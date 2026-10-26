@@ -44,6 +44,12 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v7
 
+      - name: Install Linux input dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends pkg-config libudev-dev
+
       # Reads the toolchain, components, and profile from rust-toolchain.toml.
       - name: Install pinned Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v2
@@ -94,6 +100,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+
+      - name: Install Linux input dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends pkg-config libudev-dev
 
       - name: Install pinned Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v2

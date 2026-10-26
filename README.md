@@ -24,6 +24,9 @@ Install Rust through rustup and the native compiler/linker for your platform.
 The workspace toolchain is pinned in `rust-toolchain.toml`; dependency versions
 are pinned in `Cargo.lock`.
 
+Linux builds need pkg-config and libudev development headers for gamepad input.
+On Debian or Ubuntu, install them with `sudo apt-get install pkg-config libudev-dev`.
+
 ```sh
 cargo build --workspace --locked
 cargo run --locked -p egui-gl-host-proof --bin jellyfin-kattri
