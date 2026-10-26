@@ -353,7 +353,17 @@ impl<'session> GlHost<'session> {
                 }
             }
         }
-        if let Some((reason, Some(item_id), was_live)) = self.mpv.take_playback_end() {
+        if let Some(generation) = self.mpv.take_playback_loaded() {
+            self.kattri_app.playback_loaded(generation);
+        }
+        if let Some(mpv_host::PlaybackEnd {
+            reason,
+            item_id: Some(item_id),
+            was_live,
+            generation,
+            was_loaded,
+        }) = self.mpv.take_playback_end()
+        {
             #[cfg(debug_assertions)]
             debug_harness::log_if_changed(
                 "mpv end",
@@ -376,7 +386,22 @@ impl<'session> GlHost<'session> {
                         self.kattri_app.on_music_track_ended(&item_id, false);
                     }
                     mpv_render_proof::EndFileReason::Error => {
-                        self.kattri_app.playback_failed(&item_id);
+                        if self.kattri_app.music_queue_current_item_id() == Some(item_id.as_str()) {
+                            self.kattri_app.playback_failed(&item_id);
+                        } else {
+                            match (was_loaded, generation) {
+                                (false, Some(generation)) => {
+                                    self.kattri_app.playback_open_failed(&item_id, generation)
+                                }
+                                _ if generation.is_none_or(|id| {
+                                    id == self.kattri_app.playback_start_generation()
+                                }) =>
+                                {
+                                    self.kattri_app.playback_failed(&item_id)
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     mpv_render_proof::EndFileReason::Stop
                     | mpv_render_proof::EndFileReason::Quit
@@ -896,10 +921,14 @@ impl<'session> GlHost<'session> {
                 series_id,
                 language_memory: self.kattri_app.series_language_memory(),
             };
-            match self
-                .mpv
-                .load_relay(url, relay, report_metadata, resume_position_ticks, load)
-            {
+            match self.mpv.load_relay(
+                url,
+                relay,
+                report_metadata,
+                resume_position_ticks,
+                self.kattri_app.playback_start_generation(),
+                load,
+            ) {
                 Ok(()) => {
                     // Catalog focus must not consume player shortcuts or keep its overlay open.
                     self.egui.memory_mut(|memory| {

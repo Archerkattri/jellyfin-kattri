@@ -717,6 +717,7 @@ struct ItemPlaybackState {
 
 struct PendingMediaLoad<T> {
     command_id: u64,
+    generation: Option<u64>,
     relay: Option<T>,
     resume_seconds: Option<f64>,
     item: ItemPlaybackState,
@@ -732,6 +733,14 @@ struct MediaLoadState<T> {
 pub(crate) enum RelayLoadError {
     Busy,
     Failed(&'static str),
+}
+
+pub(crate) struct PlaybackEnd {
+    pub(crate) reason: EndFileReason,
+    pub(crate) item_id: Option<String>,
+    pub(crate) was_live: bool,
+    pub(crate) generation: Option<u64>,
+    pub(crate) was_loaded: bool,
 }
 
 impl<T> Default for MediaLoadState<T> {
@@ -802,6 +811,10 @@ pub(crate) struct MpvHost<'session> {
     playback_end_reason: Option<EndFileReason>,
     playback_end_item_id: Option<String>,
     playback_end_was_live: bool,
+    playback_end_generation: Option<u64>,
+    playback_end_was_loaded: bool,
+    active_generation: Option<u64>,
+    playback_loaded_generation: Option<u64>,
     playback_restart_seen: bool,
     subtitle_track_observation: Option<ObservationId>,
     subtitle_delay_observation: Option<ObservationId>,
@@ -899,6 +912,10 @@ impl<'session> MpvHost<'session> {
                 playback_end_reason: None,
                 playback_end_item_id: None,
                 playback_end_was_live: false,
+                playback_end_generation: None,
+                playback_end_was_loaded: false,
+                active_generation: None,
+                playback_loaded_generation: None,
                 playback_restart_seen: false,
                 subtitle_track_observation: None,
                 subtitle_delay_observation: None,
@@ -984,6 +1001,10 @@ impl<'session> MpvHost<'session> {
                     playback_end_reason: None,
                     playback_end_item_id: None,
                     playback_end_was_live: false,
+                    playback_end_generation: None,
+                    playback_end_was_loaded: false,
+                    active_generation: None,
+                    playback_loaded_generation: None,
                     playback_restart_seen: false,
                     subtitle_track_observation,
                     subtitle_delay_observation,
@@ -1041,6 +1062,10 @@ impl<'session> MpvHost<'session> {
             playback_end_reason: None,
             playback_end_item_id: None,
             playback_end_was_live: false,
+            playback_end_generation: None,
+            playback_end_was_loaded: false,
+            active_generation: None,
+            playback_loaded_generation: None,
             playback_restart_seen: false,
             subtitle_track_observation,
             subtitle_delay_observation,
@@ -1117,6 +1142,7 @@ impl<'session> MpvHost<'session> {
                     Ok(command) => {
                         self.media_load.pending = Some(PendingMediaLoad {
                             command_id: command.get(),
+                            generation: None,
                             relay: None,
                             resume_seconds: None,
                             item: ItemPlaybackState::default(),
@@ -1204,6 +1230,7 @@ impl<'session> MpvHost<'session> {
             .map_err(|_| "Could not queue the stream address in libmpv.")?;
         self.media_load.pending = Some(PendingMediaLoad {
             command_id: command.get(),
+            generation: None,
             relay: None,
             resume_seconds: None,
             item: ItemPlaybackState::default(),
@@ -1225,6 +1252,7 @@ impl<'session> MpvHost<'session> {
         relay: RelayHandle,
         report_metadata: PlaybackReportMetadata,
         resume_position_ticks: Option<i64>,
+        generation: u64,
         load: ItemLoadSettings<'_>,
     ) -> Result<(), RelayLoadError> {
         if self.renderer.is_none() {
@@ -1245,6 +1273,7 @@ impl<'session> MpvHost<'session> {
             .map_err(|_| RelayLoadError::Failed("Could not queue the server stream in libmpv."))?;
         self.media_load.pending = Some(PendingMediaLoad {
             command_id: command.get(),
+            generation: Some(generation),
             relay: Some(relay),
             resume_seconds: resume_position_seconds(resume_position_ticks),
             item: ItemPlaybackState {
@@ -1295,6 +1324,7 @@ impl<'session> MpvHost<'session> {
                 }
                 EventKind::FileLoaded => {
                     self.file_loaded = true;
+                    self.playback_loaded_generation = self.active_generation;
                     self.status = if self.report_metadata.is_some() {
                         "Server-transcoded Jellyfin stream is loaded".into()
                     } else {
@@ -1329,8 +1359,11 @@ impl<'session> MpvHost<'session> {
                     self.playback_restart_seen = false;
                     self.stop_playback_report(false);
                     if let Some(load) = self.media_load.started(playlist_entry_id) {
+                        self.active_generation = load.generation;
                         self.pending_resume_seconds = load.resume_seconds;
                         self.item = load.item;
+                    } else {
+                        self.active_generation = None;
                     }
                     self.report_metadata = self.pending_report_metadata.take();
                     self.report_session = self.next_report_session();
@@ -1355,6 +1388,8 @@ impl<'session> MpvHost<'session> {
                         continue;
                     }
                     self.playback_end_reason = Some(reason);
+                    self.playback_end_generation = self.active_generation.take();
+                    self.playback_end_was_loaded = self.file_loaded;
                     self.playback_end_item_id = self
                         .report_metadata
                         .as_ref()
@@ -1393,9 +1428,16 @@ impl<'session> MpvHost<'session> {
                         && (matches!(event.kind, EventKind::CommandSubmissionFailed)
                             || event.error < 0) =>
                 {
+                    let generation = self
+                        .media_load
+                        .pending
+                        .as_ref()
+                        .and_then(|load| load.generation);
                     let _ = self.media_load.reject_command(event.request_id);
                     let metadata = self.pending_report_metadata.take();
                     self.playback_end_reason = Some(EndFileReason::Error);
+                    self.playback_end_generation = generation;
+                    self.playback_end_was_loaded = false;
                     self.playback_end_item_id = metadata.as_ref().map(|item| item.item_id.clone());
                     self.playback_end_was_live = metadata
                         .as_ref()
@@ -2769,11 +2811,23 @@ impl<'session> MpvHost<'session> {
         &self.status
     }
 
-    pub(crate) fn take_playback_end(&mut self) -> Option<(EndFileReason, Option<String>, bool)> {
+    pub(crate) fn take_playback_loaded(&mut self) -> Option<u64> {
+        self.playback_loaded_generation.take()
+    }
+
+    pub(crate) fn take_playback_end(&mut self) -> Option<PlaybackEnd> {
         self.playback_end_reason.take().map(|reason| {
             let item_id = self.playback_end_item_id.take();
             let was_live = std::mem::take(&mut self.playback_end_was_live);
-            (reason, item_id, was_live)
+            let generation = self.playback_end_generation.take();
+            let was_loaded = std::mem::take(&mut self.playback_end_was_loaded);
+            PlaybackEnd {
+                reason,
+                item_id,
+                was_live,
+                generation,
+                was_loaded,
+            }
         })
     }
 
@@ -3180,6 +3234,7 @@ mod tests {
             active_entry_id: Some(11),
             pending: Some(PendingMediaLoad {
                 command_id: 42,
+                generation: Some(10),
                 relay: Some("new relay"),
                 resume_seconds: Some(8.0),
                 item: ItemPlaybackState::default(),
@@ -3210,6 +3265,7 @@ mod tests {
             active_entry_id: Some(11),
             pending: Some(PendingMediaLoad {
                 command_id: 42,
+                generation: Some(10),
                 relay: Some("queued relay"),
                 resume_seconds: None,
                 item: ItemPlaybackState::default(),
@@ -3234,6 +3290,7 @@ mod tests {
             active_entry_id: Some(11),
             pending: Some(PendingMediaLoad {
                 command_id: 42,
+                generation: Some(10),
                 relay: None,
                 resume_seconds: None,
                 item: ItemPlaybackState {

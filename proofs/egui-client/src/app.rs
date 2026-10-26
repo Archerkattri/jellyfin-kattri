@@ -4953,6 +4953,11 @@ impl KattriApp {
         self.pending_playback.take()
     }
 
+    /// Identifies the current prepared playback request for native event correlation.
+    pub fn playback_start_generation(&self) -> u64 {
+        self.playback_start_request_id
+    }
+
     /// Series GUID of the playing item from its loaded record (M2-10). `None` means the record
     /// has not arrived for this item; `Some(None)` means it arrived and the item has no series.
     fn playing_series_id(&self, item_id: &str) -> Option<Option<String>> {
@@ -4989,13 +4994,29 @@ impl KattriApp {
     }
 
     pub fn playback_start_opening(&mut self) {
-        // loadfile was accepted. Later asynchronous errors need player-generation
-        // and current-position evidence before automatic recovery is safe.
-        self.playback_recovery = None;
         self.playback_start_status = Some(ui_text(ids::PLAYBACK_STATUS_OPENING_LOCAL).into());
         if self.music_queue_auto_play_item_id.as_deref() == self.selected_item_id.as_deref() {
             self.music_queue_auto_play_item_id = None;
             self.music_queue_notice = None;
+        }
+    }
+
+    /// Once this exact request has loaded, failures need position-aware recovery.
+    pub fn playback_loaded(&mut self, generation: u64) {
+        if self.playback_start_request_id == generation {
+            self.playback_recovery = None;
+        }
+    }
+
+    /// Retry an asynchronous open failure only for the still-current request.
+    pub fn playback_open_failed(&mut self, item_id: &str, generation: u64) {
+        if self.playback_start_request_id != generation
+            || self.selected_item_id.as_deref() != Some(item_id)
+        {
+            return;
+        }
+        if !self.retry_playback_start() {
+            self.playback_failed(item_id);
         }
     }
 
@@ -10132,14 +10153,46 @@ mod playback_recovery_tests {
     }
 
     #[test]
-    fn accepted_load_clears_retry_and_stale_native_error_is_ignored() {
+    fn loaded_event_clears_only_its_own_recovery_and_stale_error_is_ignored() {
         let mut app = recovery_app();
+        app.playback_start_request_id = 50;
         app.playback_start_opening();
+        assert!(app.playback_recovery.is_some());
+        app.playback_loaded(49);
+        assert!(app.playback_recovery.is_some());
+        app.playback_loaded(50);
         assert!(app.playback_recovery.is_none());
         app.playback_failed("other");
         assert!(app.playback_start_error.is_none());
         app.playback_failed("movie");
         assert!(app.playback_start_error.is_some());
         assert!(!app.playback_start_loading);
+    }
+
+    #[test]
+    fn asynchronous_open_failure_retries_only_current_item_and_generation() {
+        let mut app = recovery_app();
+        app.playback_start_request_id = 50;
+        app.playback_start_opening();
+        app.playback_open_failed("movie", 49);
+        app.playback_open_failed("other", 50);
+        assert_eq!(app.playback_start_request_id, 50);
+        assert_eq!(
+            app.playback_recovery
+                .as_ref()
+                .expect("context")
+                .remaining
+                .len(),
+            1
+        );
+        app.playback_open_failed("movie", 50);
+        assert_ne!(app.playback_start_request_id, 50);
+        assert!(app.playback_start_loading);
+        let current = app.playback_start_request_id;
+        app.playback_open_failed("movie", 50);
+        assert_eq!(app.playback_start_request_id, current);
+        app.playback_open_failed("movie", current);
+        assert!(app.playback_start_error.is_some());
+        assert!(app.playback_recovery.is_none());
     }
 }
