@@ -137,6 +137,27 @@ pub fn plan_frame_step(is_playing: bool) -> FrameStepPlan {
     }
 }
 
+/// A command produced from the [`AbLoop`] state for the playback host to apply.
+/// Only seek commands are produced; the host decides when to observe position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LoopCommand {
+    /// Seek back to A because playback reached or passed B.
+    SeekToA(Duration),
+    /// No loop action required at the current position.
+    None,
+}
+
+/// Evaluate the loop against the current playback position and return the command
+/// the host should apply. When `wrap_target` is `Some(A)`, the host should seek to A.
+/// The host remains responsible for comparing `position` and calling this function
+/// at the playback update rate; no clock call is made here.
+pub fn loop_command(loop_state: &AbLoop, position: Duration) -> LoopCommand {
+    match loop_state.wrap_target(position) {
+        Some(a) => LoopCommand::SeekToA(a),
+        None => LoopCommand::None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -281,6 +302,21 @@ mod tests {
         assert_eq!(frame_after_step(3, StepDirection::Back, Some(3)), Some(2));
         assert_eq!(frame_after_step(1, StepDirection::Back, None), Some(0));
         assert_eq!(frame_after_step(0, StepDirection::Back, Some(3)), None);
+    }
+
+    #[test]
+    fn loop_command_produces_seek_when_at_or_past_b() {
+        use super::{LoopCommand, loop_command};
+        let loop_state = loop_from(10, 15);
+        assert_eq!(loop_command(&loop_state, secs(14)), LoopCommand::None);
+        assert_eq!(
+            loop_command(&loop_state, secs(15)),
+            LoopCommand::SeekToA(secs(10))
+        );
+        assert_eq!(
+            loop_command(&loop_state, secs(20)),
+            LoopCommand::SeekToA(secs(10))
+        );
     }
 
     #[test]
