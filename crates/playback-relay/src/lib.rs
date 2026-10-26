@@ -383,15 +383,16 @@ impl AliasTable {
                 ids.push(id.clone());
                 continue;
             }
+            // Refuse before generating more random IDs once this batch cannot
+            // fit. No table entries have been inserted yet, so failure is atomic.
+            if self.by_id.len().saturating_add(additions.len()) >= MAX_ALIAS_COUNT {
+                return Err(RelayError::AliasLimitReached);
+            }
             let id = unique_resource_id(&self.by_id, &reserved_ids)?;
             reserved_ids.insert(id.clone());
             new_ids.insert(url.clone(), id.clone());
             additions.push((url.clone(), id.clone()));
             ids.push(id);
-        }
-
-        if self.by_id.len().saturating_add(additions.len()) > MAX_ALIAS_COUNT {
-            return Err(RelayError::AliasLimitReached);
         }
 
         for (url, id) in additions {
@@ -1213,6 +1214,50 @@ mod tests {
             .insert_initial(SecretUrl::from_url(url.clone()))
             .expect("random alias");
         (SecretUrl::from_url(url), aliases)
+    }
+
+    #[test]
+    fn alias_capacity_failure_is_atomic_and_existing_urls_remain_usable() {
+        let mut aliases = AliasTable::default();
+        for index in 0..MAX_ALIAS_COUNT - 1 {
+            let url = SecretUrl::from_url(
+                Url::parse(&format!("https://jellyfin.example/segment/{index}")).expect("URL"),
+            );
+            let id = format!("fixture-{index}");
+            aliases.by_url.insert(url.clone(), id.clone());
+            aliases.by_id.insert(id, url);
+        }
+        let existing =
+            SecretUrl::from_url(Url::parse("https://jellyfin.example/segment/0").expect("URL"));
+        let last = SecretUrl::from_url(Url::parse("https://jellyfin.example/last").expect("URL"));
+        let overflow =
+            SecretUrl::from_url(Url::parse("https://jellyfin.example/overflow").expect("URL"));
+        assert!(matches!(
+            aliases.register_batch(&[existing.clone(), last.clone(), overflow.clone()]),
+            Err(RelayError::AliasLimitReached)
+        ));
+        assert_eq!(aliases.by_id.len(), MAX_ALIAS_COUNT - 1);
+        assert!(!aliases.by_url.contains_key(&last));
+        assert_eq!(aliases.get("fixture-0").as_ref(), Some(&existing));
+
+        let accepted = aliases
+            .register_batch(&[last.clone(), last.clone(), existing.clone()])
+            .expect("one remaining slot");
+        assert_eq!(accepted[0], accepted[1]);
+        assert_eq!(accepted[2], "fixture-0");
+        assert_eq!(aliases.by_id.len(), MAX_ALIAS_COUNT);
+        assert_eq!(aliases.get(&accepted[0]).as_ref(), Some(&last));
+        assert!(matches!(
+            aliases.register_batch(&[overflow]),
+            Err(RelayError::AliasLimitReached)
+        ));
+        assert_eq!(
+            aliases
+                .register_batch(&[existing])
+                .expect("known URL at capacity"),
+            ["fixture-0"]
+        );
+        assert_eq!(aliases.get(&accepted[0]).as_ref(), Some(&last));
     }
 
     async fn start_timeout_fixture(
