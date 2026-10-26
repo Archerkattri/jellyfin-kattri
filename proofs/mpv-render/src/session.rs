@@ -20,7 +20,7 @@ use crate::{
         MPV_EVENT_PROPERTY_CHANGE, MPV_EVENT_SEEK, MPV_EVENT_SHUTDOWN, MPV_EVENT_START_FILE,
         MPV_FORMAT_DOUBLE, MPV_FORMAT_FLAG, MPV_FORMAT_INT64, MPV_FORMAT_NODE,
         MPV_FORMAT_NODE_ARRAY, MPV_FORMAT_NODE_MAP, MPV_FORMAT_NONE, MPV_FORMAT_STRING,
-        MpvEventEndFile, MpvEventProperty, MpvHandle, MpvNode,
+        MpvEventEndFile, MpvEventProperty, MpvEventStartFile, MpvHandle, MpvNode,
     },
     playback_policy::{
         AB_LOOP_CYCLE_ARGUMENTS, ChapterStep, chapter_step_arguments, frame_step_command,
@@ -317,8 +317,14 @@ pub enum EventKind {
         property: PlaybackProperty,
         value: PlaybackPropertyValue,
     },
-    StartFile,
-    EndFile(EndFileReason),
+    /// Start and end IDs identify the same playlist entry when libmpv supplies them.
+    StartFile {
+        playlist_entry_id: Option<i64>,
+    },
+    EndFile {
+        reason: EndFileReason,
+        playlist_entry_id: Option<i64>,
+    },
     FileLoaded,
     Seek,
     PlaybackRestart,
@@ -2116,7 +2122,17 @@ fn drain_events(
             }
             MPV_EVENT_START_FILE => {
                 core.track_generation.fetch_add(1, Ordering::AcqRel);
-                EventKind::StartFile
+                let playlist_entry_id = if event.data.is_null() {
+                    None
+                } else {
+                    // SAFETY: Start-file data is an mpv_event_start_file on the
+                    // supported client API; copy it before the next wait call.
+                    Some(
+                        unsafe { ptr::read_unaligned(event.data.cast::<MpvEventStartFile>()) }
+                            .playlist_entry_id,
+                    )
+                };
+                EventKind::StartFile { playlist_entry_id }
             }
             MPV_EVENT_END_FILE => {
                 core.track_generation.fetch_add(1, Ordering::AcqRel);
@@ -2128,9 +2144,13 @@ fn drain_events(
                     // next mpv_wait_event call.
                     Some(unsafe { ptr::read_unaligned(event.data.cast::<MpvEventEndFile>()) })
                 };
+                let playlist_entry_id = payload.map(|details| details.playlist_entry_id);
                 let (reason, error) = end_file_details(payload, event.error);
                 reported_error = error;
-                EventKind::EndFile(reason)
+                EventKind::EndFile {
+                    reason,
+                    playlist_entry_id,
+                }
             }
             MPV_EVENT_FILE_LOADED => EventKind::FileLoaded,
             MPV_EVENT_SEEK => EventKind::Seek,

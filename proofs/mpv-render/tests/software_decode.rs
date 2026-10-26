@@ -26,7 +26,7 @@ fn missing_local_file_reports_the_actual_mpv_end_error() {
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
         if let Some(event) = session.try_event()
-            && let EventKind::EndFile(reason) = event.kind
+            && let EventKind::EndFile { reason, .. } = event.kind
         {
             assert_eq!(reason, EndFileReason::Error);
             assert!(
@@ -39,6 +39,59 @@ fn missing_local_file_reports_the_actual_mpv_end_error() {
         thread::sleep(Duration::from_millis(5));
     }
     panic!("libmpv did not report the missing-file failure");
+}
+
+#[test]
+#[ignore = "requires checksum-verified libmpv and a local test-media path"]
+fn replacing_a_file_reports_distinct_matching_playlist_entry_ids() {
+    let library_path = env::var_os("KATTRI_TEST_LIBMPV").expect("set KATTRI_TEST_LIBMPV");
+    let media_path = env::var("KATTRI_TEST_MEDIA").expect("set KATTRI_TEST_MEDIA");
+    let library = MpvLibrary::load_from_path(library_path).expect("load selected libmpv");
+    let session =
+        MpvSession::new_software_null(&library).expect("initialize software/null session");
+    session
+        .command(&["set", "pause", "yes"])
+        .expect("pause playback");
+    session
+        .command(&["loadfile", &media_path, "replace"])
+        .expect("load first file");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut first_id = None;
+    let mut replacement_queued = false;
+    let mut old_end_id = None;
+    let mut second_id = None;
+    while Instant::now() < deadline {
+        if let Some(event) = session.try_event() {
+            match event.kind {
+                EventKind::StartFile { playlist_entry_id } if !replacement_queued => {
+                    first_id = playlist_entry_id
+                }
+                EventKind::FileLoaded if !replacement_queued => {
+                    assert!(first_id.is_some(), "first start must carry an ID");
+                    session
+                        .command(&["loadfile", &media_path, "replace"])
+                        .expect("replace file");
+                    replacement_queued = true;
+                }
+                EventKind::EndFile {
+                    playlist_entry_id, ..
+                } if replacement_queued => old_end_id = playlist_entry_id,
+                EventKind::StartFile { playlist_entry_id } if replacement_queued => {
+                    second_id = playlist_entry_id
+                }
+                EventKind::FileLoaded if replacement_queued => break,
+                _ => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(old_end_id, first_id, "end must identify the original entry");
+    assert!(second_id.is_some(), "replacement start must carry an ID");
+    assert_ne!(
+        second_id, first_id,
+        "replacement must use a distinct entry ID"
+    );
+    println!("replacement_entry_ids=matched_and_distinct");
 }
 
 #[test]
@@ -75,7 +128,7 @@ fn decodes_thirty_seconds_with_software_and_null_outputs() {
                     file_loaded = true;
                 }
                 EventKind::PlaybackRestart => playback_restarted = true,
-                EventKind::EndFile(_) => end_seen = true,
+                EventKind::EndFile { .. } => end_seen = true,
                 EventKind::CapabilitySnapshotReady
                     if Some(event.request_id) == capability_request =>
                 {

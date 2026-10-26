@@ -63,7 +63,7 @@ fn decode_stream(library: &MpvLibrary, url: &str, seconds: u64) -> RunMetrics {
                         position = value;
                     }
                 }
-                EventKind::EndFile(_) | EventKind::Shutdown => {
+                EventKind::EndFile { .. } | EventKind::Shutdown => {
                     ended = true;
                     break;
                 }

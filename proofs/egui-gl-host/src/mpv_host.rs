@@ -1221,7 +1221,7 @@ impl<'session> MpvHost<'session> {
                         self.controls.apply_observation(property, value);
                     }
                 }
-                EventKind::StartFile => {
+                EventKind::StartFile { .. } => {
                     self.file_loaded = false;
                     self.media_info.clear_snapshot();
                     self.playback_restart_seen = false;
@@ -1241,7 +1241,7 @@ impl<'session> MpvHost<'session> {
                     self.pending_track_selection = None;
                     self.reset_subtitle_state();
                 }
-                EventKind::EndFile(reason) => {
+                EventKind::EndFile { reason, .. } => {
                     self.playback_end_reason = Some(reason);
                     self.playback_end_item_id = self
                         .report_metadata

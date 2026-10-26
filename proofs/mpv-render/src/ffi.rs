@@ -61,6 +61,13 @@ pub(crate) struct MpvEvent {
     pub data: *mut c_void,
 }
 
+/// ABI layout from mpv/include/mpv/client.h: `mpv_event_start_file`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct MpvEventStartFile {
+    pub playlist_entry_id: i64,
+}
+
 /// ABI layout from mpv/include/mpv/client.h: `mpv_event_end_file`.
 #[repr(C)]
 #[derive(Clone, Copy)]
