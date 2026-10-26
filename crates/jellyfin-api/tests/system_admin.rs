@@ -183,7 +183,10 @@ async fn recorded_admin_fixtures_decode_into_counts_and_task_rows() {
     let (_, session) = signed_in(&mock).await;
     let stub_client = client(&url);
 
-    let users = stub_client.user_counts(&session).await.expect("user counts");
+    let users = stub_client
+        .user_counts(&session)
+        .await
+        .expect("user counts");
     assert_eq!(
         users,
         UserCounts {
@@ -225,7 +228,14 @@ async fn library_item_count_refuses_a_value_that_is_not_a_library_id() {
     let (_, session) = signed_in(&mock).await;
     let stub_client = client(&url);
 
-    for library_id in ["", " ", "../../Users", "id with space", "<script>", &"a".repeat(65)] {
+    for library_id in [
+        "",
+        " ",
+        "../../Users",
+        "id with space",
+        "<script>",
+        &"a".repeat(65),
+    ] {
         let result = stub_client.library_item_count(&session, library_id).await;
         assert!(
             matches!(result, Err(ApiError::InvalidConfiguration)),

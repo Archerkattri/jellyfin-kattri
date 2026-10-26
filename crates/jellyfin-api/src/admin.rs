@@ -185,22 +185,16 @@ impl JellyfinClient {
 
     /// Read the scheduled tasks and their last execution status
     /// (`GET /ScheduledTasks`), capped at [`MAX_SCHEDULED_TASKS`].
-    pub async fn scheduled_tasks(
-        &self,
-        session: &Session,
-    ) -> Result<Vec<ScheduledTask>, ApiError> {
-        let entries: Vec<ScheduledTaskEntry> = self
-            .get_admin_json(session, &["ScheduledTasks"])
-            .await?;
+    pub async fn scheduled_tasks(&self, session: &Session) -> Result<Vec<ScheduledTask>, ApiError> {
+        let entries: Vec<ScheduledTaskEntry> =
+            self.get_admin_json(session, &["ScheduledTasks"]).await?;
         Ok(entries
             .into_iter()
             .take(MAX_SCHEDULED_TASKS)
             .map(|entry| ScheduledTask {
                 name: entry.name,
                 state: entry.state,
-                last_status: entry
-                    .last_execution_result
-                    .and_then(|result| result.status),
+                last_status: entry.last_execution_result.and_then(|result| result.status),
             })
             .collect())
     }
@@ -254,4 +248,3 @@ fn is_library_id(value: &str) -> bool {
             .chars()
             .all(|character| character.is_ascii_hexdigit() || character == '-')
 }
-

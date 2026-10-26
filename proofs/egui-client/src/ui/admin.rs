@@ -170,7 +170,11 @@ fn task_needs_attention(task: &ScheduledTask) -> bool {
 
 /// The summary counts every task, so the capped detail rows never hide a total.
 fn scheduled_task_summary(snapshot: &AdminSnapshot) -> String {
-    let running = snapshot.tasks.iter().filter(|task| task_is_running(task)).count();
+    let running = snapshot
+        .tasks
+        .iter()
+        .filter(|task| task_is_running(task))
+        .count();
     let failed = snapshot
         .tasks
         .iter()
@@ -192,7 +196,6 @@ fn task_line(task: &ScheduledTask) -> String {
     let last = task_text(task.last_status.as_deref()).unwrap_or(ui_text(ids::ADMIN_TASK_NEVER_RUN));
     format!("{name} · {state} · {last}")
 }
-
 
 /// Pure mapping from the load state to what the screen draws. The gate wins
 /// over the data, so a disabled dashboard never shows a section.
@@ -512,14 +515,8 @@ mod tests {
 
     #[test]
     fn empty_library_list_shows_zero_libraries_and_no_name_rows() {
-        let snapshot = AdminSnapshot::from_reads(
-            &server_info(),
-            &[],
-            &[],
-            0,
-            UserCounts::default(),
-            &[],
-        );
+        let snapshot =
+            AdminSnapshot::from_reads(&server_info(), &[], &[], 0, UserCounts::default(), &[]);
         let view = dashboard_view(true, &AdminLoad::Loaded(snapshot));
         assert_eq!(
             view,
@@ -605,18 +602,18 @@ mod tests {
             task("Metadata refresh", "Idle", Some("Failed")),
             task("Cancelled job", "Idle", Some("Aborted")),
         ];
-        let snapshot = AdminSnapshot::from_reads(
-            &server_info(),
-            &[],
-            &[],
-            0,
-            UserCounts::default(),
-            &tasks,
-        );
+        let snapshot =
+            AdminSnapshot::from_reads(&server_info(), &[], &[], 0, UserCounts::default(), &tasks);
         let DashboardView::Rows(rows) = dashboard_view(true, &AdminLoad::Loaded(snapshot)) else {
             panic!("expected rows");
         };
-        assert_eq!(rows[7], row("Scheduled tasks", "5 · 1 running · 1 last failed".to_owned()));
+        assert_eq!(
+            rows[7],
+            row(
+                "Scheduled tasks",
+                "5 · 1 running · 1 last failed".to_owned()
+            )
+        );
         assert_eq!(
             rows[8],
             row("Task", "Library scan · Running · Completed".to_owned())
@@ -633,14 +630,8 @@ mod tests {
         let tasks: Vec<ScheduledTask> = (0..MAX_TASK_DETAIL_ROWS + 2)
             .map(|index| task(&format!("Job {index}"), "Running", Some("Completed")))
             .collect();
-        let snapshot = AdminSnapshot::from_reads(
-            &server_info(),
-            &[],
-            &[],
-            0,
-            UserCounts::default(),
-            &tasks,
-        );
+        let snapshot =
+            AdminSnapshot::from_reads(&server_info(), &[], &[], 0, UserCounts::default(), &tasks);
         let DashboardView::Rows(rows) = dashboard_view(true, &AdminLoad::Loaded(snapshot)) else {
             panic!("expected rows");
         };
@@ -670,14 +661,8 @@ mod tests {
                 last_status: None,
             },
         ];
-        let snapshot = AdminSnapshot::from_reads(
-            &server_info(),
-            &[],
-            &[],
-            0,
-            UserCounts::default(),
-            &tasks,
-        );
+        let snapshot =
+            AdminSnapshot::from_reads(&server_info(), &[], &[], 0, UserCounts::default(), &tasks);
         let DashboardView::Rows(rows) = dashboard_view(true, &AdminLoad::Loaded(snapshot)) else {
             panic!("expected rows");
         };
