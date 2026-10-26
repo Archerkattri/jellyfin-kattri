@@ -2633,7 +2633,8 @@ unsafe fn copy_chapter_string(
         // SAFETY: mpv guarantees its string fields are NUL-terminated and
         // readable. The loop stops at that terminator or after the configured
         // bound, so it never scans an unbounded field.
-        let byte = unsafe { pointer.add(index).read() } as u8;
+        // C char signedness varies by target; decode the underlying UTF-8 bytes.
+        let byte = unsafe { pointer.cast::<u8>().add(index).read() };
         if byte == 0 {
             return String::from_utf8(bytes).map_err(|_| ChapterListError::InvalidString);
         }
