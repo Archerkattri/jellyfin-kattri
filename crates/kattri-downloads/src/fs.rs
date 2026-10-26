@@ -241,16 +241,21 @@ fn is_valid_temp_name(name: &str) -> bool {
 fn open_regular_file_nofollow(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    // O_NOFOLLOW is a platform ABI flag and is not exposed by std. These values
-    // cover the supported Unix targets (Linux x64/ARM64 and macOS); keeping it here
-    // avoids adding a direct dependency solely for one open flag.
-    #[cfg(target_os = "linux")]
+    // O_NOFOLLOW is a platform ABI flag and is not exposed by std. Linux ARM64
+    // uses the asm-generic value, which differs from Linux x86_64.
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    const O_NOFOLLOW: i32 = 0x8000;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     const O_NOFOLLOW: i32 = 0x2_0000;
     #[cfg(target_os = "macos")]
     const O_NOFOLLOW: i32 = 0x0100;
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    compile_error!("no-follow temp-file opens are defined only for Linux and macOS");
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        target_os = "macos"
+    )))]
+    compile_error!("no-follow temp-file opens are defined only for Linux x64/ARM64 and macOS");
 
     let file = OpenOptions::new()
         .read(true)
