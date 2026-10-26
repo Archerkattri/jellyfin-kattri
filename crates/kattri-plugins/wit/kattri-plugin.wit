@@ -1,0 +1,24 @@
+package kattri:plugin@0.1.0;
+
+world kattri-plugin {
+    record position-info {
+        ticks: u64,
+    }
+
+    variant playback-event {
+        started,
+        paused,
+        resumed,
+        stopped,
+        position(position-info),
+    }
+
+    import presence-write: func(payload: string) -> result<_, string>;
+    import settings-get: func(key: string) -> result<option<string>, string>;
+    import settings-set: func(key: string, value: string) -> result<_, string>;
+    import log-write: func(line: string) -> result<_, string>;
+
+    export init: func(plugin-id: string) -> result<_, string>;
+    export on-playback-event: func(event: playback-event);
+    export shutdown: func();
+}

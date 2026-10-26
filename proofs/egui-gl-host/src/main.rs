@@ -1,0 +1,1993 @@
+//! Custom native host that embeds KattriApp and presents libmpv into egui.
+
+#[cfg(debug_assertions)]
+mod debug_harness;
+#[cfg(debug_assertions)]
+mod qa_metrics;
+use std::error::Error;
+#[cfg(any(debug_assertions, test))]
+use std::ffi::OsStr;
+use std::ffi::{CString, OsString};
+use std::num::NonZeroU32;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use egui::ViewportId;
+use egui_winit::State as EguiWinitState;
+use gl_adapter::{ContextParts, HostGlContextProvider};
+use glow::HasContext;
+use glutin::config::ConfigTemplateBuilder;
+use glutin::context::{ContextApi, ContextAttributesBuilder, NotCurrentGlContext};
+use glutin::display::{GetGlDisplay, GlDisplay};
+use glutin::prelude::GlSurface;
+use glutin::surface::{SwapInterval, WindowSurface};
+use glutin_winit::{ApiPreference, DisplayBuilder};
+use jellyfin_egui_client::KattriApp;
+use kattri_client_core::PlaybackPhase;
+use kattri_client_core::controls::OsdVisibility;
+use kattri_client_core::pip::{PipController, PipError, PipSize, can_show_video};
+use kattri_client_core::screenshot::{
+    ScreenshotContext, ScreenshotFormat, screenshot_stem, unique_file_name,
+};
+use kattri_client_core::window_state::SavedWindow;
+use kattri_plugins::discord::{IpcTransport, PresenceBinding};
+use mpv_host::{
+    ItemLoadSettings, MpvHost, SYNC_MARKER_BUTTONS, SyncFeedbackTone, TrackMemoryEvent,
+    TrackMenuKind, local_media_path,
+};
+use mpv_render_proof::{
+    FboTarget, FrameDecision, MpvLibrary, MpvSession, PROVISIONAL_SCREENSHOT_MODE,
+};
+use std::path::{Path, PathBuf};
+use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::event::{StartCause, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::raw_window_handle::HasWindowHandle;
+use winit::window::{Window, WindowAttributes, WindowId};
+
+mod gl_adapter;
+mod media_info_panel;
+mod mpv_host;
+mod player_controls;
+mod report_handoff;
+mod video_target;
+mod window_hooks;
+
+use player_controls::{
+    ChapterChoice, PlayerControlAction, PlayerControlsView, SecondarySubtitleChoice, SkipControls,
+    screenshot_key_pressed,
+};
+use report_handoff::{CloseAdmission, ReportCloseGrace};
+use video_target::VideoTarget;
+
+/// How long a status-bar notice (screenshot or PiP) stays on screen.
+const SHELL_NOTICE_DURATION: Duration = Duration::from_secs(3);
+
+pub(crate) enum HostEvent {
+    EguiRepaint(Duration),
+    MpvRepaint,
+    AccessKit(egui_winit::accesskit_winit::Event),
+}
+
+impl From<egui_winit::accesskit_winit::Event> for HostEvent {
+    fn from(event: egui_winit::accesskit_winit::Event) -> Self {
+        Self::AccessKit(event)
+    }
+}
+
+struct GlHost<'session> {
+    mpv: MpvHost<'session>,
+    video_target: Option<VideoTarget>,
+    painter: Option<egui_glow::Painter>,
+    egui_winit: EguiWinitState,
+    kattri_app: KattriApp,
+    egui: egui::Context,
+    gl: Arc<glow::Context>,
+    parts: Rc<ContextParts>,
+    // The context and surface retain the native window handle, so the window
+    // is declared last and explicitly kept alive through GL teardown.
+    window: Window,
+    video_texture_id: egui::TextureId,
+    screen_framebuffer: i32,
+    physical_size: PhysicalSize<u32>,
+    shutdown_error: Option<String>,
+    report_close_grace: ReportCloseGrace,
+    report_connection_generation: u64,
+    report_connection_notice: Option<String>,
+    osd_visibility: OsdVisibility,
+    osd_clock: Instant,
+    destroyed: bool,
+    show_player_details: bool,
+    // The screenshot command goes to the same session the MpvHost renders from.
+    session: Option<&'session MpvSession>,
+    pip: PipController,
+    // Name of a local media file, used for the `%f` template field. Jellyfin items use their id.
+    local_stem: Option<String>,
+    screenshot_count: u32,
+    shell_notice: Option<(String, Duration)>,
+    // Pending window-geometry write. Moves and resizes restart it; it is polled from about_to_wait.
+    geometry_save: window_hooks::SaveDebounce,
+}
+
+impl<'session> GlHost<'session> {
+    fn new(
+        event_loop: &ActiveEventLoop,
+        proxy: EventLoopProxy<HostEvent>,
+        session: Option<&'session MpvSession>,
+        runtime_error: Option<String>,
+        local_media: Result<Option<String>, String>,
+        profile: Option<&str>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let window_attributes = WindowAttributes::default()
+            .with_title("Jellyfin Kattri")
+            .with_inner_size(LogicalSize::new(1180.0, 760.0))
+            .with_visible(false);
+        let template = ConfigTemplateBuilder::new()
+            .with_depth_size(0)
+            .with_stencil_size(0)
+            .with_transparency(false);
+
+        let (window, config) = DisplayBuilder::new()
+            .with_preference(ApiPreference::FallbackEgl)
+            .with_window_attributes(Some(window_attributes.clone()))
+            .build(event_loop, template, |mut configs| {
+                configs
+                    .next()
+                    .expect("the platform returned no compatible GL configurations")
+            })?;
+        let display = config.display();
+        let window = match window {
+            Some(window) => window,
+            None => glutin_winit::finalize_window(event_loop, window_attributes, &config)?,
+        };
+
+        let raw_window = window.window_handle()?.as_raw();
+        let context_attributes = ContextAttributesBuilder::new().build(Some(raw_window));
+        let gles_attributes = ContextAttributesBuilder::new()
+            .with_context_api(ContextApi::Gles(None))
+            .build(Some(raw_window));
+
+        // SAFETY: the raw window handle is obtained from the live `window`,
+        // which is retained for at least as long as the GL context and surface.
+        let not_current = unsafe {
+            display
+                .create_context(&config, &context_attributes)
+                .or_else(|_| display.create_context(&config, &gles_attributes))?
+        };
+
+        let physical_size = window.inner_size();
+        let (width, height) = nonzero_size(physical_size);
+        let surface_attributes = glutin::surface::SurfaceAttributesBuilder::<WindowSurface>::new()
+            .build(raw_window, width, height);
+
+        // SAFETY: the raw window handle remains valid because `window` is
+        // stored in this host for the entire lifetime of the surface.
+        let surface = unsafe { display.create_window_surface(&config, &surface_attributes)? };
+        let context = not_current.make_current(&surface)?;
+        let parts = Rc::new(ContextParts {
+            context,
+            surface,
+            display,
+        });
+        if let Err(error) = parts
+            .surface
+            .set_swap_interval(&parts.context, SwapInterval::Wait(NonZeroU32::MIN))
+        {
+            eprintln!("could not enable swap interval: {error}");
+        }
+
+        let gl = Arc::new(unsafe {
+            // SAFETY: the matching context is current and the loader is backed
+            // by the display retained in ContextParts.
+            glow::Context::from_loader_function(|name| {
+                // A name with an interior NUL cannot be a GL symbol; report it as missing.
+                let Ok(name) = CString::new(name) else {
+                    return std::ptr::null();
+                };
+                parts.display.get_proc_address(&name)
+            })
+        });
+        let mut painter = egui_glow::Painter::new(Arc::clone(&gl), "", None, false)?;
+        let screen_framebuffer = unsafe { gl.get_parameter_i32(glow::FRAMEBUFFER_BINDING) };
+        let egui = egui::Context::default();
+        let repaint_proxy = proxy.clone();
+        egui.set_request_repaint_callback(move |info| {
+            let _ = repaint_proxy.send_event(HostEvent::EguiRepaint(info.delay));
+        });
+        let mut egui_winit = EguiWinitState::new(
+            egui.clone(),
+            ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            window.theme(),
+            None,
+        );
+        egui_winit.set_max_texture_side(unsafe {
+            gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE).max(1) as usize
+        });
+        egui_winit.init_accesskit(event_loop, &window, proxy.clone());
+
+        let local_stem = local_media
+            .as_ref()
+            .ok()
+            .and_then(|path| path.as_deref())
+            .and_then(|path| Path::new(path).file_stem())
+            .map(|stem| stem.to_string_lossy().into_owned());
+        let video_target = VideoTarget::new(&gl, [640, 360])?;
+        let video_texture_id = painter.register_native_texture(video_target.texture());
+        let provider = HostGlContextProvider::new(Rc::clone(&parts), Arc::clone(&gl));
+        let gpu_identity = unsafe {
+            format!(
+                "{} / {}",
+                gl.get_parameter_string(glow::VENDOR),
+                gl.get_parameter_string(glow::RENDERER)
+            )
+        };
+        let driver_identity = unsafe { gl.get_parameter_string(glow::VERSION) };
+        let mut mpv = MpvHost::new(
+            session,
+            runtime_error,
+            provider,
+            proxy,
+            gpu_identity,
+            driver_identity,
+        );
+        #[cfg(debug_assertions)]
+        if stream_only_validation(std::env::var_os("KATTRI_DEBUG_STREAM_ONLY").as_deref()) {
+            mpv.disable_reporting_for_validation()?;
+        }
+        // Same launch rules as the egui client: `--profile` picks the profile, a missing one
+        // falls back with a notice, and the picker opens when several profiles exist.
+        // The app draws the notice and the picker itself from `ui`.
+        let mut kattri_app = KattriApp::with_launch_profile(egui.clone(), profile);
+        kattri_app.offer_launch_picker();
+        kattri_app.resume_saved_sign_in();
+        // Load the local file after the app exists, so its hwdec comes from the launch profile.
+        mpv.load_local_media(
+            local_media,
+            kattri_app.video_settings(),
+            kattri_app.subtitle_settings(),
+        );
+        // The window is still hidden, so the restored placement is not seen as a jump (M2-14).
+        let saved_window = window_hooks::saved_from_settings(kattri_app.window_settings());
+        window_hooks::restore_at_startup(&window, event_loop, saved_window.as_ref());
+        // The restore may change the inner size after the surface was created. Resize it to match.
+        let physical_size = window.inner_size();
+        let (width, height) = nonzero_size(physical_size);
+        parts.surface.resize(&parts.context, width, height);
+        let report_connection_generation = kattri_app.connection_generation();
+        let osd_clock = Instant::now();
+        let mut osd_visibility = OsdVisibility::new();
+        osd_visibility.on_input(Duration::ZERO);
+        window.set_visible(true);
+
+        Ok(Self {
+            mpv,
+            video_target: Some(video_target),
+            painter: Some(painter),
+            egui_winit,
+            kattri_app,
+            egui,
+            gl,
+            parts,
+            window,
+            video_texture_id,
+            screen_framebuffer,
+            physical_size,
+            shutdown_error: None,
+            report_close_grace: ReportCloseGrace::default(),
+            report_connection_generation,
+            report_connection_notice: None,
+            osd_visibility,
+            osd_clock,
+            destroyed: false,
+            show_player_details: false,
+            session,
+            pip: PipController::new(),
+            local_stem,
+            screenshot_count: 0,
+            shell_notice: None,
+            geometry_save: window_hooks::SaveDebounce::new(window_hooks::SAVE_DEBOUNCE),
+        })
+    }
+
+    fn touch_window_geometry(&mut self) {
+        self.geometry_save.touch(Instant::now());
+    }
+
+    fn window_geometry_deadline(&self) -> Option<Instant> {
+        self.geometry_save.deadline()
+    }
+
+    /// Save the window now, unless PiP is on: the PiP size is not the window memory (M2-14).
+    /// The write is queued to the settings writer thread, so this does not wait for the disk.
+    fn save_window_geometry(&mut self, event_loop: &ActiveEventLoop) {
+        if self.pip.is_pip() {
+            return;
+        }
+        // A window that reports no position or monitor keeps the last saved geometry.
+        if let Some(normal) = window_hooks::capture_window(&self.window, event_loop) {
+            self.store_normal_window(&normal);
+        }
+    }
+
+    fn store_normal_window(&mut self, normal: &SavedWindow) {
+        if window_hooks::is_storable(normal) {
+            self.kattri_app.save_window_geometry(normal);
+        }
+    }
+
+    fn save_window_geometry_if_due(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
+        if self.geometry_save.take_due(now) {
+            self.save_window_geometry(event_loop);
+        }
+    }
+
+    fn resize(&mut self, size: PhysicalSize<u32>) {
+        self.physical_size = size;
+        if let (Some(width), Some(height)) =
+            (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+        {
+            self.parts
+                .surface
+                .resize(&self.parts.context, width, height);
+        }
+    }
+
+    fn render(&mut self, event_loop: &ActiveEventLoop) -> Duration {
+        #[cfg(debug_assertions)]
+        let qa_frame_started = Instant::now();
+        self.sync_report_connection();
+        self.mpv.poll_events();
+        #[cfg(debug_assertions)]
+        debug_harness::log_if_changed("mpv status", self.mpv.status());
+        // Leaving PiP when the video stops is decided by the model, once per frame (M2-12).
+        if self.pip.is_pip() {
+            let (phase, has_video) = self.pip_playback();
+            if !can_show_video(phase, has_video) {
+                let monitors = window_hooks::monitor_infos(event_loop);
+                if let Some(transition) = self.pip.playback_changed(phase, has_video, &monitors) {
+                    window_hooks::apply_transition(&self.window, &transition);
+                }
+            }
+        }
+        if let Some((reason, Some(item_id), was_live)) = self.mpv.take_playback_end() {
+            #[cfg(debug_assertions)]
+            debug_harness::log_if_changed(
+                "mpv end",
+                &format!("{reason:?} item={item_id} live={was_live}"),
+            );
+            if was_live {
+                match reason {
+                    mpv_render_proof::EndFileReason::Eof
+                    | mpv_render_proof::EndFileReason::Error => {
+                        self.kattri_app.on_live_tv_stream_ended(&item_id);
+                    }
+                    mpv_render_proof::EndFileReason::Stop
+                    | mpv_render_proof::EndFileReason::Quit
+                    | mpv_render_proof::EndFileReason::Redirect
+                    | mpv_render_proof::EndFileReason::Unknown(_) => {}
+                }
+            } else {
+                match reason {
+                    mpv_render_proof::EndFileReason::Eof => {
+                        self.kattri_app.on_music_track_ended(&item_id, false);
+                    }
+                    mpv_render_proof::EndFileReason::Error => {
+                        self.kattri_app.on_music_track_ended(&item_id, true);
+                    }
+                    mpv_render_proof::EndFileReason::Stop
+                    | mpv_render_proof::EndFileReason::Quit
+                    | mpv_render_proof::EndFileReason::Redirect
+                    | mpv_render_proof::EndFileReason::Unknown(_) => {}
+                }
+            }
+        }
+        if let Some(profile) = self.mpv.take_device_profile() {
+            self.kattri_app.set_device_profile(profile);
+        }
+        apply_log_detail(self.kattri_app.log_detail());
+        if self
+            .mpv
+            .sync_audio_filters(self.kattri_app.audio_settings(), Instant::now())
+        {
+            self.egui
+                .request_repaint_after(mpv_host::AUDIO_FILTER_APPLY_GAP);
+        }
+        if let Some(devices) = self.mpv.take_audio_devices() {
+            self.kattri_app.set_audio_devices(devices);
+        }
+        self.flush_playback_reports();
+        if self.physical_size.width == 0 || self.physical_size.height == 0 {
+            return self.report_retry_delay().unwrap_or(Duration::MAX);
+        }
+        #[allow(unused_mut)]
+        let mut input = self.egui_winit.take_egui_input(&self.window);
+        #[cfg(debug_assertions)]
+        debug_harness::inject(&mut input, &self.window, &self.egui);
+        // The picker closes this window once the replacement process has started. egui-winit
+        // reports that request as a viewport input event, not as a window event.
+        if input
+            .viewport()
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::ViewportEvent::Close))
+        {
+            self.begin_close();
+            if self.advance_close() {
+                event_loop.exit();
+            } else {
+                self.window.request_redraw();
+            }
+            return Duration::MAX;
+        }
+        if has_user_activity(&input.events) {
+            self.osd_visibility.on_input(self.osd_clock.elapsed());
+        }
+        // Playback keys are ignored while a text field in the app has keyboard focus.
+        let typing = self.egui.egui_wants_keyboard_input();
+        if !typing {
+            for action in mpv_host::playback_key_actions(&input.events) {
+                self.mpv.dispatch_playback_key(action);
+            }
+        }
+        let screenshot_requested = !typing && screenshot_key_pressed(&input.events);
+        let mut video_size_points = egui::vec2(640.0, 360.0);
+        let video_texture_id = self.video_texture_id;
+        let playback_status = self.mpv.status().to_owned();
+        let capability_warning = self
+            .mpv
+            .capability_warning()
+            .map(|warning| format!("Runtime capability fallback: {warning:?}"));
+        let renderer_available = self.mpv.has_renderer();
+        let media_active = self.mpv.has_media();
+        let shutdown_error = self.shutdown_error.clone();
+        let report_handoff_feedback = self
+            .mpv
+            .report_handoff_feedback()
+            .or_else(|| self.report_connection_notice.clone());
+        let audio_track_options = self.mpv.track_menu_options(TrackMenuKind::Audio);
+        let subtitle_track_options = self.mpv.track_menu_options(TrackMenuKind::Subtitle);
+        let track_feedback = self.mpv.track_feedback().map(str::to_owned);
+        let controls_snapshot = self.mpv.controls_snapshot();
+        let playing_item_id = self.mpv.playing_item_id().map(str::to_owned);
+        self.kattri_app.observe_music_queue_position(
+            playing_item_id.as_deref(),
+            controls_snapshot.position_seconds,
+        );
+        let controls_position = controls_snapshot
+            .position_seconds
+            .and_then(duration_from_seconds)
+            .unwrap_or_default();
+        let controls_duration = controls_snapshot
+            .duration_seconds
+            .and_then(duration_from_seconds);
+        let controls_paused = controls_snapshot.paused;
+        let controls_speed_multiplier = controls_snapshot.speed_multiplier;
+        let previous_track_enabled = self.mpv.playing_item_id().is_some_and(|playing_id| {
+            self.kattri_app.music_queue_current_item_id() == Some(playing_id)
+        });
+        let controls_chapters = controls_snapshot
+            .chapters
+            .iter()
+            .map(|chapter| ChapterChoice {
+                index: chapter.index,
+                title: chapter.title.clone(),
+                time: chapter.time,
+            })
+            .collect::<Vec<_>>();
+        self.osd_visibility
+            .set_paused(controls_paused.unwrap_or(false));
+        let osd_now = self.osd_clock.elapsed();
+        let controls_visible = player_controls_visible(
+            self.osd_visibility.is_visible_at(osd_now),
+            self.egui.memory(|memory| memory.focused().is_some()),
+            egui::Popup::is_any_open(&self.egui),
+        );
+        let osd_hide_after = self.osd_visibility.time_until_hidden(osd_now);
+        let controls_feedback = self.mpv.controls_feedback().map(str::to_owned);
+        let playback_report_feedback = self
+            .kattri_app
+            .playback_report_feedback()
+            .map(str::to_owned);
+        // Off when no skip switch is on or the outro delay is invalid (M2-08).
+        let skip_settings =
+            player_controls::skip_settings(self.kattri_app.playback_settings()).ok();
+        let media_info = self.mpv.media_info_view();
+        let secondary_choices = self.mpv.secondary_subtitle_choices();
+        let secondary_selected = self.mpv.secondary_subtitle_selected();
+        if screenshot_requested {
+            self.take_screenshot();
+        }
+        let pip_active = self.pip.is_pip();
+        let pip_available = renderer_available && media_active;
+        let mut pip_toggle_requested = false;
+        let shell_notice = self.shell_notice.as_ref().and_then(|(text, shown_at)| {
+            let age = osd_now.saturating_sub(*shown_at);
+            (age < SHELL_NOTICE_DURATION).then(|| (text.clone(), SHELL_NOTICE_DURATION - age))
+        });
+        // The OSD fades out during playback, and the controls are not drawn then. Automatic
+        // skip still has to run, so it is checked here as well (M2-08).
+        if renderer_available
+            && media_active
+            && !controls_visible
+            && let Some(settings) = skip_settings
+            && let Some(PlayerControlAction::SeekAbsolute(target)) =
+                player_controls::auto_skip_action(
+                    SkipControls {
+                        skipper: self.mpv.segment_skipper_mut(),
+                        settings,
+                    },
+                    controls_position,
+                    controls_duration,
+                )
+        {
+            self.mpv.seek_absolute(target);
+        }
+        let osd = OsdState {
+            position: controls_position,
+            duration: controls_duration,
+            paused: controls_paused,
+            speed_multiplier: controls_speed_multiplier,
+            media_active,
+            previous_track_enabled,
+            chapters: &controls_chapters,
+            secondary_subtitles: &secondary_choices,
+            secondary_selected,
+            pip_active,
+            pip_available,
+            skip_settings,
+            feedback: controls_feedback.as_deref(),
+            audio_tracks: audio_track_options.as_deref(),
+            subtitle_tracks: subtitle_track_options.as_deref(),
+            track_feedback: track_feedback.as_deref(),
+        };
+        // Theater view: while a video plays, the player fills the window. "Player details"
+        // brings the side panel and diagnostics back.
+        let theater = renderer_available
+            && media_active
+            && !pip_active
+            && !self.show_player_details
+            && self.kattri_app.selected_is_video();
+        let mpv = &mut self.mpv;
+        let kattri_app = &mut self.kattri_app;
+        let show_player_details = &mut self.show_player_details;
+        let mut output = self.egui.run_ui(input, |root| {
+            if media_active && kattri_app.take_player_pause_shortcut(root.ctx()) {
+                if mpv.live_stream_active() {
+                    mpv.stop_playback();
+                } else {
+                    mpv.toggle_paused();
+                }
+            }
+            #[cfg(debug_assertions)]
+            if !mpv.reporting_enabled() {
+                egui::Panel::top("stream_only_validation_notice").show(root, |ui| {
+                    ui.label("Stream-only validation — session reporting is disabled.");
+                });
+            }
+            if let Some(delay) = osd_hide_after {
+                root.request_repaint_after(delay);
+            }
+            if media_info.is_some() {
+                // The panel re-reads the player's properties on this cadence.
+                root.request_repaint_after(media_info_panel::REFRESH_INTERVAL);
+            }
+            if let Some((_, remaining)) = &shell_notice {
+                root.request_repaint_after(*remaining);
+            }
+            if theater {
+                // Service the worker without laying out a hidden catalog, changing its focus,
+                // or running catalog actions against player input.
+                kattri_app.update_background(root.ctx());
+                let typing = root.egui_wants_keyboard_input();
+                if !typing && root.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    // Escape closes the media info panel before it leaves the video.
+                    if mpv.media_info_open() {
+                        mpv.close_media_info();
+                    } else {
+                        mpv.stop_playback();
+                    }
+                }
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+                    .show(root, |ui| {
+                        let area = ui.max_rect();
+                        let size = fit_16_9(area.size());
+                        video_size_points = size;
+                        let video_rect = egui::Rect::from_center_size(area.center(), size);
+                        ui.painter().image(
+                            video_texture_id,
+                            video_rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                        if controls_visible {
+                            egui::Area::new(egui::Id::unique("theater_back"))
+                                .order(egui::Order::Foreground)
+                                .anchor(egui::Align2::LEFT_TOP, egui::vec2(24.0, 20.0))
+                                .show(ui.ctx(), |ui| {
+                                    let back = egui::Button::new(
+                                        egui::RichText::new("←  Back")
+                                            .size(17.0)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::from_black_alpha(150))
+                                    .corner_radius(egui::CornerRadius::same(22))
+                                    .min_size(egui::vec2(110.0, 44.0));
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui.add(back).clicked() {
+                                            mpv.stop_playback();
+                                        }
+                                        if ui.button("Player details").clicked() {
+                                            *show_player_details = true;
+                                        }
+                                    });
+                                });
+                            egui::Area::new(egui::Id::unique("theater_controls"))
+                                .order(egui::Order::Foreground)
+                                .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -28.0))
+                                .show(ui.ctx(), |ui| {
+                                    ui.set_max_width((area.width() - 32.0).clamp(1.0, 920.0));
+                                    osd_controls(
+                                        ui,
+                                        mpv,
+                                        kattri_app,
+                                        &osd,
+                                        &mut pip_toggle_requested,
+                                    );
+                                });
+                        }
+                        if let Some(info) = &media_info
+                            && media_info_panel::show(ui.ctx(), info).close
+                        {
+                            mpv.close_media_info();
+                        }
+                    });
+                return;
+            }
+            if report_handoff_feedback.is_some() || shutdown_error.is_some() {
+                egui::Panel::top("native_playback_report_feedback").show(root, |ui| {
+                    if let Some(feedback) = &report_handoff_feedback {
+                        ui.colored_label(egui::Color32::LIGHT_RED, feedback);
+                    }
+                    if let Some(error) = &shutdown_error {
+                        ui.colored_label(egui::Color32::LIGHT_RED, error);
+                    }
+                });
+            }
+            // The status bar appears only when it has something to say: a video is loaded, the
+            // player runtime is missing, a notice is showing, or the details panel is open.
+            if status_bar_visible(
+                media_active,
+                renderer_available,
+                shell_notice.is_some(),
+                *show_player_details,
+            ) {
+                egui::Panel::bottom("player_status_bar")
+                    .exact_size(34.0)
+                    .frame(
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgb(0x15, 0x15, 0x17))
+                            .inner_margin(egui::Margin::symmetric(16, 0)),
+                    )
+                    .show(root, |ui| {
+                        ui.horizontal_centered(|ui| {
+                            if !renderer_available {
+                                let (dot, _) = ui.allocate_exact_size(
+                                    egui::vec2(8.0, 8.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(
+                                    dot.center(),
+                                    4.0,
+                                    egui::Color32::from_rgb(0xF2, 0xB1, 0x34),
+                                );
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Video playback is unavailable on this computer",
+                                    )
+                                    .color(egui::Color32::from_rgb(0xA1, 0xA1, 0xA6)),
+                                );
+                            }
+                            if let Some((text, _)) = &shell_notice {
+                                ui.label(text);
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.toggle_value(show_player_details, "Player details")
+                                        .on_hover_text(
+                                            "Show the video surface, track controls, subtitle sync and runtime diagnostics",
+                                        );
+                                },
+                            );
+                        });
+                    });
+            }
+            if playback_panel_visible(media_active, *show_player_details) {
+                let panel_width = (root.available_width() * 0.38).clamp(300.0, 480.0);
+                egui::containers::panel::Panel::right("mpv-video-panel")
+                .default_size(panel_width)
+                .resizable(true)
+                .show(root, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading("Playback");
+                    ui.separator();
+                    let available = ui.available_size_before_wrap();
+                    let width = available.x.max(1.0);
+                    let height = (width * 9.0 / 16.0).min(available.y.max(1.0));
+                    video_size_points = egui::vec2(width, height);
+                    ui.image((video_texture_id, video_size_points));
+                    if renderer_available && controls_visible {
+                        ui.add_space(6.0);
+                        osd_controls(ui, mpv, kattri_app, &osd, &mut pip_toggle_requested);
+                    }
+                    ui.add_space(8.0);
+                    ui.label(&playback_status);
+                    if let Some(warning) = &capability_warning {
+                        ui.colored_label(egui::Color32::YELLOW, warning);
+                    }
+                    if let Some(feedback) = &playback_report_feedback {
+                        ui.colored_label(egui::Color32::LIGHT_RED, feedback);
+                    }
+                    if !renderer_available {
+                        ui.label("Install a matching libmpv runtime to enable the local video surface.");
+                    } else {
+                        ui.label(
+                            "Pass a local file as the first argument, or choose a server-transcoded stream from an item.",
+                        );
+                    }
+                    ui.label(
+                        "For Jellyfin playback, libmpv receives only a loopback URL; server credentials and upstream URLs stay in the Rust relay.",
+                    );
+                    ui.add_space(10.0);
+                    if renderer_available {
+                        // The combos sit under a collapsed header; the keyboard path to them is
+                        // tested in player_controls (M2-18).
+                        let (audio_pick, subtitle_pick) = player_controls::track_section(
+                            ui,
+                            audio_track_options.as_deref(),
+                            subtitle_track_options.as_deref(),
+                            track_feedback.as_deref(),
+                        );
+                        if let Some(selection) = audio_pick {
+                            mpv.select_audio_track(selection);
+                        }
+                        if let Some(selection) = subtitle_pick {
+                            mpv.select_subtitle_track(selection);
+                        }
+                        ui.add_space(10.0);
+                    }
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new("SYNC SUBTITLES TO SPEECH")
+                            .size(11.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(0x83, 0xD6, 0xC0)),
+                    );
+                    let subtitle_available = renderer_available && mpv.subtitle_track_selected();
+                    if subtitle_available {
+                        ui.label(
+                            "Press “I hear the spoken line” when it is spoken and “I see the subtitle” when its text appears. Press either one first; Kattri applies the correction after both times are captured.",
+                        );
+                        ui.add_space(6.0);
+                        for (marker, label) in SYNC_MARKER_BUTTONS {
+                            if ui
+                                .add_sized(
+                                    [ui.available_width(), 38.0],
+                                    egui::Button::new(label),
+                                )
+                                .clicked()
+                            {
+                                mpv.capture_sync_marker(marker);
+                            }
+                            ui.add_space(4.0);
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Reset subtitle delay").clicked() {
+                                mpv.reset_subtitle_delay();
+                            }
+                        });
+                        egui::CollapsingHeader::new("Fine adjustment (optional)")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    "Move subtitles in small 50 ms steps if the automatic match needs a touch-up.",
+                                );
+                                ui.horizontal(|ui| {
+                                    if ui.button("Earlier by 50 ms").clicked() {
+                                        mpv.nudge_subtitle_delay(-0.05);
+                                    }
+                                    if ui.button("Later by 50 ms").clicked() {
+                                        mpv.nudge_subtitle_delay(0.05);
+                                    }
+                                });
+                            });
+                        if let Some(delay) = mpv.subtitle_delay_seconds() {
+                            ui.label(format!("Current subtitle delay: {delay:+.3} s"));
+                        } else {
+                            ui.label("Current subtitle delay: waiting for libmpv…");
+                        }
+                    } else {
+                        ui.label(
+                            "A ready player and selected subtitle track are required to enable sync controls.",
+                        );
+                    }
+                    let (message, tone) = mpv.sync_feedback().display();
+                    let feedback = format!("{}: {message}", tone.label());
+                    match tone {
+                        SyncFeedbackTone::Guidance => ui.label(feedback),
+                        SyncFeedbackTone::Pending => ui.colored_label(
+                            egui::Color32::from_rgb(0x83, 0xD6, 0xC0),
+                            feedback,
+                        ),
+                        SyncFeedbackTone::Success => {
+                            ui.colored_label(egui::Color32::LIGHT_GREEN, feedback)
+                        }
+                        SyncFeedbackTone::Error => {
+                            ui.colored_label(egui::Color32::LIGHT_RED, feedback)
+                        }
+                    };
+                    });
+                });
+            }
+            // No frame margin: the app draws its own edge-to-edge bars and page gutters.
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new())
+                .show(root, |ui| kattri_app.ui(ui));
+            if let Some(info) = &media_info
+                && media_info_panel::show(root, info).close
+            {
+                mpv.close_media_info();
+            }
+        });
+        self.sync_report_connection();
+        self.flush_playback_reports();
+        #[cfg(debug_assertions)]
+        debug_harness::observe_tree(&output.platform_output);
+        self.egui_winit.handle_platform_output_with_event_loop(
+            &self.window,
+            event_loop,
+            output.platform_output,
+        );
+        // The window is changed after the UI pass, so no borrow of the UI is held here.
+        if pip_toggle_requested {
+            self.toggle_pip(event_loop);
+        }
+        // Track choices the viewer made this frame go to the per-series memory (M2-10).
+        for (series_id, event) in self.mpv.take_track_memory_events() {
+            let series = series_id.as_deref();
+            match event {
+                TrackMemoryEvent::Audio(track) => {
+                    self.kattri_app.record_audio_choice(series, &track);
+                }
+                TrackMemoryEvent::Subtitle(track) => {
+                    self.kattri_app.record_subtitle_choice(series, &track);
+                }
+                TrackMemoryEvent::SubtitlesOff => {
+                    self.kattri_app.record_subtitles_off_choice(series);
+                }
+            }
+        }
+        if let Some((item_id, segments)) = self.kattri_app.take_media_segments() {
+            self.mpv.load_media_segments(&item_id, segments);
+        }
+        // Remote-control actions from the egui client (M4-13). Drained here, on the UI
+        // thread and before the frame renders, so libmpv only changes on this thread.
+        for action in self.kattri_app.take_player_intents() {
+            self.mpv.apply_remote_action(action);
+        }
+        if let Some(playback) = self.kattri_app.take_prepared_playback() {
+            #[cfg(debug_assertions)]
+            qa_metrics::playback_queued(Instant::now());
+            let series_id = playback.series_id().map(str::to_owned);
+            let (url, relay, report_metadata, resume_position_ticks) = playback.into_parts();
+            let live_stream_id = report_metadata.live_stream_id.clone();
+            let live_channel_id = live_stream_id
+                .as_ref()
+                .map(|_| report_metadata.item_id.clone());
+            let audio_settings = self.kattri_app.playback_audio_settings();
+            let load = ItemLoadSettings {
+                audio: &audio_settings,
+                playback: self.kattri_app.playback_settings(),
+                subtitles: self.kattri_app.subtitle_settings(),
+                video: self.kattri_app.video_settings(),
+                series_id,
+                language_memory: self.kattri_app.series_language_memory(),
+            };
+            match self
+                .mpv
+                .load_relay(url, relay, report_metadata, resume_position_ticks, load)
+            {
+                Ok(()) => {
+                    // Catalog focus must not consume player shortcuts or keep its overlay open.
+                    self.egui.memory_mut(|memory| {
+                        if let Some(focus) = memory.focused() {
+                            memory.surrender_focus(focus);
+                        }
+                    });
+                    self.report_connection_notice = None;
+                    self.kattri_app.playback_start_opening();
+                }
+                Err(error) => {
+                    if let Some(live_stream_id) = live_stream_id {
+                        self.kattri_app.close_live_tv_stream(live_stream_id);
+                    }
+                    if let Some(channel_id) = live_channel_id {
+                        self.kattri_app.on_live_tv_stream_ended(&channel_id);
+                    }
+                    self.kattri_app.playback_start_failed(error);
+                }
+            }
+            self.egui.request_repaint();
+        }
+
+        if let Some(stream_url) = self.kattri_app.take_stream_url() {
+            let audio_settings = self.kattri_app.playback_audio_settings();
+            let load = ItemLoadSettings {
+                audio: &audio_settings,
+                playback: self.kattri_app.playback_settings(),
+                subtitles: self.kattri_app.subtitle_settings(),
+                video: self.kattri_app.video_settings(),
+                series_id: None,
+                language_memory: self.kattri_app.series_language_memory(),
+            };
+            if let Err(error) = self.mpv.load_stream_url(&stream_url, load) {
+                tracing::warn!(error, "stream address was not started");
+            }
+            self.egui.request_repaint();
+        }
+
+        let target_size = physical_video_size(video_size_points, output.pixels_per_point, &self.gl);
+        if let Err(error) = self.resize_video_target(target_size) {
+            eprintln!("could not resize the video FBO: {error}");
+        }
+        let decision = if let Some(target) = self.video_target.as_ref() {
+            match FboTarget::new(
+                target.framebuffer_id(),
+                target.size()[0],
+                target.size()[1],
+                Some(target.internal_format()),
+                // The video FBO texture is drawn with egui's top-left UV origin, and a GL
+                // texture's first row is its bottom row, so mpv must not flip again.
+                false,
+            ) {
+                Ok(fbo) => match self.mpv.render_if_due(fbo) {
+                    Ok(decision) => decision,
+                    Err(error) => {
+                        eprintln!("libmpv OpenGL render failed: {error}");
+                        FrameDecision::NoFrame
+                    }
+                },
+                Err(error) => {
+                    eprintln!("invalid libmpv FBO target: {error}");
+                    FrameDecision::NoFrame
+                }
+            }
+        } else {
+            FrameDecision::NoFrame
+        };
+
+        #[cfg(debug_assertions)]
+        debug_harness::log_if_changed(
+            "video surface",
+            &format!(
+                "renderer_available={renderer_available} target={:?} size_points={video_size_points:?}",
+                self.video_target.as_ref().map(|target| target.size())
+            ),
+        );
+        let primitives = self.egui.tessellate(output.shapes, output.pixels_per_point);
+        unsafe {
+            self.gl.bind_framebuffer(
+                glow::FRAMEBUFFER,
+                u32::try_from(self.screen_framebuffer)
+                    .ok()
+                    .and_then(NonZeroU32::new)
+                    .map(glow::NativeFramebuffer),
+            );
+        }
+        let Some(painter) = self.painter.as_mut() else {
+            return Duration::MAX;
+        };
+        painter.clear(
+            [self.physical_size.width, self.physical_size.height],
+            [0.035, 0.047, 0.063, 1.0],
+        );
+        painter.paint_and_update_textures(
+            [self.physical_size.width, self.physical_size.height],
+            output.pixels_per_point,
+            &primitives,
+            &mut output.textures_delta,
+        );
+
+        #[cfg(debug_assertions)]
+        debug_harness::capture_if_requested(
+            &self.gl,
+            self.physical_size.width,
+            self.physical_size.height,
+            self.video_target.as_ref(),
+        );
+        if let Err(error) = self.parts.surface.swap_buffers(&self.parts.context) {
+            eprintln!("swap_buffers failed: {error}");
+            return Duration::MAX;
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            let finished = Instant::now();
+            qa_metrics::frame(qa_frame_started, finished);
+            if matches!(decision, FrameDecision::Rendered(_)) {
+                qa_metrics::video_presented(finished);
+            }
+        }
+
+        if matches!(decision, FrameDecision::Rendered(_))
+            && let Err(error) = self.mpv.report_swap()
+        {
+            eprintln!("libmpv swap report failed: {error}");
+        }
+
+        if matches!(decision, FrameDecision::Rendered(_))
+            && let Some(elapsed) = self.mpv.take_live_tune_elapsed()
+        {
+            tracing::info!(
+                elapsed_ms = elapsed.as_millis(),
+                "Live TV first video frame rendered"
+            );
+        }
+
+        let mut next_repaint = output
+            .viewport_output
+            .get(&ViewportId::ROOT)
+            .map_or(Duration::MAX, |viewport| viewport.repaint_delay);
+        if let FrameDecision::WaitUntil { delay, .. } = decision {
+            next_repaint = next_repaint.min(delay);
+        }
+        if let Some(delay) = self.report_retry_delay() {
+            next_repaint = next_repaint.min(delay);
+        }
+        next_repaint
+    }
+
+    /// The playback phase and video presence the PiP model reads. The host does not observe
+    /// loading states or the video track yet, so a loaded item reads as playing or paused, and
+    /// video is assumed once the renderer is ready. Audio-only files are not refused yet.
+    fn pip_playback(&self) -> (Option<PlaybackPhase>, bool) {
+        let loaded = self.mpv.has_media() && self.mpv.has_renderer();
+        let phase = loaded.then(|| match self.mpv.controls_snapshot().paused {
+            Some(true) => PlaybackPhase::Paused,
+            _ => PlaybackPhase::Playing,
+        });
+        (phase, loaded)
+    }
+
+    fn toggle_pip(&mut self, event_loop: &ActiveEventLoop) {
+        if self.pip.is_pip() {
+            let monitors = window_hooks::monitor_infos(event_loop);
+            match self.pip.leave(&monitors) {
+                Ok(transition) => window_hooks::apply_transition(&self.window, &transition),
+                Err(_) => self.set_shell_notice("Picture-in-picture is already off.".to_owned()),
+            }
+            return;
+        }
+        let (phase, has_video) = self.pip_playback();
+        let Some(normal) = window_hooks::capture_window(&self.window, event_loop) else {
+            self.set_shell_notice(
+                "Picture-in-picture needs the window position, which this platform did not report."
+                    .to_owned(),
+            );
+            return;
+        };
+        // Write the normal window before the PiP size replaces it, so a move made within the
+        // debounce window is not lost (M2-14).
+        self.store_normal_window(&normal);
+        match self
+            .pip
+            .enter(normal, PipSize::default_size(), phase, has_video)
+        {
+            Ok(transition) => window_hooks::apply_transition(&self.window, &transition),
+            Err(PipError::NoVideoPlaying) => {
+                self.set_shell_notice("Picture-in-picture needs a playing video.".to_owned());
+            }
+            Err(PipError::AlreadyInPip | PipError::NotInPip) => {}
+        }
+    }
+
+    /// Queue an mpv screenshot of the current frame (M2-15). The name comes from the settings
+    /// template. The command is queued; the write is not confirmed here.
+    fn take_screenshot(&mut self) {
+        const NOTHING_TO_CAPTURE: &str = "Nothing to capture yet.";
+        let Some(session) = self.session else {
+            self.set_shell_notice(NOTHING_TO_CAPTURE.to_owned());
+            return;
+        };
+        if !(self.mpv.has_renderer() && self.mpv.has_media()) {
+            self.set_shell_notice(NOTHING_TO_CAPTURE.to_owned());
+            return;
+        }
+        let (configured, template) = {
+            let screenshot = &self.kattri_app.video_settings().screenshot;
+            (screenshot.directory.clone(), screenshot.template.clone())
+        };
+        let directory = match screenshot_directory(&configured) {
+            Ok(directory) => directory,
+            Err(message) => {
+                self.set_shell_notice(message.to_owned());
+                return;
+            }
+        };
+        if std::fs::create_dir_all(&directory).is_err() {
+            self.set_shell_notice("The screenshot folder could not be created.".to_owned());
+            return;
+        }
+        let existing = match existing_file_names(&directory) {
+            Ok(names) => names,
+            Err(_) => {
+                self.set_shell_notice("The screenshot folder could not be read.".to_owned());
+                return;
+            }
+        };
+        let stem_source = self
+            .mpv
+            .playing_item_id()
+            .map(str::to_owned)
+            .or_else(|| self.local_stem.clone())
+            .unwrap_or_else(|| "video".to_owned());
+        let position = self
+            .mpv
+            .controls_snapshot()
+            .position_seconds
+            .and_then(duration_from_seconds)
+            .unwrap_or_default();
+        self.screenshot_count = self.screenshot_count.saturating_add(1);
+        let context = ScreenshotContext {
+            file_stem: &stem_source,
+            position,
+            counter: self.screenshot_count,
+        };
+        let stem = match screenshot_stem(&template, &context) {
+            Ok(stem) => stem,
+            Err(_) => {
+                self.set_shell_notice("The screenshot name template is invalid.".to_owned());
+                return;
+            }
+        };
+        let file_name = match unique_file_name(&stem, ScreenshotFormat::Png, &existing) {
+            Ok(name) => name,
+            Err(_) => {
+                self.set_shell_notice("No free screenshot file name is left.".to_owned());
+                return;
+            }
+        };
+        match session.screenshot_to_file(
+            &directory,
+            &template,
+            &context,
+            &existing,
+            PROVISIONAL_SCREENSHOT_MODE,
+        ) {
+            Ok(_) => self.set_shell_notice(format!("Screenshot requested: {file_name}")),
+            Err(error) => self.set_shell_notice(format!("Screenshot failed: {error}")),
+        }
+    }
+
+    fn set_shell_notice(&mut self, text: String) {
+        self.shell_notice = Some((text, self.osd_clock.elapsed()));
+    }
+
+    fn resize_video_target(&mut self, size: [u32; 2]) -> Result<(), String> {
+        if self
+            .video_target
+            .as_ref()
+            .is_some_and(|current| current.size() == size)
+        {
+            return Ok(());
+        }
+        let next = VideoTarget::new(&self.gl, size)?;
+        let painter = self
+            .painter
+            .as_mut()
+            .ok_or_else(|| "egui_glow painter has already been destroyed".to_owned())?;
+        painter.replace_native_texture(self.video_texture_id, next.texture());
+        if let Some(previous) = self.video_target.replace(next) {
+            previous.destroy_framebuffer(&self.gl);
+        }
+        Ok(())
+    }
+
+    fn destroy(&mut self) -> bool {
+        if self.destroyed {
+            return true;
+        }
+        if let Err(error) = self.mpv.close() {
+            self.shutdown_error = Some(format!(
+                "Could not close libmpv while its GL context is current: {error}. Keep the window open and retry."
+            ));
+            return false;
+        }
+        self.mpv.finish_playback_reporting();
+        self.flush_playback_reports();
+        if let Err(error) = self.parts.make_current() {
+            self.shutdown_error = Some(format!(
+                "Could not make the host GL context current for teardown: {error}. Keep the window open and retry."
+            ));
+            return false;
+        }
+        if let Some(target) = self.video_target.take() {
+            target.destroy_framebuffer(&self.gl);
+        }
+        if let Some(painter) = self.painter.as_mut() {
+            painter.destroy();
+        }
+        self.painter.take();
+        self.destroyed = true;
+        true
+    }
+
+    fn flush_playback_reports(&mut self) {
+        let app = &mut self.kattri_app;
+        self.mpv
+            .flush_report_actions(self.osd_clock.elapsed(), |action| {
+                app.report_playback_action(action)
+            });
+    }
+
+    fn sync_report_connection(&mut self) {
+        let generation = self.kattri_app.connection_generation();
+        if generation == self.report_connection_generation {
+            return;
+        }
+        self.report_connection_generation = generation;
+        let had_context = self.mpv.has_reporting_context();
+        let counts = self.mpv.clear_reporting_for_connection_change();
+        self.report_connection_notice = had_context.then(|| {
+            format!(
+                "Jellyfin connection changed. Reports from the previous sign-in were discarded (Start: {}, Progress: {}, Stop: {}). Current playback continues without session reporting.",
+                counts.started, counts.progress, counts.stopped,
+            )
+        });
+    }
+
+    fn report_retry_delay(&self) -> Option<Duration> {
+        self.mpv.report_retry_delay(self.osd_clock.elapsed())
+    }
+
+    fn begin_close(&mut self) {
+        if self.mpv.has_media() {
+            self.mpv.stop_playback();
+        }
+        self.mpv.finish_playback_reporting();
+        self.report_close_grace.begin(self.osd_clock.elapsed());
+    }
+
+    fn advance_close(&mut self) -> bool {
+        self.flush_playback_reports();
+        match self
+            .report_close_grace
+            .advance(self.osd_clock.elapsed(), self.mpv.has_pending_reports())
+        {
+            CloseAdmission::Ready => {
+                self.shutdown_error = None;
+                self.destroy()
+            }
+            CloseAdmission::Retry => false,
+            CloseAdmission::Idle => false,
+            CloseAdmission::TimedOut => {
+                let counts = self.mpv.pending_report_counts();
+                self.shutdown_error = Some(format!(
+                    "Close delayed: playback reports have not been accepted (Start: {}, Progress: {}, Stop: {}). They remain retained. Retry closing after the network queue recovers.",
+                    counts.started, counts.progress, counts.stopped,
+                ));
+                self.window.request_redraw();
+                false
+            }
+        }
+    }
+}
+
+// Idle browsing must not reserve a permanent blank video/diagnostics column.
+/// Everything the on-screen controls need for one frame. The theater view and the Player
+/// details panel draw the same controls from the same state.
+struct OsdState<'a> {
+    position: Duration,
+    duration: Option<Duration>,
+    paused: Option<bool>,
+    speed_multiplier: Option<f64>,
+    media_active: bool,
+    previous_track_enabled: bool,
+    chapters: &'a [ChapterChoice],
+    secondary_subtitles: &'a [SecondarySubtitleChoice],
+    secondary_selected: Option<i64>,
+    pip_active: bool,
+    pip_available: bool,
+    skip_settings: Option<kattri_client_core::segments::SkipSettings>,
+    feedback: Option<&'a str>,
+    audio_tracks: Option<&'a [mpv_host::TrackMenuOption]>,
+    subtitle_tracks: Option<&'a [mpv_host::TrackMenuOption]>,
+    track_feedback: Option<&'a str>,
+}
+
+/// Draws the playback controls and performs the actions they return.
+fn osd_controls(
+    ui: &mut egui::Ui,
+    mpv: &mut MpvHost<'_>,
+    kattri_app: &mut KattriApp,
+    osd: &OsdState<'_>,
+    pip_toggle_requested: &mut bool,
+) {
+    let live_stream_active = mpv.live_stream_active();
+    let skip = osd.skip_settings.map(|settings| SkipControls {
+        skipper: mpv.segment_skipper_mut(),
+        settings,
+    });
+    let actions = player_controls::draw_with_skip(
+        ui,
+        PlayerControlsView {
+            position: osd.position,
+            duration: osd.duration,
+            paused: osd.paused,
+            speed_multiplier: osd.speed_multiplier,
+            seek_enabled: true,
+            stop_enabled: osd.media_active,
+            previous_track_enabled: osd.previous_track_enabled,
+            chapters: osd.chapters,
+            secondary_subtitles: osd.secondary_subtitles,
+            secondary_selected: osd.secondary_selected,
+            pip_active: osd.pip_active,
+            pip_available: osd.pip_available,
+        },
+        skip,
+    );
+    if live_stream_active {
+        ui.small("Live TV cannot pause; the Pause button stops the channel.");
+    }
+    for action in actions {
+        match action {
+            PlayerControlAction::SeekRelative(delta) => mpv.seek_relative(delta),
+            PlayerControlAction::SeekAbsolute(target) => mpv.seek_absolute(target),
+            PlayerControlAction::TogglePause if live_stream_active => mpv.stop_playback(),
+            PlayerControlAction::TogglePause => mpv.toggle_paused(),
+            PlayerControlAction::PreviousTrack => {
+                if let Some(playing_item_id) = mpv.playing_item_id().map(str::to_owned)
+                    && kattri_app.on_music_previous(&playing_item_id, osd.position)
+                {
+                    mpv.seek_absolute(Duration::ZERO);
+                }
+            }
+            PlayerControlAction::NextTrack => {
+                if let Some(playing_item_id) = mpv.playing_item_id().map(str::to_owned) {
+                    kattri_app.on_music_next(&playing_item_id);
+                }
+            }
+            PlayerControlAction::Stop => mpv.stop_playback(),
+            PlayerControlAction::SetSpeed(speed) => mpv.set_playback_speed(speed),
+            PlayerControlAction::SelectChapter(index) => mpv.select_chapter(index),
+            PlayerControlAction::SelectSecondarySubtitle(track) => {
+                mpv.select_secondary_subtitle(track);
+            }
+            PlayerControlAction::TogglePip => *pip_toggle_requested = true,
+        }
+    }
+    if let Some(feedback) = osd.feedback {
+        ui.colored_label(egui::Color32::LIGHT_RED, feedback);
+    }
+    ui.menu_button("Audio & subtitles", |ui| {
+        ui.set_max_width(300.0);
+        let (audio, subtitle) = player_controls::track_menu_contents(
+            ui,
+            osd.audio_tracks,
+            osd.subtitle_tracks,
+            osd.track_feedback,
+        );
+        if let Some(selection) = audio {
+            mpv.select_audio_track(selection);
+        }
+        if let Some(selection) = subtitle {
+            mpv.select_subtitle_track(selection);
+        }
+        ui.separator();
+        ui.label("Sync subtitles to speech");
+        ui.add_enabled_ui(mpv.subtitle_track_selected(), |ui| {
+            for (marker, label) in SYNC_MARKER_BUTTONS {
+                if ui.button(label).clicked() {
+                    mpv.capture_sync_marker(marker);
+                }
+            }
+            if ui.button("Reset subtitle delay").clicked() {
+                mpv.reset_subtitle_delay();
+            }
+        });
+        ui.label(mpv.sync_feedback().display().0);
+    });
+}
+
+/// Keep keyboard focus and open player menus visible beyond the pointer inactivity timer.
+fn player_controls_visible(timed: bool, focused: bool, popup_open: bool) -> bool {
+    timed || focused || popup_open
+}
+
+/// The largest 16:9 box that fits `available`.
+fn fit_16_9(available: egui::Vec2) -> egui::Vec2 {
+    let width = available.x.max(1.0);
+    let height = available.y.max(1.0);
+    if width * 9.0 <= height * 16.0 {
+        egui::vec2(width, width * 9.0 / 16.0)
+    } else {
+        egui::vec2(height * 16.0 / 9.0, height)
+    }
+}
+
+/// Whether the bottom status bar has anything to show.
+fn status_bar_visible(
+    media_active: bool,
+    renderer_available: bool,
+    notice_showing: bool,
+    details_open: bool,
+) -> bool {
+    media_active || !renderer_available || notice_showing || details_open
+}
+
+fn playback_panel_visible(media_active: bool, details_requested: bool) -> bool {
+    media_active || details_requested
+}
+
+/// The folder for screenshots. An empty setting means the Pictures folder of the user profile.
+/// A relative path is refused, because mpv would resolve it against its own working directory.
+fn screenshot_directory(configured: &str) -> Result<PathBuf, &'static str> {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .ok_or("No user folder is known, so screenshots need a folder in Settings.")?;
+        return Ok(PathBuf::from(home).join("Pictures"));
+    }
+    let path = PathBuf::from(configured);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err("The screenshot folder in Settings must be an absolute path.")
+    }
+}
+
+fn existing_file_names(directory: &Path) -> std::io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        if let Some(name) = entry?.file_name().to_str() {
+            names.push(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
+#[cfg(test)]
+mod shell_tests {
+    #[test]
+    fn playback_controls_do_not_hide_focused_widgets_or_open_menus() {
+        assert!(!super::player_controls_visible(false, false, false));
+        assert!(super::player_controls_visible(true, false, false));
+        assert!(super::player_controls_visible(false, true, false));
+        assert!(super::player_controls_visible(false, false, true));
+    }
+    use super::{playback_panel_visible, screenshot_directory, status_bar_visible};
+
+    #[test]
+    fn the_status_bar_hides_while_browsing_with_a_working_player() {
+        assert!(!status_bar_visible(false, true, false, false));
+        assert!(status_bar_visible(true, true, false, false));
+        assert!(status_bar_visible(false, false, false, false));
+        assert!(status_bar_visible(false, true, true, false));
+        assert!(status_bar_visible(false, true, false, true));
+    }
+
+    #[test]
+    fn browsing_uses_full_width_until_media_or_details_are_requested() {
+        assert!(!playback_panel_visible(false, false));
+        assert!(playback_panel_visible(false, true));
+        assert!(playback_panel_visible(true, false));
+        assert!(playback_panel_visible(true, true));
+    }
+
+    #[test]
+    fn screenshot_folder_must_be_absolute_and_empty_means_the_pictures_folder() {
+        assert!(screenshot_directory("Shots").is_err());
+        assert!(screenshot_directory("..\\Shots").is_err());
+        let absolute = std::env::temp_dir();
+        let text = absolute.to_string_lossy().into_owned();
+        assert_eq!(screenshot_directory(&text), Ok(absolute));
+        if let Ok(pictures) = screenshot_directory("") {
+            assert!(pictures.ends_with("Pictures"));
+        }
+    }
+}
+
+impl Drop for GlHost<'_> {
+    fn drop(&mut self) {
+        let _ = self.destroy();
+        if self.mpv.has_pending_reports() {
+            // Forced window/OS teardown cannot keep a visible retry UI alive.
+            // Log counts only; report bodies contain private media identifiers.
+            eprintln!(
+                "native playback reports not admitted before forced teardown: {:?}",
+                self.mpv.pending_report_counts(),
+            );
+        }
+    }
+}
+
+fn physical_video_size(points: egui::Vec2, pixels_per_point: f32, gl: &glow::Context) -> [u32; 2] {
+    let max_size = unsafe { gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE).max(1) as u32 };
+    [points.x, points.y].map(|points| {
+        (points * pixels_per_point)
+            .round()
+            .clamp(1.0, max_size.min(i32::MAX as u32) as f32) as u32
+    })
+}
+
+fn nonzero_size(size: PhysicalSize<u32>) -> (NonZeroU32, NonZeroU32) {
+    (
+        NonZeroU32::new(size.width).unwrap_or(NonZeroU32::MIN),
+        NonZeroU32::new(size.height).unwrap_or(NonZeroU32::MIN),
+    )
+}
+
+struct MpvRuntime {
+    _library: MpvLibrary,
+    session: MpvSession,
+}
+
+impl MpvRuntime {
+    fn load() -> Result<Self, String> {
+        let library = MpvLibrary::load().map_err(|error| error.to_string())?;
+        let session = MpvSession::new(&library).map_err(|error| error.to_string())?;
+        Ok(Self {
+            _library: library,
+            session,
+        })
+    }
+}
+
+struct HostApp<'session> {
+    host: Option<GlHost<'session>>,
+    session: Option<&'session MpvSession>,
+    runtime_error: Option<String>,
+    local_media: Result<Option<String>, String>,
+    profile: Option<String>,
+    proxy: EventLoopProxy<HostEvent>,
+    redraw_at: Option<Instant>,
+    failed: bool,
+    /// Discord presence (M4-09). Built only when `plugins.discord_presence` is on and a
+    /// Discord application id is configured. Neither is in place yet, so this stays `None`.
+    presence: Option<PresenceBinding<IpcTransport>>,
+    /// Monotonic origin for the presence clock, which the binding's `shutdown` takes.
+    started: Instant,
+}
+
+impl<'session> HostApp<'session> {
+    fn new(
+        session: Option<&'session MpvSession>,
+        runtime_error: Option<String>,
+        local_media: Result<Option<String>, String>,
+        profile: Option<String>,
+        proxy: EventLoopProxy<HostEvent>,
+    ) -> Self {
+        Self {
+            host: None,
+            session,
+            runtime_error,
+            local_media,
+            profile,
+            proxy,
+            redraw_at: None,
+            failed: false,
+            presence: None,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl ApplicationHandler<HostEvent> for HostApp<'_> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.host.is_some() || self.failed {
+            return;
+        }
+        match GlHost::new(
+            event_loop,
+            self.proxy.clone(),
+            self.session,
+            self.runtime_error.clone(),
+            self.local_media.clone(),
+            self.profile.as_deref(),
+        ) {
+            Ok(host) => {
+                host.window.request_redraw();
+                self.host = Some(host);
+            }
+            Err(error) => {
+                eprintln!("failed to initialize native GL host: {error}");
+                self.failed = true;
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(host) = self.host.as_mut() else {
+            return;
+        };
+        if window_id != host.window.id() {
+            return;
+        }
+        let event_response = host.egui_winit.on_window_event(&host.window, &event);
+
+        match event {
+            WindowEvent::CloseRequested => {
+                host.save_window_geometry(event_loop);
+                host.begin_close();
+                if host.advance_close() {
+                    event_loop.exit();
+                } else {
+                    host.window.request_redraw();
+                }
+            }
+            WindowEvent::Destroyed => {
+                if !host.destroy() {
+                    eprintln!("window was destroyed before libmpv/GL teardown completed");
+                }
+                event_loop.exit();
+            }
+            WindowEvent::Resized(size) => {
+                host.resize(size);
+                host.touch_window_geometry();
+                host.window.request_redraw();
+            }
+            WindowEvent::Moved(_) => host.touch_window_geometry(),
+            WindowEvent::RedrawRequested => {
+                let delay = host.render(event_loop);
+                self.redraw_at = if delay.is_zero() {
+                    host.window.request_redraw();
+                    None
+                } else if delay == Duration::MAX {
+                    None
+                } else {
+                    Instant::now().checked_add(delay)
+                };
+            }
+            _ if event_response.repaint => host.window.request_redraw(),
+            _ => {}
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: HostEvent) {
+        let Some(host) = self.host.as_mut() else {
+            return;
+        };
+        match event {
+            HostEvent::MpvRepaint => {
+                host.window.request_redraw();
+                self.redraw_at = None;
+            }
+            HostEvent::EguiRepaint(delay) if delay.is_zero() => {
+                host.window.request_redraw();
+                self.redraw_at = None;
+            }
+            HostEvent::EguiRepaint(delay) => {
+                let deadline = Instant::now().checked_add(delay);
+                self.redraw_at = match (self.redraw_at, deadline) {
+                    (Some(current), Some(next)) => Some(current.min(next)),
+                    (None, next) => next,
+                    (current, None) => current,
+                };
+            }
+            HostEvent::AccessKit(event) if event.window_id == host.window.id() => {
+                use egui_winit::accesskit_winit::WindowEvent as AccessKitWindowEvent;
+                match event.window_event {
+                    AccessKitWindowEvent::InitialTreeRequested => {
+                        host.egui.enable_accesskit();
+                        host.window.request_redraw();
+                    }
+                    AccessKitWindowEvent::ActionRequested(request) => {
+                        host.egui_winit.on_accesskit_action_request(request);
+                        host.window.request_redraw();
+                    }
+                    AccessKitWindowEvent::AccessibilityDeactivated => {
+                        host.egui.disable_accesskit();
+                    }
+                }
+            }
+            HostEvent::AccessKit(_) => {}
+        }
+    }
+
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        if matches!(cause, StartCause::ResumeTimeReached { .. }) {
+            if let Some(host) = self.host.as_ref() {
+                host.window.request_redraw();
+            }
+            self.redraw_at = None;
+        }
+        let _ = event_loop;
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(host) = self.host.as_mut() {
+            if host.advance_close() {
+                event_loop.exit();
+                return;
+            }
+            host.save_window_geometry_if_due(event_loop, Instant::now());
+            if let Some(delay) = host.report_retry_delay() {
+                let deadline = Instant::now() + delay;
+                self.redraw_at = Some(
+                    self.redraw_at
+                        .map_or(deadline, |current| current.min(deadline)),
+                );
+            }
+            if let Some(deadline) = host.window_geometry_deadline() {
+                self.redraw_at = Some(
+                    self.redraw_at
+                        .map_or(deadline, |current| current.min(deadline)),
+                );
+            }
+        }
+        event_loop.set_control_flow(match self.redraw_at {
+            Some(deadline) => ControlFlow::WaitUntil(deadline),
+            None => ControlFlow::Wait,
+        });
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(host) = self.host.as_mut()
+            && !host.destroy()
+        {
+            eprintln!("libmpv renderer could not be closed before host teardown");
+        }
+        // Clears the Discord activity and closes the IPC connection. Without this, a
+        // presence shown at exit stays on the Discord profile until Discord times it out.
+        if let Some(presence) = self.presence.as_mut() {
+            presence.shutdown(self.started.elapsed());
+        }
+    }
+}
+
+fn has_user_activity(events: &[egui::Event]) -> bool {
+    events.iter().any(|event| match event {
+        egui::Event::PointerMoved(_)
+        | egui::Event::MouseMoved(_)
+        | egui::Event::MouseWheel { .. }
+        | egui::Event::Zoom(_)
+        | egui::Event::Rotate(_)
+        | egui::Event::Touch { .. }
+        | egui::Event::Text(_)
+        | egui::Event::Copy
+        | egui::Event::Cut
+        | egui::Event::Paste(_) => true,
+        egui::Event::PointerButton { pressed, .. } => *pressed,
+        egui::Event::Key { pressed, .. } => *pressed,
+        _ => false,
+    })
+}
+
+fn duration_from_seconds(seconds: f64) -> Option<Duration> {
+    (seconds.is_finite() && seconds >= 0.0)
+        .then(|| Duration::try_from_secs_f64(seconds).ok())
+        .flatten()
+}
+
+/// Host command line: `--profile <name>` or `--profile=<name>`, and at most one local media
+/// path. The profile rules match `jellyfin-egui-client`, whose parser lives in its binary.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HostArgs {
+    profile: Option<String>,
+    media: Vec<OsString>,
+}
+
+fn parse_host_args<I>(args: I) -> Result<HostArgs, String>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut parsed = HostArgs::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg.to_str() == Some("--profile") {
+            let name = args
+                .next()
+                .ok_or_else(|| "--profile needs a profile name".to_owned())?;
+            parsed.profile = Some(
+                name.into_string()
+                    .map_err(|_| "the profile name must be valid UTF-8".to_owned())?,
+            );
+        } else if let Some(name) = arg
+            .to_str()
+            .and_then(|text| text.strip_prefix("--profile="))
+        {
+            parsed.profile = Some(name.to_owned());
+        } else if arg.to_str().is_some_and(|text| text.starts_with("--")) {
+            // A mistyped flag is reported instead of being read as a media path.
+            return Err(format!("unknown argument `{}`", arg.to_string_lossy()));
+        } else {
+            parsed.media.push(arg);
+        }
+    }
+    Ok(parsed)
+}
+
+/// Starts the production log file and the panic log. A failure (no data folder, read-only disk,
+/// a subscriber already installed) leaves the app running without a log file.
+fn init_logging() -> Option<kattri_logging::LogGuard> {
+    let dir = kattri_logging::log_directory()?;
+    let level = kattri_logging::resolve_level(
+        None,
+        std::env::var(kattri_logging::LEVEL_ENV_VAR).ok().as_deref(),
+    );
+    let guard =
+        kattri_logging::init(&kattri_logging::LogConfig::new(dir).with_level(level)).ok()?;
+    kattri_logging::install_panic_hook();
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        "Jellyfin Kattri started"
+    );
+    Some(guard)
+}
+
+/// True when `KATTRI_LOG` names a level: it then wins over the Settings choice for this run.
+fn log_level_set_by_environment() -> bool {
+    static PINNED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PINNED.get_or_init(|| {
+        std::env::var(kattri_logging::LEVEL_ENV_VAR)
+            .ok()
+            .is_some_and(|text| text.parse::<kattri_logging::LogLevel>().is_ok())
+    })
+}
+
+/// Makes the running log follow the Settings choice. Cheap when nothing changed.
+fn apply_log_detail(detail: kattri_settings::LogDetail) {
+    use kattri_logging::LogLevel;
+    use kattri_settings::LogDetail;
+    if log_level_set_by_environment() {
+        return;
+    }
+    let wanted = match detail {
+        LogDetail::Error => LogLevel::Error,
+        LogDetail::Warn => LogLevel::Warn,
+        LogDetail::Info => LogLevel::Info,
+        LogDetail::Debug => LogLevel::Debug,
+    };
+    if kattri_logging::current_level().is_some_and(|now| now != wanted) {
+        kattri_logging::set_level(wanted);
+    }
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    #[cfg(debug_assertions)]
+    qa_metrics::start(Instant::now());
+    let _log_guard = init_logging();
+    // A bad command line is reported through the same status line as a bad media path.
+    let (profile, local_media) = match parse_host_args(std::env::args_os().skip(1)) {
+        Ok(args) => (args.profile, local_media_path(args.media)),
+        Err(message) => (None, Err(message)),
+    };
+    let event_loop = EventLoop::<HostEvent>::with_user_event().build()?;
+    let proxy = event_loop.create_proxy();
+    let runtime = MpvRuntime::load();
+    let runtime_error = runtime.as_ref().err().cloned();
+    let runtime = runtime.ok();
+    let session = runtime.as_ref().map(|runtime| &runtime.session);
+    let mut app = HostApp::new(session, runtime_error, local_media, profile, proxy);
+    event_loop.run_app(&mut app)?;
+    Ok(())
+}
+
+/// Only the explicit debug-runner opt-in disables reporting; release builds ignore it.
+#[cfg(any(debug_assertions, test))]
+fn stream_only_validation(value: Option<&OsStr>) -> bool {
+    value == Some(OsStr::new("1"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HostArgs, duration_from_seconds, has_user_activity, parse_host_args};
+    use egui::{Event, Key, Modifiers};
+    use std::ffi::OsString;
+    use std::time::Duration;
+
+    fn parse(args: &[&str]) -> Result<HostArgs, String> {
+        parse_host_args(args.iter().map(|arg| OsString::from(*arg)))
+    }
+
+    #[test]
+    fn stream_only_validation_requires_the_exact_debug_opt_in() {
+        use super::stream_only_validation;
+        use std::ffi::OsStr;
+        assert!(stream_only_validation(Some(OsStr::new("1"))));
+        for value in [None, Some(""), Some("0"), Some("true"), Some(" 1")] {
+            assert!(!stream_only_validation(value.map(OsStr::new)));
+        }
+    }
+
+    #[test]
+    fn no_arguments_selects_no_profile_and_no_media() {
+        assert_eq!(parse(&[]), Ok(HostArgs::default()));
+    }
+
+    #[test]
+    fn profile_flag_takes_the_next_argument_or_the_equals_form() {
+        let kids = Some("kids".to_owned());
+        assert_eq!(
+            parse(&["--profile", "kids"]).map(|args| args.profile),
+            Ok(kids.clone())
+        );
+        assert_eq!(
+            parse(&["--profile=kids"]).map(|args| args.profile),
+            Ok(kids)
+        );
+    }
+
+    #[test]
+    fn profile_flag_without_a_value_is_an_error() {
+        assert_eq!(
+            parse(&["--profile"]),
+            Err("--profile needs a profile name".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_local_media_path_is_kept_beside_the_profile_flag() {
+        assert_eq!(
+            parse(&["--profile", "kids", "clip.mkv"]),
+            Ok(HostArgs {
+                profile: Some("kids".to_owned()),
+                media: vec![OsString::from("clip.mkv")],
+            })
+        );
+    }
+
+    #[test]
+    fn an_unknown_flag_is_reported_instead_of_read_as_media() {
+        assert_eq!(
+            parse(&["--profle", "kids"]),
+            Err("unknown argument `--profle`".to_owned())
+        );
+    }
+
+    #[test]
+    fn pointer_and_pressed_keyboard_events_count_as_osd_activity() {
+        assert!(has_user_activity(&[Event::PointerMoved(egui::pos2(
+            2.0, 3.0
+        ))]));
+        assert!(has_user_activity(&[Event::Key {
+            key: Key::Space,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }]));
+        assert!(!has_user_activity(&[Event::Key {
+            key: Key::Space,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }]));
+    }
+
+    #[test]
+    fn playback_property_values_are_safely_converted_for_the_controls() {
+        assert_eq!(
+            duration_from_seconds(65.5),
+            Some(Duration::from_millis(65_500))
+        );
+        assert_eq!(duration_from_seconds(f64::NAN), None);
+        assert_eq!(duration_from_seconds(-1.0), None);
+    }
+}

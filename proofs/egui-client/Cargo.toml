@@ -1,0 +1,56 @@
+[package]
+name = "jellyfin-egui-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-only"
+description = "Accessible native Rust UI prototype for Jellyfin Kattri"
+
+[lib]
+name = "jellyfin_egui_client"
+path = "src/lib.rs"
+
+[features]
+default = []
+eframe-demo = ["dep:eframe"]
+photo-counters = ["kattri-client-core/photo-counters"]
+
+[[bin]]
+name = "jellyfin-egui-client"
+path = "src/main.rs"
+required-features = ["eframe-demo"]
+
+[dependencies]
+egui = { version = "=0.37.0", default-features = false, features = ["default_fonts"] }
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
+eframe = { version = "=0.37.0", default-features = false, features = [
+    "glow",
+    "accesskit",
+    "default_fonts",
+    "wayland",
+    "x11",
+], optional = true }
+directories = "6"
+jellyfin-api = { path = "../../crates/jellyfin-api" }
+kattri-downloads = { path = "../../crates/kattri-downloads" }
+kattri-client-core = { path = "../../crates/client-core" }
+kattri-logging = { path = "../../crates/kattri-logging" }
+jellyfin-playback-relay = { path = "../../crates/playback-relay" }
+kattri-input = { path = "../../crates/kattri-input" }
+kattri-settings = { path = "../../crates/kattri-settings" }
+kattri-parental = { path = "../../crates/kattri-parental" }
+kattri-i18n = { path = "../../crates/kattri-i18n" }
+kattri-updater = { path = "../../crates/kattri-updater" }
+kattri-platform = { path = "../../crates/kattri-platform" }
+tracing = "=0.1.44"
+sha2 = "=0.11.1"
+uuid = { version = "1", features = ["v4"] }
+zeroize = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+
+[dev-dependencies]
+base64 = "=0.23.1"
+ed25519-dalek = "=3.0.0"
+serde_json = "1"
+mock-jellyfin = { path = "../../crates/mock-jellyfin" }
+mpv-render-proof = { path = "../mpv-render" }

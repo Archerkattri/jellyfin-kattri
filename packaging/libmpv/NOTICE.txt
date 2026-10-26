@@ -1,0 +1,26 @@
+libmpv notice for Jellyfin Kattri
+
+Component: libmpv, the mpv media-player library, and the FFmpeg libraries used
+by the selected build. Exact upstream releases, archive URLs, checksums and
+platform status are recorded in packaging/libmpv/manifest.toml.
+
+Windows x64 and ARM64 packaging pins the LGPL builds from:
+https://github.com/zhongfly/mpv-winbuild/releases/tag/2026-10-23-fa0534a729
+
+The recorded build configuration disables GPL components and enables FFmpeg's
+version-3 components. The corresponding LGPL-3.0 license, upstream copyright
+notices, build configuration and source availability must accompany binary
+distribution as applicable to that build. This short notice does not replace
+those upstream materials. Packaging and license-compliance acceptance remain
+incomplete; a pinned archive alone is not a validated release.
+
+No macOS or Linux archive is currently pinned by this manifest. Fetch scripts
+refuse unpinned platform entries. Local diagnostic runtimes are not part of the
+packaging manifest and must not be substituted for the selected build.
+
+Upstream source and license information:
+https://github.com/mpv-player/mpv
+https://ffmpeg.org/legal.html
+https://www.gnu.org/licenses/lgpl-3.0.txt
+
+Jellyfin Kattri's own license is GPL-3.0-only; see the root LICENSE.

@@ -1,0 +1,15 @@
+[package]
+name = "kattri-plugin-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+kattri-plugins = { path = "../kattri-plugins" }
+# Exact pin. 49.0.4 was the first patched release for RUSTSEC-2026-0378 and -0379; 50.0.0 is the
+# next major release after it. docs/decisions/0005-plugin-runtime.md still names 49.0.3; the
+# owner must record the bump.
+wasmtime = { version = "=50.0.0", default-features = false, features = ["anyhow", "cranelift", "component-model", "runtime", "std", "wat"] }
+thiserror = "2"

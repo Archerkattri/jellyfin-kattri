@@ -1,0 +1,89 @@
+# cargo-deny policy for the workspace. Run with: cargo deny check
+# Checked by the cargo-deny job in .github/workflows/ci.yml on Linux.
+
+[graph]
+# Dependency graph is evaluated for these targets. Platform-specific crates for other
+# targets are not checked.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
+]
+all-features = false
+no-default-features = false
+
+[advisories]
+version = 2
+# Each ignored advisory needs an identifier and a reason, and should name an expiry
+# date in the reason. None are ignored yet.
+# Reviewed 2026-10-22 (M5-19). The three zbus-family advisories have no safe upgrade.
+# They reach the Linux build only, through egui-winit -> accesskit_winit -> accesskit_unix
+# -> atspi 0.29 -> zbus 5 (zbus_names, zvariant, zvariant_derive). Owner decision needed:
+# accept until egui/accesskit release a zbus 6 build, or replace the accessibility stack.
+# Re-check by 2027-01-22.
+ignore = [
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names 4.3.4 unmaintained; no safe upgrade; Linux accessibility path via atspi/zbus 5. Owner decision; re-check by 2027-01-22." },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant 5.15.0 unmaintained; no safe upgrade; Linux accessibility path via atspi/zbus 5. Owner decision; re-check by 2027-01-22." },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive 5.15.0 unmaintained; no safe upgrade; Linux accessibility path via atspi/zbus 5. Owner decision; re-check by 2027-01-22." },
+]
+
+[licenses]
+version = 2
+# License expressions accepted for dependencies. Each entry is an SPDX identifier.
+# "Apache-2.0 WITH LLVM-exception" covers the wasmtime and cranelift crates (27 of them).
+# Added 2026-10-22 by owner decision: the plugin runtime is kept for 1.0, and the license
+# review is deferred to the owner's legal work (open item L1, a release blocker in
+# docs/BLOCKERS.md). The release stays blocked until that review is recorded.
+allow = [
+    "Apache-2.0 WITH LLVM-exception",
+    # Permissive, the usual Rust dependency licenses.
+    "Apache-2.0",
+    "MIT",
+    # BSD-2-Clause and BSD-3-Clause.
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    # ISC, a permissive license close to MIT.
+    "ISC",
+    # Boost Software License 1.0, permissive, used by clipboard-win (Windows clipboard).
+    # Added 2026-10-22 (M5-19). FSF lists it as GPL-compatible; not fetched in this review.
+    "BSL-1.0",
+    # Unicode license used by the ICU data crates.
+    "Unicode-3.0",
+    # zlib, permissive.
+    "Zlib",
+    # Weak copyleft, file-level. Allowed so dependencies under MPL-2.0 can be used
+    # without changing the app's license.
+    "MPL-2.0",
+    # The app itself is GPL-3.0-only (workspace license). Allowed so the workspace's
+    # own crates pass the check. A dependency under this license also passes, so the
+    # owner should review any new GPL dependency by hand.
+    "GPL-3.0-only",
+    # Not in the owner's first list. Required by epaint_default_fonts, pulled in by egui
+    # with its default_fonts feature: the bundled fonts are under the SIL Open Font
+    # License 1.1 and the Ubuntu Font Licence 1.0. Owner to confirm or drop the feature.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Multiple versions of one crate are reported as warnings, not failures. Duplicates
+# often come from transitive dependencies that the workspace cannot control.
+multiple-versions = "warn"
+# Wildcard version requirements are not checked. Workspace path dependencies have no
+# version, and cargo-deny reports them as wildcards. allow-wildcard-paths does not
+# cover them because the workspace crates are not marked publish = false. Setting
+# publish = false on the crates would let this rule be "deny" again. Owner decision.
+wildcards = "allow"
+highlight = "all"
+skip = []
+skip-tree = []
+deny = []
+
+[sources]
+# Only the crates.io index is accepted. Git and other registries fail the check.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

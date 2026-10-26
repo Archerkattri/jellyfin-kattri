@@ -1,0 +1,205 @@
+# Linux release build: one shared release binary, then an AppImage and the deb and rpm
+# packages. The reference distribution is Ubuntu 22.04 (the build image, so the glibc
+# floor is the oldest one the release targets). Runner: ubuntu-22.04, confirmed against
+# the actions/runner-images README, which lists ubuntu-22.04 as an x64 image.
+#
+# Flatpak is not built here. Its manifest is in packaging/flatpak and is built by a
+# separate job when that is added.
+#
+# Not verified: this workflow has not been run. libmpv is taken from the Ubuntu 22.04
+# libmpv1 package for bundling into the AppImage. Deb and rpm are not installed or
+# launched in a clean container here. That check is separate.
+
+name: Release Linux
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build release binary
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+
+      - name: Install system packages for the build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libudev-dev
+
+      - name: Build release binary
+        run: cargo build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri
+
+      - name: Record glibc floor and linked libraries
+        run: |
+          set -euo pipefail
+          BIN=target/release/jellyfin-kattri
+          mkdir -p dist/linux
+          {
+            echo "glibc symbol versions required:"
+            objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1
+            echo "dynamic dependencies:"
+            ldd "$BIN"
+          } | tee dist/linux/BUILD-INFO.txt
+
+      - name: Upload build record
+        uses: actions/upload-artifact@v7
+        with:
+          name: kattri-linux-build-info
+          path: dist/linux/BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: kattri-linux-binary
+          path: target/release/jellyfin-kattri
+          if-no-files-found: error
+          retention-days: 7
+
+  appimage:
+    name: AppImage (x64)
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Download release binary
+        uses: actions/download-artifact@v8
+        with:
+          name: kattri-linux-binary
+          path: target/release
+
+      - name: Install AppImage prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libmpv1 desktop-file-utils file libfuse2
+
+      - name: Build AppImage
+        env:
+          KATTRI_RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          set -euo pipefail
+          chmod 755 target/release/jellyfin-kattri
+          VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [[ "$KATTRI_RELEASE_VERSION" != "" && "$KATTRI_RELEASE_VERSION" != "v$VERSION" ]]; then
+            echo "error: tag $KATTRI_RELEASE_VERSION does not match workspace version $VERSION" >&2
+            exit 1
+          fi
+          LIBMPV="$(dpkg -L libmpv1 | grep -E '/libmpv\.so\.[0-9]+$' | head -n 1)"
+          # Update information is embedded only for tagged releases. It names the release
+          # asset pattern that AppImageUpdate reads. See the comment in build-appimage.sh.
+          UPDATE_INFO=""
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            UPDATE_INFO="gh-releases-zsync|Archerkattri|jellyfin-kattri|latest|kattri-*-linux-x64.AppImage.zsync"
+          fi
+          LIBMPV_PATH="$LIBMPV" UPDATE_INFO="$UPDATE_INFO" \
+            packaging/linux/appimage/build-appimage.sh "$VERSION" \
+            target/release/jellyfin-kattri dist/linux
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v7
+        with:
+          name: kattri-linux-appimage
+          path: |
+            dist/linux/kattri-*-linux-x64.AppImage
+            dist/linux/kattri-*-linux-x64.AppImage.sha256
+            dist/linux/kattri-*-linux-x64.AppImage.zsync
+          if-no-files-found: error
+          retention-days: 30
+
+  packages:
+    name: deb and rpm
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+
+      - name: Download release binary
+        uses: actions/download-artifact@v8
+        with:
+          name: kattri-linux-binary
+          path: target/release
+
+      - name: Install packaging prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            dpkg-dev lintian rpmlint pkg-config libudev-dev
+
+      - name: Install cargo-deb and cargo-generate-rpm (pinned)
+        run: |
+          set -euo pipefail
+          cargo install --locked --version 3.8.0 cargo-deb
+          cargo install --locked --version 0.21.1 cargo-generate-rpm
+
+      - name: Build deb
+        run: |
+          set -euo pipefail
+          chmod 755 target/release/jellyfin-kattri
+          # cargo-deb reads the package metadata from this CI-only manifest fragment.
+          # The release binary is already built, so cargo deb does not rebuild it.
+          echo >> proofs/egui-gl-host/Cargo.toml
+          cat packaging/linux/deb/cargo-deb.toml >> proofs/egui-gl-host/Cargo.toml
+          cargo deb -p egui-gl-host-proof --no-build
+          mkdir -p dist/linux
+          mv target/debian/kattri_*.deb dist/linux/
+
+      - name: Build rpm
+        run: |
+          set -euo pipefail
+          # cargo-generate-rpm 0.21.0 did not read the metadata from --metadata-overwrite
+          # (it failed with "Missing field: package.metadata.generate-rpm"). The table is
+          # appended to the crate manifest instead, as the deb step does for cargo-deb.
+          grep -v '^#' packaging/linux/rpm/generate-rpm.toml >> proofs/egui-gl-host/Cargo.toml
+          cargo generate-rpm -p proofs/egui-gl-host
+          mv target/generate-rpm/kattri-*.rpm dist/linux/
+
+      - name: Lint packages
+        run: |
+          set -euo pipefail
+          # lintian fails the job on errors. rpmlint is recorded but not gating yet.
+          lintian --fail-on error dist/linux/*.deb
+          rpmlint dist/linux/*.rpm || echo "rpmlint reported findings (not gating)"
+
+      - name: Write checksums
+        run: |
+          set -euo pipefail
+          cd dist/linux
+          for f in kattri_*.deb kattri-*.rpm; do sha256sum "$f" > "$f.sha256"; done
+
+      - name: Upload deb and rpm
+        uses: actions/upload-artifact@v7
+        with:
+          name: kattri-linux-deb-rpm
+          path: |
+            dist/linux/kattri_*.deb
+            dist/linux/kattri_*.deb.sha256
+            dist/linux/kattri-*.rpm
+            dist/linux/kattri-*.rpm.sha256
+          if-no-files-found: error
+          retention-days: 30

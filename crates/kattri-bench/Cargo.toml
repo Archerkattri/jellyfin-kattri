@@ -1,0 +1,19 @@
+[package]
+name = "kattri-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Benchmarks and soak tests only. The crate has no public API.
+[dev-dependencies]
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+jellyfin-api = { path = "../jellyfin-api" }
+kattri-client-core = { path = "../client-core" }
+# Default features are off so the gamepad backend is not compiled for the keymap bench.
+kattri-input = { path = "../kattri-input", default-features = false }
+
+[[bench]]
+name = "hot_paths"
+harness = false

@@ -1,0 +1,44 @@
+# Build output and downloaded tooling
+target/
+**/target/
+build/
+**/build/
+*.log
+*.7z
+*.zip
+*.msi
+*.dmg
+*.AppImage
+
+# Local development material
+/.local/
+.verify/
+**/.verify/
+/docs/
+/legacy/
+/spikes/
+/research_notes/
+/reports/
+/rust-client/
+**/*.md
+!/README.md
+
+# Credentials and signing material
+.env
+.env.*
+*.clixml
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.cache/
+.venv/
+venv/
+__pycache__/
+*.pyc
+node_modules/

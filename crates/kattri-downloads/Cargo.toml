@@ -1,0 +1,24 @@
+[package]
+name = "kattri-downloads"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+kattri-client-core = { path = "../client-core" }
+kattri-settings = { path = "../kattri-settings" }
+kattri-platform = { path = "../kattri-platform" }
+jellyfin-api = { path = "../jellyfin-api" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "time"] }
+sha1 = "0.10"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }

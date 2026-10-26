@@ -1,0 +1,9 @@
+{
+  "id": "org.kattri.sample-presence",
+  "name": "Sample Presence",
+  "version": "0.1.0",
+  "api_version": 1,
+  "entry": "src/lib.rs",
+  "description": "Example plugin that sets presence from playback events and writes log lines.",
+  "permissions": ["presence.write", "log.write"]
+}

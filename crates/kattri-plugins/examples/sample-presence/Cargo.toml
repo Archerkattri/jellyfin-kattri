@@ -1,0 +1,19 @@
+[package]
+name = "sample-presence"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+# Same version the root Cargo.lock already pins through wasmtime's tooling. The default
+# features enable `std`, which would clash with the guest's own panic handler.
+wit-bindgen = { version = "=0.57.1", default-features = false, features = ["macros", "realloc", "macro-string"] }
+
+# Empty workspace table: this guest is built on its own, outside the repository
+# workspace members, and must not be pulled into `cargo test --workspace`.
+[workspace]

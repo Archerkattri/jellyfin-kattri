@@ -1,0 +1,63 @@
+# Pinned libmpv builds used by the packaging fetch scripts.
+#
+# Each [platforms.<name>] table pins the libmpv build that the artifacts for that platform
+# bundle. fetch.ps1 and fetch.sh parse only flat `key = "value"` lines inside these tables,
+# so keep every value on one line as a basic string. Do not add arrays or inline tables.
+#
+# Fields:
+#   libmpv_version  upstream version of the pinned build
+#   source_url      upstream project or release page
+#   url             exact https download URL of the archive
+#   archive_name    archive file name (letters, digits, dot, underscore, hyphen only)
+#   sha256          lowercase SHA-256 of the archive; empty means not pinned
+#   library_member  path of the shared library inside the archive, with forward slashes
+#   license         license the pinned build is claimed under; L2 covers the build flags
+#   status          "pinned" or "TODO". The fetch scripts refuse anything but "pinned".
+#   todo            why the platform is not pinned; empty when pinned
+#
+
+schema_version = 1
+
+[platforms.windows-x64]
+libmpv_version = "mpv git fa0534a729 (zhongfly/mpv-winbuild release 2026-10-23-fa0534a729)"
+source_url = "https://github.com/zhongfly/mpv-winbuild/releases/tag/2026-10-23-fa0534a729"
+url = "https://github.com/zhongfly/mpv-winbuild/releases/download/2026-10-23-fa0534a729/mpv-dev-lgpl-x86_64-20261023-git-fa0534a729.7z"
+archive_name = "mpv-dev-lgpl-x86_64-20261023-git-fa0534a729.7z"
+sha256 = "7bde835900796b57b46cc5a1b497a356f390dec35ee403a8972e3dd3160b71ca"
+library_member = "libmpv-2.dll"
+license = "LGPL build per the upstream compile-lgpl-libmpv.patch (mpv gpl=false, FFmpeg without --enable-gpl but with --enable-version3, so LGPL-3.0); test build pending legal review L1, L2, L7"
+status = "pinned"
+todo = ""
+
+[platforms.windows-arm64]
+libmpv_version = "mpv git fa0534a729 (zhongfly/mpv-winbuild release 2026-10-23-fa0534a729)"
+source_url = "https://github.com/zhongfly/mpv-winbuild/releases/tag/2026-10-23-fa0534a729"
+url = "https://github.com/zhongfly/mpv-winbuild/releases/download/2026-10-23-fa0534a729/mpv-dev-lgpl-aarch64-20261023-git-fa0534a729.7z"
+archive_name = "mpv-dev-lgpl-aarch64-20261023-git-fa0534a729.7z"
+sha256 = "1a062c69341e010b5f934362bd2543f5e59ea71ef1a1f4cb3fe4259639b2d404"
+library_member = "libmpv-2.dll"
+license = "LGPL build per the upstream compile-lgpl-libmpv.patch (mpv gpl=false, FFmpeg without --enable-gpl but with --enable-version3, so LGPL-3.0); test build pending legal review L1, L2, L7"
+status = "pinned"
+todo = ""
+
+[platforms.macos-universal]
+libmpv_version = ""
+source_url = ""
+url = ""
+archive_name = ""
+sha256 = ""
+library_member = ""
+license = "LGPL-2.1-or-later required; no LGPL build recorded"
+status = "TODO"
+todo = "No macOS libmpv build is recorded. The app needs a universal dylib (arm64 and x86_64). If the upstream ships per-arch dylibs, merge them with lipo and pin the merged archive; that merge step is not written yet."
+
+[platforms.linux-x64]
+libmpv_version = ""
+source_url = ""
+url = ""
+archive_name = ""
+sha256 = ""
+library_member = ""
+license = "LGPL-2.1-or-later required; no LGPL build recorded"
+status = "TODO"
+todo = "No pinned libmpv archive is recorded for Linux. The Flatpak builds mpv v0.41.0 from a git tag with gpl=false and no commit or checksum. release-linux.yml takes Ubuntu's libmpv1 package, which is unpinned. Neither is a pinned archive."

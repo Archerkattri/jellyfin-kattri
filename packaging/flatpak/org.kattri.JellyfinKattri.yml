@@ -1,0 +1,97 @@
+# Flatpak manifest for Jellyfin Kattri. UNVERIFIED: this has not been built.
+#
+# Build (from the repository root, after generating cargo-sources.json):
+#   flatpak-builder --force-clean --user --install-deps-from=flathub \
+#     build-dir packaging/flatpak/org.kattri.JellyfinKattri.yml
+#
+# Runtime choice. The app is egui and winit, with no GNOME libraries, so the
+# org.freedesktop.Platform runtime is used. Its GNOME runtime pin is not applicable.
+# Runtime, SDK, Rust extension and ffmpeg extension are all pinned to branch 25.08,
+# which must match each other. The branch was not checked against the current Flathub
+# listing; check it before the first build.
+#
+# libmpv is built as a module in this manifest from the mpv v0.41.0 tag (the latest
+# GitHub release at the time of writing). The tag is pinned but no commit hash is
+# recorded yet; add `commit:` before a release. libass, libplacebo and Vulkan are
+# disabled, so ASS subtitle rendering is not in this build. Those need their own
+# modules before the Flatpak is a full playback build.
+#
+# Offline build: flatpak-builder runs cargo with --offline. Every crate comes from
+# cargo-sources.json, generated from Cargo.lock with the flatpak-cargo-generator tool
+# (version not recorded here). The generated file is not committed to the repository.
+#
+# Permissions: the finish args grant only the display sockets, GPU access, audio, the
+# network (needed to reach the Jellyfin server), and no general filesystem access. Files
+# are chosen through the file portal.
+
+id: org.kattri.JellyfinKattri
+runtime: org.freedesktop.Platform
+runtime-version: "25.08"
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.ffmpeg-full
+command: kattri
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --socket=pulseaudio
+  - --share=network
+
+build-options:
+  env:
+    CARGO_HOME: /run/build/kattri/cargo
+  append-path: /usr/lib/sdk/rust-stable/bin
+  prepend-pkgconfig-path: /usr/lib/sdk/ffmpeg-full/lib/pkgconfig
+
+modules:
+  # This libmpv is built from the git tag, not from a packaging/libmpv archive, so the
+  # SHA-256 check does not apply. It has no commit or checksum yet (linux-x64 TODO in
+  # packaging/libmpv/manifest.toml). -Dgpl=false is the LGPL build flag (legal item L2).
+  - name: mpv
+    buildsystem: meson
+    config-opts:
+      - -Dlibmpv=true
+      - -Dcplayer=false
+      - -Dgpl=false
+      - -Dtests=false
+      - -Dmanpage-build=disabled
+      - -Dlua=disabled
+      - -Djavascript=disabled
+      - -Dlibass=disabled
+      - -Dlibplacebo=disabled
+      - -Dvulkan=disabled
+      - -Dlcms2=disabled
+      - -Dlibarchive=disabled
+      - -Drubberband=disabled
+      - -Dgl=enabled
+    sources:
+      - type: git
+        url: https://github.com/mpv-player/mpv.git
+        tag: v0.41.0
+
+  - name: kattri
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/kattri/cargo
+    build-commands:
+      - cargo --offline build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri
+      - install -Dm755 target/release/jellyfin-kattri /app/bin/kattri
+      - mkdir -p /app/share/applications
+      - sed 's/^Icon=kattri$/Icon=org.kattri.JellyfinKattri/' packaging/linux/share/kattri.desktop > /app/share/applications/org.kattri.JellyfinKattri.desktop
+      - install -Dm644 packaging/linux/icons/kattri.svg /app/share/icons/hicolor/scalable/apps/org.kattri.JellyfinKattri.svg
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - target
+          - dist
+          - build
+          - legacy
+          - .local
+      - cargo-sources.json

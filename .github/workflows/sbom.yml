@@ -1,0 +1,88 @@
+# Software bill of materials for the Linux release binary.
+#
+# Method, stated once:
+#   1. `cargo auditable build --release` embeds the dependency list (crate names,
+#      versions and sources) in the binary's own section, so the binary carries its
+#      dependency record with it.
+#   2. `cargo audit bin` reads that embedded record from the built binary and checks
+#      it against the RustSec advisory database. A vulnerable dependency fails the job.
+#   3. `cargo cyclonedx` exports a CycloneDX JSON SBOM from the workspace lock file for
+#      the package that ships. This is the SBOM artifact.
+#
+# The SBOM is generated from this job's own build and is not yet tied to the binary
+# attached to a release. Tying them together is a later step.
+#
+# Not verified: this workflow has not been run. The cargo-cyclonedx output flags are
+# unconfirmed for the pinned version and the output path is found by search.
+
+name: SBOM
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sbom-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sbom:
+    name: SBOM and binary advisory scan (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+
+      - name: Install system packages for the build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libudev-dev
+
+      - name: Install pinned SBOM and audit tools
+        run: |
+          set -euo pipefail
+          cargo install --locked --version 0.7.7 cargo-auditable
+          cargo install --locked --version 0.22.2 cargo-audit
+          cargo install --locked --version 0.5.9 cargo-cyclonedx
+
+      - name: Build release binary with embedded dependency data
+        run: cargo auditable build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri
+
+      - name: Scan the built binary for advisories
+        run: |
+          set -euo pipefail
+          mkdir -p dist/sbom
+          cargo audit bin target/release/jellyfin-kattri --json > dist/sbom/binary-audit.json
+
+      - name: Export CycloneDX SBOM from the lock file
+        run: |
+          set -euo pipefail
+          cargo cyclonedx --manifest-path proofs/egui-gl-host/Cargo.toml \
+            --format json --override-filename kattri-sbom
+          found=0
+          while IFS= read -r -d '' file; do
+            mv "$file" dist/sbom/
+            found=1
+          done < <(find . -path ./target -prune -o -name 'kattri-sbom*.json' -print0)
+          if [[ "$found" -ne 1 ]]; then
+            echo "error: no CycloneDX SBOM file was produced" >&2
+            exit 1
+          fi
+          ls -l dist/sbom
+
+      - name: Upload SBOM and binary audit
+        uses: actions/upload-artifact@v7
+        with:
+          name: kattri-linux-sbom
+          path: dist/sbom/
+          if-no-files-found: error
+          retention-days: 90

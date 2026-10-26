@@ -1,0 +1,18 @@
+[package]
+name = "kattri-client-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+photo-counters = []
+
+[dependencies]
+jellyfin-api = { path = "../jellyfin-api" }
+kattri-guard = { path = "../kattri-guard" }
+kattri-settings = { path = "../kattri-settings" }
+
+[dev-dependencies]
+serde_json = "1.0"

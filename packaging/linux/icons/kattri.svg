@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Jellyfin Kattri media player icon">
+  <rect width="512" height="512" rx="112" fill="#17212b"/>
+  <path d="M112 112h48v288h-48z" fill="#56b6c2"/>
+  <path d="M208 256 368 160v192z" fill="#f2f5f7"/>
+  <path d="M112 80h48v24h-48zm0 328h48v24h-48z" fill="#89d3dc"/>
+</svg>

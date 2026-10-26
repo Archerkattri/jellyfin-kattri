@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "softwareBaseline": {
+    "videoContainers": ["avi", "m2ts", "m4v", "mkv", "mov", "mp4", "mpegts", "ts", "webm"],
+    "audioContainers": ["flac", "mkv", "mov", "mp3", "mp4", "ogg", "wav"],
+    "videoCodecs": ["av1", "h264", "hevc", "mpeg2video", "mpeg4", "vc1", "vp8", "vp9"],
+    "audioCodecs": ["aac", "ac3", "alac", "dts", "dts-hd", "eac3", "flac", "mp3", "opus", "pcm_alaw", "pcm_bluray", "pcm_dvd", "pcm_dvda", "pcm_f16le", "pcm_f24le", "pcm_f32be", "pcm_f32le", "pcm_f64be", "pcm_f64le", "pcm_lxf", "pcm_mulaw", "pcm_s16be", "pcm_s16be_planar", "pcm_s16le", "pcm_s16le_planar", "pcm_s24be", "pcm_s24daud", "pcm_s24le", "pcm_s24le_planar", "pcm_s32be", "pcm_s32le", "pcm_s32le_planar", "pcm_s64be", "pcm_s64le", "pcm_s8", "pcm_s8_planar", "pcm_sga", "pcm_u16be", "pcm_u16le", "pcm_u24be", "pcm_u24le", "pcm_u32be", "pcm_u32le", "pcm_u8", "pcm_vidc", "truehd", "vorbis"],
+    "maxVideoBitDepth": 10,
+    "subtitleProfiles": [
+      {"format": "srt", "method": "External"},
+      {"format": "ass", "method": "External"},
+      {"format": "ssa", "method": "External"},
+      {"format": "vtt", "method": "External"},
+      {"format": "pgs", "method": "External"},
+      {"format": "sub", "method": "External"}
+    ]
+  },
+  "provenance": [
+    {
+      "source": "Jellyfin Server DLNA DeviceProfile",
+      "revision": "aec42b345e1a7da25ee5492183f12209338df688",
+      "url": "https://github.com/jellyfin/jellyfin/blob/aec42b345e1a7da25ee5492183f12209338df688/MediaBrowser.Model/Dlna/DeviceProfile.cs",
+      "informs": ["Jellyfin profile fields and profile type conventions"]
+    },
+    {
+      "source": "Jellyfin Web browserDeviceProfile.js",
+      "revision": "e7a146f4b5807d6367ef87f4b7aa30ec993eb317",
+      "url": "https://github.com/jellyfin/jellyfin-web/blob/e7a146f4b5807d6367ef87f4b7aa30ec993eb317/src/scripts/browserDeviceProfile.js",
+      "informs": ["Direct-play, transcoding, codec-condition and subtitle profile structure"]
+    },
+    {
+      "source": "Jellyfin Vue playback profiles",
+      "revision": "97513f2fbf9f2ce6f3e579efe92edeb910ea8fc6",
+      "url": "https://github.com/jellyfin/jellyfin-vue/tree/97513f2fbf9f2ce6f3e579efe92edeb910ea8fc6/packages/frontend/src/utils/playback-profiles",
+      "informs": ["Separation of direct-play, transcode and subtitle profile generation"]
+    },
+    {
+      "source": "Jellyfin StreamBuilder",
+      "revision": "aec42b345e1a7da25ee5492183f12209338df688",
+      "url": "https://github.com/jellyfin/jellyfin/blob/aec42b345e1a7da25ee5492183f12209338df688/MediaBrowser.Model/Dlna/StreamBuilder.cs",
+      "informs": ["Conservative use of matching conditions and transcode fallback"]
+    },
+    {
+      "source": "FFmpeg decoder documentation",
+      "revision": "2ec8998c3daf6aa31a4afec963bff9b5ecbfdee7",
+      "url": "https://github.com/FFmpeg/FFmpeg/blob/2ec8998c3daf6aa31a4afec963bff9b5ecbfdee7/doc/decoders.texi",
+      "informs": ["Software decoder candidate families; runtime inventory must filter exact build support"]
+    },
+    {
+      "source": "FFmpeg demuxer documentation",
+      "revision": "2ec8998c3daf6aa31a4afec963bff9b5ecbfdee7",
+      "url": "https://github.com/FFmpeg/FFmpeg/blob/2ec8998c3daf6aa31a4afec963bff9b5ecbfdee7/doc/demuxers.texi",
+      "informs": ["Container/demuxer candidate families; runtime inventory must filter exact build support"]
+    },
+    {
+      "source": "mpv runtime property documentation",
+      "revision": "ec38361c56b2d91e417c4c3e58184535d1a1aa2e",
+      "url": "https://github.com/mpv-player/mpv/blob/ec38361c56b2d91e417c4c3e58184535d1a1aa2e/DOCS/man/input.rst",
+      "informs": ["Runtime decoder/demuxer inventory and version properties; missing values mean unknown"]
+    },
+    {
+      "source": "mpv software decode and null output documentation",
+      "revision": "ec38361c56b2d91e417c4c3e58184535d1a1aa2e",
+      "url": "https://github.com/mpv-player/mpv/blob/ec38361c56b2d91e417c4c3e58184535d1a1aa2e/DOCS/man/options.rst",
+      "informs": ["Software-decode selection and null video-output validation procedure"]
+    }
+  ]
+}

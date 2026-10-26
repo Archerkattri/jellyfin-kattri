@@ -1,0 +1,165 @@
+# macOS universal release build. Produces a universal disk image, signed and notarized
+# only when signing secrets are configured. Without them the artifacts are unsigned.
+#
+# Runner: macos-13 (Intel), the build host that matches the macOS 13 minimum in M5-01
+# (owner decision 2026-10-22). The label is not confirmed against the runner-images README
+# in this change (no network). The minimum OS is set by MACOSX_DEPLOYMENT_TARGET in
+# build-app.sh, not by the runner. If GitHub no longer offers macos-13, switch the label
+# to macos-15; the 13.0 deployment target still applies. Both Rust targets are built on
+# this one job; the arm64 slice is cross-compiled with the Xcode SDK.
+#
+# Secrets (repository or environment secrets, never committed):
+#   MACOS_CERT_P12_BASE64         Developer ID Application certificate, base64 of the .p12
+#   MACOS_CERT_PASSWORD           Password of the .p12
+#   APPLE_DEVELOPER_ID            Signing identity name
+#   APPLE_ID                      Apple ID used for notarization
+#   APPLE_TEAM_ID                 Apple team identifier
+#   APPLE_APP_SPECIFIC_PASSWORD   App-specific password for notarization
+#
+# Not verified here: this workflow has not been run on GitHub. The keychain and
+# notarytool steps are unverified until a run with real credentials.
+
+name: Release macOS universal
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-universal:
+    name: macOS universal (arm64 + x86_64)
+    runs-on: macos-13
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      # The toolchain channel comes from rust-toolchain.toml. Both targets are added here.
+      - name: Install pinned Rust toolchain with macOS targets
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Resolve version and check tag
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [[ -z "$VERSION" ]]; then
+            echo "error: could not read the workspace version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
+            echo "error: tag $GITHUB_REF_NAME does not match workspace version $VERSION" >&2
+            exit 1
+          fi
+          echo "KATTRI_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Release version: $VERSION"
+
+      - name: Build universal app bundle
+        env:
+          CARGO_PACKAGE: egui-gl-host-proof
+          BINARY_NAME: jellyfin-kattri
+        run: packaging/macos/build-app.sh "$KATTRI_VERSION"
+
+      - name: Record toolchain and SDK
+        run: |
+          set -euo pipefail
+          mkdir -p dist/macos
+          {
+            echo "version: $KATTRI_VERSION"
+            echo "commit: $GITHUB_SHA"
+            rustc -Vv
+            echo "--- Xcode"
+            xcodebuild -version
+            echo "--- lipo"
+            lipo -info "dist/macos/Jellyfin Kattri.app/Contents/MacOS/jellyfin-kattri"
+          } | tee dist/macos/BUILD-INFO.txt
+
+      # Imports the Developer ID certificate into a temporary keychain. Skipped with a
+      # notice when the secret is empty, which leaves the artifacts unsigned.
+      - name: Import signing certificate
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$MACOS_CERT_P12_BASE64" ]]; then
+            echo "No signing certificate configured. Artifacts will be unsigned."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/kattri-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          P12="$RUNNER_TEMP/kattri-signing.p12"
+          printf '%s' "$MACOS_CERT_P12_BASE64" | base64 --decode > "$P12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$P12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | sed -e 's/"//g')
+          rm -f "$P12"
+          echo "Signing certificate imported."
+
+      # Stores notarytool credentials in the keychain profile name that
+      # sign-and-notarize.sh reads from NOTARY_PROFILE.
+      - name: Store notarization credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$APPLE_ID" ]]; then
+            echo "No notarization credentials configured. Artifacts will not be notarized."
+            exit 0
+          fi
+          xcrun notarytool store-credentials "kattri-notary" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD"
+          echo "NOTARY_PROFILE=kattri-notary" >> "$GITHUB_ENV"
+
+      - name: Sign and notarize app bundle
+        env:
+          DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+        run: packaging/macos/sign-and-notarize.sh "dist/macos/Jellyfin Kattri.app"
+
+      - name: Build disk image
+        run: packaging/macos/make-dmg.sh "dist/macos/Jellyfin Kattri.app" "$KATTRI_VERSION" dist/macos
+
+      - name: Sign and notarize disk image
+        env:
+          DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+        run: packaging/macos/sign-and-notarize.sh "dist/macos/kattri-${KATTRI_VERSION}-macos-universal.dmg"
+
+      - name: Mark artifact signing state
+        id: signing-state
+        env:
+          DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+        run: |
+          if [[ -z "$DEVELOPER_ID" ]]; then
+            echo "suffix=-unsigned" >> "$GITHUB_OUTPUT"
+            echo "Artifacts in this run are UNSIGNED and not notarized." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "suffix=" >> "$GITHUB_OUTPUT"
+            echo "Artifacts in this run were signed and notarized." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: kattri-${{ env.KATTRI_VERSION }}-macos-universal${{ steps.signing-state.outputs.suffix }}
+          path: |
+            dist/macos/kattri-*-macos-universal.dmg
+            dist/macos/kattri-*-macos-universal.dmg.sha256
+            dist/macos/BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 30

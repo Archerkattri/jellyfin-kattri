@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Per-user MSI for Jellyfin Kattri (WiX v4 schema).
+
+  Install scope (owner decision D11, 2026-10-22): per user, under
+  LocalAppDataFolder\Programs\Jellyfin Kattri. Scope perUser lets the installer run
+  without elevation, so no UAC prompt appears. WiX v4 derives limited install
+  privileges from that scope; there is no InstallPrivileges attribute on Package.
+  The portable zip is built separately by build-zip.ps1.
+
+  Upgrade code: 35630542-A9E3-4ADD-AA5E-51534AC570F5
+    This GUID identifies the product family for major upgrades. It must never
+    change once a release has shipped, because changing it makes Windows Installer
+    treat new builds as an unrelated product and leaves old installs behind.
+    The product code is generated per build. MajorUpgrade requires a new product
+    code for each version, so the product code is not pinned here.
+
+  Defines supplied on the command line by build-msi.ps1:
+    Version      four-part or three-part numeric version, for example 1.2.3
+    ExePath      full path to the release executable for the target platform
+    ExeName      file name of that executable, for example jellyfin-kattri.exe
+    LicensePath  full path to the license file to install alongside the executable
+    LibmpvPath   full path to the verified libmpv-2.dll, installed next to the executable
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Jellyfin Kattri"
+    Manufacturer="Kattri"
+    Version="$(var.Version)"
+    UpgradeCode="35630542-A9E3-4ADD-AA5E-51534AC570F5"
+    Language="1033"
+    Scope="perUser">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Jellyfin Kattri is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="MainFeature" Title="Jellyfin Kattri" Level="1">
+      <ComponentRef Id="ExecutableComponent" />
+      <ComponentRef Id="LicenseComponent" />
+      <ComponentRef Id="LibmpvComponent" />
+      <ComponentRef Id="StartMenuShortcutComponent" />
+    </Feature>
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="LocalProgramsFolder" Name="Programs">
+      <Directory Id="INSTALLFOLDER" Name="Jellyfin Kattri">
+
+        <Component Id="ExecutableComponent" Guid="*">
+          <File Id="MainExecutable" Source="$(var.ExePath)" Name="$(var.ExeName)" KeyPath="yes" />
+          <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        </Component>
+
+        <Component Id="LibmpvComponent" Guid="*">
+          <File Id="LibmpvDll" Source="$(var.LibmpvPath)" Name="libmpv-2.dll" KeyPath="yes" />
+        </Component>
+
+        <Component Id="LicenseComponent" Guid="*">
+          <File Id="LicenseFile" Source="$(var.LicensePath)" Name="LICENSE.txt" KeyPath="yes" />
+        </Component>
+
+      </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramMenuFolder" Name="Jellyfin Kattri">
+        <!--
+          The start menu shortcut needs a key path. A per-user install writes only to
+          the current user's hive, so the key path is a per-user registry value under
+          HKCU that records the shortcut was installed. HKLM would need elevation.
+        -->
+        <Component Id="StartMenuShortcutComponent" Guid="*">
+          <Shortcut
+            Id="StartMenuShortcut"
+            Name="Jellyfin Kattri"
+            Description="Jellyfin Kattri"
+            Target="[INSTALLFOLDER]$(var.ExeName)"
+            WorkingDirectory="INSTALLFOLDER" />
+          <RegistryValue
+            Root="HKCU"
+            Key="Software\Jellyfin Kattri"
+            Name="StartMenuShortcutInstalled"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+          <RemoveFolder Id="RemoveApplicationProgramMenuFolder" Directory="ApplicationProgramMenuFolder" On="uninstall" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+  </Package>
+</Wix>

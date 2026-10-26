@@ -1,0 +1,121 @@
+# Reproducible build check. Builds the release binary twice from two separate source
+# trees, with the same SOURCE_DATE_EPOCH, and fails if the two binaries differ.
+#
+# Each tree is a clean `git archive HEAD` extraction, so no build output or untracked
+# file can leak into either build. The two trees live at different paths. Debug info
+# (the release profile sets debug = 1) records source paths, so both builds remap their
+# own tree to the same virtual path. Without the remap the comparison would always fail
+# on path differences, which would say nothing about reproducibility.
+#
+# Not verified: this workflow has not been run. The dependency crates are compiled from
+# the registry, so the registry source directory is remapped too.
+
+name: Reproducible build check
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "proofs/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/reproducible.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reproducible-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reproducible:
+    name: Build twice and compare (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+
+      - name: Install system packages for the workspace build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libudev-dev
+
+      - name: Create two clean source trees
+        run: |
+          set -euo pipefail
+          for tree in "$RUNNER_TEMP/tree-a" "$RUNNER_TEMP/tree-b"; do
+            rm -rf "$tree"
+            mkdir -p "$tree"
+            git archive --format=tar HEAD | tar -x -C "$tree"
+          done
+          echo "TREE_A=$RUNNER_TEMP/tree-a" >> "$GITHUB_ENV"
+          echo "TREE_B=$RUNNER_TEMP/tree-b" >> "$GITHUB_ENV"
+
+      - name: Build first tree
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
+          export CARGO_INCREMENTAL=0
+          export RUSTFLAGS="--remap-path-prefix=$TREE_A=/build/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/build/cargo"
+          cd "$TREE_A"
+          cargo build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri
+          sha256sum target/release/jellyfin-kattri | tee "$RUNNER_TEMP/sha-a.txt"
+
+      - name: Build second tree
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
+          export CARGO_INCREMENTAL=0
+          export RUSTFLAGS="--remap-path-prefix=$TREE_B=/build/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/build/cargo"
+          cd "$TREE_B"
+          cargo build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri
+          sha256sum target/release/jellyfin-kattri | tee "$RUNNER_TEMP/sha-b.txt"
+
+      - name: Compare binaries
+        run: |
+          set -euo pipefail
+          A="$TREE_A/target/release/jellyfin-kattri"
+          B="$TREE_B/target/release/jellyfin-kattri"
+          HASH_A="$(sha256sum "$A" | cut -d' ' -f1)"
+          HASH_B="$(sha256sum "$B" | cut -d' ' -f1)"
+          echo "tree-a sha256: $HASH_A"
+          echo "tree-b sha256: $HASH_B"
+          if [[ "$HASH_A" != "$HASH_B" ]]; then
+            echo "error: release binaries differ; the build is not reproducible" >&2
+            cmp -l "$A" "$B" | head -n 50 >&2 || true
+            exit 1
+          fi
+          echo "Release binaries are identical."
+
+      - name: Keep the build record
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/record"
+          {
+            echo "commit: $GITHUB_SHA"
+            echo "source_date_epoch: $(git log -1 --format=%ct HEAD)"
+            rustc -Vv
+            cat "$RUNNER_TEMP/sha-a.txt" "$RUNNER_TEMP/sha-b.txt" 2>/dev/null || true
+          } > "$RUNNER_TEMP/record/reproducible-build.txt"
+
+      - name: Upload build record
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reproducible-build-record
+          path: ${{ runner.temp }}/record/reproducible-build.txt
+          if-no-files-found: warn
+          retention-days: 14

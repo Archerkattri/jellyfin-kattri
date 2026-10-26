@@ -1,0 +1,16 @@
+[package]
+name = "kattri-settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+kattri-guard = { path = "../kattri-guard" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "1.1"
+
+[dev-dependencies]
+tempfile = "3"

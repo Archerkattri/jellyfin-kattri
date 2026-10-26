@@ -1,0 +1,12 @@
+#!/bin/sh
+# Entry point for the Jellyfin Kattri AppImage.
+#
+# The AppImage runtime mounts the image and exports APPDIR (the mount point) and
+# APPIMAGE (the path of the .AppImage file). Bundled libraries live in usr/lib.
+# Only that directory is prepended to LD_LIBRARY_PATH, so the host's libraries
+# remain the fallback for everything that is not bundled. glibc and GPU driver
+# libraries are not bundled (see build-appimage.sh).
+
+HERE="$(dirname "$(readlink -f "$0")")"
+export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$HERE/usr/bin/kattri" "$@"

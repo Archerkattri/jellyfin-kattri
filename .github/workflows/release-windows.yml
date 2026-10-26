@@ -1,0 +1,111 @@
+# Windows release packaging. Runs on version tags and produces the per-machine MSI and the
+# portable zip for x64 and arm64, with SHA256 checksums for the zip.
+#
+# Signing:
+#   Signing runs only when the repository variable KATTRI_SIGNING_SERVICE is set. Its value is
+#   the signtool selector string described at the top of packaging/windows/sign.ps1. The
+#   private key is held on an offline hardware token and never reaches CI. When the variable
+#   is unset, the job still succeeds and the uploaded artifact name ends in "-unsigned".
+#
+# Variables and secrets referenced:
+#   vars.KATTRI_SIGNING_SERVICE   optional signing reference (variable, not a secret)
+#   No secrets are referenced.
+#
+# Binary name:
+#   The existing egui-gl-host-proof package provides the jellyfin-kattri executable.
+
+name: Release (Windows packaging)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x64
+            runner: windows-latest
+          # windows-11-arm is the GitHub-hosted Windows arm64 runner label, per the
+          # GitHub-hosted runner documentation. GitHub has announced a successor label
+          # (windows-11-vs2026-arm) and a migration of this label; confirm the mapping
+          # before relying on the exact image version.
+          - platform: arm64
+            runner: windows-11-arm
+    env:
+      KATTRI_BIN: jellyfin-kattri
+      KATTRI_SIGNING_SERVICE: ${{ vars.KATTRI_SIGNING_SERVICE }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Derive version from tag
+        shell: pwsh
+        env:
+          KATTRI_TAG: ${{ github.ref_name }}
+        run: |
+          $version = $env:KATTRI_TAG -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+            throw "Tag '$env:KATTRI_TAG' does not give a numeric version (expected vX.Y.Z)."
+          }
+          "KATTRI_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # The Rust toolchain is read from rust-toolchain.toml by rustup.
+      - name: Build release executable
+        shell: pwsh
+        run: cargo build --release --locked -p egui-gl-host-proof --bin $env:KATTRI_BIN
+
+      - name: Sign executable
+        shell: pwsh
+        run: packaging/windows/sign.ps1 -Path "target/release/$env:KATTRI_BIN.exe"
+
+      - name: Build MSI
+        shell: pwsh
+        run: >-
+          packaging/windows/build-msi.ps1
+          -ExePath "target/release/$env:KATTRI_BIN.exe"
+          -Version $env:KATTRI_VERSION
+          -Platform ${{ matrix.platform }}
+          -OutputDir dist
+
+      - name: Sign MSI
+        shell: pwsh
+        run: packaging/windows/sign.ps1 -Path "dist/JellyfinKattri-$env:KATTRI_VERSION-${{ matrix.platform }}.msi"
+
+      - name: Build portable zip and checksum
+        shell: pwsh
+        run: >-
+          packaging/windows/build-zip.ps1
+          -ExePath "target/release/$env:KATTRI_BIN.exe"
+          -Version $env:KATTRI_VERSION
+          -Platform ${{ matrix.platform }}
+          -OutputDir dist
+
+      - name: Mark artifact signing state
+        id: signing-state
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:KATTRI_SIGNING_SERVICE)) {
+            "suffix=-unsigned" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "Artifacts in this run are UNSIGNED: KATTRI_SIGNING_SERVICE is not set." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          } else {
+            "suffix=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "Artifacts in this run were signed through the configured signing service." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: kattri-windows-${{ matrix.platform }}${{ steps.signing-state.outputs.suffix }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30

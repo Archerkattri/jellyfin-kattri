@@ -1,0 +1,35 @@
+[workspace]
+members = [
+    "crates/jellyfin-api",
+    "crates/mock-jellyfin",
+    "crates/client-core",
+    "crates/playback-relay",
+    "crates/kattri-settings",
+    "crates/kattri-downloads",
+    "crates/kattri-guard",
+    "crates/kattri-logging",
+    "crates/kattri-i18n",
+    "crates/kattri-input",
+    "crates/kattri-parental",
+    "crates/kattri-platform",
+    "crates/kattri-player",
+    "crates/kattri-plugins",
+    "crates/kattri-plugin-host",
+    "crates/kattri-updater",
+    "crates/kattri-bench",
+    "proofs/egui-client",
+    "proofs/egui-gl-host",
+    "proofs/mpv-render",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-only"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1

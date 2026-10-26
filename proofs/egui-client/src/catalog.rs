@@ -1,0 +1,149 @@
+use jellyfin_api::BaseItemDto;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKind {
+    Movie,
+    Series,
+    Episode,
+    Audio,
+    Photo,
+    Playlist,
+    Folder,
+    Other,
+}
+
+impl MediaKind {
+    pub fn from_server_type(item_type: Option<&str>) -> Self {
+        match item_type {
+            Some("Movie") => Self::Movie,
+            Some("Series") => Self::Series,
+            Some("Episode") => Self::Episode,
+            Some("Audio" | "MusicAlbum") => Self::Audio,
+            Some("Photo") => Self::Photo,
+            Some("Playlist") => Self::Playlist,
+            Some("Folder" | "CollectionFolder" | "BoxSet") => Self::Folder,
+            _ => Self::Other,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Movie => "Movie",
+            Self::Series => "Series",
+            Self::Episode => "Episode",
+            Self::Audio => "Audio",
+            Self::Photo => "Photo",
+            Self::Playlist => "Playlist",
+            Self::Folder => "Folder",
+            Self::Other => "Jellyfin item",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ArtworkPalette {
+    pub top: [u8; 3],
+    pub bottom: [u8; 3],
+    pub shape: [u8; 3],
+    pub detail: [u8; 3],
+    pub motif: ArtworkMotif,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ArtworkMotif {
+    Horizon,
+    Orbit,
+    Peaks,
+    Arches,
+    Sound,
+}
+
+#[derive(Clone)]
+pub struct MediaItem {
+    pub id: String,
+    pub title: String,
+    pub remote_type: Option<String>,
+    pub overview: Option<String>,
+    pub kind: MediaKind,
+    pub artwork: ArtworkPalette,
+    pub primary_image_tag: Option<String>,
+    pub artwork_texture: Option<egui::TextureHandle>,
+}
+
+impl MediaItem {
+    pub fn from_api(item: BaseItemDto) -> Self {
+        let kind = MediaKind::from_server_type(item.item_type.as_deref());
+        let artwork = placeholder_artwork(&item.id);
+        let primary_image_tag = item
+            .image_tags
+            .as_ref()
+            .and_then(|tags| tags.get("Primary"))
+            .and_then(Option::as_deref)
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_owned);
+        Self {
+            id: item.id,
+            title: item.name,
+            remote_type: item.item_type,
+            overview: item.overview,
+            kind,
+            artwork,
+            primary_image_tag,
+            artwork_texture: None,
+        }
+    }
+
+    pub fn subtitle(&self) -> &str {
+        self.remote_type
+            .as_deref()
+            .filter(|item_type| !item_type.is_empty())
+            .unwrap_or("Jellyfin item")
+    }
+}
+
+fn placeholder_artwork(id: &str) -> ArtworkPalette {
+    const PALETTES: [ArtworkPalette; 5] = [
+        ArtworkPalette {
+            top: [28, 55, 49],
+            bottom: [13, 31, 35],
+            shape: [163, 179, 119],
+            detail: [221, 192, 134],
+            motif: ArtworkMotif::Peaks,
+        },
+        ArtworkPalette {
+            top: [43, 105, 113],
+            bottom: [16, 40, 59],
+            shape: [100, 202, 175],
+            detail: [217, 226, 162],
+            motif: ArtworkMotif::Orbit,
+        },
+        ArtworkPalette {
+            top: [67, 118, 116],
+            bottom: [27, 52, 57],
+            shape: [143, 194, 162],
+            detail: [228, 213, 163],
+            motif: ArtworkMotif::Horizon,
+        },
+        ArtworkPalette {
+            top: [126, 79, 49],
+            bottom: [37, 28, 25],
+            shape: [222, 151, 94],
+            detail: [244, 218, 178],
+            motif: ArtworkMotif::Arches,
+        },
+        ArtworkPalette {
+            top: [53, 95, 151],
+            bottom: [19, 40, 83],
+            shape: [90, 151, 209],
+            detail: [195, 220, 228],
+            motif: ArtworkMotif::Sound,
+        },
+    ];
+
+    let index = id
+        .bytes()
+        .fold(0usize, |sum, byte| sum.wrapping_add(byte as usize))
+        % PALETTES.len();
+    PALETTES[index]
+}

@@ -1,0 +1,105 @@
+# Build and test validation. This does not install libmpv or perform runtime QA.
+name: Rust client build and test validation (not runtime QA)
+
+on:
+  push:
+    paths:
+      - "crates/**"
+      - "proofs/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/**"
+      - "scripts/**"
+      - "packaging/**"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "proofs/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/**"
+      - "scripts/**"
+      - "packaging/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-client-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      # Reads the toolchain, components, and profile from rust-toolchain.toml.
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+
+      - name: Check native release target and packaging contracts
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: scripts/tests/release_targets.ps1
+
+      - name: Check read-only runner without server access
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: scripts/tests/live_runner.ps1
+
+  # ARM64 jobs run the same Rust checks on GitHub's standard ARM64 runners.
+  # Native playback and installer acceptance require separate runtime validation.
+  check-windows-arm64:
+    name: Clippy and tests (windows-11-arm)
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+
+  # Test-only. Linux arm64 release artifacts are deferred by M5-01 and are not built here.
+  check-linux-arm64:
+    name: Clippy and tests (ubuntu-24.04-arm)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --workspace --locked

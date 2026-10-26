@@ -1,0 +1,36 @@
+# cargo-deb metadata for the kattri package.
+#
+# cargo-deb reads only [package.metadata.deb] from a Cargo.toml, so this file is
+# appended to proofs/egui-gl-host/Cargo.toml by the release-linux workflow, in the CI
+# checkout only, before `cargo deb` runs. Do not commit that change.
+#
+# Binary sources use cargo-deb's special target/release path so they resolve the
+# workspace target directory. Other paths are relative to the package root.
+#
+# libmpv is a runtime dependency, not a bundled library. The app loads libmpv at run
+# time. Package names differ by release: libmpv1 on Ubuntu 22.04 (mpv 0.34 series),
+# libmpv2 on Ubuntu 24.04 and Debian 12. The minimum libmpv version is not set yet
+# (owner decision, see docs/packaging/target-matrix.md).
+
+[package.metadata.deb]
+name = "kattri"
+maintainer = "Jellyfin Kattri <krishiattriwork@gmail.com>"
+priority = "optional"
+changelog = "../../packaging/linux/deb/changelog"
+section = "video"
+# No license-file: it would copy the full GPL text into the package copyright file, which lintian
+# rejects. The crate license (GPL-3.0-only) is written as a short entry that points at
+# /usr/share/common-licenses/GPL-3.
+copyright = "2026 Jellyfin Kattri contributors"
+# Strip the packaged binary; the debug symbols (the release profile keeps them) go to a
+# separate -dbgsym package.
+separate-debug-symbols = true
+extended-description = """
+Jellyfin Kattri is a native client for Jellyfin media servers. Playback uses the
+system libmpv, which this package declares as a dependency."""
+depends = "$auto, libmpv2 | libmpv1"
+assets = [
+    ["target/release/jellyfin-kattri", "usr/bin/kattri", "755"],
+    ["../../packaging/linux/share/kattri.desktop", "usr/share/applications/kattri.desktop", "644"],
+    ["../../packaging/linux/icons/kattri.svg", "usr/share/icons/hicolor/scalable/apps/kattri.svg", "644"],
+]

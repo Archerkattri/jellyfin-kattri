@@ -1,0 +1,30 @@
+[package]
+name = "egui-gl-host-proof"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-only"
+description = "Minimal custom winit/glutin host lifecycle proof for egui and OpenGL"
+
+[[bin]]
+name = "jellyfin-kattri"
+path = "src/main.rs"
+
+[dependencies]
+egui = { version = "=0.37.0", features = ["default_fonts"] }
+egui-winit = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "wayland", "x11"] }
+egui_glow = "=0.37.0"
+glow = "=0.17.0"
+glutin = "=0.32.3"
+glutin-winit = "=0.5.0"
+jellyfin-api = { path = "../../crates/jellyfin-api" }
+jellyfin-egui-client = { path = "../egui-client" }
+kattri-client-core = { path = "../../crates/client-core" }
+kattri-logging = { path = "../../crates/kattri-logging" }
+kattri-player = { path = "../../crates/kattri-player" }
+kattri-plugins = { path = "../../crates/kattri-plugins", features = ["discord-ipc"] }
+kattri-settings = { path = "../../crates/kattri-settings" }
+jellyfin-playback-relay = { path = "../../crates/playback-relay" }
+mpv-render-proof = { path = "../mpv-render" }
+winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "x11"] }
+tracing = "=0.1.44"
