@@ -1,6 +1,7 @@
-//! Audio output device model. Pure: it validates device entries, keeps the list and the
-//! selection, and picks the value for mpv's `audio-device` property. It does not enumerate
-//! real hardware and makes no mpv calls.
+//! Audio output device model. Pure: validates device entries, keeps the list/selection, picks
+//! the mpv `audio-device` property value. Real device enumeration requires an OS service layer
+//! (Windows/CMMedia, macOS/AudioDevice, Linux/alsa/pulse) not yet implemented (M6-07 partial).
+//! The selected id must be in the list; with no selection the value is `auto`.
 //!
 //! Ids are the strings mpv itself reports for a device. A selected id must be in the list, so
 //! the value handed to mpv always names a device the list knows about. With no selection the
