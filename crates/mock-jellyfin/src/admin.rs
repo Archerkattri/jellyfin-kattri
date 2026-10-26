@@ -15,6 +15,8 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/System/Info", get(system_info))
         .route("/Library/VirtualFolders", get(virtual_folders))
+        .route("/Users", get(users))
+        .route("/ScheduledTasks", get(scheduled_tasks))
 }
 
 async fn system_info(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
@@ -52,4 +54,53 @@ async fn virtual_folders(State(state): State<Arc<AppState>>, headers: HeaderMap)
         })
         .collect();
     json_ok(Value::Array(folders))
+}
+
+/// Three fixed users: one administrator, one enabled member and one disabled
+/// member. The names are placeholders, not real accounts.
+async fn users(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    record_request(&state, "GET", "/Users", None);
+    if !is_authorized(&headers) {
+        return unauthorized();
+    }
+    json_ok(json!([
+        {
+            "Name": "mock-admin",
+            "Id": seed::hex_id(0xa001),
+            "Policy": { "IsAdministrator": true, "IsDisabled": false },
+        },
+        {
+            "Name": "mock-member",
+            "Id": seed::hex_id(0xa002),
+            "Policy": { "IsAdministrator": false, "IsDisabled": false },
+        },
+        {
+            "Name": "mock-disabled",
+            "Id": seed::hex_id(0xa003),
+            "Policy": { "IsAdministrator": false, "IsDisabled": true },
+        },
+    ]))
+}
+
+/// Two fixed scheduled tasks: one with a completed last run, one that has not
+/// run yet. The shape follows `TaskInfo`; the times are omitted because the
+/// dashboard does not read them.
+async fn scheduled_tasks(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    record_request(&state, "GET", "/ScheduledTasks", None);
+    if !is_authorized(&headers) {
+        return unauthorized();
+    }
+    json_ok(json!([
+        {
+            "Name": "Mock Library Scan",
+            "Key": "MockLibraryScan",
+            "State": "Idle",
+            "LastExecutionResult": { "Status": "Completed" },
+        },
+        {
+            "Name": "Mock Cleanup",
+            "Key": "MockCleanup",
+            "State": "Idle",
+        },
+    ]))
 }

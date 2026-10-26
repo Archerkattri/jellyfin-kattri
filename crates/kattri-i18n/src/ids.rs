@@ -214,6 +214,11 @@ pub const ADMIN_ROW_SERVER_VERSION: &str = "admin.row.server_version";
 pub const ADMIN_ROW_LIBRARIES: &str = "admin.row.libraries";
 pub const ADMIN_ROW_LIBRARY: &str = "admin.row.library";
 pub const ADMIN_ROW_ACTIVE_SESSIONS: &str = "admin.row.active_sessions";
+pub const ADMIN_ROW_USERS: &str = "admin.row.users";
+pub const ADMIN_ROW_SCHEDULED_TASKS: &str = "admin.row.scheduled_tasks";
+pub const ADMIN_ROW_TASK: &str = "admin.row.task";
+pub const ADMIN_TASK_MORE: &str = "admin.task.more";
+pub const ADMIN_TASK_NEVER_RUN: &str = "admin.task.never_run";
 pub const ADMIN_STATUS_LOADING: &str = "admin.status.loading";
 pub const ADMIN_ERROR_LOAD_FAILED: &str = "admin.error.load_failed";
 pub const ADMIN_HEADING_TITLE: &str = "admin.heading.title";
@@ -937,6 +942,11 @@ pub const ALL: &[&str] = &[
     ADMIN_ROW_LIBRARIES,
     ADMIN_ROW_LIBRARY,
     ADMIN_ROW_ACTIVE_SESSIONS,
+    ADMIN_ROW_USERS,
+    ADMIN_ROW_SCHEDULED_TASKS,
+    ADMIN_ROW_TASK,
+    ADMIN_TASK_MORE,
+    ADMIN_TASK_NEVER_RUN,
     ADMIN_STATUS_LOADING,
     ADMIN_ERROR_LOAD_FAILED,
     ADMIN_HEADING_TITLE,

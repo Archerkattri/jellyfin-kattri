@@ -1131,3 +1131,135 @@ async fn readonly_home_and_playback_negotiation() {
         "read-only live calls failed: {failures:?}"
     );
 }
+
+/// M4-22 live, read-only: the admin dashboard reads against a real server.
+/// Prints counts and library kinds only; never names, ids, tokens or paths.
+/// A 403 is reported as "admin rights unavailable" instead of failing, because
+/// the server decides whether the account may see the section.
+#[tokio::test]
+#[ignore = "requires explicit access to an existing Jellyfin server"]
+async fn readonly_admin_dashboard_reads() {
+    let base = env::var("JELLYFIN_TEST_URL").unwrap_or_else(|_| DEFAULT_SERVER.to_owned());
+    let config = ClientConfig::new(
+        &base,
+        "Kattri validator",
+        "validation",
+        "kattri-validation-m4-22",
+        "1",
+    )
+    .expect("valid server configuration");
+    let client = JellyfinClient::new(config).expect("HTTP client");
+    let username = env::var("JELLYFIN_TEST_USER")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(Zeroizing::new);
+    let password = env::var("JELLYFIN_TEST_PASSWORD")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(Zeroizing::new);
+    let (Some(username), Some(password)) = (username, password) else {
+        println!("M4-22 admin reads: NOT RUN (credentials unavailable)");
+        return;
+    };
+    let session = client
+        .authenticate(&username, &password)
+        .await
+        .expect("authentication failed; response details are suppressed");
+
+    let mut failures = Vec::new();
+    if let Some(info) = outcome(
+        &mut failures,
+        "M4-22 system_info",
+        client.server_info(&session).await,
+    ) {
+        println!(
+            "M4-22 server_info: PASS product_reported={} version_reported={}",
+            info.product_name.is_some(),
+            info.version.is_some()
+        );
+    }
+    let libraries = match client.virtual_folders(&session).await {
+        Ok(libraries) => {
+            println!("M4-22 virtual_folders: PASS count={}", libraries.len());
+            Some(libraries)
+        }
+        Err(ApiError::Forbidden) => {
+            println!("M4-22 virtual_folders: FORBIDDEN (account is not elevated)");
+            None
+        }
+        Err(error) => {
+            println!("M4-22 virtual_folders: FAIL {error}");
+            failures.push("M4-22 virtual folders");
+            None
+        }
+    };
+    if let Some(active) = outcome(
+        &mut failures,
+        "M4-22 active_sessions",
+        client.active_session_count(&session).await,
+    ) {
+        println!("M4-22 active_sessions: PASS count={active}");
+    }
+    match client.user_counts(&session).await {
+        Ok(users) => println!(
+            "M4-22 user_counts: PASS total={} enabled={} disabled={}",
+            users.total, users.enabled, users.disabled
+        ),
+        Err(ApiError::Forbidden) => println!("M4-22 user_counts: FORBIDDEN"),
+        Err(error) => {
+            println!("M4-22 user_counts: FAIL {error}");
+            failures.push("M4-22 user counts");
+        }
+    }
+    match client.scheduled_tasks(&session).await {
+        Ok(tasks) => {
+            let running = tasks
+                .iter()
+                .filter(|task| {
+                    task.state
+                        .as_deref()
+                        .is_some_and(|state| !state.eq_ignore_ascii_case("Idle"))
+                })
+                .count();
+            let named = tasks.iter().filter(|task| task.name.is_some()).count();
+            println!(
+                "M4-22 scheduled_tasks: PASS count={} named={} running={}",
+                tasks.len(),
+                named,
+                running
+            );
+        }
+        Err(ApiError::Forbidden) => println!("M4-22 scheduled_tasks: FORBIDDEN"),
+        Err(error) => {
+            println!("M4-22 scheduled_tasks: FAIL {error}");
+            failures.push("M4-22 scheduled tasks");
+        }
+    }
+    if let Some(libraries) = libraries {
+        let mut counted = 0;
+        let mut missing = 0;
+        for library in libraries.iter().take(8) {
+            let Some(id) = library.item_id.as_deref() else {
+                missing += 1;
+                continue;
+            };
+            match client.library_item_count(&session, id).await {
+                Ok(Some(_)) => counted += 1,
+                Ok(None) => missing += 1,
+                Err(ApiError::Forbidden) => {
+                    println!("M4-22 library_item_count: FORBIDDEN");
+                    break;
+                }
+                Err(error) => {
+                    println!("M4-22 library_item_count: FAIL {error}");
+                    failures.push("M4-22 library item count");
+                    break;
+                }
+            }
+        }
+        println!("M4-22 library_item_count: PASS counted={counted} without_total={missing}");
+    }
+
+    println!("M4-22 read-only summary: failed_calls={}", failures.len());
+    assert!(failures.is_empty(), "admin reads failed: {failures:?}");
+}

@@ -27,7 +27,7 @@ mod syncplay;
 pub mod system_time;
 pub mod websocket;
 
-pub use admin::{ServerInfo, VirtualFolder};
+pub use admin::{MAX_SCHEDULED_TASKS, ScheduledTask, ServerInfo, UserCounts, VirtualFolder};
 pub use collections::{CollectionRuntime, collection_runtime};
 pub use device_profile::{
     CodecProfile, ContainerProfile, DeviceProfile, DirectPlayProfile, ProfileCondition,

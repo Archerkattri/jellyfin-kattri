@@ -1,0 +1,85 @@
+[
+  {
+    "Name": "admin",
+    "ServerId": "00000000000000000000000000000001",
+    "Id": "0000000000000000000000000000a001",
+    "HasPassword": true,
+    "HasConfiguredPassword": true,
+    "LastLoginDate": "2026-10-26T13:04:28.7056464Z",
+    "LastActivityDate": "2026-10-26T13:04:28.7056464Z",
+    "Configuration": {
+      "AudioLanguagePreference": "",
+      "PlayDefaultAudioTrack": true,
+      "SubtitleLanguagePreference": "",
+      "DisplayMissingEpisodes": false,
+      "GroupedFolders": [],
+      "SubtitleMode": "Default",
+      "DisplayCollectionsView": false,
+      "EnableLocalPassword": false,
+      "OrderedViews": [],
+      "LatestItemsExcludes": [],
+      "MyMediaExcludes": [],
+      "HidePlayedInLatest": true,
+      "RememberAudioSelections": true,
+      "RememberSubtitleSelections": true,
+      "EnableNextEpisodeAutoPlay": true
+    },
+    "Policy": {
+      "IsAdministrator": true,
+      "IsHidden": true,
+      "IsDisabled": false,
+      "EnableRemoteControlOfOtherUsers": false,
+      "EnableSharedDeviceControl": true,
+      "EnableRemoteAccess": true,
+      "EnableLiveTvManagement": true,
+      "EnableLiveTvAccess": true,
+      "EnableMediaPlayback": true,
+      "EnableAudioPlaybackTranscoding": true,
+      "EnableVideoPlaybackTranscoding": true,
+      "EnablePlaybackRemuxing": true,
+      "EnableContentDeletion": false,
+      "EnableContentDownloading": true,
+      "EnableSubtitleDownloading": true,
+      "EnableSubtitleManagement": true,
+      "EnableSyncTranscoding": true,
+      "EnableMediaConversion": true,
+      "EnabledDevices": [],
+      "EnableAllDevices": true,
+      "EnabledChannels": [],
+      "EnableAllChannels": true,
+      "EnabledFolders": [],
+      "EnableAllFolders": true,
+      "InvalidLoginAttemptCount": 0,
+      "LoginAttemptsBeforeLockout": -1,
+      "BlockedTags": [],
+      "AllowedTags": []
+    }
+  },
+  {
+    "Name": "member",
+    "ServerId": "00000000000000000000000000000001",
+    "Id": "0000000000000000000000000000a002",
+    "HasPassword": true,
+    "HasConfiguredPassword": true,
+    "LastActivityDate": "2026-10-26T13:04:28.7056464Z",
+    "Policy": {
+      "IsAdministrator": false,
+      "IsDisabled": false,
+      "EnableMediaPlayback": true,
+      "EnableAllFolders": true
+    }
+  },
+  {
+    "Name": "guest",
+    "ServerId": "00000000000000000000000000000001",
+    "Id": "0000000000000000000000000000a003",
+    "HasPassword": false,
+    "HasConfiguredPassword": false,
+    "Policy": {
+      "IsAdministrator": false,
+      "IsDisabled": true,
+      "EnableMediaPlayback": false,
+      "EnableAllFolders": true
+    }
+  }
+]

@@ -1,0 +1,76 @@
+[
+  {
+    "Name": "Audio Normalization",
+    "State": "Idle",
+    "Id": "ec2f221fd8e7706b3d3afd2c4591b4d7",
+    "LastExecutionResult": {
+      "StartTimeUtc": "2026-10-26T00:26:30.0669518Z",
+      "EndTimeUtc": "2026-10-26T00:26:30.550055Z",
+      "Status": "Completed",
+      "Name": "Audio Normalization",
+      "Key": "AudioNormalization",
+      "Id": "ec2f221fd8e7706b3d3afd2c4591b4d7"
+    },
+    "Triggers": [
+      {
+        "Type": "IntervalTrigger",
+        "IntervalTicks": 864000000000
+      }
+    ],
+    "Description": "Scans files for audio normalization data.",
+    "Category": "Library",
+    "IsHidden": false,
+    "Key": "AudioNormalization"
+  },
+  {
+    "Name": "Clean Activity Log",
+    "State": "Idle",
+    "Id": "86d13cb6f8434e4e8a12b0a9d3e8a2f1",
+    "LastExecutionResult": {
+      "StartTimeUtc": "2026-10-26T00:26:30.0669518Z",
+      "EndTimeUtc": "2026-10-26T00:26:31.1106310Z",
+      "Status": "Aborted",
+      "Name": "Clean Activity Log",
+      "Key": "CleanActivityLog",
+      "Id": "86d13cb6f8434e4e8a12b0a9d3e8a2f1"
+    },
+    "Triggers": [],
+    "Description": "Deletes activity log entries older than the configured value.",
+    "Category": "Maintenance",
+    "IsHidden": false,
+    "Key": "CleanActivityLog"
+  },
+  {
+    "Name": "Scan Media Library",
+    "State": "Running",
+    "Id": "7738148ffcd07979c7ceb148e06b3aae",
+    "LastExecutionResult": {
+      "StartTimeUtc": "2026-10-26T00:27:02.1000000Z",
+      "EndTimeUtc": "2026-10-26T00:31:44.4000000Z",
+      "Status": "Failed",
+      "Name": "Scan Media Library",
+      "Key": "RefreshLibrary",
+      "Id": "7738148ffcd07979c7ceb148e06b3aae"
+    },
+    "Triggers": [
+      {
+        "Type": "DailyTrigger",
+        "TimeOfDayTicks": 0
+      }
+    ],
+    "Description": "Scans your media libraries for file changes.",
+    "Category": "Library",
+    "IsHidden": false,
+    "Key": "RefreshLibrary"
+  },
+  {
+    "Name": "Clean Cache Directory",
+    "State": "Idle",
+    "Id": "f2c5b0d4e6a74d0eb7c1a8f9d3e2b6c4",
+    "Triggers": [],
+    "Description": "Deletes cache files that are no longer needed.",
+    "Category": "Maintenance",
+    "IsHidden": false,
+    "Key": "CleanCacheDirectory"
+  }
+]

@@ -40,6 +40,9 @@ use zeroize::{Zeroize, Zeroizing};
 /// Items requested per home-screen row. Bounded so one row cannot grow the UI without limit.
 pub const HOME_ROW_LIMIT: u32 = 16;
 const CATALOG_PAGE_SIZE: u32 = 50;
+/// Libraries whose item count is read per dashboard load. A server with more
+/// libraries shows the first ones and reports the rest without a count.
+const MAX_COUNTED_LIBRARIES: usize = 32;
 
 /// The three home-screen rows, each loaded and retried independently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4754,7 +4757,7 @@ async fn send_photo_image_failure(
     send_event(events, ctx, event).await;
 }
 
-/// The three read-only admin calls. Only the decoded counts and names reach the UI.
+/// The read-only admin calls. Only the decoded counts and names reach the UI.
 async fn load_dashboard(
     client: &JellyfinClient,
     session: &Session,
@@ -4762,10 +4765,29 @@ async fn load_dashboard(
     let server = client.server_info(session).await?;
     let libraries = client.virtual_folders(session).await?;
     let active_sessions = client.active_session_count(session).await?;
+    let users = client.user_counts(session).await?;
+    let tasks = client.scheduled_tasks(session).await?;
+    let mut library_item_counts = Vec::with_capacity(libraries.len().min(MAX_COUNTED_LIBRARIES));
+    for library in libraries.iter().take(MAX_COUNTED_LIBRARIES) {
+        let count = match library.item_id.as_deref() {
+            Some(id) => match client.library_item_count(session, id).await {
+                Ok(count) => count,
+                // A revoked admin right must hide the section, not crash it.
+                Err(ApiError::Forbidden) => return Err(ApiError::Forbidden),
+                // One unreadable count must not hide the whole dashboard.
+                Err(_) => None,
+            },
+            None => None,
+        };
+        library_item_counts.push(count);
+    }
     Ok(AdminSnapshot::from_reads(
         &server,
         &libraries,
+        &library_item_counts,
         active_sessions,
+        users,
+        &tasks,
     ))
 }
 
