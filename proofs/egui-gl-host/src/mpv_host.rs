@@ -715,10 +715,88 @@ struct ItemPlaybackState {
     pending_track_memory: Option<(u64, TrackMemoryEvent)>,
 }
 
+struct PendingMediaLoad<T> {
+    command_id: u64,
+    relay: Option<T>,
+    resume_seconds: Option<f64>,
+    item: ItemPlaybackState,
+}
+
+struct MediaLoadState<T> {
+    active: Option<T>,
+    pending: Option<PendingMediaLoad<T>>,
+    active_entry_id: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RelayLoadError {
+    Busy,
+    Failed(&'static str),
+}
+
+impl<T> Default for MediaLoadState<T> {
+    fn default() -> Self {
+        Self {
+            active: None,
+            pending: None,
+            active_entry_id: None,
+        }
+    }
+}
+
+impl<T> MediaLoadState<T> {
+    fn started(&mut self, entry_id: Option<i64>) -> Option<PendingMediaLoad<T>> {
+        let mut load = self.pending.take();
+        if let Some(load) = load.as_mut() {
+            self.active = load.relay.take();
+        }
+        self.active_entry_id = entry_id;
+        load
+    }
+
+    fn ended(&mut self, entry_id: Option<i64>) -> bool {
+        if let (Some(active), Some(ended)) = (self.active_entry_id, entry_id)
+            && active != ended
+        {
+            return false;
+        }
+        self.active_entry_id = None;
+        self.active = None;
+        true
+    }
+
+    fn reject_command(&mut self, command_id: u64) -> bool {
+        if self
+            .pending
+            .as_ref()
+            .is_none_or(|load| load.command_id != command_id)
+        {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
+
+    fn load_segments(
+        &mut self,
+        active: &mut ItemPlaybackState,
+        item_id: &str,
+        segments: Vec<MediaSegment>,
+    ) {
+        if let Some(pending) = self.pending.as_mut()
+            && pending.item.segment_item_id.as_deref() == Some(item_id)
+        {
+            pending.item.segment_skipper.load(item_id, segments);
+        } else if active.segment_item_id.as_deref() == Some(item_id) {
+            active.segment_skipper.load(item_id, segments);
+        }
+    }
+}
+
 pub(crate) struct MpvHost<'session> {
     session: Option<&'session MpvSession>,
     renderer: Option<MpvRenderer<'session>>,
-    _relay: Option<RelayHandle>,
+    media_load: MediaLoadState<RelayHandle>,
     status: String,
     file_loaded: bool,
     playback_end_reason: Option<EndFileReason>,
@@ -815,7 +893,7 @@ impl<'session> MpvHost<'session> {
             return Self {
                 session: None,
                 renderer: None,
-                _relay: None,
+                media_load: MediaLoadState::default(),
                 status: runtime_error.unwrap_or_else(|| "libmpv is unavailable".into()),
                 file_loaded: false,
                 playback_end_reason: None,
@@ -900,7 +978,7 @@ impl<'session> MpvHost<'session> {
                 return Self {
                     session: Some(session),
                     renderer: None,
-                    _relay: None,
+                    media_load: MediaLoadState::default(),
                     status: format!("libmpv OpenGL renderer unavailable: {error}"),
                     file_loaded: false,
                     playback_end_reason: None,
@@ -957,7 +1035,7 @@ impl<'session> MpvHost<'session> {
         Self {
             session: Some(session),
             renderer: Some(renderer),
-            _relay: None,
+            media_load: MediaLoadState::default(),
             status: "OpenGL video surface ready; no media loaded".into(),
             file_loaded: false,
             playback_end_reason: None,
@@ -1024,6 +1102,10 @@ impl<'session> MpvHost<'session> {
         };
         match local_media {
             Ok(Some(path)) => {
+                if self.media_load.pending.is_some() {
+                    self.status = "A media load is already pending.".into();
+                    return;
+                }
                 if let Err(error) = self.sync_controller.reset_subtitle_delay(session) {
                     self.sync_feedback = subtitle_delay_error(error);
                 }
@@ -1032,7 +1114,16 @@ impl<'session> MpvHost<'session> {
                     queue_validated(session, setting, options);
                 }
                 match session.command(&["loadfile", &path, "replace"]) {
-                    Ok(_) => self.status = "Loading local media".into(),
+                    Ok(command) => {
+                        self.media_load.pending = Some(PendingMediaLoad {
+                            command_id: command.get(),
+                            relay: None,
+                            resume_seconds: None,
+                            item: ItemPlaybackState::default(),
+                        });
+                        self.pending_report_metadata = None;
+                        self.status = "Loading local media".into();
+                    }
                     Err(error) => self.status = format!("Could not queue local media: {error}"),
                 }
             }
@@ -1101,19 +1192,23 @@ impl<'session> MpvHost<'session> {
         if self.renderer.is_none() {
             return Err("The libmpv video renderer is unavailable.");
         }
+        if self.media_load.pending.is_some() {
+            return Err("A media load is already pending. Try again shortly.");
+        }
         let Some(session) = self.session else {
             return Err("libmpv is unavailable.");
         };
         self.queue_load_settings(session, &load)?;
-        session
+        let command = session
             .command(&["loadfile", url.as_str(), "replace"])
             .map_err(|_| "Could not queue the stream address in libmpv.")?;
-        self.item = ItemPlaybackState::default();
-        self._relay = None;
+        self.media_load.pending = Some(PendingMediaLoad {
+            command_id: command.get(),
+            relay: None,
+            resume_seconds: None,
+            item: ItemPlaybackState::default(),
+        });
         self.pending_report_metadata = None;
-        self.pending_resume_seconds = None;
-        self.resume_seek_command = None;
-        self.playback_seek_pending = false;
         self.status = format!("Loading stream {}", url.redacted());
         self.sync_controller.reset();
         self.policy.reset_item();
@@ -1131,28 +1226,35 @@ impl<'session> MpvHost<'session> {
         report_metadata: PlaybackReportMetadata,
         resume_position_ticks: Option<i64>,
         load: ItemLoadSettings<'_>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), RelayLoadError> {
         if self.renderer.is_none() {
-            return Err("The libmpv video renderer is unavailable.");
+            return Err(RelayLoadError::Failed(
+                "The libmpv video renderer is unavailable.",
+            ));
+        }
+        if self.media_load.pending.is_some() {
+            return Err(RelayLoadError::Busy);
         }
         let Some(session) = self.session else {
-            return Err("libmpv is unavailable.");
+            return Err(RelayLoadError::Failed("libmpv is unavailable."));
         };
-        self.queue_load_settings(session, &load)?;
-        session
+        self.queue_load_settings(session, &load)
+            .map_err(RelayLoadError::Failed)?;
+        let command = session
             .command(&["loadfile", url.as_str(), "replace"])
-            .map_err(|_| "Could not queue the server stream in libmpv.")?;
-        self.item = ItemPlaybackState {
-            segment_item_id: Some(report_metadata.item_id.clone()),
-            series_id: load.series_id,
-            language_memory: load.language_memory,
-            ..ItemPlaybackState::default()
-        };
-        self._relay = Some(relay);
+            .map_err(|_| RelayLoadError::Failed("Could not queue the server stream in libmpv."))?;
+        self.media_load.pending = Some(PendingMediaLoad {
+            command_id: command.get(),
+            relay: Some(relay),
+            resume_seconds: resume_position_seconds(resume_position_ticks),
+            item: ItemPlaybackState {
+                segment_item_id: Some(report_metadata.item_id.clone()),
+                series_id: load.series_id,
+                language_memory: load.language_memory,
+                ..ItemPlaybackState::default()
+            },
+        });
         self.pending_report_metadata = Some(report_metadata);
-        self.pending_resume_seconds = resume_position_seconds(resume_position_ticks);
-        self.resume_seek_command = None;
-        self.playback_seek_pending = false;
         self.status = "Loading server-transcoded Jellyfin playback through the local relay".into();
         self.sync_controller.reset();
         self.policy.reset_item();
@@ -1221,11 +1323,15 @@ impl<'session> MpvHost<'session> {
                         self.controls.apply_observation(property, value);
                     }
                 }
-                EventKind::StartFile { .. } => {
+                EventKind::StartFile { playlist_entry_id } => {
                     self.file_loaded = false;
                     self.media_info.clear_snapshot();
                     self.playback_restart_seen = false;
                     self.stop_playback_report(false);
+                    if let Some(load) = self.media_load.started(playlist_entry_id) {
+                        self.pending_resume_seconds = load.resume_seconds;
+                        self.item = load.item;
+                    }
                     self.report_metadata = self.pending_report_metadata.take();
                     self.report_session = self.next_report_session();
                     self.report_started_at = None;
@@ -1241,7 +1347,13 @@ impl<'session> MpvHost<'session> {
                     self.pending_track_selection = None;
                     self.reset_subtitle_state();
                 }
-                EventKind::EndFile { reason, .. } => {
+                EventKind::EndFile {
+                    reason,
+                    playlist_entry_id,
+                } => {
+                    if !self.media_load.ended(playlist_entry_id) {
+                        continue;
+                    }
                     self.playback_end_reason = Some(reason);
                     self.playback_end_item_id = self
                         .report_metadata
@@ -1255,7 +1367,6 @@ impl<'session> MpvHost<'session> {
                     self.media_info.close();
                     // EndFile is the point at which mpv has stopped consuming
                     // the relay URL. Dropping the handle requests listener shutdown.
-                    self._relay.take();
                     self.file_loaded = false;
                     self.playback_restart_seen = false;
                     self.stop_playback_report(playback_end_failed(reason));
@@ -1272,6 +1383,24 @@ impl<'session> MpvHost<'session> {
                     self.track_feedback = None;
                     self.pending_track_selection = None;
                     self.reset_subtitle_state();
+                }
+                EventKind::CommandReply | EventKind::CommandSubmissionFailed
+                    if self
+                        .media_load
+                        .pending
+                        .as_ref()
+                        .is_some_and(|load| load.command_id == event.request_id)
+                        && (matches!(event.kind, EventKind::CommandSubmissionFailed)
+                            || event.error < 0) =>
+                {
+                    let _ = self.media_load.reject_command(event.request_id);
+                    let metadata = self.pending_report_metadata.take();
+                    self.playback_end_reason = Some(EndFileReason::Error);
+                    self.playback_end_item_id = metadata.as_ref().map(|item| item.item_id.clone());
+                    self.playback_end_was_live = metadata
+                        .as_ref()
+                        .is_some_and(|item| item.live_stream_id.is_some());
+                    self.status = format!("Could not start media (libmpv error {}).", event.error);
                 }
                 EventKind::CommandReply if Some(event.request_id) == self.resume_seek_command => {
                     self.resume_seek_command = None;
@@ -2447,9 +2576,8 @@ impl<'session> MpvHost<'session> {
     /// Hand the item's fetched segments to the skipper. Segments for another item are dropped,
     /// so a late response cannot skip the wrong item (M2-08).
     pub(crate) fn load_media_segments(&mut self, item_id: &str, segments: Vec<MediaSegment>) {
-        if self.item.segment_item_id.as_deref() == Some(item_id) {
-            self.item.segment_skipper.load(item_id, segments);
-        }
+        self.media_load
+            .load_segments(&mut self.item, item_id, segments);
     }
 
     /// Choices the viewer made since the last call, each with its series (M2-10).
@@ -3043,6 +3171,97 @@ mod tests {
         ] {
             assert!(!playback_end_failed(reason), "{reason:?}");
         }
+    }
+
+    #[test]
+    fn replacement_keeps_the_new_relay_until_its_matching_entry_ends() {
+        let mut state = MediaLoadState {
+            active: Some("old relay"),
+            active_entry_id: Some(11),
+            pending: Some(PendingMediaLoad {
+                command_id: 42,
+                relay: Some("new relay"),
+                resume_seconds: Some(8.0),
+                item: ItemPlaybackState::default(),
+            }),
+        };
+        assert!(state.ended(Some(11)));
+        assert_eq!(state.active, None);
+        assert_eq!(
+            state.pending.as_ref().and_then(|load| load.relay),
+            Some("new relay")
+        );
+        let started = state.started(Some(12)).expect("queued replacement");
+        assert_eq!(started.resume_seconds, Some(8.0));
+        assert_eq!(state.active, Some("new relay"));
+        assert!(
+            !state.ended(Some(11)),
+            "late old end cannot close new relay"
+        );
+        assert_eq!(state.active, Some("new relay"));
+        assert!(state.ended(Some(12)));
+        assert_eq!(state.active, None);
+    }
+
+    #[test]
+    fn failed_load_clears_only_its_pending_relay() {
+        let mut state = MediaLoadState {
+            active: Some("currently playing"),
+            active_entry_id: Some(11),
+            pending: Some(PendingMediaLoad {
+                command_id: 42,
+                relay: Some("queued relay"),
+                resume_seconds: None,
+                item: ItemPlaybackState::default(),
+            }),
+        };
+        assert!(!state.reject_command(41));
+        assert!(state.pending.is_some());
+        assert!(state.reject_command(42));
+        assert!(state.pending.is_none());
+        assert_eq!(state.active, Some("currently playing"));
+        assert_eq!(state.active_entry_id, Some(11));
+    }
+
+    #[test]
+    fn segments_are_delivered_to_the_matching_pending_or_active_item() {
+        let mut active = ItemPlaybackState {
+            segment_item_id: Some("old".into()),
+            ..Default::default()
+        };
+        let mut state = MediaLoadState::<()> {
+            active: None,
+            active_entry_id: Some(11),
+            pending: Some(PendingMediaLoad {
+                command_id: 42,
+                relay: None,
+                resume_seconds: None,
+                item: ItemPlaybackState {
+                    segment_item_id: Some("new".into()),
+                    ..Default::default()
+                },
+            }),
+        };
+        state.load_segments(&mut active, "new", vec![]);
+        assert_eq!(
+            state
+                .pending
+                .as_ref()
+                .and_then(|load| load.item.segment_skipper.item_id()),
+            Some("new")
+        );
+        assert_eq!(active.segment_skipper.item_id(), None);
+        state.load_segments(&mut active, "old", vec![]);
+        assert_eq!(active.segment_skipper.item_id(), Some("old"));
+        state.load_segments(&mut active, "unrelated", vec![]);
+        assert_eq!(active.segment_skipper.item_id(), Some("old"));
+        assert_eq!(
+            state
+                .pending
+                .as_ref()
+                .and_then(|load| load.item.segment_skipper.item_id()),
+            Some("new")
+        );
     }
 
     #[test]

@@ -5012,6 +5012,16 @@ impl KattriApp {
         }
     }
 
+    /// A busy player is backpressure, not evidence that another source will work.
+    pub fn playback_start_busy(&mut self) {
+        self.playback_recovery = None;
+        self.playback_start_loading = false;
+        self.playback_start_status = None;
+        self.playback_start_error =
+            Some("A media load is already pending. Try again shortly.".into());
+        self.music_queue_auto_play_item_id = None;
+    }
+
     /// Surface an asynchronous player failure without restarting a superseded item.
     /// Music keeps its queue policy; movie/episode mid-stream retry is not yet safe.
     pub fn playback_failed(&mut self, item_id: &str) {
@@ -10025,6 +10035,22 @@ mod playback_recovery_tests {
         app.playback_request_id += 1;
         assert!(!app.retry_playback_start());
         assert!(app.playback_recovery.is_none());
+    }
+
+    #[test]
+    fn busy_player_surfaces_backpressure_without_trying_another_source() {
+        let mut app = recovery_app();
+        app.playback_start_request_id = 50;
+        app.playback_start_loading = true;
+        app.playback_start_busy();
+        assert_eq!(app.playback_start_request_id, 50);
+        assert!(!app.playback_start_loading);
+        assert!(app.playback_recovery.is_none());
+        assert!(
+            app.playback_start_error
+                .as_deref()
+                .is_some_and(|message| message.contains("pending"))
+        );
     }
 
     #[test]

@@ -873,9 +873,6 @@ impl<'session> GlHost<'session> {
                 }
             }
         }
-        if let Some((item_id, segments)) = self.kattri_app.take_media_segments() {
-            self.mpv.load_media_segments(&item_id, segments);
-        }
         // Remote-control actions from the egui client (M4-13). Drained here, on the UI
         // thread and before the frame renders, so libmpv only changes on this thread.
         for action in self.kattri_app.take_player_intents() {
@@ -920,10 +917,21 @@ impl<'session> GlHost<'session> {
                     if let Some(channel_id) = live_channel_id {
                         self.kattri_app.on_live_tv_stream_ended(&channel_id);
                     }
-                    self.kattri_app.playback_start_failed(error);
+                    match error {
+                        mpv_host::RelayLoadError::Busy => self.kattri_app.playback_start_busy(),
+                        mpv_host::RelayLoadError::Failed(message) => {
+                            self.kattri_app.playback_start_failed(message)
+                        }
+                    }
                 }
             }
             self.egui.request_repaint();
+        }
+
+        // A fast segment response can arrive in the same frame as a prepared
+        // item; stage that item first so its segments have a matching owner.
+        if let Some((item_id, segments)) = self.kattri_app.take_media_segments() {
+            self.mpv.load_media_segments(&item_id, segments);
         }
 
         if let Some(stream_url) = self.kattri_app.take_stream_url() {
