@@ -151,18 +151,34 @@ pub fn select_playback_info_source_for_profile<'a>(
     response: &'a PlaybackInfoResponse,
     profile: &DeviceProfile,
 ) -> Option<PlaybackInfoSelection<'a>> {
+    let selection = playback_info_candidates_for_profile(response, profile).next()?;
+    Some(PlaybackInfoSelection {
+        source_index: selection.source_index,
+        method: selection.method,
+        media_source: &response.media_sources[selection.source_index],
+    })
+}
+
+/// Enumerate eligible methods once per source, preserving server source order.
+/// Each source prefers direct play, then remux, then transcode. Consumers may
+/// retain the remaining selections for bounded retries after an open failure.
+/// Eligibility uses the same profile and URL requirements as initial selection.
+pub fn playback_info_candidates_for_profile<'a>(
+    response: &'a PlaybackInfoResponse,
+    profile: &'a DeviceProfile,
+) -> impl Iterator<Item = PlaybackSelection> + 'a {
     response
         .media_sources
         .iter()
         .enumerate()
-        .find_map(|(source_index, media_source)| {
+        .flat_map(move |(source_index, media_source)| {
             let direct_play_match = direct_play_match(profile, media_source);
             let direct_stream_match = direct_stream_profile_match(profile, media_source);
             let has_safe_container = media_source
                 .container
                 .as_deref()
                 .is_some_and(is_safe_container);
-            let method = PlaybackSourceCapabilities {
+            let capabilities = PlaybackSourceCapabilities {
                 supports_direct_play: media_source.supports_direct_play && has_safe_container,
                 supports_direct_stream: media_source.supports_direct_stream && has_safe_container,
                 direct_stream_profile_match: direct_stream_match,
@@ -172,12 +188,22 @@ pub fn select_playback_info_source_for_profile<'a>(
                     .transcoding_url
                     .as_deref()
                     .is_some_and(|url| !url.trim().is_empty()),
-            }
-            .preferred_method()?;
-            Some(PlaybackInfoSelection {
+            };
+            [
+                (capabilities.supports_direct_play
+                    && capabilities.direct_play_profile_match
+                        == DirectPlayProfileMatch::ValidatedPass)
+                    .then_some(PlaybackMethod::DirectPlay),
+                (capabilities.supports_direct_stream && capabilities.direct_stream_profile_match)
+                    .then_some(PlaybackMethod::DirectStream),
+                (capabilities.supports_transcoding && capabilities.has_transcoding_url)
+                    .then_some(PlaybackMethod::Transcode),
+            ]
+            .into_iter()
+            .flatten()
+            .map(move |method| PlaybackSelection {
                 source_index,
                 method,
-                media_source,
             })
         })
 }
@@ -364,5 +390,122 @@ mod tests {
         let selected = select_playback_info_source_for_profile(&remux, &profile)
             .expect("direct-stream source");
         assert_eq!(selected.method, PlaybackMethod::DirectStream);
+    }
+
+    #[test]
+    fn failure_candidates_reject_unsafe_or_unsupported_direct_modes_and_blank_transcodes() {
+        let response: PlaybackInfoResponse = serde_json::from_value(serde_json::json!({
+            "MediaSources": [
+                {
+                    "Container": "../mkv",
+                    "SupportsDirectPlay": true,
+                    "SupportsDirectStream": true,
+                    "SupportsTranscoding": true,
+                    "TranscodingUrl": "  ",
+                    "MediaStreams": [
+                        { "Type": "Video", "Codec": "h264", "BitDepth": 8, "VideoRangeType": "SDR" },
+                        { "Type": "Audio", "Codec": "aac", "IsDefault": true, "Index": 1 }
+                    ]
+                },
+                {
+                    "Container": "mkv",
+                    "SupportsDirectPlay": true,
+                    "SupportsDirectStream": true,
+                    "SupportsTranscoding": true,
+                    "TranscodingUrl": "/fallback",
+                    "MediaStreams": [
+                        { "Type": "Video", "Codec": "unsupported", "BitDepth": 8, "VideoRangeType": "SDR" },
+                        { "Type": "Audio", "Codec": "aac", "IsDefault": true, "Index": 1 }
+                    ]
+                },
+                {
+                    "Container": "mkv",
+                    "SupportsDirectPlay": false,
+                    "SupportsDirectStream": false,
+                    "SupportsTranscoding": false,
+                    "TranscodingUrl": "/not-offered"
+                }
+            ]
+        }))
+        .expect("invalid source fixtures");
+        let profile = baseline_device_profile();
+        assert_eq!(
+            playback_info_candidates_for_profile(&response, &profile).collect::<Vec<_>>(),
+            [PlaybackSelection {
+                source_index: 1,
+                method: PlaybackMethod::Transcode
+            }]
+        );
+        let empty: PlaybackInfoResponse =
+            serde_json::from_str("{}").expect("empty response fixture");
+        assert!(
+            playback_info_candidates_for_profile(&empty, &profile)
+                .next()
+                .is_none()
+        );
+        assert!(select_playback_info_source_for_profile(&empty, &profile).is_none());
+    }
+
+    #[test]
+    fn failure_candidates_cover_every_method_then_advance_in_server_order() {
+        let response: PlaybackInfoResponse = serde_json::from_value(serde_json::json!({
+            "MediaSources": [
+                {
+                    "Container": "mkv",
+                    "SupportsDirectPlay": true,
+                    "SupportsDirectStream": false,
+                    "SupportsTranscoding": true,
+                    "TranscodingUrl": "/first-transcode",
+                    "MediaStreams": [
+                        { "Type": "Video", "Codec": "h264", "BitDepth": 8, "VideoRangeType": "SDR" },
+                        { "Type": "Audio", "Codec": "aac", "IsDefault": true, "Index": 1 }
+                    ]
+                },
+                {
+                    "Container": "custom",
+                    "SupportsDirectPlay": false,
+                    "SupportsDirectStream": true,
+                    "SupportsTranscoding": true,
+                    "TranscodingUrl": "/second-transcode",
+                    "MediaStreams": [
+                        { "Type": "Video", "Codec": "h264", "BitDepth": 8, "VideoRangeType": "SDR" },
+                        { "Type": "Audio", "Codec": "aac", "IsDefault": true, "Index": 1 }
+                    ]
+                }
+            ]
+        }))
+        .expect("fallback source fixture");
+        let candidates: Vec<_> =
+            playback_info_candidates_for_profile(&response, &baseline_device_profile()).collect();
+        assert_eq!(
+            candidates,
+            [
+                PlaybackSelection {
+                    source_index: 0,
+                    method: PlaybackMethod::DirectPlay,
+                },
+                PlaybackSelection {
+                    source_index: 0,
+                    method: PlaybackMethod::Transcode,
+                },
+                PlaybackSelection {
+                    source_index: 1,
+                    method: PlaybackMethod::DirectStream,
+                },
+                PlaybackSelection {
+                    source_index: 1,
+                    method: PlaybackMethod::Transcode,
+                },
+            ]
+        );
+        assert_eq!(
+            candidates.first().copied(),
+            select_playback_info_source_for_profile(&response, &baseline_device_profile()).map(
+                |selection| PlaybackSelection {
+                    source_index: selection.source_index,
+                    method: selection.method
+                }
+            )
+        );
     }
 }

@@ -544,6 +544,10 @@ fn playback_end_status(error: i32) -> String {
     }
 }
 
+fn playback_end_failed(reason: EndFileReason) -> bool {
+    reason == EndFileReason::Error
+}
+
 fn playback_can_start_report(
     paused: Option<bool>,
     file_loaded: bool,
@@ -1254,7 +1258,7 @@ impl<'session> MpvHost<'session> {
                     self._relay.take();
                     self.file_loaded = false;
                     self.playback_restart_seen = false;
-                    self.stop_playback_report(false);
+                    self.stop_playback_report(playback_end_failed(reason));
                     self.pending_resume_seconds = None;
                     self.resume_seek_command = None;
                     self.playback_seek_pending = false;
@@ -3025,6 +3029,20 @@ mod tests {
             "Playback ended with libmpv error -12"
         );
         assert_eq!(playback_end_status(12), "Playback ended");
+    }
+
+    #[test]
+    fn only_error_end_reason_marks_playback_report_failed() {
+        assert!(playback_end_failed(EndFileReason::Error));
+        for reason in [
+            EndFileReason::Eof,
+            EndFileReason::Stop,
+            EndFileReason::Quit,
+            EndFileReason::Redirect,
+            EndFileReason::Unknown(123),
+        ] {
+            assert!(!playback_end_failed(reason), "{reason:?}");
+        }
     }
 
     #[test]

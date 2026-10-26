@@ -30,7 +30,10 @@ use kattri_client_core::epg::{EpgProgram, EpgWindow};
 use kattri_client_core::focus::FocusGraph;
 use kattri_client_core::language_memory::{RecordOutcome, SeriesLanguageMemory, TrackLanguage};
 use kattri_client_core::paging::PagingState;
-use kattri_client_core::playback_plan::{PlaybackMethod, select_playback_info_source_for_profile};
+use kattri_client_core::playback_plan::{
+    PlaybackMethod, PlaybackSelection, playback_info_candidates_for_profile,
+    select_playback_info_source_for_profile,
+};
 use kattri_client_core::playback_reporting::PlaybackReportAction;
 use kattri_client_core::queue::{Queue, Step};
 use kattri_client_core::queue_store::{StoredLoadOutcome, StoredQueue};
@@ -496,6 +499,13 @@ pub(crate) struct AutoPlay {
     start_over: bool,
 }
 
+struct PlaybackRecovery {
+    item_id: String,
+    options_request_id: u64,
+    start_time_ticks: Option<i64>,
+    remaining: VecDeque<PlaybackSelection>,
+}
+
 pub struct KattriApp {
     pub(crate) worker: Option<ApiWorker>,
     /// Download list and page state. The worker owns the jobs; this copy is what the page reads.
@@ -573,6 +583,7 @@ pub struct KattriApp {
     pub(crate) playback_start_status: Option<String>,
     playback_report_feedback: Option<String>,
     pending_playback: Option<PreparedPlayback>,
+    playback_recovery: Option<PlaybackRecovery>,
     /// A prepared episode waiting for its item record, which carries the series ID (M2-10).
     /// Kept with its start request ID, so a newer request drops it.
     held_playback: Option<(u64, String, Box<PreparedPlayback>)>,
@@ -990,6 +1001,7 @@ impl KattriApp {
             playback_start_status: None,
             playback_report_feedback: None,
             pending_playback: None,
+            playback_recovery: None,
             held_playback: None,
             page: Page::Home,
             view: AppView::Home,
@@ -4698,6 +4710,68 @@ impl KattriApp {
         play_method: jellyfin_api::PlayMethod,
         start_time_ticks: Option<i64>,
     ) {
+        self.playback_recovery = None;
+        // Only ordinary movie/episode startup is retried. Music and Live TV
+        // retain their existing queue/reconnect policies.
+        if let Some(item_id) = self.selected_item_id.clone()
+            && self.selected_details.as_ref().is_some_and(|item| {
+                item.id == item_id && matches!(item.item_type.as_deref(), Some("Movie" | "Episode"))
+            })
+            && let Some(info) = self.playback_info.as_ref()
+        {
+            let chosen_method = match play_method {
+                jellyfin_api::PlayMethod::DirectPlay => PlaybackMethod::DirectPlay,
+                jellyfin_api::PlayMethod::DirectStream => PlaybackMethod::DirectStream,
+                jellyfin_api::PlayMethod::Transcode => PlaybackMethod::Transcode,
+            };
+            let chosen = PlaybackSelection {
+                source_index,
+                method: chosen_method,
+            };
+            let mut candidates = playback_info_candidates_for_profile(info, self.device_profile());
+            if candidates.by_ref().any(|candidate| candidate == chosen) {
+                self.playback_recovery = Some(PlaybackRecovery {
+                    item_id,
+                    options_request_id: self.playback_request_id,
+                    start_time_ticks,
+                    // Bound automatic retries even for an unusually large response.
+                    remaining: candidates.take(32).collect(),
+                });
+            }
+        }
+        self.prepare_server_playback(source_index, play_method, start_time_ticks);
+    }
+
+    fn retry_playback_start(&mut self) -> bool {
+        let Some(recovery) = self.playback_recovery.as_mut() else {
+            return false;
+        };
+        if self.selected_item_id.as_deref() != Some(recovery.item_id.as_str())
+            || self.playback_request_id != recovery.options_request_id
+        {
+            self.playback_recovery = None;
+            return false;
+        }
+        let Some(candidate) = recovery.remaining.pop_front() else {
+            self.playback_recovery = None;
+            return false;
+        };
+        let ticks = recovery.start_time_ticks;
+        let method = match candidate.method {
+            PlaybackMethod::DirectPlay => jellyfin_api::PlayMethod::DirectPlay,
+            PlaybackMethod::DirectStream => jellyfin_api::PlayMethod::DirectStream,
+            PlaybackMethod::Transcode => jellyfin_api::PlayMethod::Transcode,
+        };
+        self.prepare_server_playback(candidate.source_index, method, ticks);
+        true
+    }
+
+    fn prepare_server_playback(
+        &mut self,
+        source_index: usize,
+        play_method: jellyfin_api::PlayMethod,
+        start_time_ticks: Option<i64>,
+    ) {
         let Some(item_id) = self.selected_item_id.clone() else {
             return;
         };
@@ -4915,6 +4989,9 @@ impl KattriApp {
     }
 
     pub fn playback_start_opening(&mut self) {
+        // loadfile was accepted. Later asynchronous errors need player-generation
+        // and current-position evidence before automatic recovery is safe.
+        self.playback_recovery = None;
         self.playback_start_status = Some(ui_text(ids::PLAYBACK_STATUS_OPENING_LOCAL).into());
         if self.music_queue_auto_play_item_id.as_deref() == self.selected_item_id.as_deref() {
             self.music_queue_auto_play_item_id = None;
@@ -4923,12 +5000,29 @@ impl KattriApp {
     }
 
     pub fn playback_start_failed(&mut self, message: impl Into<String>) {
+        if self.retry_playback_start() {
+            return;
+        }
         let queue_failed = self.music_queue_auto_play_item_id.clone();
         self.playback_start_loading = false;
         self.playback_start_status = None;
         self.playback_start_error = Some(message.into());
         if let Some(item_id) = queue_failed {
             self.on_music_track_ended(&item_id, true);
+        }
+    }
+
+    /// Surface an asynchronous player failure without restarting a superseded item.
+    /// Music keeps its queue policy; movie/episode mid-stream retry is not yet safe.
+    pub fn playback_failed(&mut self, item_id: &str) {
+        if self.music_queue_current_item_id() == Some(item_id) {
+            self.on_music_track_ended(item_id, true);
+        } else if self.selected_item_id.as_deref() == Some(item_id) {
+            self.playback_recovery = None;
+            self.playback_start_loading = false;
+            self.playback_start_status = None;
+            self.playback_start_error =
+                Some("Playback failed. Try another source or play again.".into());
         }
     }
 
@@ -6364,6 +6458,9 @@ impl KattriApp {
                     request_id,
                     message,
                 } if request_id == self.playback_start_request_id => {
+                    if self.retry_playback_start() {
+                        continue;
+                    }
                     self.playback_start_loading = false;
                     self.playback_start_status = None;
                     self.record_error_for_crash_report(&format!(
@@ -9869,5 +9966,154 @@ mod photo_decode_event_tests {
                 .cancelled,
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod playback_recovery_tests {
+    use super::*;
+
+    fn recovery_app() -> KattriApp {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.worker = Some(ApiWorker::queued_for_test());
+        app.selected_item_id = Some("movie".into());
+        app.playback_request_id = 19;
+        app.playback_recovery = Some(PlaybackRecovery {
+            item_id: "movie".into(),
+            options_request_id: 19,
+            start_time_ticks: Some(40_000_000),
+            remaining: [PlaybackSelection {
+                source_index: 1,
+                method: PlaybackMethod::Transcode,
+            }]
+            .into(),
+        });
+        app
+    }
+
+    #[test]
+    fn startup_retry_consumes_candidate_once_then_surfaces_terminal_error() {
+        let mut app = recovery_app();
+        let previous_request = app.playback_start_request_id;
+        app.playback_start_failed("first source failed");
+        assert!(app.playback_start_loading);
+        assert!(app.playback_start_error.is_none());
+        assert_ne!(app.playback_start_request_id, previous_request);
+        assert!(
+            app.playback_recovery
+                .as_ref()
+                .expect("retry context")
+                .remaining
+                .is_empty()
+        );
+        app.playback_start_failed("last source failed");
+        assert!(!app.playback_start_loading);
+        assert_eq!(
+            app.playback_start_error.as_deref(),
+            Some("last source failed")
+        );
+        assert!(app.playback_recovery.is_none());
+    }
+
+    #[test]
+    fn navigation_or_renegotiation_invalidates_recovery() {
+        let mut app = recovery_app();
+        app.selected_item_id = Some("other".into());
+        assert!(!app.retry_playback_start());
+        assert!(app.playback_recovery.is_none());
+        let mut app = recovery_app();
+        app.playback_request_id += 1;
+        assert!(!app.retry_playback_start());
+        assert!(app.playback_recovery.is_none());
+    }
+
+    #[test]
+    fn preparation_failure_retries_but_stale_worker_event_does_not_consume_candidate() {
+        let mut app = recovery_app();
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.playback_start_request_id = 100;
+        sender
+            .try_send(WorkerEvent::PlaybackPrepareFailed {
+                request_id: 99,
+                message: "stale".into(),
+            })
+            .expect("stale event");
+        app.receive_worker_events(&egui::Context::default());
+        assert_eq!(
+            app.playback_recovery
+                .as_ref()
+                .expect("context")
+                .remaining
+                .len(),
+            1
+        );
+        sender
+            .try_send(WorkerEvent::PlaybackPrepareFailed {
+                request_id: 100,
+                message: "failed".into(),
+            })
+            .expect("current event");
+        app.receive_worker_events(&egui::Context::default());
+        assert!(
+            app.playback_recovery
+                .as_ref()
+                .expect("context")
+                .remaining
+                .is_empty()
+        );
+        assert!(app.playback_start_loading);
+        assert!(app.playback_start_error.is_none());
+    }
+
+    #[test]
+    fn explicit_movie_start_builds_only_remaining_candidates_and_keeps_resume() {
+        let mut app = recovery_app();
+        app.selected_details = Some(
+            serde_json::from_value(
+                serde_json::json!({"Id":"movie", "Name":"Fixture", "Type":"Movie"}),
+            )
+            .expect("item fixture"),
+        );
+        app.playback_info = Some(serde_json::from_value(serde_json::json!({
+            "MediaSources":[{
+                "Container":"mkv", "SupportsDirectPlay":true, "SupportsTranscoding":true,
+                "TranscodingUrl":"/fixture",
+                "MediaStreams":[{"Type":"Video","Codec":"h264","BitDepth":8,"VideoRangeType":"SDR"}, {"Type":"Audio","Codec":"aac","IsDefault":true,"Index":1}]
+            }]
+        })).expect("negotiation fixture"));
+        app.start_server_playback(0, jellyfin_api::PlayMethod::DirectPlay, Some(40_000_000));
+        let recovery = app.playback_recovery.as_ref().expect("movie recovery");
+        assert_eq!(recovery.start_time_ticks, Some(40_000_000));
+        assert_eq!(
+            recovery.remaining.iter().copied().collect::<Vec<_>>(),
+            [PlaybackSelection {
+                source_index: 0,
+                method: PlaybackMethod::Transcode
+            }]
+        );
+        app.start_server_playback(0, jellyfin_api::PlayMethod::Transcode, None);
+        assert!(
+            app.playback_recovery
+                .as_ref()
+                .expect("explicit transcode")
+                .remaining
+                .is_empty()
+        );
+        app.selected_details.as_mut().expect("item").item_type = Some("Audio".into());
+        app.start_server_playback(0, jellyfin_api::PlayMethod::DirectPlay, None);
+        assert!(app.playback_recovery.is_none());
+    }
+
+    #[test]
+    fn accepted_load_clears_retry_and_stale_native_error_is_ignored() {
+        let mut app = recovery_app();
+        app.playback_start_opening();
+        assert!(app.playback_recovery.is_none());
+        app.playback_failed("other");
+        assert!(app.playback_start_error.is_none());
+        app.playback_failed("movie");
+        assert!(app.playback_start_error.is_some());
+        assert!(!app.playback_start_loading);
     }
 }

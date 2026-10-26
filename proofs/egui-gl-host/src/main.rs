@@ -376,7 +376,7 @@ impl<'session> GlHost<'session> {
                         self.kattri_app.on_music_track_ended(&item_id, false);
                     }
                     mpv_render_proof::EndFileReason::Error => {
-                        self.kattri_app.on_music_track_ended(&item_id, true);
+                        self.kattri_app.playback_failed(&item_id);
                     }
                     mpv_render_proof::EndFileReason::Stop
                     | mpv_render_proof::EndFileReason::Quit
