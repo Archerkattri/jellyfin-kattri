@@ -349,7 +349,7 @@ pub enum EndFileReason {
 
 #[cfg(test)]
 mod end_file_reason_tests {
-    use super::EndFileReason;
+    use super::{EndFileReason, MpvEventEndFile, end_file_details};
 
     #[test]
     fn maps_known_end_reasons_without_treating_user_stop_as_eof() {
@@ -359,6 +359,43 @@ mod end_file_reason_tests {
         assert_eq!(EndFileReason::from_raw(4), EndFileReason::Error);
         assert_eq!(EndFileReason::from_raw(5), EndFileReason::Redirect);
         assert_eq!(EndFileReason::from_raw(123), EndFileReason::Unknown(123));
+    }
+
+    #[test]
+    fn end_file_uses_payload_error_for_failure_and_handles_missing_data() {
+        let payload = MpvEventEndFile {
+            reason: 4,
+            error: -13,
+            playlist_entry_id: 7,
+            playlist_insert_id: 0,
+            playlist_insert_num_entries: 0,
+        };
+        assert_eq!(
+            end_file_details(Some(payload), 0),
+            (EndFileReason::Error, -13)
+        );
+        assert_eq!(
+            end_file_details(None, -20),
+            (EndFileReason::Unknown(-1), -20)
+        );
+        assert_eq!(
+            end_file_details(
+                Some(MpvEventEndFile {
+                    reason: 0,
+                    error: 0,
+                    ..payload
+                }),
+                -20
+            ),
+            (EndFileReason::Eof, 0)
+        );
+    }
+}
+
+fn end_file_details(payload: Option<MpvEventEndFile>, event_error: i32) -> (EndFileReason, i32) {
+    match payload {
+        Some(payload) => (EndFileReason::from_raw(payload.reason), payload.error),
+        None => (EndFileReason::Unknown(-1), event_error),
     }
 }
 
@@ -2015,6 +2052,7 @@ fn drain_events(
         if event.event_id == MPV_EVENT_NONE {
             break;
         }
+        let mut reported_error = event.error;
         let kind = match event.event_id {
             MPV_EVENT_SHUTDOWN => EventKind::Shutdown,
             MPV_EVENT_COMMAND_REPLY => EventKind::CommandReply,
@@ -2082,16 +2120,16 @@ fn drain_events(
             }
             MPV_EVENT_END_FILE => {
                 core.track_generation.fetch_add(1, Ordering::AcqRel);
-                let reason = if event.data.is_null() {
-                    EndFileReason::Unknown(-1)
+                let payload = if event.data.is_null() {
+                    None
                 } else {
                     // SAFETY: MPV_EVENT_END_FILE data points to the documented
                     // mpv_event_end_file payload and remains valid until the
                     // next mpv_wait_event call.
-                    let payload =
-                        unsafe { ptr::read_unaligned(event.data.cast::<MpvEventEndFile>()) };
-                    EndFileReason::from_raw(payload.reason)
+                    Some(unsafe { ptr::read_unaligned(event.data.cast::<MpvEventEndFile>()) })
                 };
+                let (reason, error) = end_file_details(payload, event.error);
+                reported_error = error;
                 EventKind::EndFile(reason)
             }
             MPV_EVENT_FILE_LOADED => EventKind::FileLoaded,
@@ -2120,7 +2158,7 @@ fn drain_events(
         let _ = sender.send(MpvEvent {
             kind,
             request_id: event.reply_userdata,
-            error: event.error,
+            error: reported_error,
         });
     }
 }

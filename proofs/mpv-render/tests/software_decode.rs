@@ -4,9 +4,42 @@ use std::{
 };
 
 use mpv_render_proof::{
-    CapabilitySnapshot, CapabilityValue, EventKind, MpvLibrary, MpvSession, PlaybackProperty,
-    PlaybackPropertyValue,
+    CapabilitySnapshot, CapabilityValue, EndFileReason, EventKind, MpvLibrary, MpvSession,
+    PlaybackProperty, PlaybackPropertyValue,
 };
+
+#[test]
+#[ignore = "requires checksum-verified libmpv"]
+fn missing_local_file_reports_the_actual_mpv_end_error() {
+    let library_path = env::var_os("KATTRI_TEST_LIBMPV").expect("set KATTRI_TEST_LIBMPV");
+    let library = MpvLibrary::load_from_path(library_path).expect("load selected libmpv");
+    let session =
+        MpvSession::new_software_null(&library).expect("initialize software/null session");
+    let missing = env::temp_dir()
+        .join(format!("kattri-missing-mpv-test-{}", std::process::id()))
+        .join("missing.mp4");
+    assert!(!missing.exists(), "test path unexpectedly exists");
+    let path = missing.to_str().expect("Unicode temp path");
+    session
+        .command(&["loadfile", path, "replace"])
+        .expect("queue missing file");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if let Some(event) = session.try_event()
+            && let EventKind::EndFile(reason) = event.kind
+        {
+            assert_eq!(reason, EndFileReason::Error);
+            assert!(
+                event.error < 0,
+                "missing file must carry a negative libmpv error"
+            );
+            println!("missing_file_end_error={}", event.error);
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!("libmpv did not report the missing-file failure");
+}
 
 #[test]
 #[ignore = "requires checksum-verified libmpv and a local test-media path"]
