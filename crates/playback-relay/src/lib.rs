@@ -8,7 +8,7 @@
 pub mod cast_listener;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
     future::IntoFuture,
     hash::{Hash, Hasher},
@@ -350,10 +350,21 @@ impl fmt::Debug for SecretUrl {
     }
 }
 
+/// Aliases for one relay session, bounded at `MAX_ALIAS_COUNT`.
+///
+/// Rolling HLS playlists add new segment URLs on every refresh, so a full table
+/// evicts the least recently used aliases instead of refusing. The source alias
+/// is pinned. Every alias in the batch being registered is touched before any
+/// eviction, and fetching an alias touches it too, so live variant playlists
+/// and the current window's segments stay mapped.
 #[derive(Default)]
 struct AliasTable {
     by_id: HashMap<String, SecretUrl>,
     by_url: HashMap<SecretUrl, String>,
+    stamps: HashMap<String, u64>,
+    recency: BTreeMap<u64, String>,
+    next_stamp: u64,
+    pinned: HashSet<String>,
 }
 
 impl AliasTable {
@@ -361,45 +372,90 @@ impl AliasTable {
         let id = unique_resource_id(&self.by_id, &HashSet::new())?;
         self.by_url.insert(url.clone(), id.clone());
         self.by_id.insert(id.clone(), url);
+        self.pinned.insert(id.clone());
         Ok(id)
     }
 
-    fn get(&self, id: &str) -> Option<SecretUrl> {
-        self.by_id.get(id).cloned()
+    fn get(&mut self, id: &str) -> Option<SecretUrl> {
+        let url = self.by_id.get(id).cloned()?;
+        self.touch(id);
+        Some(url)
+    }
+
+    fn touch(&mut self, id: &str) {
+        if self.pinned.contains(id) {
+            return;
+        }
+        let stamp = self.next_stamp;
+        self.next_stamp += 1;
+        if let Some(previous) = self.stamps.insert(id.to_owned(), stamp) {
+            self.recency.remove(&previous);
+        }
+        self.recency.insert(stamp, id.to_owned());
+    }
+
+    fn evict_oldest(&mut self) {
+        if let Some((_, id)) = self.recency.pop_first() {
+            self.stamps.remove(&id);
+            if let Some(url) = self.by_id.remove(&id) {
+                self.by_url.remove(&url);
+            }
+        }
     }
 
     fn register_batch(&mut self, urls: &[SecretUrl]) -> Result<Vec<String>, RelayError> {
+        let mut known_ids = Vec::new();
+        let mut seen_known = HashSet::new();
         let mut new_ids: HashMap<SecretUrl, String> = HashMap::new();
         let mut additions = Vec::new();
-        let mut ids = Vec::with_capacity(urls.len());
         let mut reserved_ids = HashSet::new();
 
         for url in urls {
             if let Some(id) = self.by_url.get(url) {
-                ids.push(id.clone());
+                if seen_known.insert(id.clone()) {
+                    known_ids.push(id.clone());
+                }
                 continue;
             }
-            if let Some(id) = new_ids.get(url) {
-                ids.push(id.clone());
+            if new_ids.contains_key(url) {
                 continue;
             }
-            // Refuse before generating more random IDs once this batch cannot
-            // fit. No table entries have been inserted yet, so failure is atomic.
-            if self.by_id.len().saturating_add(additions.len()) >= MAX_ALIAS_COUNT {
+            // Stop generating random IDs once the batch alone cannot fit.
+            if additions.len() >= MAX_ALIAS_COUNT {
                 return Err(RelayError::AliasLimitReached);
             }
             let id = unique_resource_id(&self.by_id, &reserved_ids)?;
             reserved_ids.insert(id.clone());
             new_ids.insert(url.clone(), id.clone());
-            additions.push((url.clone(), id.clone()));
-            ids.push(id);
+            additions.push((url.clone(), id));
+        }
+        // The pinned aliases and every alias this batch refers to must fit together;
+        // only aliases outside the batch can be evicted. Nothing has been mutated
+        // yet, so failure is atomic.
+        let retained = self.pinned.len()
+            + known_ids
+                .iter()
+                .filter(|id| !self.pinned.contains(*id))
+                .count();
+        if retained.saturating_add(additions.len()) > MAX_ALIAS_COUNT {
+            return Err(RelayError::AliasLimitReached);
         }
 
+        for id in &known_ids {
+            self.touch(id);
+        }
+        while self.by_id.len().saturating_add(additions.len()) > MAX_ALIAS_COUNT {
+            self.evict_oldest();
+        }
         for (url, id) in additions {
             self.by_url.insert(url.clone(), id.clone());
-            self.by_id.insert(id, url);
+            self.by_id.insert(id.clone(), url);
+            self.touch(&id);
         }
-        Ok(ids)
+        Ok(urls
+            .iter()
+            .map(|url| self.by_url.get(url).cloned().unwrap_or_default())
+            .collect())
     }
 }
 
@@ -428,7 +484,7 @@ async fn relay_handler(
         .aliases
         .lock()
         .ok()
-        .and_then(|aliases| aliases.get(&resource_id))
+        .and_then(|mut aliases| aliases.get(&resource_id))
     else {
         return empty_response(StatusCode::NOT_FOUND);
     };
@@ -1216,48 +1272,77 @@ mod tests {
         (SecretUrl::from_url(url), aliases)
     }
 
+    fn segment(index: usize) -> SecretUrl {
+        SecretUrl::from_url(
+            Url::parse(&format!("https://jellyfin.example/segment/{index}")).expect("URL"),
+        )
+    }
+
     #[test]
-    fn alias_capacity_failure_is_atomic_and_existing_urls_remain_usable() {
-        let mut aliases = AliasTable::default();
-        for index in 0..MAX_ALIAS_COUNT - 1 {
-            let url = SecretUrl::from_url(
-                Url::parse(&format!("https://jellyfin.example/segment/{index}")).expect("URL"),
-            );
-            let id = format!("fixture-{index}");
-            aliases.by_url.insert(url.clone(), id.clone());
-            aliases.by_id.insert(id, url);
-        }
-        let existing =
-            SecretUrl::from_url(Url::parse("https://jellyfin.example/segment/0").expect("URL"));
-        let last = SecretUrl::from_url(Url::parse("https://jellyfin.example/last").expect("URL"));
-        let overflow =
-            SecretUrl::from_url(Url::parse("https://jellyfin.example/overflow").expect("URL"));
+    fn oversized_alias_batch_fails_atomically_and_existing_urls_remain_usable() {
+        let (source, mut aliases) = initial_aliases("https://jellyfin.example/master.m3u8");
+        let first = aliases.register_batch(&[segment(0)]).expect("first alias")[0].clone();
+        let oversized: Vec<_> = (1..=MAX_ALIAS_COUNT).map(segment).collect();
+        let mut with_known = oversized.clone();
+        with_known.push(segment(0));
         assert!(matches!(
-            aliases.register_batch(&[existing.clone(), last.clone(), overflow.clone()]),
+            aliases.register_batch(&with_known),
             Err(RelayError::AliasLimitReached)
         ));
-        assert_eq!(aliases.by_id.len(), MAX_ALIAS_COUNT - 1);
-        assert!(!aliases.by_url.contains_key(&last));
-        assert_eq!(aliases.get("fixture-0").as_ref(), Some(&existing));
+        assert_eq!(aliases.by_id.len(), 2);
+        assert!(!aliases.by_url.contains_key(&segment(1)));
+        assert_eq!(aliases.get(&first).as_ref(), Some(&segment(0)));
+        assert!(aliases.by_url.contains_key(&source));
 
         let accepted = aliases
-            .register_batch(&[last.clone(), last.clone(), existing.clone()])
-            .expect("one remaining slot");
+            .register_batch(&[segment(1), segment(1), segment(0)])
+            .expect("batch fits");
         assert_eq!(accepted[0], accepted[1]);
-        assert_eq!(accepted[2], "fixture-0");
+        assert_eq!(accepted[2], first);
+        assert_eq!(aliases.get(&accepted[0]).as_ref(), Some(&segment(1)));
+    }
+
+    #[test]
+    fn full_alias_table_evicts_least_recently_used_but_keeps_the_batch_and_source() {
+        let (source, mut aliases) = initial_aliases("https://jellyfin.example/master.m3u8");
+        let filler: Vec<_> = (0..MAX_ALIAS_COUNT - 1).map(segment).collect();
+        let filler_ids = aliases.register_batch(&filler).expect("fill table");
         assert_eq!(aliases.by_id.len(), MAX_ALIAS_COUNT);
-        assert_eq!(aliases.get(&accepted[0]).as_ref(), Some(&last));
-        assert!(matches!(
-            aliases.register_batch(&[overflow]),
-            Err(RelayError::AliasLimitReached)
-        ));
+
+        // Fetching segment 1 makes it recent, so segment 2 is now the oldest
+        // alias that is not in the next batch.
+        assert!(aliases.get(&filler_ids[1]).is_some());
+        let next = aliases
+            .register_batch(&[segment(0), segment(MAX_ALIAS_COUNT)])
+            .expect("rolling refresh at capacity");
+        assert_eq!(next[0], filler_ids[0]);
+        assert_eq!(aliases.by_id.len(), MAX_ALIAS_COUNT);
+        assert!(aliases.get(&filler_ids[2]).is_none());
+        assert!(aliases.get(&filler_ids[1]).is_some());
         assert_eq!(
-            aliases
-                .register_batch(&[existing])
-                .expect("known URL at capacity"),
-            ["fixture-0"]
+            aliases.get(&next[1]).as_ref(),
+            Some(&segment(MAX_ALIAS_COUNT))
         );
-        assert_eq!(aliases.get(&accepted[0]).as_ref(), Some(&last));
+        assert!(aliases.by_url.contains_key(&source));
+    }
+
+    #[test]
+    fn rolling_playlist_outlives_the_alias_limit() {
+        let (source, mut aliases) = initial_aliases("https://jellyfin.example/live.m3u8");
+        let window = 6;
+        // Ten times the table size in distinct segments, as a long live session
+        // would produce.
+        for start in 0..MAX_ALIAS_COUNT * 10 {
+            let batch: Vec<_> = (start..start + window).map(segment).collect();
+            let ids = aliases.register_batch(&batch).expect("rolling refresh");
+            for (id, url) in ids.iter().zip(&batch) {
+                assert_eq!(aliases.get(id).as_ref(), Some(url));
+            }
+        }
+        assert!(aliases.by_id.len() <= MAX_ALIAS_COUNT);
+        assert_eq!(aliases.by_id.len(), aliases.by_url.len());
+        assert_eq!(aliases.stamps.len(), aliases.recency.len());
+        assert!(aliases.by_url.contains_key(&source));
     }
 
     async fn start_timeout_fixture(
