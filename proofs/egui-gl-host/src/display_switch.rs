@@ -8,9 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use kattri_client_core::display_match::{
-    DisplayBackend, DisplayMode, FileRecordStore, MatchError, Matcher, Outcome,
-};
+use kattri_client_core::display_match::{FileRecordStore, MatchError, Matcher, Outcome};
 
 #[cfg(windows)]
 mod windows_backend;
@@ -26,7 +24,7 @@ const RESTORE_GRACE: Duration = Duration::from_millis(1500);
 
 #[cfg(not(windows))]
 mod unsupported {
-    use super::{DisplayBackend, DisplayMode};
+    use kattri_client_core::display_match::{DisplayBackend, DisplayMode};
 
     pub(super) struct Unsupported;
 
@@ -138,7 +136,7 @@ impl DisplaySwitch {
         Some(text)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     fn is_switched(&self) -> bool {
         self.matcher.is_switched()
     }
