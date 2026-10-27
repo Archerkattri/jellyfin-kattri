@@ -767,6 +767,8 @@ pub(crate) struct PlaybackEnd {
     pub(crate) was_live: bool,
     pub(crate) generation: Option<u64>,
     pub(crate) was_loaded: bool,
+    /// Last observed position, for reopening a file that failed mid-stream.
+    pub(crate) position_ticks: Option<i64>,
 }
 
 impl<T> Default for MediaLoadState<T> {
@@ -839,6 +841,7 @@ pub(crate) struct MpvHost<'session> {
     playback_end_was_live: bool,
     playback_end_generation: Option<u64>,
     playback_end_was_loaded: bool,
+    playback_end_position_ticks: Option<i64>,
     active_generation: Option<u64>,
     playback_loaded_generation: Option<u64>,
     playback_restart_seen: bool,
@@ -949,6 +952,7 @@ impl<'session> MpvHost<'session> {
                 playback_end_was_live: false,
                 playback_end_generation: None,
                 playback_end_was_loaded: false,
+                playback_end_position_ticks: None,
                 active_generation: None,
                 playback_loaded_generation: None,
                 playback_restart_seen: false,
@@ -1042,6 +1046,7 @@ impl<'session> MpvHost<'session> {
                     playback_end_was_live: false,
                     playback_end_generation: None,
                     playback_end_was_loaded: false,
+                    playback_end_position_ticks: None,
                     active_generation: None,
                     playback_loaded_generation: None,
                     playback_restart_seen: false,
@@ -1107,6 +1112,7 @@ impl<'session> MpvHost<'session> {
             playback_end_was_live: false,
             playback_end_generation: None,
             playback_end_was_loaded: false,
+            playback_end_position_ticks: None,
             active_generation: None,
             playback_loaded_generation: None,
             playback_restart_seen: false,
@@ -1466,6 +1472,11 @@ impl<'session> MpvHost<'session> {
                     self.playback_end_reason = Some(reason);
                     self.playback_end_generation = self.active_generation.take();
                     self.playback_end_was_loaded = self.file_loaded;
+                    self.playback_end_position_ticks = self
+                        .file_loaded
+                        .then(|| self.playback_position_ticks())
+                        .flatten()
+                        .map(JellyfinTicks::as_ticks);
                     self.playback_end_item_id = self
                         .report_metadata
                         .as_ref()
@@ -1514,6 +1525,7 @@ impl<'session> MpvHost<'session> {
                     self.playback_end_reason = Some(EndFileReason::Error);
                     self.playback_end_generation = generation;
                     self.playback_end_was_loaded = false;
+                    self.playback_end_position_ticks = None;
                     self.playback_end_item_id = metadata.as_ref().map(|item| item.item_id.clone());
                     self.playback_end_was_live = metadata
                         .as_ref()
@@ -2956,12 +2968,14 @@ impl<'session> MpvHost<'session> {
             let was_live = std::mem::take(&mut self.playback_end_was_live);
             let generation = self.playback_end_generation.take();
             let was_loaded = std::mem::take(&mut self.playback_end_was_loaded);
+            let position_ticks = self.playback_end_position_ticks.take();
             PlaybackEnd {
                 reason,
                 item_id,
                 was_live,
                 generation,
                 was_loaded,
+                position_ticks,
             }
         })
     }

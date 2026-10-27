@@ -365,6 +365,7 @@ impl<'session> GlHost<'session> {
             was_live,
             generation,
             was_loaded,
+            position_ticks,
         }) = self.mpv.take_playback_end()
         {
             #[cfg(debug_assertions)]
@@ -395,6 +396,13 @@ impl<'session> GlHost<'session> {
                             match (was_loaded, generation) {
                                 (false, Some(generation)) => {
                                     self.kattri_app.playback_open_failed(&item_id, generation)
+                                }
+                                (true, Some(generation)) => {
+                                    self.kattri_app.playback_failed_mid_stream(
+                                        &item_id,
+                                        generation,
+                                        position_ticks,
+                                    )
                                 }
                                 _ if generation.is_none_or(|id| {
                                     id == self.kattri_app.playback_start_generation()
