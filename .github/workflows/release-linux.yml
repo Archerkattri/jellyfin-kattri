@@ -6,8 +6,9 @@
 # Flatpak is not built here. Its manifest is in packaging/flatpak and is built by a
 # separate job when that is added.
 #
-# Not verified: this workflow has not been run. libmpv is taken from the Ubuntu 22.04
-# libmpv1 package for bundling into the AppImage. Deb and rpm are not installed or
+# Not verified: this workflow has not been run. The AppImage bundles the pinned,
+# SHA-256-verified libmpv archive (packaging/libmpv/manifest.toml, linux-x64). Deb and
+# rpm declare the distro libmpv as a dependency instead. They are not installed or
 # launched in a clean container here. That check is separate.
 
 name: Release Linux
@@ -88,11 +89,16 @@ jobs:
           name: kattri-linux-binary
           path: target/release
 
+      # libmpv comes from the pinned archive (packaging/libmpv/fetch.sh linux-x64, called by
+      # build-appimage.sh). linuxdeploy resolves its shared dependencies from the host, so the
+      # libraries named in that archive's BUILD-INFO.txt are installed here.
       - name: Install AppImage prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libmpv1 desktop-file-utils file libfuse2
+            desktop-file-utils file libfuse2 \
+            libass9 libuchardet0 libva2 libva-drm2 libdrm2 libgbm1 libegl1 \
+            libx11-6 libxfixes3 libasound2 libpulse0 libjpeg8 zlib1g
 
       - name: Build AppImage
         env:
@@ -105,14 +111,13 @@ jobs:
             echo "error: tag $KATTRI_RELEASE_VERSION does not match workspace version $VERSION" >&2
             exit 1
           fi
-          LIBMPV="$(dpkg -L libmpv1 | grep -E '/libmpv\.so\.[0-9]+$' | head -n 1)"
           # Update information is embedded only for tagged releases. It names the release
           # asset pattern that AppImageUpdate reads. See the comment in build-appimage.sh.
           UPDATE_INFO=""
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             UPDATE_INFO="gh-releases-zsync|Archerkattri|jellyfin-kattri|latest|kattri-*-linux-x64.AppImage.zsync"
           fi
-          LIBMPV_PATH="$LIBMPV" UPDATE_INFO="$UPDATE_INFO" \
+          UPDATE_INFO="$UPDATE_INFO" \
             packaging/linux/appimage/build-appimage.sh "$VERSION" \
             target/release/jellyfin-kattri dist/linux
 

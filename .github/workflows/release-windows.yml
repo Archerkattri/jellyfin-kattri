@@ -1,11 +1,14 @@
-# Windows release packaging. Runs on version tags and produces the per-machine MSI and the
-# portable zip for x64 and arm64, with SHA256 checksums for the zip.
+# Windows release packaging. Runs on version tags and produces the dual-purpose MSI
+# (per user by default, per machine with ALLUSERS=1) and the portable zip for x64 and
+# arm64, with SHA256 checksums for the zip.
 #
 # Signing:
-#   Signing runs only when the repository variable KATTRI_SIGNING_SERVICE is set. Its value is
-#   the signtool selector string described at the top of packaging/windows/sign.ps1. The
-#   private key is held on an offline hardware token and never reaches CI. When the variable
-#   is unset, the job still succeeds and the uploaded artifact name ends in "-unsigned".
+#   1.0 ships unsigned (owner decision 2026-10-27: no paid certificate and no signing
+#   account, as with Jellyfin Media Player). Signing runs only when the repository
+#   variable KATTRI_SIGNING_SERVICE is set. Its value is the signtool selector string
+#   described at the top of packaging/windows/sign.ps1. No key reaches CI. When the
+#   variable is unset, the job still succeeds and the uploaded artifact name ends in
+#   "-unsigned".
 #
 # Variables and secrets referenced:
 #   vars.KATTRI_SIGNING_SERVICE   optional signing reference (variable, not a secret)
@@ -67,6 +70,13 @@ jobs:
       - name: Sign executable
         shell: pwsh
         run: packaging/windows/sign.ps1 -Path "target/release/$env:KATTRI_BIN.exe"
+
+      # build-msi.ps1 needs the WiX v4 CLI on PATH; the runner images do not ship it.
+      - name: Install WiX 4.0.5
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 4.0.5
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
       - name: Build MSI
         shell: pwsh
