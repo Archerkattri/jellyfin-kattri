@@ -58,11 +58,15 @@ try {
         $debMetadata -notmatch '"usr/bin/kattri"' -or
         $debMetadata -notmatch 'packaging/linux/icons/kattri\.svg' -or
         $debMetadata -notmatch 'icons/hicolor/scalable/apps/kattri\.svg' -or
-        $rpmMetadata -notmatch 'target/release/jellyfin-kattri' -or
+        $rpmMetadata -notmatch 'target/kattri-stripped' -or
         $rpmMetadata -notmatch '"/usr/bin/kattri"' -or
         $rpmMetadata -notmatch 'packaging/linux/icons/kattri\.svg' -or
         $rpmMetadata -notmatch 'icons/hicolor/scalable/apps/kattri\.svg') {
         throw 'Linux package metadata must source jellyfin-kattri, preserve the kattri command, and install the SVG icon.'
+    }
+    # The rpm packages a stripped copy of the same host binary, made by the release workflow.
+    if ($linux -notmatch 'strip -o target/kattri-stripped target/release/jellyfin-kattri') {
+        throw 'Linux release workflow must strip the jellyfin-kattri host binary for the rpm.'
     }
     if ($debMetadata -match 'jellyfin-egui-client' -or $rpmMetadata -match 'jellyfin-egui-client') {
         throw 'Linux package metadata still references the old demo executable.'
