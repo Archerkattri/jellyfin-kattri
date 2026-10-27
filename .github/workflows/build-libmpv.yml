@@ -1,0 +1,131 @@
+# Builds the LGPL libmpv archives that packaging/libmpv/manifest.toml pins for Linux and macOS,
+# and publishes them as a GitHub release of this repository. The Windows archives come from
+# zhongfly/mpv-winbuild; there is no comparable upstream for Linux or macOS.
+#
+# Run it by hand. A trial run (publish off) only builds and uploads workflow artifacts. A run with
+# publish on also creates the release and prints each archive's SHA-256 in the job summary; copy
+# the release asset URL and SHA-256 into manifest.toml. Sources are pinned by git tag and commit in the build scripts.
+
+name: Build libmpv
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Create the release from the finished archives (leave off for a trial build)"
+        type: boolean
+        default: false
+      release_tag:
+        description: "Release tag to create when publishing, for example libmpv-v0.41.0-r1"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  linux-x64:
+    name: libmpv linux-x64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git meson ninja-build nasm pkg-config python3-jinja2 \
+            libva-dev libdrm-dev zlib1g-dev libass-dev \
+            libfreetype-dev libharfbuzz-dev libfribidi-dev libfontconfig-dev libegl-dev \
+            libgl-dev libx11-dev libxext-dev libxrandr-dev libxpresent-dev libxss-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols libasound2-dev libpulse-dev \
+            libuchardet-dev
+      - name: Build
+        run: packaging/libmpv/build-linux.sh out
+      - uses: actions/upload-artifact@v7
+        with:
+          name: libmpv-linux-x64
+          path: out/*
+          if-no-files-found: error
+
+  macos:
+    name: libmpv macos-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build tools
+        run: brew install meson ninja nasm pkg-config autoconf automake libtool
+      - name: Build
+        run: packaging/libmpv/build-macos.sh ${{ matrix.arch }} out
+      - uses: actions/upload-artifact@v7
+        with:
+          name: libmpv-macos-${{ matrix.arch }}
+          path: out/
+          if-no-files-found: error
+
+  macos-universal:
+    name: libmpv macos-universal
+    needs: macos
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: libmpv-macos-arm64
+          path: arm64
+      - uses: actions/download-artifact@v8
+        with:
+          name: libmpv-macos-x86_64
+          path: x86_64
+      - name: Merge
+        run: packaging/libmpv/combine-macos.sh arm64 x86_64 out
+      - uses: actions/upload-artifact@v7
+        with:
+          name: libmpv-macos-universal
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    if: inputs.publish
+    needs: [linux-x64, macos-universal]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: libmpv-*-x64
+          path: assets
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: libmpv-macos-universal
+          path: assets
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ -n "$TAG" ]] || { echo "error: release_tag is required to publish" >&2; exit 1; }
+          ls -l assets
+          {
+            echo "### libmpv archives"
+            echo '```'
+            (cd assets && sha256sum *.tar.gz)
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          gh release create "$TAG" assets/*.tar.gz assets/*.sha256 \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "libmpv build $TAG" \
+            --notes "LGPL libmpv for Linux x64 and macOS universal, built by .github/workflows/build-libmpv.yml from the sources pinned in packaging/libmpv/build-linux.sh and build-macos.sh. Each archive carries its license texts and BUILD-INFO.txt."
