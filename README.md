@@ -95,17 +95,88 @@ credentials and server addresses; nothing is uploaded anywhere.
 
 ## Project status
 
-Kattri is an early development build, not a production release. On Windows x64 the
-native client has been exercised against a live Jellyfin 12.0.0 server for browsing,
-search, playback negotiation, native video presentation and stream-only relay
-playback. Audio output, the complete control surface, hardware decoding, HDR,
-macOS/Linux runtime and signed packaging are still being validated, and no full
-feature parity with Jellyfin Web or Jellyfin Desktop is claimed.
+Kattri is an early development build, not a production release. Public CI is green
+on Windows x64/ARM64, macOS, and Linux x64/ARM64. Windows x64 has been exercised
+against Jellyfin 12.0.0 for browsing, search, PlaybackInfo, native video rendering,
+and authorized stream-only relay playback. A separate Windows RTX 4060 run used
+NVDEC and rendered an HDR10 source tone-mapped to SDR. These checks do not establish
+complete playback, release readiness, or feature parity with Jellyfin Web/Desktop.
 
-The project tracks every feature with an explicit acceptance status rather than a
-completion percentage; the internal development tree documents the architecture and
-the evidence behind each claim. Nothing here should be read as a guarantee that a
-given feature works on your hardware.
+### Work still required for a production release
+
+**Playback and reliability**
+
+- Add position-safe recovery after a stream has started. Startup fallback and
+  generation-aware replacement handling exist; mid-stream retries remain open.
+- Validate the complete graphical path: visible video, audible audio, pause, seek,
+  speed, chapters, tracks, subtitles, stop, and clean shutdown.
+- Exercise relay replacement in the running graphical host. Unit and software/null
+  libmpv replacement-event checks pass, but the full rendered relay flow is unverified.
+- Address the 4,096-entry HLS alias limit for long rolling playlists without breaking
+  late segment reads or seeking. The limit currently fails safely and remains.
+- Exercise DirectPlay, DirectStream, and Transcode end to end. Previous server samples
+  did not offer DirectStream.
+- Validate resume, start/progress/stop reporting, failure reporting, and watched-state
+  behavior on an authorized test setup.
+- Run disconnect, reconnect, slow-server, stalled-stream, and playback-cancellation
+  scenarios.
+
+**Feature integration and acceptance**
+
+- Finish SyncPlay shared-queue playback, ready/buffering reports, queue updates,
+  reconnect/error handling, and two-client synchronization acceptance.
+- Connect the sandboxed plugin runtime to the app, including load, permission grants,
+  run, revoke, unload, and failure handling. Current app runtime fails closed.
+- Validate audible music queue advancement, shuffle, repeat, gapless transitions, and
+  the 200-track restart/resume scenario.
+- Validate tuner-backed Live TV guide data, real channel playback, channel switching,
+  reconnects, and tune-time targets.
+- Validate the download lifecycle: pause/resume, restart recovery, subtitles, offline
+  playback, and low-disk handling.
+- Exercise cast and remote control with real devices; mocks do not prove device behavior.
+- Validate the admin-lite dashboard with a real administrator account. User counts,
+  per-library counts, and scheduled-task summaries are already implemented.
+- Verify settings persistence and actual engine/OS effects across profiles, including
+  passthrough/PCM fallback, cache, PiP, window memory, screenshots, track memory, and
+  subtitle synchronization.
+- Complete keyboard, gamepad, and 10-foot navigation walks across menus, dialogs,
+  settings, and playback; record screen-reader, focus, and contrast checks per platform.
+
+**Media, hardware, and quality**
+
+- Validate HDR output on HDR-capable hardware per platform. Tone mapping and HDR
+  policies exist; HDR passthrough is not proven. Dolby Vision and HDR10+ remain open.
+- Validate Windows refresh-rate switching/restoration across fullscreen and monitors;
+  Linux/macOS switching remains limited.
+- Expand hardware-decode coverage across codecs, drivers, GPUs, and platforms. One
+  Windows RTX 4060/NVDEC run has succeeded.
+- Validate audio-device switching, equalizer and filters, volume boost, Atmos/DTS:X
+  passthrough, and fallback on real equipment.
+- Validate ASS/SSA rendering, subtitle styling, secondary subtitles, offset/reset, and
+  subtitle synchronization visually.
+- Complete or explicitly scope the planned ISO/BDMV/DVD playback support.
+- Measure startup, playback startup, scrolling/frame time, texture and resident memory
+  against release budgets; complete the eight-hour mixed-use stability soak.
+
+**Distribution and release gates**
+
+- Pin Linux and macOS libmpv artifacts with checksums. Their build workflow exists,
+  while packaging manifest entries remain TODO.
+- Build and test Windows x64/ARM64, macOS universal, Linux packages, AppImage, and
+  Flatpak on clean systems.
+- Complete Windows signing and macOS signing/notarization; verify each artifact.
+- Exercise tag-based packaging, uploads, checksums, and publication on the release head.
+- Verify the final embedded SBOM, shipped license notices, and reproducible-build result.
+- Review three ignored Linux accessibility dependency advisories and record the release
+  decision.
+- Choose the release version, verify README build steps on each platform, and publish
+  release notes with known gaps.
+
+Discord presence is deferred to 1.1. Automatic update fetching is deferred for 1.0;
+the updater signing keyring is empty, so signed automatic updates are unavailable.
+Owner approval to use required licenses is recorded; shipped third-party notices and
+package-level compliance evidence are still required. Kattri does not guarantee a
+feature will work on every device until its platform and hardware checks are recorded.
 
 ## Development checks
 
