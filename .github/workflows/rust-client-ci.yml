@@ -73,6 +73,45 @@ jobs:
         shell: powershell
         run: scripts/tests/live_runner.ps1
 
+  # Real libmpv runtime: the pinned, SHA-256-verified LGPL libmpv-2.dll from
+  # packaging/libmpv/manifest.toml, a software decoder and the null audio/video outputs. It
+  # runs the ignored mpv-render runtime tests against the committed 32-second clip. It proves
+  # the FFI and the property reads, not visible or audible output.
+  libmpv-runtime-windows:
+    name: libmpv runtime (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            runner: windows-latest
+          - platform: windows-arm64
+            runner: windows-11-arm
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+
+      - name: Fetch the pinned libmpv
+        shell: pwsh
+        run: |
+          $library = & packaging/libmpv/fetch.ps1 -Platform ${{ matrix.platform }}
+          if (-not (Test-Path -LiteralPath $library)) { throw "fetch.ps1 returned no library" }
+          "KATTRI_TEST_LIBMPV=$library" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "KATTRI_TEST_MEDIA=$((Resolve-Path proofs/mpv-render/tests/fixtures/clip-h264-aac.mkv).Path)" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run libmpv runtime tests
+        run: >-
+          cargo test --locked -p mpv-render-proof
+          --test stream_snapshot_runtime --test controls_runtime
+          --test software_decode --test runtime_probe
+          -- --ignored --nocapture --test-threads=1
+
   # ARM64 jobs run the same Rust checks on GitHub's standard ARM64 runners.
   # Native playback and installer acceptance require separate runtime validation.
   check-windows-arm64:
