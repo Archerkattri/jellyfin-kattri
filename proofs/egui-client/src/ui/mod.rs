@@ -173,6 +173,10 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
     if !gamepad_actions.is_empty() {
         app.cancel_network_retry_for_user_action();
     }
+    // While a video fills the window the library page is hidden; the player takes the pad.
+    if app.player_owns_input() {
+        app.player_nav_actions.append(&mut gamepad_actions);
+    }
 
     let nav_focus = egui::Panel::top("topbar")
         .exact_size(64.0)

@@ -56,8 +56,8 @@ mod video_target;
 mod window_hooks;
 
 use player_controls::{
-    ChapterChoice, PlayerControlAction, PlayerControlsView, SecondarySubtitleChoice, SkipControls,
-    screenshot_key_pressed,
+    ChapterChoice, GamepadPlayerAction, PlayerControlAction, PlayerControlsView,
+    SecondarySubtitleChoice, SkipControls, screenshot_key_pressed,
 };
 use report_handoff::{CloseAdmission, ReportCloseGrace};
 use video_target::VideoTarget;
@@ -579,6 +579,7 @@ impl<'session> GlHost<'session> {
             && !pip_active
             && !self.show_player_details
             && self.kattri_app.selected_is_video();
+        self.kattri_app.set_player_owns_input(theater);
         let mpv = &mut self.mpv;
         let kattri_app = &mut self.kattri_app;
         let show_player_details = &mut self.show_player_details;
@@ -873,6 +874,7 @@ impl<'session> GlHost<'session> {
                 mpv.close_media_info();
             }
         });
+        self.apply_gamepad_player_actions();
         self.sync_report_connection();
         self.flush_playback_reports();
         #[cfg(debug_assertions)]
@@ -1139,6 +1141,38 @@ impl<'session> GlHost<'session> {
 
     /// Queue an mpv screenshot of the current frame (M2-15). The name comes from the settings
     /// template. The command is queued; the write is not confirmed here.
+    /// Apply the gamepad presses the app collected while the video filled the window (M6-18).
+    /// Any press also brings the on-screen controls back.
+    fn apply_gamepad_player_actions(&mut self) {
+        let actions = self.kattri_app.take_player_nav_actions();
+        if actions.is_empty() {
+            return;
+        }
+        self.osd_visibility.on_input(self.osd_clock.elapsed());
+        let live_stream_active = self.mpv.live_stream_active();
+        for action in actions {
+            match player_controls::gamepad_player_action(action) {
+                GamepadPlayerAction::Control(PlayerControlAction::TogglePause)
+                    if live_stream_active =>
+                {
+                    self.mpv.stop_playback();
+                }
+                GamepadPlayerAction::Control(PlayerControlAction::TogglePause) => {
+                    self.mpv.toggle_paused();
+                }
+                GamepadPlayerAction::Control(PlayerControlAction::SeekRelative(delta)) => {
+                    self.mpv.seek_relative(delta);
+                }
+                GamepadPlayerAction::Control(_) | GamepadPlayerAction::ShowControls => {}
+                GamepadPlayerAction::Leave => self.mpv.stop_playback(),
+                GamepadPlayerAction::ToggleMediaInfo => self
+                    .mpv
+                    .dispatch_playback_key(mpv_host::PlaybackKeyAction::MediaInfo),
+            }
+        }
+        self.window.request_redraw();
+    }
+
     fn take_screenshot(&mut self) {
         const NOTHING_TO_CAPTURE: &str = "Nothing to capture yet.";
         let Some(session) = self.session else {

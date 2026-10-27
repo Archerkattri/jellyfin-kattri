@@ -93,10 +93,10 @@ if [[ -f "$ROOT/LICENSE" ]]; then
   cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
 fi
 
-# The app dlopens libmpv by its bare name (proofs/mpv-render/src/library.rs) and does not
-# link it, so the binary gets no -change entry. The bundled copy is found only once the
-# loader looks in Contents/Frameworks; that loader change is outside this script. Its
-# own dependencies (FFmpeg and other dylibs) are not bundled here yet.
+# The app dlopens libmpv and does not link it, so the binary gets no -change entry.
+# MpvLibrary::load (proofs/mpv-render/src/library.rs) tries
+# Contents/Frameworks/libmpv.2.dylib before the bare names. Its own dependencies (FFmpeg
+# and other dylibs) are not bundled here yet.
 LIBMPV_DYLIB="$("$ROOT/packaging/libmpv/fetch.sh" macos-universal)"
 cp "$LIBMPV_DYLIB" "$APP/Contents/Frameworks/libmpv.2.dylib"
 chmod 644 "$APP/Contents/Frameworks/libmpv.2.dylib"

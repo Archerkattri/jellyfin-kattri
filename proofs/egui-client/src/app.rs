@@ -657,6 +657,11 @@ pub struct KattriApp {
     playlist_candidates_request_id: u64,
     pub(crate) focus_graph: FocusGraph,
     pub(crate) gamepad: Box<dyn GamepadBackend>,
+    /// True while a video fills the window: gamepad input then drives the player, not the
+    /// hidden library page.
+    player_owns_input: bool,
+    /// Gamepad actions collected for the player since the host last took them.
+    pub(crate) player_nav_actions: Vec<kattri_client_core::focus::NavAction>,
     // Keyboard map mtime at the last load, and when the next check is due.
     keymap_mtime_seen: Option<SystemTime>,
     keymap_check_due: Duration,
@@ -1076,6 +1081,8 @@ impl KattriApp {
                 ctx: ctx.clone(),
                 inner: gamepad_backend(),
             }),
+            player_owns_input: false,
+            player_nav_actions: Vec::new(),
             keymap_mtime_seen,
             keymap_check_due: Duration::ZERO,
             search_query: String::new(),
@@ -1144,6 +1151,24 @@ impl KattriApp {
             artwork_access_ticks: HashMap::new(),
             next_artwork_access_tick: 0,
         }
+    }
+
+    /// Route gamepad input to the player (true) or to the library page (false). The host sets
+    /// this each frame before drawing.
+    pub fn set_player_owns_input(&mut self, owns: bool) {
+        self.player_owns_input = owns;
+        if !owns {
+            self.player_nav_actions.clear();
+        }
+    }
+
+    pub(crate) fn player_owns_input(&self) -> bool {
+        self.player_owns_input
+    }
+
+    /// The gamepad actions pressed for the player since the last call, in order.
+    pub fn take_player_nav_actions(&mut self) -> Vec<kattri_client_core::focus::NavAction> {
+        std::mem::take(&mut self.player_nav_actions)
     }
 
     /// The output devices mpv listed. Names the player would refuse (odd characters, too long)

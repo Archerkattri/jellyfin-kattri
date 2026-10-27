@@ -1,12 +1,10 @@
 # macOS universal release build. Produces a universal disk image, signed and notarized
 # only when signing secrets are configured. Without them the artifacts are unsigned.
 #
-# Runner: macos-13 (Intel), the build host that matches the macOS 13 minimum in M5-01
-# (owner decision 2026-10-22). The label is not confirmed against the runner-images README
-# in this change (no network). The minimum OS is set by MACOSX_DEPLOYMENT_TARGET in
-# build-app.sh, not by the runner. If GitHub no longer offers macos-13, switch the label
-# to macos-15; the 13.0 deployment target still applies. Both Rust targets are built on
-# this one job; the arm64 slice is cross-compiled with the Xcode SDK.
+# Runner: macos-15 (Apple silicon). GitHub retired the macos-13 image, which left this job
+# queued with no runner. The macOS 13 minimum in M5-01 is set by MACOSX_DEPLOYMENT_TARGET in
+# build-app.sh, not by the runner, so it still applies. Both Rust targets are built on this
+# one job; the x86_64 slice is cross-compiled with the Xcode SDK.
 #
 # Secrets (repository or environment secrets, never committed):
 #   MACOS_CERT_P12_BASE64         Developer ID Application certificate, base64 of the .p12
@@ -33,7 +31,7 @@ permissions:
 jobs:
   macos-universal:
     name: macOS universal (arm64 + x86_64)
-    runs-on: macos-13
+    runs-on: macos-15
     timeout-minutes: 90
     steps:
       - name: Check out source

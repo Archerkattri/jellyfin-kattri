@@ -77,6 +77,35 @@ pub struct TrackChoice<T> {
     pub selected: bool,
 }
 
+/// What one gamepad action does while a video fills the window (M6-18).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GamepadPlayerAction {
+    /// A transport control, the same as pressing it on screen.
+    Control(PlayerControlAction),
+    /// Leave the video (B / Back), as the on-screen Back button does.
+    Leave,
+    /// Show or hide the media info panel (Menu).
+    ToggleMediaInfo,
+    /// Bring the on-screen controls back without changing playback.
+    ShowControls,
+}
+
+/// Map a gamepad action to the player: A and Play/Pause toggle pause, Left and Right seek ten
+/// seconds, B leaves, Menu toggles media info, Up and Down only reveal the controls.
+pub fn gamepad_player_action(action: kattri_client_core::focus::NavAction) -> GamepadPlayerAction {
+    use kattri_client_core::focus::NavAction;
+    match action {
+        NavAction::Select | NavAction::PlayPause => {
+            GamepadPlayerAction::Control(PlayerControlAction::TogglePause)
+        }
+        NavAction::Left => GamepadPlayerAction::Control(PlayerControlAction::SeekRelative(-10)),
+        NavAction::Right => GamepadPlayerAction::Control(PlayerControlAction::SeekRelative(10)),
+        NavAction::Back => GamepadPlayerAction::Leave,
+        NavAction::Menu => GamepadPlayerAction::ToggleMediaInfo,
+        NavAction::Up | NavAction::Down => GamepadPlayerAction::ShowControls,
+    }
+}
+
 /// Semantic intent emitted by the controls; the caller performs player operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlayerControlAction {
@@ -845,12 +874,42 @@ fn ab_loop_label(a: Option<Duration>, b: Option<Duration>) -> (&'static str, &'s
 #[cfg(test)]
 mod tests {
     use super::{
-        ChapterChoice, ControlId, MAX_CHAPTER_CHOICES, PlayerControlAction, PlayerControlsView,
-        SecondarySubtitleChoice, SkipControls, TrackChoice, TrackControl, auto_skip_action,
-        compact_label, draw, draw_inner, draw_inner_with_skip, draw_with_skip, duration_to_ticks,
-        format_time, keyboard_seek_actions, screenshot_key_pressed, skip_settings, speed_label,
-        ticks_to_duration, track_menu_contents, track_section_inner,
+        ChapterChoice, ControlId, GamepadPlayerAction, MAX_CHAPTER_CHOICES, PlayerControlAction,
+        PlayerControlsView, SecondarySubtitleChoice, SkipControls, TrackChoice, TrackControl,
+        auto_skip_action, compact_label, draw, draw_inner, draw_inner_with_skip, draw_with_skip,
+        duration_to_ticks, format_time, gamepad_player_action, keyboard_seek_actions,
+        screenshot_key_pressed, skip_settings, speed_label, ticks_to_duration, track_menu_contents,
+        track_section_inner,
     };
+
+    #[test]
+    fn a_gamepad_drives_the_player_while_a_video_fills_the_window() {
+        use kattri_client_core::focus::NavAction;
+        for (pressed, expected) in [
+            (
+                NavAction::Select,
+                GamepadPlayerAction::Control(PlayerControlAction::TogglePause),
+            ),
+            (
+                NavAction::PlayPause,
+                GamepadPlayerAction::Control(PlayerControlAction::TogglePause),
+            ),
+            (
+                NavAction::Left,
+                GamepadPlayerAction::Control(PlayerControlAction::SeekRelative(-10)),
+            ),
+            (
+                NavAction::Right,
+                GamepadPlayerAction::Control(PlayerControlAction::SeekRelative(10)),
+            ),
+            (NavAction::Back, GamepadPlayerAction::Leave),
+            (NavAction::Menu, GamepadPlayerAction::ToggleMediaInfo),
+            (NavAction::Up, GamepadPlayerAction::ShowControls),
+            (NavAction::Down, GamepadPlayerAction::ShowControls),
+        ] {
+            assert_eq!(gamepad_player_action(pressed), expected, "{pressed:?}");
+        }
+    }
     use egui::{CentralPanel, Color32, Context, Id, RawInput, Stroke};
     use kattri_client_core::segments::{MediaSegment, SegmentKind, SegmentSkipper, SkipSettings};
     use kattri_settings::PlaybackSettings;

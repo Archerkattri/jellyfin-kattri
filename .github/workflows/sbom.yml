@@ -61,7 +61,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/sbom
-          cargo audit bin target/release/jellyfin-kattri --json > dist/sbom/binary-audit.json
+          cargo audit --json bin target/release/jellyfin-kattri > dist/sbom/binary-audit.json
 
       - name: Export CycloneDX SBOM from the lock file
         run: |
