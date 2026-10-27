@@ -134,7 +134,7 @@ meson setup "$WORK/mpv/build" "$WORK/mpv" --prefix="$PREFIX" --libdir=lib --buil
   -Dlibmpv=true -Dcplayer=false -Dgpl=false -Dtests=false -Dmanpage-build=disabled \
   -Dlua=disabled -Djavascript=disabled -Dlcms2=disabled -Dvulkan=disabled \
   -Dlibarchive=disabled -Drubberband=disabled -Dzimg=disabled -Duchardet=disabled \
-  -Dzlib=disabled -Dgl=enabled -Dcocoa=disabled -Dgl-cocoa=disabled -Dmacos-cocoa-cb=disabled \
+  -Dzlib=disabled -Dgl=enabled -Dcocoa=enabled -Dgl-cocoa=enabled -Dmacos-cocoa-cb=disabled \
   -Dmacos-media-player=disabled -Dmacos-touchbar=disabled -Dswift-build=disabled \
   -Dcoreaudio=enabled -Dvideotoolbox-gl=enabled
 ninja -C "$WORK/mpv/build" install

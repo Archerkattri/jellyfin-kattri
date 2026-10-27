@@ -64,6 +64,17 @@ clone() { # url tag commit dir
   [[ "$actual" == "$3" ]] || { echo "error: $1 $2 is $actual, expected $3" >&2; exit 1; }
 }
 
+echo "==> dav1d $DAV1D_TAG (static)"
+if ! stage_done dav1d; then
+rm -rf "$WORK/dav1d"
+clone https://github.com/videolan/dav1d "$DAV1D_TAG" "$DAV1D_COMMIT" "$WORK/dav1d"
+meson setup "$WORK/dav1d/build" "$WORK/dav1d" --prefix="$PREFIX" --libdir=lib --buildtype=release \
+  --default-library=static -Db_staticpic=true -Denable_tools=false -Denable_tests=false \
+  -Denable_examples=false
+ninja -C "$WORK/dav1d/build" install
+mark_done dav1d
+fi
+
 echo "==> FFmpeg $FFMPEG_TAG (LGPL, static)"
 if ! stage_done ffmpeg; then
 rm -rf "$WORK/ffmpeg"
@@ -86,17 +97,6 @@ if ! grep -q 'define FFMPEG_LICENSE "LGPL version 2.1 or later"' "$WORK/ffmpeg/c
   echo "error: FFmpeg did not configure as LGPL 2.1 or later" >&2
   grep -n "FFMPEG_LICENSE" "$WORK/ffmpeg/config.h" >&2 || true
   exit 1
-fi
-
-echo "==> dav1d $DAV1D_TAG (static)"
-if ! stage_done dav1d; then
-rm -rf "$WORK/dav1d"
-clone https://github.com/videolan/dav1d "$DAV1D_TAG" "$DAV1D_COMMIT" "$WORK/dav1d"
-meson setup "$WORK/dav1d/build" "$WORK/dav1d" --prefix="$PREFIX" --libdir=lib --buildtype=release \
-  --default-library=static -Db_staticpic=true -Denable_tools=false -Denable_tests=false \
-  -Denable_examples=false
-ninja -C "$WORK/dav1d/build" install
-mark_done dav1d
 fi
 
 echo "==> libplacebo $PLACEBO_TAG (static)"

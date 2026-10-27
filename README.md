@@ -32,12 +32,14 @@ desktop window.
 | Details | Metadata, overview, cast, similar titles, seasons and episodes, play and download actions |
 | Search | Debounced cross-type search grouped by movies, series, episodes, music, playlists, photos, people and channels |
 | Playback | Direct play, direct stream and transcode through the relay, resume, playback reporting, audio and subtitle tracks, subtitle delay, chapters, speed control, segment skip |
+| Player | Media info panel (`I`), equalizer and loudness filters, A-B loop and frame stepping, HDR to SDR tone mapping, refresh-rate matching on Windows, open a stream address |
 | Music | Album and playlist browsing, queue with shuffle and repeat, queue restore after restart |
 | Live TV | Channel list, 24-hour guide, tune through the relay |
 | Offline | Download manager with pause, resume, range fallback, checksum verification and external subtitles |
 | Extras | Playlists, collections, favorites, watched state, photos, admin-lite dashboard, parental PIN |
 | Settings | General, playback, audio, subtitles, video, input, server, About; versioned TOML per profile |
-| Input | Keyboard map, gamepad support, full focus navigation, rebindable actions |
+| Input | Keyboard map, gamepad support (in menus and during playback), full focus navigation, rebindable actions |
+| Interface | Standard, Large and TV (10-foot) sizes |
 
 ### Library browsing
 
