@@ -141,6 +141,14 @@ pub fn apply(ctx: &egui::Context, high_contrast: bool, reduce_motion: bool) {
     });
 }
 
+/// Scale the whole interface to the chosen size. egui repaints only when the factor changes.
+pub fn apply_interface_size(ctx: &egui::Context, size: kattri_settings::InterfaceSize) {
+    let factor = size.zoom_factor();
+    if (ctx.zoom_factor() - factor).abs() > f32::EPSILON {
+        ctx.set_zoom_factor(factor);
+    }
+}
+
 pub fn color(rgb: [u8; 3]) -> Color32 {
     Color32::from_rgb(rgb[0], rgb[1], rgb[2])
 }
@@ -338,6 +346,19 @@ mod tests {
                 .map(|f| f.size),
             Some(BODY_SIZE)
         );
+    }
+
+    #[test]
+    fn the_interface_size_sets_the_zoom_factor() {
+        use kattri_settings::InterfaceSize;
+        let ctx = egui::Context::default();
+        for size in InterfaceSize::ALL {
+            apply_interface_size(&ctx, size);
+            // egui applies a new zoom factor at the start of the next frame.
+            let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+            output.textures_delta.clear();
+            assert_eq!(ctx.zoom_factor(), size.zoom_factor());
+        }
     }
 
     #[test]

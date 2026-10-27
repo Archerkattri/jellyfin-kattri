@@ -38,10 +38,11 @@ pub use profile::{
 pub use schema::{
     AspectMode, AudioOutput, AudioSettings, BACKBUFFER_MB_MAX, CACHE_MB_MAX, CACHE_MB_MIN,
     CURRENT_SCHEMA_VERSION, ChannelLayout, DecodeMode, EQUALIZER_BANDS, EQUALIZER_GAIN_LIMIT_DB,
-    GeneralSettings, HdrPreference, ImageFormat, InputSettings, LOUDNESS_TARGET_LUFS_RANGE,
-    LogDetail, MAX_SERIES_LANGUAGE_ENTRIES, Passthrough, PlaybackSettings, PluginSettings,
-    READAHEAD_SECS_MAX, ScreenshotSettings, SeriesLanguageSetting, Settings, SubtitleSettings,
-    SyncMode, TranscodePreferences, UpdateSettings, VideoSettings, WindowGeometry, WindowSettings,
+    GeneralSettings, HdrPreference, ImageFormat, InputSettings, InterfaceSize,
+    LOUDNESS_TARGET_LUFS_RANGE, LogDetail, MAX_SERIES_LANGUAGE_ENTRIES, Passthrough,
+    PlaybackSettings, PluginSettings, READAHEAD_SECS_MAX, ScreenshotSettings,
+    SeriesLanguageSetting, Settings, SubtitleSettings, SyncMode, ToneMapping, TranscodePreferences,
+    UpdateSettings, VideoSettings, WindowGeometry, WindowSettings,
 };
 pub use store::{
     LoadWarning, load, load_from_str, load_from_str_with_report, load_with_report, save,

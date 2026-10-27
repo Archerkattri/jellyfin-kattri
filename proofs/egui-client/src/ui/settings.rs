@@ -14,7 +14,7 @@ use super::{ui_text, ui_text_args};
 use egui::{RichText, Ui};
 use kattri_client_core::focus::NavAction;
 use kattri_i18n::ids;
-use kattri_settings::{HdrPreference, ImageFormat, LogDetail, Settings};
+use kattri_settings::{HdrPreference, ImageFormat, InterfaceSize, LogDetail, Settings};
 
 use crate::app::{KattriApp, Page};
 use crate::theme::Palette;
@@ -610,6 +610,34 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
         app.high_contrast = general.high_contrast;
         app.reduce_motion = general.reduce_motion;
         muted(ui, colors, ui_text(ids::SETTINGS_GENERAL_MOTION_HELP), 12.0);
+        ui.add_space(8.0);
+        choice(
+            ui,
+            ui_text(ids::SETTINGS_GENERAL_INTERFACE_SIZE),
+            "general_interface_size",
+            &mut general.interface_size,
+            &[
+                (
+                    InterfaceSize::Standard,
+                    ui_text(ids::SETTINGS_GENERAL_INTERFACE_SIZE_STANDARD),
+                ),
+                (
+                    InterfaceSize::Large,
+                    ui_text(ids::SETTINGS_GENERAL_INTERFACE_SIZE_LARGE),
+                ),
+                (
+                    InterfaceSize::TenFoot,
+                    ui_text(ids::SETTINGS_GENERAL_INTERFACE_SIZE_TEN_FOOT),
+                ),
+            ],
+        );
+        app.interface_size = general.interface_size;
+        muted(
+            ui,
+            colors,
+            ui_text(ids::SETTINGS_GENERAL_INTERFACE_SIZE_HELP),
+            12.0,
+        );
     });
     ui.add_space(12.0);
     settings_card(ui, |ui| {
@@ -945,15 +973,17 @@ fn video_preferences_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             "Unavailable: HDR output control is not connected to playback yet.",
             12.0,
         );
+        // Display switching has a backend on Windows only (M6-04).
+        let switching_available = cfg!(windows);
         ui.add_enabled(
-            false,
+            switching_available,
             egui::Checkbox::new(
                 &mut video.refresh_rate_auto_switch,
                 "Switch display refresh rate automatically",
             ),
         );
         ui.add_enabled(
-            false,
+            switching_available && video.refresh_rate_auto_switch,
             egui::Checkbox::new(
                 &mut video.refresh_rate_avoid_25_30_hz,
                 "Avoid 25/30 Hz refresh rates",
@@ -962,7 +992,11 @@ fn video_preferences_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
         muted(
             ui,
             colors,
-            "Unavailable: display refresh-rate switching is not connected yet.",
+            if switching_available {
+                "Matches the display to the video's frame rate while it plays and puts the original mode back afterwards. Takes effect for the next video."
+            } else {
+                "Unavailable: display refresh-rate switching is only available on Windows."
+            },
             12.0,
         );
         ui.add_enabled_ui(false, |ui| {

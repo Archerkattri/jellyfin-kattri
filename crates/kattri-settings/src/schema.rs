@@ -152,6 +152,8 @@ impl Default for Settings {
 pub struct GeneralSettings {
     pub high_contrast: bool,
     pub reduce_motion: bool,
+    /// How large the interface is drawn (M6-17).
+    pub interface_size: InterfaceSize,
     #[serde(rename = "_unknown", skip_serializing_if = "toml::Table::is_empty")]
     pub unknown: toml::Table,
 }
@@ -161,7 +163,33 @@ impl Default for GeneralSettings {
         Self {
             high_contrast: false,
             reduce_motion: true,
+            interface_size: InterfaceSize::Standard,
             unknown: toml::Table::new(),
+        }
+    }
+}
+
+/// Overall size of the interface. `TenFoot` is the couch-distance layout: everything is drawn
+/// 1.6 times larger so rows, focus rings and text read from a TV across the room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InterfaceSize {
+    #[default]
+    Standard,
+    Large,
+    TenFoot,
+}
+
+impl InterfaceSize {
+    /// Every size, in display order.
+    pub const ALL: [Self; 3] = [Self::Standard, Self::Large, Self::TenFoot];
+
+    /// The factor the whole interface is scaled by.
+    pub const fn zoom_factor(self) -> f32 {
+        match self {
+            Self::Standard => 1.0,
+            Self::Large => 1.25,
+            Self::TenFoot => 1.6,
         }
     }
 }
@@ -561,6 +589,8 @@ pub struct VideoSettings {
     pub hdr_preference: HdrPreference,
     /// Legacy `video.hdr_passthrough`. HDR output is M6; this is only the setting.
     pub hdr_passthrough: bool,
+    /// How HDR video is mapped to an SDR display (M6-03).
+    pub tone_mapping: ToneMapping,
     /// Legacy `video.aspect`.
     pub aspect: AspectMode,
     /// Legacy `video.allow_zoom`: Ctrl+wheel and pinch video zoom (0.5x to 4x).
@@ -583,6 +613,7 @@ impl Default for VideoSettings {
             refresh_rate_avoid_25_30_hz: true,
             hdr_preference: HdrPreference::Auto,
             hdr_passthrough: false,
+            tone_mapping: ToneMapping::Auto,
             aspect: AspectMode::Normal,
             allow_zoom: true,
             transcode: TranscodePreferences::default(),
@@ -613,6 +644,46 @@ pub enum HdrPreference {
     Auto,
     Dovi,
     Hdr10,
+}
+
+/// The curve that squeezes HDR brightness into an SDR display's range (mpv `tone-mapping`).
+/// `Auto` lets the player choose its current default (BT.2390 in recent libplacebo); it has no
+/// effect on SDR video or on a display that shows HDR itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToneMapping {
+    #[default]
+    Auto,
+    #[serde(rename = "bt-2390")]
+    Bt2390,
+    Mobius,
+    Hable,
+    Reinhard,
+    Clip,
+}
+
+impl ToneMapping {
+    /// Every curve, in display order.
+    pub const ALL: [Self; 6] = [
+        Self::Auto,
+        Self::Bt2390,
+        Self::Mobius,
+        Self::Hable,
+        Self::Reinhard,
+        Self::Clip,
+    ];
+
+    /// The value written to mpv's `tone-mapping` option.
+    pub const fn mpv_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Bt2390 => "bt.2390",
+            Self::Mobius => "mobius",
+            Self::Hable => "hable",
+            Self::Reinhard => "reinhard",
+            Self::Clip => "clip",
+        }
+    }
 }
 
 /// Legacy `video.aspect`.

@@ -683,6 +683,7 @@ pub struct KattriApp {
     pub(crate) catalog_favorites_only: bool,
     pub(crate) high_contrast: bool,
     pub(crate) reduce_motion: bool,
+    pub(crate) interface_size: kattri_settings::InterfaceSize,
     pub(crate) settings: SettingsState,
     /// Profile picker window, open while `Some`. Opened from Settings or at launch.
     pub(crate) profile_picker: Option<PickerState>,
@@ -939,6 +940,7 @@ impl KattriApp {
         let playback_overrides = playback_overrides_from_settings(settings.settings());
         let high_contrast = settings.settings().general.high_contrast;
         let reduce_motion = settings.settings().general.reduce_motion;
+        let interface_size = settings.settings().general.interface_size;
         let launch_notice = settings.launch_notice().map(str::to_owned);
         Self {
             worker,
@@ -1101,6 +1103,7 @@ impl KattriApp {
             catalog_played_filter: CatalogPlayedFilter::Any,
             catalog_favorites_only: false,
             high_contrast,
+            interface_size,
             reduce_motion,
             settings,
             profile_picker: None,
@@ -7601,6 +7604,7 @@ impl KattriApp {
         self.poll_search_debounce(now);
         self.poll_keymap_file(ctx, now);
         crate::theme::apply(ctx, self.high_contrast, self.reduce_motion);
+        crate::theme::apply_interface_size(ctx, self.interface_size);
     }
 
     pub fn ui(&mut self, root: &mut egui::Ui) {

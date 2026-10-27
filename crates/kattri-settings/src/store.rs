@@ -154,7 +154,10 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
         ],
     );
     for (section, known) in [
-        ("general", &["high_contrast", "reduce_motion"][..]),
+        (
+            "general",
+            &["high_contrast", "reduce_motion", "interface_size"][..],
+        ),
         (
             "playback",
             &[
@@ -200,6 +203,7 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
                 "refresh_rate_avoid_25_30_hz",
                 "hdr_preference",
                 "hdr_passthrough",
+                "tone_mapping",
                 "aspect",
                 "allow_zoom",
                 "transcode",
@@ -520,6 +524,71 @@ mod tests {
     fn default_settings_round_trip_through_toml() {
         let text = to_toml_string(&Settings::default()).unwrap();
         assert_eq!(load_from_str(&text).unwrap(), Settings::default());
+    }
+
+    #[test]
+    fn every_tone_mapping_round_trips_and_names_its_mpv_value() {
+        use crate::ToneMapping;
+        assert_eq!(Settings::default().video.tone_mapping, ToneMapping::Auto);
+        let mpv_names: Vec<_> = ToneMapping::ALL.map(ToneMapping::mpv_value).into();
+        assert_eq!(
+            mpv_names,
+            ["auto", "bt.2390", "mobius", "hable", "reinhard", "clip"]
+        );
+        for curve in ToneMapping::ALL {
+            let mut settings = Settings::default();
+            settings.video.tone_mapping = curve;
+            let text = to_toml_string(&settings).unwrap();
+            assert_eq!(
+                load_from_str(&text).unwrap().video.tone_mapping,
+                curve,
+                "{text}"
+            );
+        }
+        assert!(load_from_str("[video]\ntone_mapping = \"banana\"\n").is_err());
+    }
+
+    #[test]
+    fn the_interface_size_round_trips_and_defaults_to_standard() {
+        use crate::InterfaceSize;
+        assert_eq!(
+            Settings::default().general.interface_size,
+            InterfaceSize::Standard
+        );
+        for size in InterfaceSize::ALL {
+            let mut settings = Settings::default();
+            settings.general.interface_size = size;
+            let text = to_toml_string(&settings).unwrap();
+            assert_eq!(
+                load_from_str(&text).unwrap().general.interface_size,
+                size,
+                "{text}"
+            );
+        }
+        let text = to_toml_string(&Settings::default()).unwrap().replace(
+            "interface_size = \"standard\"",
+            "interface_size = \"ten-foot\"",
+        );
+        assert_eq!(
+            load_from_str(&text).unwrap().general.interface_size,
+            InterfaceSize::TenFoot
+        );
+    }
+
+    #[test]
+    fn an_unknown_interface_size_is_refused_not_guessed() {
+        let text = to_toml_string(&Settings::default())
+            .unwrap()
+            .replace("interface_size = \"standard\"", "interface_size = \"huge\"");
+        assert!(load_from_str(&text).is_err());
+    }
+
+    #[test]
+    fn larger_sizes_scale_the_interface_up_in_order() {
+        use crate::InterfaceSize;
+        let factors = InterfaceSize::ALL.map(InterfaceSize::zoom_factor);
+        assert_eq!(factors[0], 1.0);
+        assert!(factors.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]

@@ -450,6 +450,13 @@ pub const SETTINGS_HEADING_DISPLAY: &str = "settings.heading.display";
 pub const SETTINGS_GENERAL_HIGH_CONTRAST: &str = "settings.general.high_contrast";
 pub const SETTINGS_GENERAL_REDUCE_MOTION: &str = "settings.general.reduce_motion";
 pub const SETTINGS_GENERAL_MOTION_HELP: &str = "settings.general.motion_help";
+pub const SETTINGS_GENERAL_INTERFACE_SIZE: &str = "settings.general.interface_size";
+pub const SETTINGS_GENERAL_INTERFACE_SIZE_STANDARD: &str =
+    "settings.general.interface_size.standard";
+pub const SETTINGS_GENERAL_INTERFACE_SIZE_LARGE: &str = "settings.general.interface_size.large";
+pub const SETTINGS_GENERAL_INTERFACE_SIZE_TEN_FOOT: &str =
+    "settings.general.interface_size.ten_foot";
+pub const SETTINGS_GENERAL_INTERFACE_SIZE_HELP: &str = "settings.general.interface_size_help";
 pub const SETTINGS_HEADING_DIAGNOSTICS: &str = "settings.heading.diagnostics";
 pub const SETTINGS_DIAGNOSTICS_CRASH_REPORTS: &str = "settings.diagnostics.crash_reports";
 pub const SETTINGS_DIAGNOSTICS_HELP: &str = "settings.diagnostics.help";
@@ -644,6 +651,14 @@ pub const SETTINGS_MEDIA_VIDEO_HARDWARE_DECODE: &str = "settings.media.video.har
 pub const SETTINGS_MEDIA_VIDEO_DEINTERLACE: &str = "settings.media.video.deinterlace";
 pub const SETTINGS_MEDIA_VIDEO_ASPECT_RATIO: &str = "settings.media.video.aspect_ratio";
 pub const SETTINGS_MEDIA_VIDEO_ALLOW_ZOOM: &str = "settings.media.video.allow_zoom";
+pub const SETTINGS_MEDIA_VIDEO_TONE_MAPPING: &str = "settings.media.video.tone_mapping";
+pub const SETTINGS_MEDIA_TONE_MAPPING_AUTO: &str = "settings.media.tone_mapping.auto";
+pub const SETTINGS_MEDIA_TONE_MAPPING_BT2390: &str = "settings.media.tone_mapping.bt2390";
+pub const SETTINGS_MEDIA_TONE_MAPPING_MOBIUS: &str = "settings.media.tone_mapping.mobius";
+pub const SETTINGS_MEDIA_TONE_MAPPING_HABLE: &str = "settings.media.tone_mapping.hable";
+pub const SETTINGS_MEDIA_TONE_MAPPING_REINHARD: &str = "settings.media.tone_mapping.reinhard";
+pub const SETTINGS_MEDIA_TONE_MAPPING_CLIP: &str = "settings.media.tone_mapping.clip";
+pub const SETTINGS_MEDIA_TONE_MAPPING_HELP: &str = "settings.media.tone_mapping_help";
 pub const SETTINGS_MEDIA_VIDEO_TRANSCODE_ALL: &str = "settings.media.video.transcode_all";
 pub const SETTINGS_MEDIA_UNIT_MS: &str = "settings.media.unit.ms";
 pub const APP_ERROR_DOWNLOAD_QUEUE: &str = "app.error.download_queue";
@@ -1178,6 +1193,11 @@ pub const ALL: &[&str] = &[
     SETTINGS_GENERAL_HIGH_CONTRAST,
     SETTINGS_GENERAL_REDUCE_MOTION,
     SETTINGS_GENERAL_MOTION_HELP,
+    SETTINGS_GENERAL_INTERFACE_SIZE,
+    SETTINGS_GENERAL_INTERFACE_SIZE_STANDARD,
+    SETTINGS_GENERAL_INTERFACE_SIZE_LARGE,
+    SETTINGS_GENERAL_INTERFACE_SIZE_TEN_FOOT,
+    SETTINGS_GENERAL_INTERFACE_SIZE_HELP,
     SETTINGS_HEADING_DIAGNOSTICS,
     SETTINGS_DIAGNOSTICS_CRASH_REPORTS,
     SETTINGS_DIAGNOSTICS_HELP,
@@ -1369,6 +1389,14 @@ pub const ALL: &[&str] = &[
     SETTINGS_MEDIA_VIDEO_DEINTERLACE,
     SETTINGS_MEDIA_VIDEO_ASPECT_RATIO,
     SETTINGS_MEDIA_VIDEO_ALLOW_ZOOM,
+    SETTINGS_MEDIA_VIDEO_TONE_MAPPING,
+    SETTINGS_MEDIA_TONE_MAPPING_AUTO,
+    SETTINGS_MEDIA_TONE_MAPPING_BT2390,
+    SETTINGS_MEDIA_TONE_MAPPING_MOBIUS,
+    SETTINGS_MEDIA_TONE_MAPPING_HABLE,
+    SETTINGS_MEDIA_TONE_MAPPING_REINHARD,
+    SETTINGS_MEDIA_TONE_MAPPING_CLIP,
+    SETTINGS_MEDIA_TONE_MAPPING_HELP,
     SETTINGS_MEDIA_VIDEO_TRANSCODE_ALL,
     SETTINGS_MEDIA_UNIT_MS,
     APP_ERROR_DOWNLOAD_QUEUE,
