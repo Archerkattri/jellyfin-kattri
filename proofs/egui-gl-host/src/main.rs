@@ -523,6 +523,7 @@ impl<'session> GlHost<'session> {
         let media_info = self.mpv.media_info_view();
         let secondary_choices = self.mpv.secondary_subtitle_choices();
         let secondary_selected = self.mpv.secondary_subtitle_selected();
+        let (ab_loop_a, ab_loop_b) = self.mpv.ab_loop_points();
         if screenshot_requested {
             self.take_screenshot();
         }
@@ -563,6 +564,8 @@ impl<'session> GlHost<'session> {
             secondary_selected,
             pip_active,
             pip_available,
+            ab_loop_a,
+            ab_loop_b,
             skip_settings,
             feedback: controls_feedback.as_deref(),
             audio_tracks: audio_track_options.as_deref(),
@@ -1341,6 +1344,8 @@ struct OsdState<'a> {
     secondary_selected: Option<i64>,
     pip_active: bool,
     pip_available: bool,
+    ab_loop_a: Option<Duration>,
+    ab_loop_b: Option<Duration>,
     skip_settings: Option<kattri_client_core::segments::SkipSettings>,
     feedback: Option<&'a str>,
     audio_tracks: Option<&'a [mpv_host::TrackMenuOption]>,
@@ -1376,6 +1381,8 @@ fn osd_controls(
             secondary_selected: osd.secondary_selected,
             pip_active: osd.pip_active,
             pip_available: osd.pip_available,
+            ab_loop_a: osd.ab_loop_a,
+            ab_loop_b: osd.ab_loop_b,
         },
         skip,
     );
@@ -1407,6 +1414,10 @@ fn osd_controls(
                 mpv.select_secondary_subtitle(track);
             }
             PlayerControlAction::TogglePip => *pip_toggle_requested = true,
+            PlayerControlAction::StepFrame { backward } => {
+                mpv.dispatch_playback_key(mpv_host::PlaybackKeyAction::FrameStep { backward });
+            }
+            PlayerControlAction::CycleAbLoop => mpv.cycle_ab_loop(),
         }
     }
     if let Some(feedback) = osd.feedback {

@@ -96,6 +96,40 @@ impl AbLoop {
             _ => None,
         }
     }
+
+    /// One press of the A-B control: with no points it sets A, with A only it sets B, with both it
+    /// clears them. Both the key binding and the on-screen control call this, so the displayed
+    /// state and the applied loop points cannot drift apart.
+    pub fn cycle(&mut self, position: Duration) -> AbLoopCycle {
+        match (self.a, self.b) {
+            (Some(_), Some(_)) => {
+                self.clear();
+                AbLoopCycle::Cleared
+            }
+            (Some(_), None) => match self.set_b(position) {
+                Ok(()) => AbLoopCycle::SetB(position),
+                Err(error) => AbLoopCycle::Rejected(error),
+            },
+            (None, _) => match self.set_a(position) {
+                Ok(()) => AbLoopCycle::SetA(position),
+                Err(error) => AbLoopCycle::Rejected(error),
+            },
+        }
+    }
+}
+
+/// What one press of the A-B control did. The host maps this to the player's loop points and to
+/// the feedback it shows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AbLoopCycle {
+    /// A was set here. B is still unset, so the loop is not enabled yet.
+    SetA(Duration),
+    /// B was set here. The loop is now enabled.
+    SetB(Duration),
+    /// Both points were cleared.
+    Cleared,
+    /// The press was refused; the points are unchanged.
+    Rejected(AbLoopError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -340,5 +374,55 @@ mod tests {
     fn stepping_while_playing_pauses_first() {
         assert!(plan_frame_step(true).pause_first);
         assert!(!plan_frame_step(false).pause_first);
+    }
+
+    #[test]
+    fn cycle_sets_a_then_b_then_clears() {
+        use super::AbLoopCycle;
+        let mut loop_state = AbLoop::new();
+
+        assert_eq!(loop_state.cycle(secs(10)), AbLoopCycle::SetA(secs(10)));
+        assert_eq!(loop_state.a(), Some(secs(10)));
+        assert!(!loop_state.is_enabled());
+
+        assert_eq!(loop_state.cycle(secs(15)), AbLoopCycle::SetB(secs(15)));
+        assert!(loop_state.is_enabled());
+
+        assert_eq!(loop_state.cycle(secs(30)), AbLoopCycle::Cleared);
+        assert_eq!(loop_state.a(), None);
+        assert_eq!(loop_state.b(), None);
+    }
+
+    #[test]
+    fn cycle_refuses_a_b_point_that_is_not_after_a_and_keeps_a() {
+        use super::AbLoopCycle;
+        let mut loop_state = AbLoop::new();
+        loop_state.cycle(secs(10));
+
+        assert_eq!(
+            loop_state.cycle(secs(9)),
+            AbLoopCycle::Rejected(AbLoopError::NotAfterA)
+        );
+        assert_eq!(loop_state.a(), Some(secs(10)));
+        assert_eq!(loop_state.b(), None);
+        assert!(!loop_state.is_enabled());
+    }
+
+    #[test]
+    fn cycle_refuses_a_b_point_too_close_to_a_and_still_clears_next() {
+        use super::AbLoopCycle;
+        let mut loop_state = AbLoop::new();
+        loop_state.cycle(secs(10));
+        let too_close = secs(10) + MIN_LOOP_LENGTH - Duration::from_millis(1);
+
+        assert_eq!(
+            loop_state.cycle(too_close),
+            AbLoopCycle::Rejected(AbLoopError::TooShort)
+        );
+        assert!(!loop_state.is_enabled());
+
+        // A refused B press must not lose A, so the next press attempts B again.
+        assert_eq!(loop_state.cycle(secs(12)), AbLoopCycle::SetB(secs(12)));
+        assert!(loop_state.is_enabled());
     }
 }

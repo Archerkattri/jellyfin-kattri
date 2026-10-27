@@ -10,7 +10,7 @@ use jellyfin_api::JellyfinTicks;
 use jellyfin_api::{DeviceProfile, device_profile_from_runtime_inventory};
 use jellyfin_egui_client::PlaybackReportSubmitError;
 use jellyfin_playback_relay::{RelayHandle, RelayPlaybackUrl};
-use kattri_client_core::ab_loop::plan_frame_step;
+use kattri_client_core::ab_loop::{AbLoop, AbLoopCycle, AbLoopError, plan_frame_step};
 use kattri_client_core::audio::gapless_audio_option;
 use kattri_client_core::cache::{BufferSettings, demuxer_options};
 use kattri_client_core::controls::{PlaybackSpeed, SeekRequest, seek_target};
@@ -530,6 +530,24 @@ fn duration_from_seconds(seconds: f64) -> Option<Duration> {
         .flatten()
 }
 
+/// The `ab-loop-a`/`ab-loop-b` value for one loop point: a decimal second count, or `no`.
+fn ab_loop_time(point: Option<Duration>) -> String {
+    point.map_or_else(
+        || "no".to_owned(),
+        |point| format!("{:.3}", point.as_secs_f64()),
+    )
+}
+
+/// The feedback text for a refused A-B press.
+fn ab_loop_error_text(error: AbLoopError) -> &'static str {
+    match error {
+        AbLoopError::MissingA => "Set loop point A before loop point B.",
+        AbLoopError::NotAfterA => "Loop point B must come after loop point A.",
+        AbLoopError::NotBeforeB => "Loop point A must come before loop point B.",
+        AbLoopError::TooShort => "An A-B loop must be at least half a second long.",
+    }
+}
+
 fn resume_position_seconds(ticks: Option<i64>) -> Option<f64> {
     ticks
         .filter(|ticks| *ticks > 0)
@@ -825,6 +843,9 @@ pub(crate) struct MpvHost<'session> {
     subtitle_track_id: Option<i64>,
     subtitle_delay_seconds: Option<f64>,
     controls: PlaybackControlsState,
+    /// A-B loop points for the current item. Session-only, so a loop never carries to the next
+    /// item; cleared on `StartFile` (M6-12).
+    ab_loop: AbLoop,
     chapter_list_request: Option<u64>,
     controls_feedback: Option<String>,
     track_inventory: Option<TrackInventory>,
@@ -944,6 +965,7 @@ impl<'session> MpvHost<'session> {
                 next_report_generation: 0,
                 report_scheduler: playback_report_scheduler(true),
                 report_actions: ReportHandoff::default(),
+                ab_loop: AbLoop::new(),
                 sync_controller: SubtitleSyncController::new(),
                 sync_feedback: SyncFeedback::guidance(
                     "Load media with a selectable subtitle track to sync it.",
@@ -1033,6 +1055,7 @@ impl<'session> MpvHost<'session> {
                     next_report_generation: 0,
                     report_scheduler: playback_report_scheduler(true),
                     report_actions: ReportHandoff::default(),
+                    ab_loop: AbLoop::new(),
                     sync_controller: SubtitleSyncController::new(),
                     sync_feedback: SyncFeedback::guidance(
                         "Load media with a selectable subtitle track to sync it.",
@@ -1094,6 +1117,7 @@ impl<'session> MpvHost<'session> {
             next_report_generation: 0,
             report_scheduler: playback_report_scheduler(true),
             report_actions: ReportHandoff::default(),
+            ab_loop: AbLoop::new(),
             sync_controller: SubtitleSyncController::new(),
             sync_feedback: SyncFeedback::guidance(
                 "Load media with a selectable subtitle track to sync it.",
@@ -1371,6 +1395,10 @@ impl<'session> MpvHost<'session> {
                     self.resume_seek_command = None;
                     self.playback_seek_pending = false;
                     self.controls.clear();
+                    // A-B points belong to one item, so they never reach the next file (M6-12).
+                    self.ab_loop.clear();
+                    let _ = session.command(&["set", "ab-loop-a", "no"]);
+                    let _ = session.command(&["set", "ab-loop-b", "no"]);
                     self.chapter_list_request = None;
                     self.controls_feedback = None;
                     self.track_inventory = None;
@@ -1789,6 +1817,57 @@ impl<'session> MpvHost<'session> {
             session.seek_absolute(target.as_secs_f64()).map(|_| ()),
             "seek",
         );
+    }
+
+    /// The A-B loop points set for the current item, so the controls can label the next press
+    /// (M6-12). Session-only state; cleared when the item changes.
+    pub(crate) fn ab_loop_points(&self) -> (Option<Duration>, Option<Duration>) {
+        (self.ab_loop.a(), self.ab_loop.b())
+    }
+
+    /// One press of the A-B control: set A, then set B, then clear both. The host keeps the
+    /// points so the OSD can label the control, and mirrors them into libmpv so the player applies
+    /// the loop itself (M6-12). The `L` key and the on-screen control share this path.
+    pub(crate) fn cycle_ab_loop(&mut self) {
+        let Some(session) = self.session else {
+            self.controls_feedback = Some("libmpv is unavailable.".into());
+            return;
+        };
+        if !self
+            .controls
+            .duration()
+            .is_some_and(|value| !value.is_zero())
+        {
+            self.controls_feedback =
+                Some("A-B looping is unavailable for live or unknown-length media.".into());
+            return;
+        }
+        let position = self
+            .controls
+            .position_seconds
+            .and_then(duration_from_seconds)
+            .unwrap_or_default();
+        match self.ab_loop.cycle(position) {
+            AbLoopCycle::SetA(_) | AbLoopCycle::SetB(_) => {}
+            AbLoopCycle::Cleared => {}
+            AbLoopCycle::Rejected(error) => {
+                self.controls_feedback = Some(ab_loop_error_text(error).into());
+                return;
+            }
+        }
+        let (a, b) = self.ab_loop_points();
+        self.write_ab_loop(session, a, b);
+    }
+
+    /// Mirror the loop points into libmpv. `no` clears a point, a decimal number of seconds sets
+    /// it; mpv accepts both on `ab-loop-a` and `ab-loop-b`.
+    fn write_ab_loop(&mut self, session: &MpvSession, a: Option<Duration>, b: Option<Duration>) {
+        let a_text = ab_loop_time(a);
+        let b_text = ab_loop_time(b);
+        let result = session
+            .command(&["set", "ab-loop-a", &a_text])
+            .and_then(|_| session.command(&["set", "ab-loop-b", &b_text]));
+        self.record_control_result(result.map(|_| ()), "A-B loop");
     }
 
     pub(crate) fn set_playback_speed(&mut self, speed: PlaybackSpeed) {
@@ -2691,7 +2770,9 @@ impl<'session> MpvHost<'session> {
                 );
             }
             PlaybackKeyAction::AbLoopCycle => {
-                self.record_control_result(session.cycle_ab_loop().map(|_| ()), "A-B loop");
+                // The key and the OSD control share this path, so the displayed points cannot
+                // drift from the loop mpv applies.
+                self.cycle_ab_loop();
             }
             PlaybackKeyAction::MediaInfo => self.media_info.toggle(),
         }
@@ -3535,6 +3616,29 @@ mod tests {
         assert_eq!(
             chapter_seek_target(&chapters, chapters[2].index, Some(Duration::from_secs(100))),
             Some(Duration::from_secs(50))
+        );
+    }
+
+    #[test]
+    fn ab_loop_points_are_written_as_seconds_or_cleared() {
+        assert_eq!(super::ab_loop_time(None), "no");
+        assert_eq!(
+            super::ab_loop_time(Some(Duration::from_millis(12_500))),
+            "12.500"
+        );
+        assert_eq!(super::ab_loop_time(Some(Duration::ZERO)), "0.000");
+    }
+
+    #[test]
+    fn a_refused_ab_loop_press_explains_why() {
+        use kattri_client_core::ab_loop::AbLoopError;
+        assert_eq!(
+            super::ab_loop_error_text(AbLoopError::NotAfterA),
+            "Loop point B must come after loop point A."
+        );
+        assert_eq!(
+            super::ab_loop_error_text(AbLoopError::TooShort),
+            "An A-B loop must be at least half a second long."
         );
     }
 

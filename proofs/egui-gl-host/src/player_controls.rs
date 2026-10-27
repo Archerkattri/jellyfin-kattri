@@ -50,6 +50,10 @@ pub struct PlayerControlsView<'a> {
     pub pip_active: bool,
     /// Whether picture-in-picture can be entered: a video is loaded and its renderer is ready.
     pub pip_available: bool,
+    /// A-B loop point A for the current item, when one is set (M6-12). Session-only.
+    pub ab_loop_a: Option<Duration>,
+    /// A-B loop point B for the current item, when one is set (M6-12). Session-only.
+    pub ab_loop_b: Option<Duration>,
 }
 
 /// One secondary subtitle the selector offers.
@@ -96,6 +100,13 @@ pub enum PlayerControlAction {
     SelectSecondarySubtitle(Option<i64>),
     /// Enter or leave picture-in-picture (M2-12).
     TogglePip,
+    /// Step exactly one frame, pausing first when playing (M6-12).
+    StepFrame {
+        /// True steps to the previous frame.
+        backward: bool,
+    },
+    /// One press of the A-B control: set A, then set B, then clear both (M6-12).
+    CycleAbLoop,
 }
 
 /// Segment skip for the current item. The caller keeps `skipper` loaded with the item's
@@ -130,6 +141,9 @@ enum ControlId {
     PipToggle,
     SpeedMenu,
     SecondarySubtitleMenu,
+    FrameBack,
+    FrameForward,
+    AbLoop,
 }
 
 const THEATER_BG: Color32 = Color32::from_rgb(24, 25, 27);
@@ -346,6 +360,39 @@ fn draw_inner_with_skip(
                     |rect| observe(ControlId::SeekForward, rect),
                 ) {
                     actions.push(PlayerControlAction::SeekRelative(10));
+                }
+
+                // Frame stepping and the A-B control need the same seek capability as the
+                // timeline: neither can act on live or unknown-length media.
+                if labeled_button(
+                    ui,
+                    "−1f",
+                    "Step back one frame",
+                    seek_available,
+                    |rect| observe(ControlId::FrameBack, rect),
+                ) {
+                    actions.push(PlayerControlAction::StepFrame { backward: true });
+                }
+
+                if labeled_button(
+                    ui,
+                    "+1f",
+                    "Step forward one frame",
+                    seek_available,
+                    |rect| observe(ControlId::FrameForward, rect),
+                ) {
+                    actions.push(PlayerControlAction::StepFrame { backward: false });
+                }
+
+                let (loop_label, loop_accessible) = ab_loop_label(view.ab_loop_a, view.ab_loop_b);
+                if labeled_button(
+                    ui,
+                    loop_label,
+                    loop_accessible,
+                    seek_available,
+                    |rect| observe(ControlId::AbLoop, rect),
+                ) {
+                    actions.push(PlayerControlAction::CycleAbLoop);
                 }
 
                 if let Some(decision) = offered.as_ref() {
@@ -785,6 +832,16 @@ fn button_label(paused: Option<bool>) -> (&'static str, &'static str) {
     }
 }
 
+/// Label and accessibility text for the A-B control. The label carries the state, because the
+/// single button both sets and clears the loop (M6-12).
+fn ab_loop_label(a: Option<Duration>, b: Option<Duration>) -> (&'static str, &'static str) {
+    match (a, b) {
+        (None, _) => ("A-B", "Set A-B loop point A"),
+        (Some(_), None) => ("A-B A", "Set A-B loop point B"),
+        (Some(_), Some(_)) => ("A-B on", "Clear the A-B loop"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -816,6 +873,8 @@ mod tests {
             secondary_selected: None,
             pip_active: false,
             pip_available: true,
+            ab_loop_a: None,
+            ab_loop_b: None,
         }
     }
 
@@ -840,6 +899,22 @@ mod tests {
             });
         });
         assert!(seek_bar.is_none());
+    }
+
+    #[test]
+    fn the_ab_control_label_follows_the_loop_state() {
+        assert_eq!(
+            super::ab_loop_label(None, None),
+            ("A-B", "Set A-B loop point A")
+        );
+        assert_eq!(
+            super::ab_loop_label(Some(Duration::from_secs(5)), None),
+            ("A-B A", "Set A-B loop point B")
+        );
+        assert_eq!(
+            super::ab_loop_label(Some(Duration::from_secs(5)), Some(Duration::from_secs(9))),
+            ("A-B on", "Clear the A-B loop")
+        );
     }
 
     #[test]
@@ -1705,7 +1780,7 @@ mod tests {
     /// Every control in draw order, with the skip button offered (position 20 s is inside the
     /// intro), chapters present, and a second subtitle track present. Tab must reach them in
     /// this order (M2-18).
-    const DRAW_ORDER: [ControlId; 12] = [
+    const DRAW_ORDER: [ControlId; 15] = [
         ControlId::SeekBar,
         ControlId::PreviousTrack,
         ControlId::NextTrack,
@@ -1713,6 +1788,9 @@ mod tests {
         ControlId::PlayPause,
         ControlId::Stop,
         ControlId::SeekForward,
+        ControlId::FrameBack,
+        ControlId::FrameForward,
+        ControlId::AbLoop,
         ControlId::SkipSegment,
         ControlId::PipToggle,
         ControlId::SpeedMenu,
@@ -1731,11 +1809,14 @@ mod tests {
             ControlId::PlayPause => 4,
             ControlId::Stop => 5,
             ControlId::SeekForward => 6,
-            ControlId::SkipSegment => 7,
-            ControlId::PipToggle => 8,
-            ControlId::SpeedMenu => 9,
-            ControlId::ChapterMenu => 10,
-            ControlId::SecondarySubtitleMenu => 11,
+            ControlId::FrameBack => 7,
+            ControlId::FrameForward => 8,
+            ControlId::AbLoop => 9,
+            ControlId::SkipSegment => 10,
+            ControlId::PipToggle => 11,
+            ControlId::SpeedMenu => 12,
+            ControlId::ChapterMenu => 13,
+            ControlId::SecondarySubtitleMenu => 14,
         }
     }
 
@@ -1867,6 +1948,15 @@ mod tests {
                 ControlId::SeekForward,
                 PlayerControlAction::SeekRelative(10),
             ),
+            (
+                ControlId::FrameBack,
+                PlayerControlAction::StepFrame { backward: true },
+            ),
+            (
+                ControlId::FrameForward,
+                PlayerControlAction::StepFrame { backward: false },
+            ),
+            (ControlId::AbLoop, PlayerControlAction::CycleAbLoop),
             (ControlId::Stop, PlayerControlAction::Stop),
             (ControlId::PipToggle, PlayerControlAction::TogglePip),
         ];
