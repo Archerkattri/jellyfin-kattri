@@ -123,7 +123,7 @@ meson setup "$WORK/mpv/build" "$WORK/mpv" --prefix="$PREFIX" --libdir=lib \
   -Dlibmpv=true -Dcplayer=false -Dgpl=false -Dtests=false -Dmanpage-build=disabled \
   -Dlua=disabled -Djavascript=disabled -Dlcms2=disabled -Dvulkan=disabled \
   -Dlibarchive=disabled -Drubberband=disabled -Dzimg=disabled \
-  -Dgl=enabled -Degl=enabled -Dx11=disabled -Dwayland=disabled -Dvaapi=enabled -Dvdpau=disabled
+  -Dgl=enabled -Degl=enabled -Dx11=disabled -Dwayland=disabled -Ddrm=enabled -Dvaapi=enabled -Dvaapi-drm=enabled -Dvdpau=disabled
 ninja -C "$WORK/mpv/build" install
 
 LIB="$(find "$PREFIX/lib" -name 'libmpv.so.2*' -type f | head -1)"

@@ -146,7 +146,7 @@ echo "==> verify"
 install -m 644 "$LIB" "$OUT/libmpv.2.dylib"
 install_name_tool -id "@rpath/libmpv.2.dylib" "$OUT/libmpv.2.dylib"
 otool -L "$OUT/libmpv.2.dylib"
-if otool -L "$OUT/libmpv.2.dylib" | tail -n +2 | grep -vE '^\s*(/usr/lib/|/System/Library/)'; then
+if otool -L "$OUT/libmpv.2.dylib" | tail -n +2 | grep -vE '^\s*(/usr/lib/|/System/Library/|@rpath/libmpv)'; then
   echo "error: libmpv depends on a library outside the system" >&2
   exit 1
 fi
