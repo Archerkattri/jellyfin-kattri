@@ -439,6 +439,15 @@ pub const ALLOWLIST: &[OptionSpec] = &[
         default: OptionValue::Text("display-resample"),
     },
     OptionSpec {
+        // The HDR to SDR curve (M6-03). The names are mpv 0.37's `--tone-mapping=help` list;
+        // the others it offers (gamma, linear, spline, bt.2446a, st2094-*) are not offered in
+        // Settings.
+        name: "tone-mapping",
+        kind: ValueKind::Enum(&["auto", "bt.2390", "mobius", "hable", "reinhard", "clip"]),
+        owner: "video.tone_mapping",
+        default: OptionValue::Text("auto"),
+    },
+    OptionSpec {
         // `vo` drops late frames at output (mpv's default); `no` keeps every frame. The other
         // choices (`decoder`, `decoder+vo`) are not offered in Settings.
         name: "framedrop",
@@ -1304,6 +1313,18 @@ mod tests {
         assert!(validate("framedrop", OptionValue::Text("vo")).is_ok());
         assert!(validate("framedrop", OptionValue::Text("no")).is_ok());
         assert!(validate("framedrop", OptionValue::Text("decoder")).is_err());
+        for curve in ["auto", "bt.2390", "mobius", "hable", "reinhard", "clip"] {
+            assert!(
+                validate("tone-mapping", OptionValue::Text(curve)).is_ok(),
+                "{curve}"
+            );
+        }
+        for bad in ["bt2390", "spline", "", "hable;quit"] {
+            assert!(
+                validate("tone-mapping", OptionValue::Text(bad)).is_err(),
+                "{bad}"
+            );
+        }
         for ok in [0.25, 1.0, 1.5, 4.0] {
             assert!(validate("speed", OptionValue::Float(ok)).is_ok(), "{ok}");
         }

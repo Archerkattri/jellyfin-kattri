@@ -348,6 +348,14 @@ fn pre_load_options(
             "video.deinterlace",
             validate("deinterlace", OptionValue::Flag(video.deinterlace)).map(|o| vec![o]),
         ),
+        (
+            "video.tone_mapping",
+            validate(
+                "tone-mapping",
+                OptionValue::Text(video.tone_mapping.mpv_value()),
+            )
+            .map(|o| vec![o]),
+        ),
     ]
 }
 
@@ -869,6 +877,12 @@ pub(crate) struct MpvHost<'session> {
     sync_feedback: SyncFeedback,
     capability_snapshot_request: Option<u64>,
     media_info: MediaInfoState,
+    /// Set while the saved settings ask for refresh-rate matching: whether to avoid 25 and 30 Hz.
+    display_match: Option<bool>,
+    /// The stream snapshot read that finds the frame rate for display matching.
+    content_rate_request: Option<u64>,
+    /// The frame rate found for the current file, taken once by the host.
+    content_rate: Option<(f64, bool)>,
     device_profile: Option<DeviceProfile>,
     /// Output devices mpv listed in the capability probe, handed to the Settings page once.
     audio_devices: Option<Vec<String>>,
@@ -972,6 +986,9 @@ impl<'session> MpvHost<'session> {
                 ),
                 capability_snapshot_request: None,
                 media_info: MediaInfoState::default(),
+                display_match: None,
+                content_rate_request: None,
+                content_rate: None,
                 device_profile: None,
                 audio_devices: None,
                 audio_filter_ledger: OptionWriteLedger::new(),
@@ -1062,6 +1079,9 @@ impl<'session> MpvHost<'session> {
                     ),
                     capability_snapshot_request,
                     media_info: MediaInfoState::default(),
+                    display_match: None,
+                    content_rate_request: None,
+                    content_rate: None,
                     device_profile: None,
                     audio_devices: None,
                     audio_filter_ledger: OptionWriteLedger::new(),
@@ -1124,6 +1144,9 @@ impl<'session> MpvHost<'session> {
             ),
             capability_snapshot_request,
             media_info: MediaInfoState::default(),
+            display_match: None,
+            content_rate_request: None,
+            content_rate: None,
             device_profile: None,
             audio_devices: None,
             audio_filter_ledger: OptionWriteLedger::new(),
@@ -1190,6 +1213,10 @@ impl<'session> MpvHost<'session> {
         session: &MpvSession,
         load: &ItemLoadSettings<'_>,
     ) -> Result<(), &'static str> {
+        self.display_match = load
+            .video
+            .refresh_rate_auto_switch
+            .then_some(load.video.refresh_rate_avoid_25_30_hz);
         session
             .apply_audio_passthrough(load.audio)
             .map_err(|_| "Could not apply audio passthrough settings before playback.")?;
@@ -1341,6 +1368,22 @@ impl<'session> MpvHost<'session> {
         while let Some(event) = session.try_event() {
             match event.kind {
                 EventKind::StreamSnapshotReady
+                    if Some(event.request_id) == self.content_rate_request =>
+                {
+                    self.content_rate_request = None;
+                    let avoid = self.display_match;
+                    let rate =
+                        session
+                            .take_stream_snapshot(event.request_id)
+                            .and_then(|snapshot| {
+                                mpv_render_proof::available_text(&snapshot.frame_rate)
+                                    .and_then(|text| text.trim().parse::<f64>().ok())
+                            });
+                    if let (Some(avoid), Some(rate)) = (avoid, rate) {
+                        self.content_rate = Some((rate, avoid));
+                    }
+                }
+                EventKind::StreamSnapshotReady
                     if self.media_info.is_waiting_for(event.request_id) =>
                 {
                     let snapshot = session.take_stream_snapshot(event.request_id);
@@ -1356,6 +1399,9 @@ impl<'session> MpvHost<'session> {
                     };
                     self.apply_resume_position(session);
                     self.maybe_start_playback_report();
+                    if self.display_match.is_some() {
+                        self.content_rate_request = session.request_stream_snapshot().ok();
+                    }
                     self.request_track_inventory();
                     self.request_chapter_list();
                     // StartFile cleared the controls. Pause and speed keep their values across a
@@ -1380,6 +1426,8 @@ impl<'session> MpvHost<'session> {
                 EventKind::StartFile { playlist_entry_id } => {
                     self.file_loaded = false;
                     self.media_info.clear_snapshot();
+                    self.content_rate_request = None;
+                    self.content_rate = None;
                     self.playback_restart_seen = false;
                     self.stop_playback_report(false);
                     if let Some(load) = self.media_load.started(playlist_entry_id) {
@@ -2778,6 +2826,12 @@ impl<'session> MpvHost<'session> {
         }
     }
 
+    /// The frame rate of the file that just loaded and whether to avoid 25 and 30 Hz, once, when
+    /// refresh-rate matching is on. `None` when it is off or the rate is unknown.
+    pub(crate) fn take_content_rate(&mut self) -> Option<(f64, bool)> {
+        self.content_rate.take()
+    }
+
     pub(crate) fn media_info_open(&self) -> bool {
         self.media_info.is_open()
     }
@@ -3973,6 +4027,7 @@ mod pre_load_tests {
         };
         let video = VideoSettings {
             deinterlace: true,
+            tone_mapping: kattri_settings::ToneMapping::Hable,
             ..VideoSettings::default()
         };
 
@@ -3985,6 +4040,7 @@ mod pre_load_tests {
             ("audio-exclusive", "yes".to_owned()),
             ("volume-max", "300".to_owned()),
             ("deinterlace", "yes".to_owned()),
+            ("tone-mapping", "hable".to_owned()),
             ("audio-channels", "5.1".to_owned()),
             ("audio-device", "alsa/default".to_owned()),
             ("audio-normalize-downmix", "no".to_owned()),
@@ -4012,6 +4068,7 @@ mod pre_load_tests {
         assert!(got.contains(&("gapless-audio", "yes".to_owned())));
         assert!(got.contains(&("volume-max", "100".to_owned())));
         assert!(got.contains(&("deinterlace", "no".to_owned())));
+        assert!(got.contains(&("tone-mapping", "auto".to_owned())));
         assert!(got.contains(&("audio-channels", "stereo".to_owned())));
         assert!(got.contains(&("audio-device", "auto".to_owned())));
         assert!(got.contains(&("audio-normalize-downmix", "yes".to_owned())));

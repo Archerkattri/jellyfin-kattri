@@ -1485,6 +1485,7 @@ dependencies = [
 name = "egui-gl-host-proof"
 version = "0.1.0"
 dependencies = [
+ "directories",
  "egui",
  "egui-winit",
  "egui_glow",
@@ -1501,6 +1502,7 @@ dependencies = [
  "kattri-settings",
  "mpv-render-proof",
  "tracing",
+ "windows-sys 0.61.2",
  "winit",
 ]
 

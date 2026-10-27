@@ -10,7 +10,7 @@ use kattri_i18n::ids;
 use kattri_settings::schema::{MAX_VOLUME_PERCENT_CHOICES, OUTRO_DELAY_MS_MAX};
 use kattri_settings::{
     AspectMode, AudioOutput, BACKBUFFER_MB_MAX, CACHE_MB_MAX, CACHE_MB_MIN, ChannelLayout,
-    DecodeMode, READAHEAD_SECS_MAX, SyncMode,
+    DecodeMode, READAHEAD_SECS_MAX, SyncMode, ToneMapping,
 };
 use kattri_settings::{
     AudioSettings, EQUALIZER_BANDS, EQUALIZER_GAIN_LIMIT_DB, LOUDNESS_TARGET_LUFS_RANGE,
@@ -569,6 +569,44 @@ pub(super) fn video_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             "settings_video_aspect",
             &mut video.aspect,
             &aspect_modes(),
+        );
+        choice(
+            ui,
+            ui_text(ids::SETTINGS_MEDIA_VIDEO_TONE_MAPPING),
+            "settings_video_tone_mapping",
+            &mut video.tone_mapping,
+            &[
+                (
+                    ToneMapping::Auto,
+                    ui_text(ids::SETTINGS_MEDIA_TONE_MAPPING_AUTO),
+                ),
+                (
+                    ToneMapping::Bt2390,
+                    ui_text(ids::SETTINGS_MEDIA_TONE_MAPPING_BT2390),
+                ),
+                (
+                    ToneMapping::Mobius,
+                    ui_text(ids::SETTINGS_MEDIA_TONE_MAPPING_MOBIUS),
+                ),
+                (
+                    ToneMapping::Hable,
+                    ui_text(ids::SETTINGS_MEDIA_TONE_MAPPING_HABLE),
+                ),
+                (
+                    ToneMapping::Reinhard,
+                    ui_text(ids::SETTINGS_MEDIA_TONE_MAPPING_REINHARD),
+                ),
+                (
+                    ToneMapping::Clip,
+                    ui_text(ids::SETTINGS_MEDIA_TONE_MAPPING_CLIP),
+                ),
+            ],
+        );
+        muted(
+            ui,
+            colors,
+            ui_text(ids::SETTINGS_MEDIA_TONE_MAPPING_HELP),
+            12.0,
         );
         ui.checkbox(
             &mut video.allow_zoom,

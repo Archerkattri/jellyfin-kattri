@@ -47,6 +47,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::raw_window_handle::HasWindowHandle;
 use winit::window::{Window, WindowAttributes, WindowId};
 
+mod display_switch;
 mod gl_adapter;
 mod media_info_panel;
 mod mpv_host;
@@ -107,6 +108,7 @@ struct GlHost<'session> {
     local_stem: Option<String>,
     screenshot_count: u32,
     shell_notice: Option<(String, Duration)>,
+    display_switch: display_switch::DisplaySwitch,
     // Pending window-geometry write. Moves and resizes restart it; it is polled from about_to_wait.
     geometry_save: window_hooks::SaveDebounce,
 }
@@ -289,6 +291,7 @@ impl<'session> GlHost<'session> {
             local_stem,
             screenshot_count: 0,
             shell_notice: None,
+            display_switch: display_switch::DisplaySwitch::new(),
             geometry_save: window_hooks::SaveDebounce::new(window_hooks::SAVE_DEBOUNCE),
         })
     }
@@ -424,6 +427,7 @@ impl<'session> GlHost<'session> {
         if let Some(devices) = self.mpv.take_audio_devices() {
             self.kattri_app.set_audio_devices(devices);
         }
+        self.update_display_switch();
         self.flush_playback_reports();
         if self.physical_size.width == 0 || self.physical_size.height == 0 {
             return self.report_retry_delay().unwrap_or(Duration::MAX);
@@ -1173,6 +1177,20 @@ impl<'session> GlHost<'session> {
         self.window.request_redraw();
     }
 
+    /// Refresh-rate matching (M6-04): switch for a newly loaded file, restore after playback.
+    fn update_display_switch(&mut self) {
+        let mut notice = None;
+        if let Some((rate, avoid_25_30)) = self.mpv.take_content_rate() {
+            notice = self.display_switch.apply(rate, avoid_25_30);
+        }
+        let restore_notice = self
+            .display_switch
+            .tick(self.mpv.has_media(), Instant::now());
+        if let Some(text) = notice.or(restore_notice) {
+            self.set_shell_notice(text);
+        }
+    }
+
     fn take_screenshot(&mut self) {
         const NOTHING_TO_CAPTURE: &str = "Nothing to capture yet.";
         let Some(session) = self.session else {
@@ -1334,6 +1352,8 @@ impl<'session> GlHost<'session> {
         if self.mpv.has_media() {
             self.mpv.stop_playback();
         }
+        // Put the display back before the window goes away.
+        let _ = self.display_switch.restore_now();
         self.mpv.finish_playback_reporting();
         self.report_close_grace.begin(self.osd_clock.elapsed());
     }

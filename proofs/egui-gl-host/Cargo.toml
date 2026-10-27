@@ -28,3 +28,7 @@ jellyfin-playback-relay = { path = "../../crates/playback-relay" }
 mpv-render-proof = { path = "../mpv-render" }
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "x11"] }
 tracing = "=0.1.44"
+directories = "6"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi"] }
