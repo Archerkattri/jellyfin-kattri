@@ -19,7 +19,7 @@ assets = [
     { source = "target/kattri-stripped", dest = "/usr/bin/kattri", mode = "755" },
     { source = "packaging/linux/share/kattri.desktop", dest = "/usr/share/applications/kattri.desktop", mode = "644" },
     { source = "packaging/linux/icons/kattri.svg", dest = "/usr/share/icons/hicolor/scalable/apps/kattri.svg", mode = "644" },
-    { source = "target/kattri.1.gz", dest = "/usr/share/man/man1/kattri.1.gz", mode = "644" },
+    { source = "target/kattri.1.gz", dest = "/usr/share/man/man1/kattri.1.gz", mode = "644", doc = true },
 ]
 
 # Depend on the library soname, not a package name: Fedora (mpv-libs) and openSUSE (libmpv2)

@@ -54,7 +54,11 @@ jobs:
           cargo install --locked --version 0.22.2 cargo-audit
           cargo install --locked --version 0.5.9 cargo-cyclonedx
 
+      # Without debug info: the release profile keeps it, which makes the binary larger than
+      # the 100 MB that cargo audit bin accepts. The embedded dependency data is unaffected.
       - name: Build release binary with embedded dependency data
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: "0"
         run: cargo auditable build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri
 
       - name: Scan the built binary for advisories
