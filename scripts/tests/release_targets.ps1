@@ -115,7 +115,7 @@ try {
 
     $sbomWorkflow = Get-Content '.github/workflows/sbom.yml' -Raw
     if ($sbomWorkflow -notmatch 'cargo auditable build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri' -or
-        $sbomWorkflow -notmatch 'cargo audit bin target/release/jellyfin-kattri --json' -or
+        $sbomWorkflow -notmatch 'cargo audit --json bin target/release/jellyfin-kattri' -or
         $sbomWorkflow -notmatch 'cargo cyclonedx --manifest-path proofs/egui-gl-host/Cargo\.toml' -or
         $sbomWorkflow -match 'jellyfin-egui-client') {
         throw 'SBOM workflow must build, audit, and describe the release GL host package.'
