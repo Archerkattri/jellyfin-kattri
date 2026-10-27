@@ -48,9 +48,10 @@ build-options:
   prepend-pkgconfig-path: /usr/lib/sdk/ffmpeg-full/lib/pkgconfig
 
 modules:
-  # This libmpv is built from the git tag, not from a packaging/libmpv archive, so the
-  # SHA-256 check does not apply. It has no commit or checksum yet (linux-x64 TODO in
-  # packaging/libmpv/manifest.toml). -Dgpl=false is the LGPL build flag (legal item L2).
+  # This libmpv is built from source, not from a packaging/libmpv archive, so the SHA-256
+  # check does not apply. The tag is pinned to the same mpv commit as the linux-x64 archive
+  # in packaging/libmpv/manifest.toml; flatpak-builder refuses a tag that has moved.
+  # -Dgpl=false is the LGPL build flag (legal item L2).
   - name: mpv
     buildsystem: meson
     config-opts:
@@ -72,6 +73,7 @@ modules:
       - type: git
         url: https://github.com/mpv-player/mpv.git
         tag: v0.41.0
+        commit: 41f6a645068483470267271e1d09966ca3b9f413
 
   - name: kattri
     buildsystem: simple
