@@ -1,0 +1,38 @@
+.TH KATTRI 1 "2026-10-27" "kattri 0.1.0" "User Commands"
+.SH NAME
+kattri \- native client for Jellyfin media servers
+.SH SYNOPSIS
+.B kattri
+[\fB\-\-profile\fR \fINAME\fR]
+[\fIMEDIA\fR...]
+.SH DESCRIPTION
+.B kattri
+browses and plays the libraries of a Jellyfin server. Playback uses the
+system libmpv. Server streams pass through a local relay, so libmpv never
+receives server credentials.
+.PP
+On first start, enter the server address and sign in with a password or
+Quick Connect. Plain HTTP is accepted only for loopback and private-network
+addresses unless explicitly allowed.
+.SH OPTIONS
+.TP
+\fB\-\-profile\fR \fINAME\fR, \fB\-\-profile=\fR\fINAME\fR
+Use the named local profile. Each profile keeps its own settings, saved
+servers and queues.
+.TP
+.I MEDIA
+A local media file to open in the player.
+.PP
+Any other argument that starts with \fB\-\-\fR is rejected.
+.SH ENVIRONMENT
+.TP
+.B KATTRI_LOG
+Log level for this run: error, warn, info, debug or trace. The Settings
+page sets the default. Logs redact credentials and server addresses.
+.SH FILES
+Settings, profiles and logs live in the platform configuration and data
+directories. The About page in Settings shows the log folder.
+.SH SEE ALSO
+.BR mpv (1)
+.SH BUGS
+Report issues at https://github.com/Archerkattri/jellyfin-kattri/issues

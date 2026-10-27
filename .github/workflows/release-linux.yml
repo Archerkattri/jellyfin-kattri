@@ -161,11 +161,12 @@ jobs:
         run: |
           set -euo pipefail
           chmod 755 target/release/jellyfin-kattri
+          gzip -9n -c packaging/linux/share/kattri.1 > target/kattri.1.gz
           # cargo-deb reads the package metadata from this CI-only manifest fragment.
           # The release binary is already built, so cargo deb does not rebuild it.
           echo >> proofs/egui-gl-host/Cargo.toml
           cat packaging/linux/deb/cargo-deb.toml >> proofs/egui-gl-host/Cargo.toml
-          cargo deb -p egui-gl-host-proof --no-build
+          cargo deb -p egui-gl-host-proof --no-build --dbgsym
           mkdir -p dist/linux
           mv target/debian/kattri_*.deb dist/linux/
 
@@ -175,6 +176,8 @@ jobs:
           # cargo-generate-rpm 0.21.0 did not read the metadata from --metadata-overwrite
           # (it failed with "Missing field: package.metadata.generate-rpm"). The table is
           # appended to the crate manifest instead, as the deb step does for cargo-deb.
+          # The rpm carries a stripped binary; the release profile keeps debug info.
+          strip -o target/kattri-stripped target/release/jellyfin-kattri
           grep -v '^#' packaging/linux/rpm/generate-rpm.toml >> proofs/egui-gl-host/Cargo.toml
           cargo generate-rpm -p proofs/egui-gl-host
           mv target/generate-rpm/kattri-*.rpm dist/linux/

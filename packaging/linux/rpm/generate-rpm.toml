@@ -6,9 +6,8 @@
 # workspace root with -p proofs/egui-gl-host. Asset paths resolve from the current
 # directory first, so these paths are workspace-relative.
 #
-# libmpv is a runtime dependency. On Fedora the package that provides libmpv.so.2 is
-# mpv-libs. The openSUSE name (libmpv2) differs and is not targeted yet. Minimum
-# version: not set (owner decision).
+# libmpv is a runtime dependency, declared by soname below. Minimum version: not set
+# (owner decision).
 
 [package.metadata.generate-rpm]
 name = "kattri"
@@ -16,10 +15,14 @@ summary = "Native Jellyfin client"
 license = "GPL-3.0-only"
 url = "https://github.com/Archerkattri/jellyfin-kattri"
 assets = [
-    { source = "target/release/jellyfin-kattri", dest = "/usr/bin/kattri", mode = "755" },
+    # The release workflow writes this stripped copy of the release binary.
+    { source = "target/kattri-stripped", dest = "/usr/bin/kattri", mode = "755" },
     { source = "packaging/linux/share/kattri.desktop", dest = "/usr/share/applications/kattri.desktop", mode = "644" },
     { source = "packaging/linux/icons/kattri.svg", dest = "/usr/share/icons/hicolor/scalable/apps/kattri.svg", mode = "644" },
+    { source = "target/kattri.1.gz", dest = "/usr/share/man/man1/kattri.1.gz", mode = "644" },
 ]
 
+# Depend on the library soname, not a package name: Fedora (mpv-libs) and openSUSE (libmpv2)
+# both provide it.
 [package.metadata.generate-rpm.requires]
-mpv-libs = "*"
+"libmpv.so.2()(64bit)" = "*"
