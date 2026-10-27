@@ -35,7 +35,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential git meson ninja-build nasm pkg-config python3-jinja2 \
-            libva-dev libdrm-dev zlib1g-dev libass-dev \
+            hwdata libva-dev libdrm-dev zlib1g-dev libass-dev \
             libfreetype-dev libharfbuzz-dev libfribidi-dev libfontconfig-dev libegl-dev \
             libgl-dev libx11-dev libxext-dev libxrandr-dev libxpresent-dev libxss-dev \
             libxkbcommon-dev libwayland-dev wayland-protocols libasound2-dev libpulse-dev \

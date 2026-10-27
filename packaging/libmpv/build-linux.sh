@@ -17,7 +17,7 @@
 # Build host: Ubuntu 22.04 (the glibc 2.35 floor of the Linux release).
 #
 # Packages (Ubuntu): build-essential git meson ninja-build nasm pkg-config python3-jinja2
-#   libva-dev libdrm-dev libdav1d-dev zlib1g-dev libass-dev libfreetype-dev
+#   hwdata libva-dev libdrm-dev libdav1d-dev zlib1g-dev libass-dev libfreetype-dev
 #   libharfbuzz-dev libfribidi-dev libfontconfig-dev libegl-dev libgl-dev libx11-dev libxext-dev
 #   libxrandr-dev libxpresent-dev libxss-dev libxkbcommon-dev libwayland-dev wayland-protocols
 #   libasound2-dev libpulse-dev libuchardet-dev
@@ -30,6 +30,8 @@ PLACEBO_TAG="v7.360.1"
 PLACEBO_COMMIT="cee9b076f2c63104ccfd497fa79c39a867293ec4"
 DAV1D_TAG="1.5.4"
 DAV1D_COMMIT="54706fc6bc0cdecab7e9593974a4039cc038fca7"
+DISPLAYINFO_TAG="0.2.0"
+DISPLAYINFO_COMMIT="66b802d05b374cd8f388dc6ad1e7ae4f08cb3300"
 MPV_TAG="v0.41.0"
 MPV_COMMIT="41f6a645068483470267271e1d09966ca3b9f413"
 
@@ -115,6 +117,17 @@ ninja -C "$WORK/libplacebo/build" install
 mark_done placebo
 fi
 
+echo "==> libdisplay-info $DISPLAYINFO_TAG (static, needed by mpv's DRM support)"
+if ! stage_done displayinfo; then
+rm -rf "$WORK/libdisplay-info"
+clone https://gitlab.freedesktop.org/emersion/libdisplay-info.git "$DISPLAYINFO_TAG" "$DISPLAYINFO_COMMIT" \
+  "$WORK/libdisplay-info"
+meson setup "$WORK/libdisplay-info/build" "$WORK/libdisplay-info" --prefix="$PREFIX" --libdir=lib \
+  --buildtype=release --default-library=static -Db_staticpic=true
+ninja -C "$WORK/libdisplay-info/build" install
+mark_done displayinfo
+fi
+
 echo "==> mpv $MPV_TAG (libmpv only, -Dgpl=false)"
 rm -rf "$WORK/mpv"
 clone https://github.com/mpv-player/mpv "$MPV_TAG" "$MPV_COMMIT" "$WORK/mpv"
@@ -131,13 +144,13 @@ LIB="$(find "$PREFIX/lib" -name 'libmpv.so.2*' -type f | head -1)"
 
 echo "==> verify"
 # libavcodec, libavformat, libavutil, libswresample and libplacebo must be inside the library.
-if readelf -d "$LIB" | grep -E 'NEEDED.*(libav|libsw|libplacebo|libdav1d)'; then
+if readelf -d "$LIB" | grep -E 'NEEDED.*(libav|libsw|libplacebo|libdav1d|libdisplay-info)'; then
   echo "error: FFmpeg or libplacebo is dynamically linked, the archive would not be self-contained" >&2
   exit 1
 fi
 readelf -d "$LIB" | grep -E 'SONAME'
-nm -D --defined-only "$LIB" | grep -q ' mpv_create$' || { echo "error: mpv_create is not exported" >&2; exit 1; }
-nm -D --defined-only "$LIB" | grep -q ' mpv_render_context_create$' \
+nm -D --defined-only "$LIB" | grep ' mpv_create$' >/dev/null || { echo "error: mpv_create is not exported" >&2; exit 1; }
+nm -D --defined-only "$LIB" | grep ' mpv_render_context_create$' >/dev/null \
   || { echo "error: the render API is not exported" >&2; exit 1; }
 
 STAGE="$WORK/stage"
@@ -149,11 +162,13 @@ cp "$WORK/mpv/LICENSE.LGPL" "$STAGE/$NAME/LICENSE.mpv.LGPL"
 cp "$WORK/ffmpeg/COPYING.LGPLv2.1" "$STAGE/$NAME/LICENSE.ffmpeg.LGPL"
 cp "$WORK/libplacebo/LICENSE" "$STAGE/$NAME/LICENSE.libplacebo.LGPL"
 cp "$WORK/dav1d/COPYING" "$STAGE/$NAME/LICENSE.dav1d.BSD-2-Clause"
+cp "$WORK/libdisplay-info/LICENSE" "$STAGE/$NAME/LICENSE.libdisplay-info.MIT"
 {
   echo "mpv $MPV_TAG ($MPV_COMMIT) -Dgpl=false"
   echo "FFmpeg $FFMPEG_TAG ($FFMPEG_COMMIT) LGPL 2.1 or later, static"
   echo "libplacebo $PLACEBO_TAG ($PLACEBO_COMMIT) static"
   echo "dav1d $DAV1D_TAG ($DAV1D_COMMIT) static"
+  echo "libdisplay-info $DISPLAYINFO_TAG ($DISPLAYINFO_COMMIT) static"
   echo "Build host: $(. /etc/os-release && echo "$PRETTY_NAME"), glibc $(ldd --version | head -1 | awk '{print $NF}')"
   echo "--- shared dependencies"
   readelf -d "$STAGE/$NAME/libmpv.so.2" | grep NEEDED

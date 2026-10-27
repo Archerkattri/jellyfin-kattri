@@ -151,8 +151,8 @@ if otool -L "$OUT/libmpv.2.dylib" | tail -n +2 | grep -vE '^\s*(/usr/lib/|/Syste
   exit 1
 fi
 lipo -archs "$OUT/libmpv.2.dylib"
-nm -gU "$OUT/libmpv.2.dylib" | grep -q '_mpv_create$' || { echo "error: mpv_create is not exported" >&2; exit 1; }
-nm -gU "$OUT/libmpv.2.dylib" | grep -q '_mpv_render_context_create$' \
+nm -gU "$OUT/libmpv.2.dylib" | grep '_mpv_create$' >/dev/null || { echo "error: mpv_create is not exported" >&2; exit 1; }
+nm -gU "$OUT/libmpv.2.dylib" | grep '_mpv_render_context_create$' >/dev/null \
   || { echo "error: the render API is not exported" >&2; exit 1; }
 strip -x "$OUT/libmpv.2.dylib"
 
