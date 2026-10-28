@@ -18,57 +18,71 @@ pub fn media_card(
     let poster_height = 188.0;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
     let art_rect = Rect::from_min_size(rect.min, egui::vec2(width, poster_height));
-    let painter = ui.painter_at(rect);
+    // A library page can hold a thousand cards; only the ones on screen are painted.
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter_at(rect);
 
-    if let Some(texture) = item.artwork_texture.as_ref() {
-        painter.add(
-            egui::epaint::RectShape::filled(art_rect, CornerRadius::same(10), Color32::WHITE)
-                .with_texture(texture.id(), cover_uv(texture.size_vec2(), art_rect.size())),
-        );
-    } else {
-        paint_artwork(&painter, art_rect, item.artwork);
-    }
-    painter.galley(
-        egui::pos2(rect.left() + 1.0, art_rect.bottom() + 10.0),
-        super::row::layout_text(
-            &painter,
-            &item.title,
-            FontId::proportional(15.0),
+        if let Some(texture) = item.artwork_texture.as_ref() {
+            painter.add(
+                egui::epaint::RectShape::filled(art_rect, CornerRadius::same(10), Color32::WHITE)
+                    .with_texture(texture.id(), cover_uv(texture.size_vec2(), art_rect.size())),
+            );
+        } else {
+            paint_artwork(&painter, art_rect, item.artwork);
+        }
+        painter.galley(
+            egui::pos2(rect.left() + 1.0, art_rect.bottom() + 10.0),
+            super::row::layout_text(
+                &painter,
+                &item.title,
+                FontId::proportional(15.0),
+                colors.text,
+                width - 2.0,
+                1,
+            ),
             colors.text,
-            width - 2.0,
-            1,
-        ),
-        colors.text,
-    );
-    painter.galley(
-        egui::pos2(rect.left() + 1.0, art_rect.bottom() + 31.0),
-        super::row::layout_text(
-            &painter,
-            item.subtitle(),
-            FontId::proportional(11.5),
+        );
+        painter.galley(
+            egui::pos2(rect.left() + 1.0, art_rect.bottom() + 31.0),
+            super::row::layout_text(
+                &painter,
+                item.subtitle(),
+                FontId::proportional(11.5),
+                colors.muted,
+                width - 2.0,
+                1,
+            ),
             colors.muted,
-            width - 2.0,
-            1,
-        ),
-        colors.muted,
-    );
+        );
 
-    if response.has_focus() {
-        painter.rect_stroke(
-            art_rect.expand(2.0),
-            CornerRadius::same(9),
-            Stroke::new(2.5, colors.focus),
-            egui::StrokeKind::Outside,
-        );
-    } else if selected || response.hovered() {
-        painter.rect_stroke(
-            art_rect.expand(1.0),
-            CornerRadius::same(8),
-            Stroke::new(if selected { 2.0 } else { 1.5 }, colors.accent),
-            egui::StrokeKind::Outside,
-        );
+        if response.has_focus() {
+            painter.rect_stroke(
+                art_rect.expand(2.0),
+                CornerRadius::same(9),
+                Stroke::new(2.5, colors.focus),
+                egui::StrokeKind::Outside,
+            );
+        } else if selected || response.hovered() {
+            painter.rect_stroke(
+                art_rect.expand(1.0),
+                CornerRadius::same(8),
+                Stroke::new(if selected { 2.0 } else { 1.5 }, colors.accent),
+                egui::StrokeKind::Outside,
+            );
+        }
     }
 
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Button, true, selected, card_label(item))
+    });
+    response.on_hover_ui(|ui| {
+        ui.label(card_label(item));
+    })
+}
+
+/// The spoken and tooltip description of a card. Built only when accessibility or a tooltip
+/// asks for it, not for every card on every frame.
+fn card_label(item: &MediaItem) -> String {
     let artwork_description = if item.artwork_texture.is_some() {
         ui_text(ids::ARTWORK_DESCRIPTION_PRIMARY)
     } else {
@@ -97,10 +111,7 @@ pub fn media_card(
         label.push_str(". ");
     }
     label.push_str(ui_text(ids::ARTWORK_HINT_LOAD_DETAILS));
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::Button, true, selected, label.clone())
-    });
-    response.on_hover_text(label)
+    label
 }
 
 pub fn paint_artwork(painter: &egui::Painter, rect: Rect, art: ArtworkPalette) {

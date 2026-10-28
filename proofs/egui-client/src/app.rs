@@ -655,6 +655,8 @@ pub struct KattriApp {
     pub(crate) photo_page_start: usize,
     photo_thumbnail_pending: HashMap<u64, String>,
     photo_thumbnail_attempted: HashSet<String>,
+    /// Photo ids in the visible thumbnail window of the latest frame.
+    photo_visible_ids: HashSet<String>,
     photo_full_size_pending: HashMap<u64, String>,
     pub(crate) photo_full_size_failed: HashSet<String>,
     pub(crate) music_queue: Queue,
@@ -779,6 +781,9 @@ pub struct KattriApp {
     attempted_artwork: HashSet<(String, String)>,
     artwork_access_ticks: HashMap<(String, String), u64>,
     next_artwork_access_tick: u64,
+    /// First access tick of the latest visible-artwork pass. Textures touched at or after it
+    /// are on screen and are never evicted.
+    visible_artwork_from_tick: u64,
 }
 
 impl KattriApp {
@@ -821,6 +826,7 @@ impl KattriApp {
     }
 
     pub(crate) fn update_photo_thumbnail_window(&mut self, visible: &[(String, String)]) {
+        self.photo_visible_ids = visible.iter().map(|(item_id, _)| item_id.clone()).collect();
         let requested_ids = visible
             .iter()
             .map(|(item_id, _)| item_id.as_str())
@@ -1080,6 +1086,7 @@ impl KattriApp {
             photo_page_start: 0,
             photo_thumbnail_pending: HashMap::new(),
             photo_thumbnail_attempted: HashSet::new(),
+            photo_visible_ids: HashSet::new(),
             photo_full_size_pending: HashMap::new(),
             photo_full_size_failed: HashSet::new(),
             music_queue: Queue::new(),
@@ -1187,6 +1194,7 @@ impl KattriApp {
             attempted_artwork: HashSet::new(),
             artwork_access_ticks: HashMap::new(),
             next_artwork_access_tick: 0,
+            visible_artwork_from_tick: 0,
         }
     }
 
@@ -4929,24 +4937,33 @@ impl KattriApp {
     }
 
     pub(crate) fn request_visible_artwork(&mut self, requests: Vec<(String, String)>) {
+        self.visible_artwork_from_tick = self.next_artwork_access_tick.saturating_add(1);
+        // One pass over the items instead of two scans per visible card.
+        let mut known: HashMap<(&str, &str), bool> = HashMap::new();
+        for item in self.artwork_items() {
+            if let Some(tag) = item.primary_image_tag.as_deref() {
+                let loaded = known
+                    .entry((item.artwork_id.as_str(), tag))
+                    .or_insert(false);
+                *loaded |= item.artwork_texture.is_some();
+            }
+        }
+        let known: HashMap<(String, String), bool> = known
+            .into_iter()
+            .map(|((id, tag), loaded)| ((id.to_owned(), tag.to_owned()), loaded))
+            .collect();
+        let mut pending: HashSet<(String, String)> =
+            self.pending_artwork_requests.values().cloned().collect();
         for (item_id, image_tag) in requests {
             let key = (item_id.clone(), image_tag.clone());
-            let item_exists = self.artwork_items().any(|item| {
-                item.artwork_id == item_id && item.primary_image_tag.as_deref() == Some(&image_tag)
-            });
-            if !item_exists {
+            let Some(&already_loaded) = known.get(&key) else {
                 continue;
-            }
+            };
 
             self.next_artwork_access_tick = self.next_artwork_access_tick.saturating_add(1);
             self.artwork_access_ticks
                 .insert(key.clone(), self.next_artwork_access_tick);
 
-            let already_loaded = self.artwork_items().any(|item| {
-                item.artwork_id == item_id
-                    && item.primary_image_tag.as_deref() == Some(&image_tag)
-                    && item.artwork_texture.is_some()
-            });
             if already_loaded {
                 continue;
             }
@@ -4954,12 +4971,7 @@ impl KattriApp {
             if self.pending_artwork_requests.len() >= MAX_PENDING_ARTWORK_REQUESTS {
                 break;
             }
-            if self.attempted_artwork.contains(&key)
-                || self
-                    .pending_artwork_requests
-                    .values()
-                    .any(|pending| pending == &key)
-            {
+            if self.attempted_artwork.contains(&key) || pending.contains(&key) {
                 continue;
             }
 
@@ -4973,6 +4985,7 @@ impl KattriApp {
                     worker.get_primary_artwork(request_id, item_id, Some(image_tag))
                 });
             if result.is_ok() {
+                pending.insert(key.clone());
                 self.pending_artwork_requests.insert(request_id, key);
             } else {
                 self.attempted_artwork.remove(&key);
@@ -4989,6 +5002,7 @@ impl KattriApp {
             &mut media,
             &mut self.artwork_access_ticks,
             &mut self.attempted_artwork,
+            self.visible_artwork_from_tick,
         );
     }
 
@@ -6348,13 +6362,12 @@ impl KattriApp {
                                 egui::TextureOptions::LINEAR,
                             ),
                         );
-                        while self.photo_thumbnails.len() > 64 {
-                            if let Some(key) = self.photo_thumbnails.keys().next().cloned() {
-                                self.photo_thumbnails.remove(&key);
-                            } else {
-                                break;
-                            }
-                        }
+                        evict_photo_thumbnails(
+                            &mut self.photo_thumbnails,
+                            &mut self.photo_thumbnail_attempted,
+                            &self.photo_visible_ids,
+                            &item_id,
+                        );
                     }
                 }
                 WorkerEvent::PhotoThumbnailFailed {
@@ -7545,10 +7558,40 @@ mod search_browse_tests {
     }
 }
 
+const MAX_PHOTO_THUMBNAILS: usize = 64;
+
+/// Keeps at most [`MAX_PHOTO_THUMBNAILS`] thumbnails, never evicting one in the visible
+/// window or the one just loaded. An evicted id may be requested again when it scrolls back.
+fn evict_photo_thumbnails(
+    thumbnails: &mut HashMap<String, egui::TextureHandle>,
+    attempted: &mut HashSet<String>,
+    visible: &HashSet<String>,
+    just_loaded: &str,
+) {
+    if thumbnails.len() <= MAX_PHOTO_THUMBNAILS {
+        return;
+    }
+    let excess = thumbnails.len() - MAX_PHOTO_THUMBNAILS;
+    let evict: Vec<String> = thumbnails
+        .keys()
+        .filter(|id| id.as_str() != just_loaded && !visible.contains(id.as_str()))
+        .take(excess)
+        .cloned()
+        .collect();
+    for id in evict {
+        thumbnails.remove(&id);
+        attempted.remove(&id);
+    }
+}
+
+/// Drops the least recently shown textures past [`MAX_CACHED_ARTWORK_TEXTURES`]. Textures
+/// shown at or after `visible_from_tick` are on screen and stay, so a screen showing more
+/// cards than the cap grows the cache instead of evicting and reloading visible artwork.
 fn trim_artwork_textures(
     items: &mut [&mut MediaItem],
     access_ticks: &mut HashMap<(String, String), u64>,
     attempted: &mut HashSet<(String, String)>,
+    visible_from_tick: u64,
 ) {
     let loaded_count = items
         .iter()
@@ -7568,6 +7611,7 @@ fn trim_artwork_textures(
                 (tick, key)
             })
         })
+        .filter(|(tick, _)| visible_from_tick == 0 || *tick < visible_from_tick)
         .collect();
     least_recently_used.sort_unstable_by_key(|(tick, _)| *tick);
 
@@ -9409,7 +9453,10 @@ mod playback_report_feedback_tests {
 
 #[cfg(test)]
 mod artwork_cache_tests {
-    use super::{MAX_CACHED_ARTWORK_TEXTURES, trim_artwork_textures};
+    use super::{
+        MAX_CACHED_ARTWORK_TEXTURES, MAX_PHOTO_THUMBNAILS, evict_photo_thumbnails,
+        trim_artwork_textures,
+    };
     use crate::catalog::{ArtworkMotif, ArtworkPalette, MediaItem, MediaKind};
     use std::collections::{HashMap, HashSet};
 
@@ -9457,7 +9504,7 @@ mod artwork_cache_tests {
 
         {
             let mut refs: Vec<&mut MediaItem> = items.iter_mut().collect();
-            trim_artwork_textures(&mut refs, &mut access_ticks, &mut attempted);
+            trim_artwork_textures(&mut refs, &mut access_ticks, &mut attempted, 0);
         }
 
         assert_eq!(
@@ -9470,6 +9517,95 @@ mod artwork_cache_tests {
         assert!(items[0].artwork_texture.is_none());
         assert!(items[MAX_CACHED_ARTWORK_TEXTURES].artwork_texture.is_some());
         assert!(!attempted.contains(&("item-0".into(), "tag-0".into())));
+    }
+
+    #[test]
+    fn textures_on_screen_are_kept_past_the_cap() {
+        let context = egui::Context::default();
+        let mut items = Vec::new();
+        let mut access_ticks = HashMap::new();
+        let mut attempted = HashSet::new();
+        let shown = MAX_CACHED_ARTWORK_TEXTURES + 10;
+        for index in 0..shown {
+            let id = format!("item-{index}");
+            let tag = format!("tag-{index}");
+            access_ticks.insert((id.clone(), tag.clone()), 100 + index as u64);
+            attempted.insert((id.clone(), tag.clone()));
+            let texture = context.load_texture(
+                id.clone(),
+                egui::ColorImage::filled([1, 1], egui::Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            items.push(MediaItem {
+                series_id: None,
+                played: false,
+                favorite: false,
+                resumable: false,
+                artwork_id: id.clone(),
+                backdrop_id: id.clone(),
+                id,
+                title: format!("Title {index}"),
+                remote_type: Some("Movie".into()),
+                overview: None,
+                kind: MediaKind::Movie,
+                artwork: ArtworkPalette {
+                    top: [10, 20, 30],
+                    bottom: [30, 20, 10],
+                    shape: [50, 60, 70],
+                    detail: [70, 60, 50],
+                    motif: ArtworkMotif::Orbit,
+                },
+                primary_image_tag: Some(tag),
+                artwork_texture: Some(texture),
+            });
+        }
+        {
+            let mut refs: Vec<&mut MediaItem> = items.iter_mut().collect();
+            trim_artwork_textures(&mut refs, &mut access_ticks, &mut attempted, 100);
+        }
+        assert!(items.iter().all(|item| item.artwork_texture.is_some()));
+    }
+
+    #[test]
+    fn photo_thumbnail_eviction_spares_the_visible_window_and_allows_reloads() {
+        let context = egui::Context::default();
+        let mut thumbnails = HashMap::new();
+        let mut attempted = HashSet::new();
+        for index in 0..=MAX_PHOTO_THUMBNAILS {
+            let id = format!("photo-{index}");
+            thumbnails.insert(
+                id.clone(),
+                context.load_texture(
+                    id.clone(),
+                    egui::ColorImage::filled([1, 1], egui::Color32::WHITE),
+                    egui::TextureOptions::LINEAR,
+                ),
+            );
+            attempted.insert(id);
+        }
+        let visible: HashSet<String> = (1..=MAX_PHOTO_THUMBNAILS)
+            .map(|index| format!("photo-{index}"))
+            .collect();
+        evict_photo_thumbnails(&mut thumbnails, &mut attempted, &visible, "photo-64");
+        assert_eq!(thumbnails.len(), MAX_PHOTO_THUMBNAILS);
+        assert!(!thumbnails.contains_key("photo-0"));
+        assert!(
+            !attempted.contains("photo-0"),
+            "an evicted photo can load again"
+        );
+
+        // Every thumbnail visible: the cache grows rather than dropping one on screen.
+        let all: HashSet<String> = thumbnails.keys().cloned().collect();
+        thumbnails.insert(
+            "photo-extra".into(),
+            context.load_texture(
+                "photo-extra",
+                egui::ColorImage::filled([1, 1], egui::Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            ),
+        );
+        evict_photo_thumbnails(&mut thumbnails, &mut attempted, &all, "photo-extra");
+        assert_eq!(thumbnails.len(), MAX_PHOTO_THUMBNAILS + 1);
     }
 }
 
