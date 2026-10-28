@@ -6,6 +6,7 @@ pub mod capabilities;
 mod collections;
 pub mod connectivity;
 mod device_profile;
+mod extras;
 mod favorites;
 mod home;
 mod item_admin;

@@ -675,6 +675,9 @@ pub struct KattriApp {
     series_next_up: Option<SeriesNextUp>,
     /// The version (media source index) the viewer picked for an item.
     preferred_source: Option<(String, usize)>,
+    /// Trailers and special features of the movie or series on screen.
+    pub(crate) item_extras: Vec<BaseItemDto>,
+    item_extras_request_id: u64,
     /// The other episodes of the season of the episode page on screen.
     pub(crate) season_siblings: Vec<BaseItemDto>,
     season_siblings_request_id: u64,
@@ -1154,6 +1157,8 @@ impl KattriApp {
             series_next_up: None,
             shuffle_queue: None,
             preferred_source: None,
+            item_extras: Vec::new(),
+            item_extras_request_id: 0,
             season_siblings: Vec::new(),
             season_siblings_request_id: 0,
             live_tv_recordings: Vec::new(),
@@ -5337,6 +5342,21 @@ impl KattriApp {
         }
     }
 
+    /// For a movie or series page, asks for its trailers and special features.
+    fn request_item_extras(&mut self) {
+        self.item_extras.clear();
+        self.item_extras_request_id = self.allocate_request_id();
+        let Some(item_id) = self.selected_details.as_ref().and_then(|item| {
+            matches!(item.item_type.as_deref(), Some("Movie" | "Series")).then(|| item.id.clone())
+        }) else {
+            return;
+        };
+        let request_id = self.item_extras_request_id;
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.list_extras(request_id, item_id);
+        }
+    }
+
     /// For an episode page, asks for the rest of its season.
     fn request_season_siblings(&mut self) {
         self.season_siblings.clear();
@@ -5352,6 +5372,13 @@ impl KattriApp {
         if let Some(worker) = self.worker.as_ref() {
             let _ = worker.list_season_siblings(request_id, series_id, season);
         }
+    }
+
+    /// Plays an extra of the page on screen; Back from it returns to that page.
+    pub(crate) fn play_child_item(&mut self, item_id: String) {
+        let parent = self.selected_item_id.clone();
+        self.play_item(item_id, true);
+        self.detail_parent = parent;
     }
 
     /// Opens another episode of the same season, keeping where Back returns.
@@ -6560,6 +6587,7 @@ impl KattriApp {
                         self.request_series_seasons(series_id);
                     }
                     self.request_season_siblings();
+                    self.request_item_extras();
                     if self.music_queue_auto_play_item_id.as_deref()
                         == self.selected_item_id.as_deref()
                     {
@@ -6666,6 +6694,11 @@ impl KattriApp {
                 WorkerEvent::GenresLoaded { request_id, genres } => {
                     if request_id == self.catalog_genres_request_id {
                         self.catalog_genres = genres;
+                    }
+                }
+                WorkerEvent::ExtrasLoaded { request_id, extras } => {
+                    if request_id == self.item_extras_request_id {
+                        self.item_extras = extras;
                     }
                 }
                 WorkerEvent::SeasonSiblingsLoaded {
@@ -11881,6 +11914,40 @@ mod photo_decode_event_tests {
             None,
             "another item uses its default"
         );
+    }
+
+    #[test]
+    fn movie_pages_load_extras_and_an_extra_returns_to_its_movie() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.selected_item_id = Some("movie".into());
+        app.selected_details = Some(
+            serde_json::from_value(
+                serde_json::json!({"Id": "movie", "Name": "Film", "Type": "Movie"}),
+            )
+            .expect("movie"),
+        );
+        app.request_item_extras();
+        sender
+            .try_send(WorkerEvent::ExtrasLoaded {
+                request_id: app.item_extras_request_id,
+                extras: vec![
+                    serde_json::from_value(serde_json::json!({"Id": "t1", "Name": "Trailer"}))
+                        .expect("trailer"),
+                ],
+            })
+            .expect("send extras");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.item_extras.len(), 1);
+        app.play_child_item("t1".into());
+        assert_eq!(app.selected_item_id.as_deref(), Some("t1"));
+        app.navigate_back();
+        assert_eq!(app.selected_item_id.as_deref(), Some("movie"));
     }
 
     #[test]

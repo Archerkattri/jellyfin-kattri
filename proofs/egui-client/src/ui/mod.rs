@@ -2370,6 +2370,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     let mut shuffle_series = None;
     let mut sibling_to_open = None;
     let mut version_picked = None;
+    let mut extra_to_play = None;
     let mut person_to_open = None;
     let mut similar_item_to_open = None;
     let mut download_target: Option<(String, String)> = None;
@@ -2445,6 +2446,28 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                             .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
                         );
                     }
+                }
+                if !app.item_extras.is_empty() {
+                    ui.add_space(14.0);
+                    ui.heading(ui_text(ids::DETAIL_EXTRAS));
+                    egui::ScrollArea::horizontal()
+                        .id_salt("detail_extras")
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for extra in &app.item_extras {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(format!("▶  {}", extra.name))
+                                                .min_size(egui::vec2(0.0, 36.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        extra_to_play = Some(extra.id.clone());
+                                    }
+                                }
+                            });
+                        });
                 }
                 if item.item_type.as_deref() == Some("Episode") && !app.season_siblings.is_empty() {
                     ui.add_space(14.0);
@@ -2815,6 +2838,10 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     if let Some(episode_id) = episode_to_open {
         // The play button plays the episode, resuming where it was left.
         app.play_item(episode_id, false);
+        ui.ctx().request_repaint();
+    }
+    if let Some(extra_id) = extra_to_play {
+        app.play_child_item(extra_id);
         ui.ctx().request_repaint();
     }
     if let Some(index) = version_picked {

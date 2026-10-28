@@ -344,6 +344,11 @@ pub enum WorkerEvent {
         request_id: u64,
         genres: Vec<String>,
     },
+    /// Trailers and special features of the item on screen. Empty on failure.
+    ExtrasLoaded {
+        request_id: u64,
+        extras: Vec<BaseItemDto>,
+    },
     /// The episodes of the season an episode page belongs to. Empty on failure.
     SeasonSiblingsLoaded {
         request_id: u64,
@@ -838,6 +843,10 @@ enum WorkerCommand {
         request_id: u64,
         series_id: String,
         season: i32,
+    },
+    ListExtras {
+        request_id: u64,
+        item_id: String,
     },
     ChangeTimer {
         request_id: u64,
@@ -1348,6 +1357,17 @@ impl ApiWorker {
             item_id,
             action,
             collection_id,
+        })
+    }
+
+    pub(crate) fn list_extras(
+        &self,
+        request_id: u64,
+        item_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ListExtras {
+            request_id,
+            item_id,
         })
     }
 
@@ -3320,6 +3340,27 @@ async fn execute_command(
                     events,
                     ctx,
                     WorkerEvent::GenresLoaded { request_id, genres },
+                )
+                .await
+            }
+            WorkerCommand::ListExtras {
+                request_id,
+                item_id,
+            } => {
+                let extras = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .item_extras(session, &item_id)
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "extras unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::ExtrasLoaded { request_id, extras },
                 )
                 .await
             }
