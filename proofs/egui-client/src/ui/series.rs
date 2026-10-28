@@ -34,6 +34,7 @@ impl SeriesPresentation {
         ui: &mut Ui,
         seasons: &[BaseItemDto],
         episodes: &[BaseItemDto],
+        thumbnails: &std::collections::HashMap<String, egui::TextureHandle>,
     ) -> SeriesPresentationResponse {
         let ordered = ordered_seasons(seasons);
         if ordered.is_empty() {
@@ -94,7 +95,7 @@ impl SeriesPresentation {
             } else {
                 ui.add_space(4.0);
                 for episode in matching_episodes {
-                    match episode_row(ui, episode) {
+                    match episode_row(ui, episode, thumbnails.get(&episode.id)) {
                         Some(EpisodeRowAction::Play) => {
                             activated_episode_id = Some(episode.id.clone());
                         }
@@ -176,7 +177,14 @@ enum EpisodeRowAction {
     Open,
 }
 
-fn episode_row(ui: &mut Ui, episode: &BaseItemDto) -> Option<EpisodeRowAction> {
+/// Size of the still shown at the start of an episode row (16:9).
+const EPISODE_THUMBNAIL: egui::Vec2 = egui::vec2(96.0, 54.0);
+
+fn episode_row(
+    ui: &mut Ui,
+    episode: &BaseItemDto,
+    thumbnail: Option<&egui::TextureHandle>,
+) -> Option<EpisodeRowAction> {
     ui.push_id(&episode.id, |ui| {
         egui::Frame::new()
             .fill(Color32::from_rgb(21, 21, 23))
@@ -185,6 +193,30 @@ fn episode_row(ui: &mut Ui, episode: &BaseItemDto) -> Option<EpisodeRowAction> {
             .show(ui, |ui| {
                 let action = ui
                     .horizontal(|ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(EPISODE_THUMBNAIL, egui::Sense::hover());
+                        match thumbnail {
+                            Some(texture) => {
+                                ui.painter().add(
+                                    egui::epaint::RectShape::filled(
+                                        rect,
+                                        egui::CornerRadius::same(6),
+                                        Color32::WHITE,
+                                    )
+                                    .with_texture(
+                                        texture.id(),
+                                        super::artwork::cover_uv(texture.size_vec2(), rect.size()),
+                                    ),
+                                );
+                            }
+                            None => {
+                                ui.painter().rect_filled(
+                                    rect,
+                                    egui::CornerRadius::same(6),
+                                    Color32::from_rgb(38, 38, 42),
+                                );
+                            }
+                        }
                         let play = ui
                             .add_sized(egui::vec2(42.0, 42.0), egui::Button::new("▶"))
                             .on_hover_text(ui_text(ids::SERIES_EPISODE_PLAY));
@@ -418,14 +450,14 @@ mod tests {
         let mut component = SeriesPresentation::default();
         let context = egui::Context::default();
         let mut output = context.run_ui(RawInput::default(), |ui| {
-            component.show(ui, &seasons, &[]);
+            component.show(ui, &seasons, &[], &std::collections::HashMap::new());
         });
         output.textures_delta.clear();
         assert_eq!(component.selected_season_id.as_deref(), Some("s1"));
 
         component.selected_season_id = Some("s2".to_owned());
         let mut output = context.run_ui(RawInput::default(), |ui| {
-            component.show(ui, &seasons, &[]);
+            component.show(ui, &seasons, &[], &std::collections::HashMap::new());
         });
         output.textures_delta.clear();
         assert_eq!(component.selected_season_id.as_deref(), Some("s2"));
@@ -456,6 +488,7 @@ mod tests {
                     ui,
                     std::slice::from_ref(&season),
                     std::slice::from_ref(&episode),
+                    &std::collections::HashMap::new(),
                 );
             },
         );

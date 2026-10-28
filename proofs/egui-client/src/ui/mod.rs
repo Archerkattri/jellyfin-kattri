@@ -2375,6 +2375,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                     ui,
                                     &app.series_seasons,
                                     &app.series_episodes,
+                                    &app.episode_thumbnails,
                                 );
                                 if response.selected_season_id.as_deref()
                                     != app.series_selected_season_id.as_deref()

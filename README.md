@@ -121,10 +121,12 @@ yet a replacement for the official clients. The main missing pieces:
   administrators, edit metadata, identify, refresh metadata, edit images, edit subtitles
   and delete.
 - **Episodes and series:** the series page offers the server's Next Up episode (Play or
-  Resume), and episode rows show the overview, runtime, progress and a watched mark.
+  Resume), and episode rows show the still, overview, runtime, progress and a watched
+  mark.
   In the player, an Up Next card counts down the last 30 seconds of an episode with
   Play now and Cancel. An episode's title opens its own page (Back returns to the
-  series) and its ▶ button plays it. Still missing: episode thumbnails and Shuffle. The player's previous and next
+  series) and its ▶ button plays it; rows show the episode's still. Still missing:
+  Shuffle. The player's previous and next
   buttons move between episodes, and the next episode starts when one ends (a Playback
   setting, on by default).
 - **Player OSD:** title, elapsed/total time, transport, chapter stepping, volume with

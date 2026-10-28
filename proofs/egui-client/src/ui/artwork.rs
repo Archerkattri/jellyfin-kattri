@@ -149,7 +149,7 @@ fn paint_vertical_gradient(painter: &egui::Painter, rect: Rect, top: [u8; 3], bo
     }
 }
 
-fn cover_uv(image_size: egui::Vec2, target_size: egui::Vec2) -> Rect {
+pub(crate) fn cover_uv(image_size: egui::Vec2, target_size: egui::Vec2) -> Rect {
     if image_size.x <= 0.0 || image_size.y <= 0.0 || target_size.x <= 0.0 || target_size.y <= 0.0 {
         return Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
     }

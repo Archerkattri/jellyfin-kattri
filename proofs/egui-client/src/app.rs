@@ -666,6 +666,9 @@ pub struct KattriApp {
     series_next_up: Option<SeriesNextUp>,
     /// The page an item was opened from (a series for its episode), where Back returns.
     detail_parent: Option<String>,
+    /// Stills for the episode rows of the series on screen.
+    pub(crate) episode_thumbnails: HashMap<String, egui::TextureHandle>,
+    episode_thumbnail_pending: HashMap<u64, String>,
     /// The user's playlists for the card menu's Add to playlist.
     menu_playlists: crate::ui::item_menu::MenuPlaylists,
     menu_playlists_request_id: u64,
@@ -1116,6 +1119,8 @@ impl KattriApp {
             episode_neighbors: None,
             series_next_up: None,
             detail_parent: None,
+            episode_thumbnails: HashMap::new(),
+            episode_thumbnail_pending: HashMap::new(),
             menu_playlists: Default::default(),
             menu_playlists_request_id: 0,
             menu_playlist_add: None,
@@ -4400,6 +4405,43 @@ impl KattriApp {
         self.series_episodes.clear();
         self.series_episodes_loading = false;
         self.series_episodes_error = None;
+        self.episode_thumbnails.clear();
+        self.episode_thumbnail_pending.clear();
+    }
+
+    /// Asks for the stills of the episodes now listed, keeping at most
+    /// [`MAX_EPISODE_THUMBNAILS`] textures.
+    fn request_episode_thumbnails(&mut self) {
+        if self.episode_thumbnails.len() > MAX_EPISODE_THUMBNAILS {
+            self.episode_thumbnails.clear();
+        }
+        let wanted: Vec<(String, String)> = self
+            .series_episodes
+            .iter()
+            .filter(|episode| !self.episode_thumbnails.contains_key(&episode.id))
+            .filter_map(|episode| {
+                episode
+                    .image_tags
+                    .as_ref()
+                    .and_then(|tags| tags.get("Primary").cloned().flatten())
+                    .map(|tag| (episode.id.clone(), tag))
+            })
+            .take(MAX_EPISODE_THUMBNAILS)
+            .collect();
+        self.episode_thumbnail_pending.clear();
+        for (episode_id, tag) in wanted {
+            let request_id = self.allocate_request_id();
+            let sent = self.worker.as_ref().is_some_and(|worker| {
+                worker
+                    .get_primary_artwork(request_id, episode_id.clone(), Some(tag))
+                    .is_ok()
+            });
+            if !sent {
+                break;
+            }
+            self.episode_thumbnail_pending
+                .insert(request_id, episode_id);
+        }
     }
 
     fn reset_people_detail(&mut self) {
@@ -6306,6 +6348,7 @@ impl KattriApp {
                     self.series_episodes_loading = false;
                     self.series_episodes_error = None;
                     self.series_episodes = episodes;
+                    self.request_episode_thumbnails();
                 }
                 WorkerEvent::SeriesEpisodesFailed {
                     request_id,
@@ -6834,6 +6877,22 @@ impl KattriApp {
                             color_image,
                             egui::TextureOptions::LINEAR,
                         ));
+                    } else if let Some(episode_id) =
+                        self.episode_thumbnail_pending.remove(&request_id)
+                    {
+                        if episode_id == item_id {
+                            self.episode_thumbnails.insert(
+                                item_id.clone(),
+                                ctx.load_texture(
+                                    format!("jellyfin-episode-still:{item_id}"),
+                                    egui::ColorImage::from_rgba_unmultiplied(
+                                        [width as usize, height as usize],
+                                        &rgba,
+                                    ),
+                                    egui::TextureOptions::LINEAR,
+                                ),
+                            );
+                        }
                     } else if let Some((expected_item_id, expected_tag)) =
                         self.pending_artwork_requests.remove(&request_id)
                         && expected_item_id == item_id
@@ -6864,6 +6923,7 @@ impl KattriApp {
                 }
                 WorkerEvent::PrimaryArtworkFailed { request_id } => {
                     self.pending_artwork_requests.remove(&request_id);
+                    self.episode_thumbnail_pending.remove(&request_id);
                 }
                 WorkerEvent::BackdropArtworkLoaded {
                     request_id,
@@ -8032,6 +8092,8 @@ struct SeriesNextUp {
 }
 
 const MAX_PHOTO_THUMBNAILS: usize = 64;
+/// Most episode stills kept for one series page (about two seasons).
+const MAX_EPISODE_THUMBNAILS: usize = 48;
 
 /// Keeps at most [`MAX_PHOTO_THUMBNAILS`] thumbnails, never evicting one in the visible
 /// window or the one just loaded. An evicted id may be requested again when it scrolls back.
@@ -10999,6 +11061,46 @@ mod photo_decode_event_tests {
                 .as_ref()
                 .is_some_and(|(text, _)| text.contains("Road trip"))
         );
+    }
+
+    #[test]
+    fn episode_rows_get_their_stills() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.series_episodes = vec![
+            serde_json::from_value(serde_json::json!({
+                "Id": "e1", "Name": "One", "ImageTags": {"Primary": "still-1"}
+            }))
+            .expect("episode fixture"),
+            serde_json::from_value(serde_json::json!({"Id": "e2", "Name": "Two"}))
+                .expect("episode without a still"),
+        ];
+        app.request_episode_thumbnails();
+        assert_eq!(app.episode_thumbnail_pending.len(), 1);
+        let (&request_id, _) = app
+            .episode_thumbnail_pending
+            .iter()
+            .next()
+            .expect("one still requested");
+        sender
+            .try_send(WorkerEvent::PrimaryArtworkLoaded {
+                request_id,
+                item_id: "e1".into(),
+                width: 2,
+                height: 2,
+                rgba: vec![255; 16],
+            })
+            .expect("send still");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert!(app.episode_thumbnails.contains_key("e1"));
+        assert!(app.episode_thumbnail_pending.is_empty());
+        app.reset_series_detail();
+        assert!(app.episode_thumbnails.is_empty());
     }
 
     #[test]
