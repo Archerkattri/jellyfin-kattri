@@ -422,6 +422,8 @@ pub struct PlaybackSettings {
     /// Milliseconds into an outro before its skip is offered. Range 0..=60000 (M2-08).
     /// Replaces the seconds key `skip_outro_delay_secs`; see `migrate::MIGRATIONS` (version 3).
     pub outro_delay_ms: u32,
+    /// When an episode ends, start the next episode of the series.
+    pub auto_play_next_episode: bool,
     /// Legacy `video.external_player`: hand video off to an external player.
     pub external_player: bool,
     /// Legacy `video.max_streaming_bitrate` in bits per second. 0 means no cap.
@@ -444,6 +446,7 @@ impl Default for PlaybackSettings {
             auto_skip_intro: false,
             auto_skip_outro: false,
             outro_delay_ms: 0,
+            auto_play_next_episode: true,
             external_player: false,
             max_streaming_bitrate: 0,
             unknown: toml::Table::new(),

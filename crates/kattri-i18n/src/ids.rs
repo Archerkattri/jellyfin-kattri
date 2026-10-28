@@ -604,6 +604,7 @@ pub const SETTINGS_MEDIA_INTRO_SHOW_BUTTON: &str = "settings.media.intro.show_bu
 pub const SETTINGS_MEDIA_INTRO_AUTO: &str = "settings.media.intro.auto";
 pub const SETTINGS_MEDIA_CREDITS_SHOW_BUTTON: &str = "settings.media.credits.show_button";
 pub const SETTINGS_MEDIA_CREDITS_AUTO: &str = "settings.media.credits.auto";
+pub const SETTINGS_MEDIA_AUTO_PLAY_NEXT_EPISODE: &str = "settings.media.auto_play_next_episode";
 pub const SETTINGS_MEDIA_CREDITS_DELAY: &str = "settings.media.credits.delay";
 pub const SETTINGS_MEDIA_EXTERNAL_PLAYER: &str = "settings.media.external_player";
 pub const SETTINGS_MEDIA_BITRATE: &str = "settings.media.bitrate";
@@ -1364,6 +1365,7 @@ pub const ALL: &[&str] = &[
     SETTINGS_MEDIA_INTRO_AUTO,
     SETTINGS_MEDIA_CREDITS_SHOW_BUTTON,
     SETTINGS_MEDIA_CREDITS_AUTO,
+    SETTINGS_MEDIA_AUTO_PLAY_NEXT_EPISODE,
     SETTINGS_MEDIA_CREDITS_DELAY,
     SETTINGS_MEDIA_EXTERNAL_PLAYER,
     SETTINGS_MEDIA_BITRATE,

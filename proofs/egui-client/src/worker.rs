@@ -304,6 +304,13 @@ pub enum WorkerEvent {
         season_id: String,
         message: String,
     },
+    /// The episodes either side of `episode_id`. Both are `None` when the request failed.
+    AdjacentEpisodesLoaded {
+        request_id: u64,
+        episode_id: String,
+        previous: Option<Box<BaseItemDto>>,
+        next: Option<Box<BaseItemDto>>,
+    },
     MusicAlbumTracksLoaded {
         request_id: u64,
         album_id: String,
@@ -716,6 +723,11 @@ enum WorkerCommand {
         request_id: u64,
         series_id: String,
         season_id: String,
+    },
+    GetAdjacentEpisodes {
+        request_id: u64,
+        series_id: String,
+        episode_id: String,
     },
     ListMusicAlbumTracks {
         request_id: u64,
@@ -1188,6 +1200,19 @@ impl ApiWorker {
             request_id,
             series_id,
             season_id,
+        })
+    }
+
+    pub(crate) fn get_adjacent_episodes(
+        &self,
+        request_id: u64,
+        series_id: String,
+        episode_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::GetAdjacentEpisodes {
+            request_id,
+            series_id,
+            episode_id,
         })
     }
 
@@ -2991,6 +3016,33 @@ async fn execute_command(
                         .await
                     }
                 }
+            }
+            WorkerCommand::GetAdjacentEpisodes {
+                request_id,
+                series_id,
+                episode_id,
+            } => {
+                let adjacent = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .adjacent_episodes(session, &series_id, &episode_id)
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "adjacent episodes unavailable");
+                            jellyfin_api::AdjacentEpisodes::default()
+                        }),
+                    _ => jellyfin_api::AdjacentEpisodes::default(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::AdjacentEpisodesLoaded {
+                        request_id,
+                        episode_id,
+                        previous: adjacent.previous.map(Box::new),
+                        next: adjacent.next.map(Box::new),
+                    },
+                )
+                .await
             }
             WorkerCommand::ListMusicAlbumTracks {
                 request_id,

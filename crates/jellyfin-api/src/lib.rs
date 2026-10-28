@@ -62,6 +62,7 @@ pub use playlists::{
 pub use quick_connect::{QuickConnectRequest, QuickConnectSecret, QuickConnectStatus};
 pub use search::{SEARCH_ITEM_TYPES, SearchError, SearchGroup, SearchResultGroup, group_by_type};
 pub use segments::{MediaSegment, MediaSegmentType, MediaSegmentsResponse};
+pub use series::AdjacentEpisodes;
 pub use session_reporting::{
     JellyfinTicks, PlayMethod, PlaybackOrder, PlaybackProgressInfo, PlaybackStartInfo,
     PlaybackStopInfo, QueueItem, RepeatMode, TICKS_PER_SECOND,

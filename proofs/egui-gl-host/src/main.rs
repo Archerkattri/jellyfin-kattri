@@ -397,7 +397,11 @@ impl<'session> GlHost<'session> {
             } else {
                 match reason {
                     mpv_render_proof::EndFileReason::Eof => {
-                        self.kattri_app.on_music_track_ended(&item_id, false);
+                        if self.kattri_app.music_queue_current_item_id() == Some(item_id.as_str()) {
+                            self.kattri_app.on_music_track_ended(&item_id, false);
+                        } else {
+                            self.kattri_app.on_episode_ended(&item_id);
+                        }
                     }
                     mpv_render_proof::EndFileReason::Error => {
                         if self.kattri_app.music_queue_current_item_id() == Some(item_id.as_str()) {
@@ -513,9 +517,16 @@ impl<'session> GlHost<'session> {
             .and_then(duration_from_seconds);
         let controls_paused = controls_snapshot.paused;
         let controls_speed_multiplier = controls_snapshot.speed_multiplier;
-        let previous_track_enabled = self.mpv.playing_item_id().is_some_and(|playing_id| {
-            self.kattri_app.music_queue_current_item_id() == Some(playing_id)
-        });
+        let (previous_track_enabled, next_track_enabled) =
+            self.mpv
+                .playing_item_id()
+                .map_or((false, false), |playing_id| {
+                    if self.kattri_app.music_queue_current_item_id() == Some(playing_id) {
+                        (true, true)
+                    } else {
+                        self.kattri_app.episode_navigation(playing_id)
+                    }
+                });
         let controls_chapters = controls_snapshot
             .chapters
             .iter()
@@ -590,6 +601,7 @@ impl<'session> GlHost<'session> {
             speed_multiplier: controls_speed_multiplier,
             media_active,
             previous_track_enabled,
+            next_track_enabled,
             chapters: &controls_chapters,
             secondary_subtitles: &secondary_choices,
             secondary_selected,
@@ -1444,6 +1456,7 @@ struct OsdState<'a> {
     speed_multiplier: Option<f64>,
     media_active: bool,
     previous_track_enabled: bool,
+    next_track_enabled: bool,
     chapters: &'a [ChapterChoice],
     secondary_subtitles: &'a [SecondarySubtitleChoice],
     secondary_selected: Option<i64>,
@@ -1487,6 +1500,7 @@ fn osd_controls(
             seek_enabled: true,
             stop_enabled: osd.media_active,
             previous_track_enabled: osd.previous_track_enabled,
+            next_track_enabled: osd.next_track_enabled,
             chapters: osd.chapters,
             secondary_subtitles: osd.secondary_subtitles,
             secondary_selected: osd.secondary_selected,
@@ -1512,15 +1526,23 @@ fn osd_controls(
             PlayerControlAction::TogglePause if live_stream_active => mpv.stop_playback(),
             PlayerControlAction::TogglePause => mpv.toggle_paused(),
             PlayerControlAction::PreviousTrack => {
-                if let Some(playing_item_id) = mpv.playing_item_id().map(str::to_owned)
-                    && kattri_app.on_music_previous(&playing_item_id, osd.position)
-                {
-                    mpv.seek_absolute(Duration::ZERO);
+                if let Some(playing_item_id) = mpv.playing_item_id().map(str::to_owned) {
+                    if kattri_app.music_queue_current_item_id() == Some(playing_item_id.as_str()) {
+                        if kattri_app.on_music_previous(&playing_item_id, osd.position) {
+                            mpv.seek_absolute(Duration::ZERO);
+                        }
+                    } else {
+                        kattri_app.on_episode_previous(&playing_item_id);
+                    }
                 }
             }
             PlayerControlAction::NextTrack => {
                 if let Some(playing_item_id) = mpv.playing_item_id().map(str::to_owned) {
-                    kattri_app.on_music_next(&playing_item_id);
+                    if kattri_app.music_queue_current_item_id() == Some(playing_item_id.as_str()) {
+                        kattri_app.on_music_next(&playing_item_id);
+                    } else {
+                        kattri_app.on_episode_next(&playing_item_id);
+                    }
                 }
             }
             PlayerControlAction::Stop => mpv.stop_playback(),

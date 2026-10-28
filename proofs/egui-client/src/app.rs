@@ -660,6 +660,8 @@ pub struct KattriApp {
     photo_full_size_pending: HashMap<u64, String>,
     pub(crate) photo_full_size_failed: HashSet<String>,
     pub(crate) music_queue: Queue,
+    /// Neighbours of the episode last started, for previous/next and auto-play.
+    episode_neighbors: Option<EpisodeNeighbors>,
     pub(crate) music_track_names: HashMap<String, String>,
     pub(crate) music_album_tracks_loading: bool,
     pub(crate) music_album_tracks_error: Option<ErrorClass>,
@@ -1090,6 +1092,7 @@ impl KattriApp {
             photo_full_size_pending: HashMap::new(),
             photo_full_size_failed: HashSet::new(),
             music_queue: Queue::new(),
+            episode_neighbors: None,
             music_track_names: HashMap::new(),
             music_album_tracks_loading: false,
             music_album_tracks_error: None,
@@ -4819,7 +4822,85 @@ impl KattriApp {
                 });
             }
         }
+        self.request_episode_neighbors();
         self.prepare_server_playback(source_index, play_method, start_time_ticks);
+    }
+
+    /// Asks for the neighbours of the episode about to play, once per episode.
+    fn request_episode_neighbors(&mut self) {
+        let Some((episode_id, series_id)) = self.selected_details.as_ref().and_then(|item| {
+            (item.item_type.as_deref() == Some("Episode"))
+                .then(|| {
+                    item.series_id
+                        .clone()
+                        .map(|series| (item.id.clone(), series))
+                })
+                .flatten()
+        }) else {
+            return;
+        };
+        if self
+            .episode_neighbors
+            .as_ref()
+            .is_some_and(|neighbors| neighbors.episode_id == episode_id)
+        {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        let submitted = self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .get_adjacent_episodes(request_id, series_id, episode_id.clone())
+                .is_ok()
+        });
+        self.episode_neighbors = submitted.then_some(EpisodeNeighbors {
+            episode_id,
+            request_id,
+            previous: None,
+            next: None,
+        });
+    }
+
+    fn neighbors_of(&self, playing_item_id: &str) -> Option<&EpisodeNeighbors> {
+        self.episode_neighbors
+            .as_ref()
+            .filter(|neighbors| neighbors.episode_id == playing_item_id)
+    }
+
+    /// Whether the player's previous and next buttons have an episode to go to.
+    pub fn episode_navigation(&self, playing_item_id: &str) -> (bool, bool) {
+        self.neighbors_of(playing_item_id)
+            .map_or((false, false), |neighbors| {
+                (neighbors.previous.is_some(), neighbors.next.is_some())
+            })
+    }
+
+    /// The player's Previous control on an episode. True when the previous episode was started.
+    pub fn on_episode_previous(&mut self, playing_item_id: &str) -> bool {
+        let Some(previous) = self
+            .neighbors_of(playing_item_id)
+            .and_then(|neighbors| neighbors.previous.clone())
+        else {
+            return false;
+        };
+        self.play_item(previous, false);
+        true
+    }
+
+    /// The player's Next control on an episode. True when the next episode was started.
+    pub fn on_episode_next(&mut self, playing_item_id: &str) -> bool {
+        let Some(next) = self
+            .neighbors_of(playing_item_id)
+            .and_then(|neighbors| neighbors.next.clone())
+        else {
+            return false;
+        };
+        self.play_item(next, false);
+        true
+    }
+
+    /// An episode played to its end. Starts the next one when the viewer allows it.
+    pub fn on_episode_ended(&mut self, ended_item_id: &str) -> bool {
+        self.playback_settings().auto_play_next_episode && self.on_episode_next(ended_item_id)
     }
 
     fn retry_playback_start(&mut self) -> bool {
@@ -6011,6 +6092,20 @@ impl KattriApp {
                 {
                     self.series_episodes_loading = false;
                     self.series_episodes_error = Some(message);
+                }
+                WorkerEvent::AdjacentEpisodesLoaded {
+                    request_id,
+                    episode_id,
+                    previous,
+                    next,
+                } => {
+                    if let Some(neighbors) = self.episode_neighbors.as_mut()
+                        && neighbors.request_id == request_id
+                        && neighbors.episode_id == episode_id
+                    {
+                        neighbors.previous = previous.map(|item| item.id);
+                        neighbors.next = next.map(|item| item.id);
+                    }
                 }
                 WorkerEvent::MusicAlbumTracksLoaded {
                     request_id,
@@ -7556,6 +7651,15 @@ mod search_browse_tests {
         assert_eq!(app.live_tv_search_start_index, 0);
         assert_eq!(app.live_tv_search_total, None);
     }
+}
+
+/// The episodes before and after one episode, as the server ordered them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EpisodeNeighbors {
+    episode_id: String,
+    request_id: u64,
+    previous: Option<String>,
+    next: Option<String>,
 }
 
 const MAX_PHOTO_THUMBNAILS: usize = 64;
@@ -10321,6 +10425,68 @@ mod photo_decode_event_tests {
         });
         output.textures_delta.clear();
         assert_eq!(app.photo_thumbnails.len(), 1);
+    }
+
+    #[test]
+    fn episode_neighbors_drive_previous_next_and_auto_play() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.selected_details = Some(
+            serde_json::from_value(serde_json::json!({
+                "Id": "e2", "Name": "Two", "Type": "Episode", "SeriesId": "show"
+            }))
+            .expect("episode fixture"),
+        );
+        app.request_episode_neighbors();
+        let request_id = app
+            .episode_neighbors
+            .as_ref()
+            .expect("neighbours requested")
+            .request_id;
+        assert_eq!(app.episode_navigation("e2"), (false, false));
+
+        let dto = |id: &str| -> Option<Box<jellyfin_api::BaseItemDto>> {
+            Some(Box::new(
+                serde_json::from_value(serde_json::json!({"Id": id, "Name": id}))
+                    .expect("neighbour fixture"),
+            ))
+        };
+        // A reply for another request is ignored.
+        sender
+            .try_send(WorkerEvent::AdjacentEpisodesLoaded {
+                request_id: request_id + 100,
+                episode_id: "e2".into(),
+                previous: dto("x"),
+                next: dto("y"),
+            })
+            .expect("send stale neighbours");
+        sender
+            .try_send(WorkerEvent::AdjacentEpisodesLoaded {
+                request_id,
+                episode_id: "e2".into(),
+                previous: None,
+                next: dto("e3"),
+            })
+            .expect("send neighbours");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.episode_navigation("e2"), (false, true));
+        assert_eq!(app.episode_navigation("other"), (false, false));
+        assert!(!app.on_episode_previous("e2"));
+
+        app.settings.settings_mut().playback.auto_play_next_episode = false;
+        assert!(!app.on_episode_ended("e2"), "auto-play is off");
+
+        assert!(app.on_episode_next("e2"));
+        assert_eq!(app.selected_item_id.as_deref(), Some("e3"));
+        assert_eq!(
+            app.auto_play.as_ref().map(|auto| auto.item_id.as_str()),
+            Some("e3")
+        );
     }
 
     #[test]
