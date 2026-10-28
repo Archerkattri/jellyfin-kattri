@@ -2256,6 +2256,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     let mut detail_error_action = None;
     let mut season_to_load = None;
     let mut episode_to_open = None;
+    let mut episode_page_to_open = None;
     let mut person_to_open = None;
     let mut similar_item_to_open = None;
     let mut download_target: Option<(String, String)> = None;
@@ -2381,6 +2382,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                     season_to_load = response.selected_season_id.clone();
                                 }
                                 episode_to_open = response.activated_episode_id.clone();
+                                episode_page_to_open = response.opened_episode_id.clone();
                             }
                         });
                         if app.series_episodes_loading {
@@ -2624,8 +2626,12 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
         ui.ctx().request_repaint();
     }
     if let Some(episode_id) = episode_to_open {
-        // Choosing an episode plays it, resuming where it was left.
+        // The play button plays the episode, resuming where it was left.
         app.play_item(episode_id, false);
+        ui.ctx().request_repaint();
+    }
+    if let Some(episode_id) = episode_page_to_open {
+        app.open_child_item(episode_id);
         ui.ctx().request_repaint();
     }
     if let Some(person_id) = person_to_open {

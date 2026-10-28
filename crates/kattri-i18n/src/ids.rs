@@ -125,6 +125,7 @@ pub const MUSIC_ALBUM_LOADING_TRACKS: &str = "music.album.loading_tracks";
 pub const SERIES_HEADING_SEASONS: &str = "series.heading.seasons";
 pub const SERIES_BUTTON_PLAY_NEXT_UP: &str = "series.button.play_next_up";
 pub const SERIES_EPISODE_WATCHED: &str = "series.episode.watched";
+pub const SERIES_EPISODE_PLAY: &str = "series.episode.play";
 pub const SERIES_BUTTON_RESUME_NEXT_UP: &str = "series.button.resume_next_up";
 pub const SERIES_STATUS_LOADING_SEASONS: &str = "series.status.loading_seasons";
 pub const SERIES_EMPTY_SEASONS: &str = "series.empty.seasons";
@@ -894,6 +895,7 @@ pub const ALL: &[&str] = &[
     SERIES_HEADING_SEASONS,
     SERIES_BUTTON_PLAY_NEXT_UP,
     SERIES_EPISODE_WATCHED,
+    SERIES_EPISODE_PLAY,
     SERIES_BUTTON_RESUME_NEXT_UP,
     SERIES_STATUS_LOADING_SEASONS,
     SERIES_EMPTY_SEASONS,

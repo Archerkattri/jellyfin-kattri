@@ -664,6 +664,8 @@ pub struct KattriApp {
     episode_neighbors: Option<EpisodeNeighbors>,
     /// The episode to play next in the series on screen.
     series_next_up: Option<SeriesNextUp>,
+    /// The page an item was opened from (a series for its episode), where Back returns.
+    detail_parent: Option<String>,
     /// The user's playlists for the card menu's Add to playlist.
     menu_playlists: crate::ui::item_menu::MenuPlaylists,
     menu_playlists_request_id: u64,
@@ -1113,6 +1115,7 @@ impl KattriApp {
             music_queue: Queue::new(),
             episode_neighbors: None,
             series_next_up: None,
+            detail_parent: None,
             menu_playlists: Default::default(),
             menu_playlists_request_id: 0,
             menu_playlist_add: None,
@@ -2494,6 +2497,7 @@ impl KattriApp {
         self.page = page;
         self.catalog_name_prefix = None;
         self.catalog_genre = None;
+        self.detail_parent = None;
         self.photo_selected_id = None;
         self.photo_page_start = 0;
         self.photo_items.clear();
@@ -2653,6 +2657,12 @@ impl KattriApp {
             self.person_items.clear();
             self.person_items_loading = false;
             self.person_items_error = None;
+            return;
+        }
+        if self.selected_item_id.is_some()
+            && let Some(parent) = self.detail_parent.take()
+        {
+            self.select_item(parent);
             return;
         }
         if self.selected_item_id.take().is_some() {
@@ -4101,12 +4111,20 @@ impl KattriApp {
         }
     }
 
+    /// Opens `item_id` (an episode) from the page on screen; Back returns to that page.
+    pub(crate) fn open_child_item(&mut self, item_id: String) {
+        let parent = self.selected_item_id.clone();
+        self.select_item(item_id);
+        self.detail_parent = parent;
+    }
+
     pub(crate) fn select_item(&mut self, item_id: String) {
         if self.selected_item_id.as_deref() == Some(item_id.as_str())
             && (self.selected_details.is_some() || self.details_loading)
         {
             return;
         }
+        self.detail_parent = None;
         self.cancel_navigation_requests();
         self.music_album_tracks_request_id = self.allocate_request_id();
         self.music_album_tracks_loading = false;
@@ -7666,6 +7684,31 @@ mod catalog_query_tests {
         app.page = crate::app::Page::Photos;
         app.request_catalog_genres(None);
         assert!(app.catalog_genres.is_empty(), "photos have no genre filter");
+    }
+
+    #[test]
+    fn an_episode_opened_from_its_series_goes_back_to_the_series() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.worker = None;
+        app.select_item("show".into());
+        app.open_child_item("episode".into());
+        assert_eq!(app.selected_item_id.as_deref(), Some("episode"));
+        app.navigate_back();
+        assert_eq!(app.selected_item_id.as_deref(), Some("show"));
+        app.navigate_back();
+        assert_eq!(
+            app.selected_item_id, None,
+            "the series page goes back to the library"
+        );
+
+        app.select_item("show".into());
+        app.open_child_item("episode".into());
+        app.select_item("elsewhere".into());
+        app.navigate_back();
+        assert_eq!(
+            app.selected_item_id, None,
+            "another selection forgets the series"
+        );
     }
 
     #[test]

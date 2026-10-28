@@ -21,7 +21,10 @@ pub struct SeriesPresentation {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SeriesPresentationResponse {
     pub selected_season_id: Option<String>,
+    /// The episode whose play button was pressed.
     pub activated_episode_id: Option<String>,
+    /// The episode whose title was pressed, to open its page.
+    pub opened_episode_id: Option<String>,
 }
 
 impl SeriesPresentation {
@@ -67,6 +70,7 @@ impl SeriesPresentation {
             .iter()
             .find(|season| self.selected_season_id.as_deref() == Some(season.id.as_str()));
         let mut activated_episode_id = None;
+        let mut opened_episode_id = None;
         if let Some(season) = selected_season {
             let season_index = season.index_number;
             let matching_episodes = episodes
@@ -90,8 +94,14 @@ impl SeriesPresentation {
             } else {
                 ui.add_space(4.0);
                 for episode in matching_episodes {
-                    if episode_row(ui, episode).clicked() {
-                        activated_episode_id = Some(episode.id.clone());
+                    match episode_row(ui, episode) {
+                        Some(EpisodeRowAction::Play) => {
+                            activated_episode_id = Some(episode.id.clone());
+                        }
+                        Some(EpisodeRowAction::Open) => {
+                            opened_episode_id = Some(episode.id.clone());
+                        }
+                        None => {}
                     }
                 }
             }
@@ -100,6 +110,7 @@ impl SeriesPresentation {
         SeriesPresentationResponse {
             selected_season_id: self.selected_season_id.clone(),
             activated_episode_id,
+            opened_episode_id,
         }
     }
 }
@@ -159,19 +170,35 @@ fn season_label(season: &BaseItemDto) -> String {
     }
 }
 
-fn episode_row(ui: &mut Ui, episode: &BaseItemDto) -> egui::Response {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EpisodeRowAction {
+    Play,
+    Open,
+}
+
+fn episode_row(ui: &mut Ui, episode: &BaseItemDto) -> Option<EpisodeRowAction> {
     ui.push_id(&episode.id, |ui| {
         egui::Frame::new()
             .fill(Color32::from_rgb(21, 21, 23))
             .corner_radius(egui::CornerRadius::same(12))
             .inner_margin(egui::Margin::symmetric(14, 10))
             .show(ui, |ui| {
-                let response = ui
+                let action = ui
                     .horizontal(|ui| {
-                        let response = ui.add_sized(
+                        let play = ui
+                            .add_sized(egui::vec2(42.0, 42.0), egui::Button::new("▶"))
+                            .on_hover_text(ui_text(ids::SERIES_EPISODE_PLAY));
+                        let open = ui.add_sized(
                             egui::vec2((ui.available_width() - 190.0).max(140.0), 42.0),
                             egui::Button::new(RichText::new(episode_label(episode)).strong()),
                         );
+                        let action = if play.clicked() {
+                            Some(EpisodeRowAction::Play)
+                        } else if open.clicked() {
+                            Some(EpisodeRowAction::Open)
+                        } else {
+                            None
+                        };
                         if let Some(runtime) = format_runtime(episode.run_time_ticks) {
                             ui.label(RichText::new(runtime).color(Color32::from_gray(164)));
                         }
@@ -188,7 +215,7 @@ fn episode_row(ui: &mut Ui, episode: &BaseItemDto) -> egui::Response {
                                     .color(Color32::from_rgb(0x8F, 0xD1, 0x9E)),
                             );
                         }
-                        response
+                        action
                     })
                     .inner;
                 if let Some(overview) = episode
@@ -202,7 +229,7 @@ fn episode_row(ui: &mut Ui, episode: &BaseItemDto) -> egui::Response {
                             .truncate(),
                     );
                 }
-                response
+                action
             })
             .inner
     })
