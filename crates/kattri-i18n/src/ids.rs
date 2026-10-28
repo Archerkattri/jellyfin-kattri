@@ -769,6 +769,13 @@ pub const ITEM_MENU_PLAY_NEXT: &str = "item_menu.play_next";
 pub const ITEM_MENU_ADD_TO_PLAYLIST: &str = "item_menu.add_to_playlist";
 pub const ITEM_MENU_REFRESH_METADATA: &str = "item_menu.refresh_metadata";
 pub const ITEM_MENU_DELETE: &str = "item_menu.delete";
+pub const FORGOT_PASSWORD_BUTTON: &str = "forgot_password.button";
+pub const FORGOT_PASSWORD_NEED_USERNAME: &str = "forgot_password.need_username";
+pub const FORGOT_PASSWORD_SENDING: &str = "forgot_password.sending";
+pub const FORGOT_PASSWORD_PIN_WRITTEN: &str = "forgot_password.pin_written";
+pub const FORGOT_PASSWORD_IN_NETWORK: &str = "forgot_password.in_network";
+pub const FORGOT_PASSWORD_CONTACT_ADMIN: &str = "forgot_password.contact_admin";
+pub const FORGOT_PASSWORD_FAILED: &str = "forgot_password.failed";
 pub const SETTINGS_GENERAL_HOME_SECTIONS: &str = "settings.general.home_sections";
 pub const PHOTOS_BUTTON_SLIDESHOW: &str = "photos.button.slideshow";
 pub const PHOTOS_BUTTON_STOP_SLIDESHOW: &str = "photos.button.stop_slideshow";
@@ -939,6 +946,13 @@ pub const ALL: &[&str] = &[
     ITEM_MENU_ADD_TO_PLAYLIST,
     ITEM_MENU_REFRESH_METADATA,
     ITEM_MENU_DELETE,
+    FORGOT_PASSWORD_BUTTON,
+    FORGOT_PASSWORD_NEED_USERNAME,
+    FORGOT_PASSWORD_SENDING,
+    FORGOT_PASSWORD_PIN_WRITTEN,
+    FORGOT_PASSWORD_IN_NETWORK,
+    FORGOT_PASSWORD_CONTACT_ADMIN,
+    FORGOT_PASSWORD_FAILED,
     SETTINGS_GENERAL_HOME_SECTIONS,
     PHOTOS_BUTTON_SLIDESHOW,
     PHOTOS_BUTTON_STOP_SLIDESHOW,

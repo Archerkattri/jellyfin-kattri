@@ -318,6 +318,11 @@ pub enum WorkerEvent {
         season_id: String,
         message: String,
     },
+    /// The server answered a forgot-password request.
+    ForgotPasswordFinished {
+        request_id: u64,
+        result: Result<jellyfin_api::ForgotPasswordResult, ErrorClass>,
+    },
     /// An administrator action on one item finished.
     ItemAdminFinished {
         request_id: u64,
@@ -911,6 +916,12 @@ enum WorkerCommand {
     },
     QuickConnectPoll {
         request_id: u64,
+    },
+    ForgotPassword {
+        request_id: u64,
+        server_url: String,
+        allow_insecure_remote_http: bool,
+        username: String,
     },
     QuickConnectAuthenticate {
         request_id: u64,
@@ -1676,6 +1687,21 @@ impl ApiWorker {
             request_id,
             server_url,
             allow_insecure_remote_http,
+        })
+    }
+
+    pub(crate) fn forgot_password(
+        &self,
+        request_id: u64,
+        server_url: String,
+        allow_insecure_remote_http: bool,
+        username: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ForgotPassword {
+            request_id,
+            server_url,
+            allow_insecure_remote_http,
+            username,
         })
     }
 
@@ -4267,6 +4293,27 @@ async fn execute_command(
                         request_id,
                         enabled,
                     },
+                )
+                .await;
+            }
+            WorkerCommand::ForgotPassword {
+                request_id,
+                server_url,
+                allow_insecure_remote_http,
+                username,
+            } => {
+                let result = match build_client(&server_url, allow_insecure_remote_http, device_id)
+                {
+                    Ok(client) => client
+                        .forgot_password(&username)
+                        .await
+                        .map_err(|error| error.classify()),
+                    Err(_) => Err(ErrorClass::Unexpected),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::ForgotPasswordFinished { request_id, result },
                 )
                 .await;
             }

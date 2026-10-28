@@ -1042,6 +1042,10 @@ fn sign_in_form(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: 
                 ui.add_space(14.0);
                 ui.label(RichText::new(error).color(Color32::from_rgb(0xF0, 0xA0, 0x99)));
             }
+            if let Some(notice) = app.forgot_password_notice.as_deref() {
+                ui.add_space(10.0);
+                ui.label(RichText::new(notice).color(colors.muted));
+            }
             ui.add_space(18.0);
             if app.visible_server_preview().is_some()
                 && with_access_name(
@@ -1067,6 +1071,11 @@ fn sign_in_form(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: 
                         .clicked()
                 {
                     app.start_quick_connect();
+                }
+                if !quick_connect_active
+                    && ui.button(ui_text(ids::FORGOT_PASSWORD_BUTTON)).clicked()
+                {
+                    app.start_forgot_password();
                 }
                 if !quick_connect_active
                     && !app.quick_connect_available()

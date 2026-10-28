@@ -142,8 +142,8 @@ yet a replacement for the official clients. The main missing pieces:
   and streams. Missing: version picker, extras/special features, trailers, theme media,
   "more from this season" and lyrics.
 - **Other:** photos have a slideshow, and the home sections can be turned off one by one
-  in General settings. Missing: Live TV recordings and timers, forgot-password flow and
-  library management; the dashboard is admin-lite.
+  in General settings, and sign-in has a Forgot password flow. Missing: Live TV recordings
+  and timers, and library management; the dashboard is admin-lite.
 
 ### Work still required for a production release
 

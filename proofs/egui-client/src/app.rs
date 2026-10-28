@@ -551,6 +551,9 @@ pub struct KattriApp {
     ui_time: Duration,
     pub(crate) server_url: String,
     pub(crate) username: String,
+    /// The answer to the last Forgot password request, shown under the sign-in form.
+    pub(crate) forgot_password_notice: Option<String>,
+    forgot_password_request_id: u64,
     // This is only the volatile input buffer; it is moved to the worker and zeroized on drop.
     pub(crate) password_input: Zeroizing<String>,
     pub(crate) allow_insecure_remote_http: bool,
@@ -1030,6 +1033,8 @@ impl KattriApp {
             ui_time: Duration::ZERO,
             server_url: String::new(),
             username: String::new(),
+            forgot_password_notice: None,
+            forgot_password_request_id: 0,
             password_input: Zeroizing::new(String::new()),
             allow_insecure_remote_http: false,
             remember_sign_in: false,
@@ -2195,6 +2200,36 @@ impl KattriApp {
         if result.is_err() {
             self.quick_connect_probe_pending = None;
             self.quick_connect_enabled_for = Some((server_url, allow_insecure_remote_http, false));
+        }
+    }
+
+    /// Asks the server to start a password reset for the username typed in the form.
+    pub(crate) fn start_forgot_password(&mut self) {
+        let username = self.username.trim().to_owned();
+        if username.is_empty() {
+            self.forgot_password_notice = Some(ui_text(ids::FORGOT_PASSWORD_NEED_USERNAME).into());
+            return;
+        }
+        if self.server_preview().is_none() {
+            self.forgot_password_notice = Some(ui_text(ids::CONNECT_ERROR_CHECK_ADDRESS).into());
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        let sent = self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .forgot_password(
+                    request_id,
+                    self.server_url.trim().to_owned(),
+                    self.allow_insecure_remote_http,
+                    username,
+                )
+                .is_ok()
+        });
+        if sent {
+            self.forgot_password_request_id = request_id;
+            self.forgot_password_notice = Some(ui_text(ids::FORGOT_PASSWORD_SENDING).into());
+        } else {
+            self.forgot_password_notice = Some(ui_text(ids::CONNECT_WORKER_UNAVAILABLE).into());
         }
     }
 
@@ -6472,6 +6507,11 @@ impl KattriApp {
                     self.series_episodes_loading = false;
                     self.series_episodes_error = Some(message);
                 }
+                WorkerEvent::ForgotPasswordFinished { request_id, result } => {
+                    if request_id == self.forgot_password_request_id {
+                        self.forgot_password_notice = Some(forgot_password_message(&result));
+                    }
+                }
                 WorkerEvent::ItemAdminFinished {
                     request_id,
                     item_id,
@@ -8235,6 +8275,28 @@ mod search_browse_tests {
         assert!(app.live_tv_search_results.is_empty());
         assert_eq!(app.live_tv_search_start_index, 0);
         assert_eq!(app.live_tv_search_total, None);
+    }
+}
+
+/// What to tell the user after a Forgot password request.
+fn forgot_password_message(
+    result: &Result<jellyfin_api::ForgotPasswordResult, jellyfin_api::ErrorClass>,
+) -> String {
+    use jellyfin_api::ForgotPasswordAction;
+    match result {
+        Ok(reset) => match reset.action {
+            ForgotPasswordAction::PinCode => {
+                let file = reset.pin_file.as_deref().unwrap_or_default();
+                ui_text_args(ids::FORGOT_PASSWORD_PIN_WRITTEN, &[("file", file)])
+            }
+            ForgotPasswordAction::InNetworkRequired => {
+                ui_text(ids::FORGOT_PASSWORD_IN_NETWORK).to_owned()
+            }
+            ForgotPasswordAction::ContactAdmin | ForgotPasswordAction::Other(_) => {
+                ui_text(ids::FORGOT_PASSWORD_CONTACT_ADMIN).to_owned()
+            }
+        },
+        Err(_) => ui_text(ids::FORGOT_PASSWORD_FAILED).to_owned(),
     }
 }
 
@@ -11470,6 +11532,31 @@ mod photo_decode_event_tests {
         assert_eq!(app.selected_item_id.as_deref(), Some("e5"));
         assert!(app.on_episode_previous("e5"));
         assert_eq!(app.selected_item_id.as_deref(), Some("e2"));
+    }
+
+    #[test]
+    fn forgot_password_needs_a_username_and_explains_the_servers_answer() {
+        let mut app = KattriApp::new(Context::default());
+        app.worker = None;
+        app.username = "  ".into();
+        app.start_forgot_password();
+        assert!(
+            app.forgot_password_notice
+                .as_deref()
+                .is_some_and(|text| text.contains("username"))
+        );
+        let pin = super::forgot_password_message(&Ok(jellyfin_api::ForgotPasswordResult {
+            action: jellyfin_api::ForgotPasswordAction::PinCode,
+            pin_file: Some("/config/passwordreset1.json".into()),
+            pin_expiration_date: None,
+        }));
+        assert!(pin.contains("/config/passwordreset1.json"));
+        let network = super::forgot_password_message(&Ok(jellyfin_api::ForgotPasswordResult {
+            action: jellyfin_api::ForgotPasswordAction::InNetworkRequired,
+            pin_file: None,
+            pin_expiration_date: None,
+        }));
+        assert!(network.contains("network"));
     }
 
     #[test]

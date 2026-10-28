@@ -13,6 +13,7 @@ pub mod item_images;
 mod json_response;
 mod live_tv;
 mod mpv_profile;
+mod password_reset;
 mod playback;
 mod playback_source;
 mod played_state;
@@ -48,6 +49,7 @@ pub use mpv_profile::{
     SoftwareCapabilities, baseline_device_profile, device_profile_from_runtime_inventory,
     load_device_profile, load_mpv_profile,
 };
+pub use password_reset::{ForgotPasswordAction, ForgotPasswordResult};
 pub use playback::{
     MediaSourceInfo, MediaStreamInfo, PlaybackErrorCode, PlaybackInfoRequest, PlaybackInfoResponse,
     PlaybackRequestOverrides, SensitiveString,
