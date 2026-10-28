@@ -309,13 +309,13 @@ impl CatalogPlayedFilter {
 }
 
 /// Top-level view: the Home screen (rows and hero) or the Library catalog pages.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AppView {
     Home,
     Library,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Page {
     Home,
     Movies,
@@ -778,6 +778,9 @@ pub struct KattriApp {
     pending_artwork_requests: HashMap<u64, (String, String)>,
     attempted_artwork: HashSet<(String, String)>,
     artwork_access_ticks: HashMap<(String, String), u64>,
+    /// The artwork the last frame asked for, in draw order. Poster artwork work is skipped while
+    /// the visible set stays the same, which is the common case for an idle grid.
+    visible_artwork: Vec<(String, String)>,
     next_artwork_access_tick: u64,
 }
 
@@ -1186,6 +1189,7 @@ impl KattriApp {
             pending_artwork_requests: HashMap::new(),
             attempted_artwork: HashSet::new(),
             artwork_access_ticks: HashMap::new(),
+            visible_artwork: Vec::new(),
             next_artwork_access_tick: 0,
         }
     }
@@ -2260,6 +2264,7 @@ impl KattriApp {
         self.pending_artwork_requests.clear();
         self.attempted_artwork.clear();
         self.artwork_access_ticks.clear();
+        self.visible_artwork.clear();
         self.pending_playback = None;
         self.submitted_search = None;
         self.search_active = false;
@@ -3563,8 +3568,7 @@ impl KattriApp {
                 "Jellyfin catalog page repeated item IDs; duplicates were dropped"
             );
         }
-        self.attempted_artwork.clear();
-        self.artwork_access_ticks.clear();
+        self.prune_artwork_bookkeeping();
         self.catalog_loaded = true;
         self.catalog_loading = false;
         self.catalog_error = None;
@@ -4929,24 +4933,36 @@ impl KattriApp {
     }
 
     pub(crate) fn request_visible_artwork(&mut self, requests: Vec<(String, String)>) {
-        for (item_id, image_tag) in requests {
-            let key = (item_id.clone(), image_tag.clone());
-            let item_exists = self.artwork_items().any(|item| {
-                item.artwork_id == item_id && item.primary_image_tag.as_deref() == Some(&image_tag)
-            });
-            if !item_exists {
-                continue;
+        // A grid that is not scrolling asks for the same artwork every frame. Returning early
+        // keeps an idle frame free of three scans over the catalog and of an LRU tick bump per
+        // poster.
+        if requests == self.visible_artwork {
+            return;
+        }
+        // One pass over the catalog instead of two scans per visible poster.
+        let mut catalog: HashMap<(String, String), bool> = HashMap::new();
+        for item in self.artwork_items() {
+            if let Some(tag) = item.primary_image_tag.as_ref() {
+                catalog.insert(
+                    (item.artwork_id.clone(), tag.clone()),
+                    item.artwork_texture.is_some(),
+                );
             }
+        }
+        let pending: HashSet<(String, String)> =
+            self.pending_artwork_requests.values().cloned().collect();
+        let mut retry_submission = false;
+
+        for (item_id, image_tag) in &requests {
+            let key = (item_id.clone(), image_tag.clone());
+            let Some(&already_loaded) = catalog.get(&key) else {
+                continue;
+            };
 
             self.next_artwork_access_tick = self.next_artwork_access_tick.saturating_add(1);
             self.artwork_access_ticks
                 .insert(key.clone(), self.next_artwork_access_tick);
 
-            let already_loaded = self.artwork_items().any(|item| {
-                item.artwork_id == item_id
-                    && item.primary_image_tag.as_deref() == Some(&image_tag)
-                    && item.artwork_texture.is_some()
-            });
             if already_loaded {
                 continue;
             }
@@ -4954,12 +4970,7 @@ impl KattriApp {
             if self.pending_artwork_requests.len() >= MAX_PENDING_ARTWORK_REQUESTS {
                 break;
             }
-            if self.attempted_artwork.contains(&key)
-                || self
-                    .pending_artwork_requests
-                    .values()
-                    .any(|pending| pending == &key)
-            {
+            if self.attempted_artwork.contains(&key) || pending.contains(&key) {
                 continue;
             }
 
@@ -4970,16 +4981,41 @@ impl KattriApp {
                 .as_ref()
                 .ok_or(WorkerSubmitError::Stopped)
                 .and_then(|worker| {
-                    worker.get_primary_artwork(request_id, item_id, Some(image_tag))
+                    worker.get_primary_artwork(request_id, item_id.clone(), Some(image_tag.clone()))
                 });
             if result.is_ok() {
                 self.pending_artwork_requests.insert(request_id, key);
             } else {
                 self.attempted_artwork.remove(&key);
+                retry_submission = matches!(result, Err(WorkerSubmitError::Busy));
                 break;
             }
         }
+        if retry_submission {
+            self.visible_artwork.clear();
+        } else {
+            self.visible_artwork = requests;
+        }
         self.trim_artwork_cache();
+    }
+
+    /// Drops LRU ticks and attempt records for artwork that is no longer in the catalog or on a
+    /// home shelf. A page append used to clear the whole map, which reset every loaded poster to
+    /// tick 0, so the next trim evicted them in arbitrary order and they were fetched again.
+    fn prune_artwork_bookkeeping(&mut self) {
+        let live: HashSet<(String, String)> = self
+            .artwork_items()
+            .filter_map(|item| {
+                item.primary_image_tag
+                    .as_ref()
+                    .map(|tag| (item.artwork_id.clone(), tag.clone()))
+            })
+            .collect();
+        self.artwork_access_ticks
+            .retain(|key, _| live.contains(key));
+        self.attempted_artwork.retain(|key| live.contains(key));
+        // A reload can replace textures even when the visible IDs stay the same.
+        self.visible_artwork.clear();
     }
 
     fn trim_artwork_cache(&mut self) {
@@ -5345,6 +5381,7 @@ impl KattriApp {
         self.pending_artwork_requests.clear();
         self.attempted_artwork.clear();
         self.artwork_access_ticks.clear();
+        self.visible_artwork.clear();
         self.server = None;
         self.user_name = None;
         self.items.clear();
@@ -5785,6 +5822,10 @@ impl KattriApp {
                             && let Some(evicted) = self.live_tv_channel_logos.keys().next().cloned()
                         {
                             self.live_tv_channel_logos.remove(&evicted);
+                            // The channel may come back on screen later; forgetting the attempt
+                            // lets the next guide pass fetch its logo again instead of
+                            // leaving it on the placeholder for the rest of the session.
+                            self.live_tv_logo_attempted.remove(&evicted);
                         }
                         let color_image = egui::ColorImage::from_rgba_unmultiplied(
                             [width as usize, height as usize],
@@ -6351,6 +6392,9 @@ impl KattriApp {
                         while self.photo_thumbnails.len() > 64 {
                             if let Some(key) = self.photo_thumbnails.keys().next().cloned() {
                                 self.photo_thumbnails.remove(&key);
+                                // Same as the Live TV logos: an evicted thumbnail must be
+                                // fetchable if the photo scrolls back into view.
+                                self.photo_thumbnail_attempted.remove(&key);
                             } else {
                                 break;
                             }
@@ -6440,6 +6484,8 @@ impl KattriApp {
                     height,
                     rgba,
                 } => {
+                    // Completing a bounded batch must schedule the rest of the visible cards.
+                    self.visible_artwork.clear();
                     if request_id == self.detail_artwork_request_id
                         && self.selected_item_id.as_deref() == Some(item_id.as_str())
                     {
@@ -6482,6 +6528,7 @@ impl KattriApp {
                 }
                 WorkerEvent::PrimaryArtworkFailed { request_id } => {
                     self.pending_artwork_requests.remove(&request_id);
+                    self.visible_artwork.clear();
                 }
                 WorkerEvent::BackdropArtworkLoaded {
                     request_id,
@@ -9409,7 +9456,7 @@ mod playback_report_feedback_tests {
 
 #[cfg(test)]
 mod artwork_cache_tests {
-    use super::{MAX_CACHED_ARTWORK_TEXTURES, trim_artwork_textures};
+    use super::{KattriApp, MAX_CACHED_ARTWORK_TEXTURES, trim_artwork_textures};
     use crate::catalog::{ArtworkMotif, ArtworkPalette, MediaItem, MediaKind};
     use std::collections::{HashMap, HashSet};
 
@@ -9470,6 +9517,150 @@ mod artwork_cache_tests {
         assert!(items[0].artwork_texture.is_none());
         assert!(items[MAX_CACHED_ARTWORK_TEXTURES].artwork_texture.is_some());
         assert!(!attempted.contains(&("item-0".into(), "tag-0".into())));
+    }
+
+    fn catalog_item(id: &str, tag: &str) -> MediaItem {
+        MediaItem::from_api(
+            serde_json::from_value(serde_json::json!({
+                "Id": id,
+                "Name": format!("Title {id}"),
+                "Type": "Movie",
+                "ImageTags": { "Primary": tag },
+            }))
+            .expect("item fixture"),
+        )
+    }
+
+    #[test]
+    fn an_unchanged_visible_set_is_not_rewalked_and_does_not_bump_ticks() {
+        let mut app = KattriApp::new(egui::Context::default());
+        let (worker, _events) = crate::worker::ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.items = vec![catalog_item("mov-1", "tag-1")];
+        let visible = vec![("mov-1".to_owned(), "tag-1".to_owned())];
+
+        app.request_visible_artwork(visible.clone());
+        let key = ("mov-1".to_owned(), "tag-1".to_owned());
+        let first = app.artwork_access_ticks[&key];
+
+        // An idle grid asks for the same artwork every frame; the tick must not move, or the
+        // LRU would treat every card as freshly seen and evict nothing useful.
+        app.request_visible_artwork(visible.clone());
+        assert_eq!(app.artwork_access_ticks[&key], first);
+        assert_eq!(app.visible_artwork, visible);
+
+        // Scrolling away and back is a change, so the poster becomes recently used again.
+        app.request_visible_artwork(Vec::new());
+        app.request_visible_artwork(visible.clone());
+        assert!(app.artwork_access_ticks[&key] > first);
+    }
+
+    #[test]
+    fn a_page_append_keeps_the_ticks_of_posters_that_stay_loaded() {
+        let mut app = KattriApp::new(egui::Context::default());
+        let (worker, _events) = crate::worker::ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.items = vec![catalog_item("mov-1", "tag-1")];
+        app.artwork_access_ticks
+            .insert(("mov-1".to_owned(), "tag-1".to_owned()), 7);
+        app.artwork_access_ticks
+            .insert(("gone".to_owned(), "old".to_owned()), 3);
+
+        app.prune_artwork_bookkeeping();
+
+        assert_eq!(
+            app.artwork_access_ticks
+                .get(&("mov-1".to_owned(), "tag-1".to_owned())),
+            Some(&7),
+            "a poster still in the catalog keeps its place in the LRU"
+        );
+        assert!(
+            !app.artwork_access_ticks
+                .contains_key(&("gone".to_owned(), "old".to_owned())),
+            "artwork that left the catalog is forgotten"
+        );
+    }
+
+    #[test]
+    fn artwork_completion_schedules_every_visible_poster_without_scrolling() {
+        let ctx = egui::Context::default();
+        let mut app = KattriApp::new(ctx.clone());
+        let (worker, events) = crate::worker::ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.items = (0..8)
+            .map(|index| catalog_item(&format!("movie-{index}"), &format!("tag-{index}")))
+            .collect();
+        let visible = app
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.artwork_id.clone(),
+                    item.primary_image_tag.clone().expect("tag"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for _ in 0..3 {
+            app.request_visible_artwork(visible.clone());
+            let batch = app.pending_artwork_requests.clone();
+            assert!(
+                !batch.is_empty(),
+                "a stationary grid keeps scheduling its backlog"
+            );
+            assert!(batch.len() <= super::MAX_PENDING_ARTWORK_REQUESTS);
+            for (request_id, (item_id, _)) in batch {
+                events
+                    .try_send(crate::worker::WorkerEvent::PrimaryArtworkLoaded {
+                        request_id,
+                        item_id,
+                        width: 1,
+                        height: 1,
+                        rgba: vec![255; 4],
+                    })
+                    .expect("fixture event");
+            }
+            app.receive_worker_events(&ctx);
+        }
+        assert!(app.items.iter().all(|item| item.artwork_texture.is_some()));
+        assert!(app.pending_artwork_requests.is_empty());
+    }
+
+    #[test]
+    fn failed_artwork_also_releases_a_slot_for_the_stationary_grid() {
+        let ctx = egui::Context::default();
+        let mut app = KattriApp::new(ctx.clone());
+        let (worker, events) = crate::worker::ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.items = (0..4)
+            .map(|index| catalog_item(&format!("movie-{index}"), &format!("tag-{index}")))
+            .collect();
+        let visible = app
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.artwork_id.clone(),
+                    item.primary_image_tag.clone().expect("tag"),
+                )
+            })
+            .collect::<Vec<_>>();
+        app.request_visible_artwork(visible.clone());
+        let failed = *app.pending_artwork_requests.keys().next().expect("pending");
+        events
+            .try_send(crate::worker::WorkerEvent::PrimaryArtworkFailed { request_id: failed })
+            .expect("fixture event");
+        app.receive_worker_events(&ctx);
+        app.request_visible_artwork(visible);
+        assert!(
+            app.pending_artwork_requests
+                .values()
+                .any(|(id, _)| id == "movie-3")
+        );
+        assert_eq!(
+            app.pending_artwork_requests.len(),
+            super::MAX_PENDING_ARTWORK_REQUESTS
+        );
     }
 }
 

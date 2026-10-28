@@ -214,9 +214,9 @@ jobs:
   # Flatpak bundle (M5-10). Unverified: this job has not run yet. It builds offline from
   # Cargo.lock: flatpak-cargo-generator writes cargo-sources.json next to the manifest, then
   # flatpak-builder installs the pinned runtime, SDK and Rust extension from Flathub.
-  # flatpak-builder-tools is taken at its default branch and its commit is logged; pin it
-  # before a release. If the Flathub Rust extension is older than rust-toolchain.toml, the
-  # cargo build fails here and the extension branch in the manifest must move.
+  # flatpak-builder-tools is pinned to an upstream commit. If the Flathub Rust
+  # extension is older than rust-toolchain.toml, the cargo build fails here and
+  # the extension branch in the manifest must move.
   flatpak:
     name: Flatpak (x64)
     runs-on: ubuntu-24.04
@@ -234,8 +234,17 @@ jobs:
       - name: Generate cargo-sources.json
         run: |
           set -euo pipefail
-          git clone --depth 1 https://github.com/flatpak/flatpak-builder-tools.git "$RUNNER_TEMP/fbt"
-          echo "flatpak-builder-tools commit: $(git -C "$RUNNER_TEMP/fbt" rev-parse HEAD)"
+          FBT_COMMIT=9d86d336a39b9af38b86f114b6ce5820fe260f91
+          git init "$RUNNER_TEMP/fbt"
+          git -C "$RUNNER_TEMP/fbt" remote add origin https://github.com/flatpak/flatpak-builder-tools.git
+          git -C "$RUNNER_TEMP/fbt" fetch --depth 1 origin "$FBT_COMMIT"
+          git -C "$RUNNER_TEMP/fbt" checkout --detach FETCH_HEAD
+          ACTUAL_FBT_COMMIT="$(git -C "$RUNNER_TEMP/fbt" rev-parse HEAD)"
+          if [[ "$ACTUAL_FBT_COMMIT" != "$FBT_COMMIT" ]]; then
+            echo "error: expected flatpak-builder-tools commit $FBT_COMMIT, got $ACTUAL_FBT_COMMIT" >&2
+            exit 1
+          fi
+          echo "flatpak-builder-tools commit: $ACTUAL_FBT_COMMIT"
           python3 "$RUNNER_TEMP/fbt/cargo/flatpak-cargo-generator.py" Cargo.lock \
             -o packaging/flatpak/cargo-sources.json
 
@@ -245,6 +254,10 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [[ "$KATTRI_RELEASE_VERSION" != "" && "$KATTRI_RELEASE_VERSION" != "v$VERSION" ]]; then
+            echo "error: tag $KATTRI_RELEASE_VERSION does not match workspace version $VERSION" >&2
+            exit 1
+          fi
           flatpak-builder --user --force-clean --install-deps-from=flathub \
             --repo="$RUNNER_TEMP/repo" "$RUNNER_TEMP/build" \
             packaging/flatpak/org.kattri.JellyfinKattri.yml

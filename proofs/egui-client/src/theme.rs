@@ -78,6 +78,14 @@ pub fn install_fonts(ctx: &egui::Context) {
 }
 
 pub fn apply(ctx: &egui::Context, high_contrast: bool, reduce_motion: bool) {
+    // The whole style is rebuilt only when the flags change. Reassigning every Visuals field on
+    // every frame is pure waste: the draw loop calls this before each pass.
+    let applied = egui::Id::unique("kattri-theme-applied");
+    let wanted = (high_contrast, reduce_motion);
+    if ctx.data(|data| data.get_temp::<(bool, bool)>(applied)) == Some(wanted) {
+        return;
+    }
+    ctx.data_mut(|data| data.insert_temp(applied, wanted));
     let colors = palette(high_contrast);
     ctx.global_style_mut(|style| {
         style.visuals = egui::Visuals::dark();
@@ -345,6 +353,29 @@ mod tests {
                 .get(&egui::TextStyle::Body)
                 .map(|f| f.size),
             Some(BODY_SIZE)
+        );
+    }
+
+    #[test]
+    fn the_style_is_rebuilt_only_when_the_flags_change() {
+        let ctx = egui::Context::default();
+        apply(&ctx, false, false);
+
+        // A marker the theme would overwrite: the second call with the same flags must leave it
+        // alone, which is how the per-frame rebuild is skipped.
+        ctx.global_style_mut(|style| style.spacing.item_spacing = egui::vec2(1.0, 1.0));
+        apply(&ctx, false, false);
+        assert_eq!(
+            ctx.style_of(egui::Theme::Dark).spacing.item_spacing,
+            egui::vec2(1.0, 1.0),
+            "unchanged flags skip the rebuild"
+        );
+
+        // A flag change rebuilds the whole style, marker included.
+        apply(&ctx, true, false);
+        assert_eq!(
+            ctx.style_of(egui::Theme::Dark).spacing.item_spacing,
+            egui::vec2(14.0, 10.0)
         );
     }
 

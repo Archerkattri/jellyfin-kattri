@@ -159,11 +159,22 @@ pub struct SearchResultGroup<'a> {
 /// Group supported Jellyfin DTO types in product order, omitting empty groups.
 /// Unknown or absent types are ignored rather than shown in the wrong section.
 pub fn group_search_results(items: &[BaseItemDto]) -> Vec<SearchResultGroup<'_>> {
+    group_search_results_with(items, &[])
+}
+
+/// The same grouping over two lists, in order. A caller with results from more than one request
+/// (catalog matches plus Live TV channels) can pass both slices instead of cloning and
+/// concatenating them, which matters when the grouping runs once per frame.
+pub fn group_search_results_with<'a>(
+    items: &'a [BaseItemDto],
+    extra: &'a [BaseItemDto],
+) -> Vec<SearchResultGroup<'a>> {
     SearchResultKind::ORDERED
         .into_iter()
         .filter_map(|kind| {
             let matching: Vec<_> = items
                 .iter()
+                .chain(extra)
                 .filter(|item| kind.matches(item.item_type.as_deref()))
                 .collect();
             (!matching.is_empty()).then_some(SearchResultGroup {
@@ -333,5 +344,17 @@ mod tests {
         let only_movies = group_search_results(&movie_result);
         assert_eq!(only_movies.len(), 1);
         assert_eq!(only_movies[0].kind, SearchResultKind::Movies);
+    }
+
+    #[test]
+    fn groups_two_slices_in_order_without_cloning_the_dtos() {
+        let catalog = [item("movie", "Movie"), item("first-channel", "TvChannel")];
+        let channels = [item("second-channel", "LiveTvChannel")];
+        let groups = group_search_results_with(&catalog, &channels);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[1].kind, SearchResultKind::Channels);
+        assert!(std::ptr::eq(groups[0].items[0], &catalog[0]));
+        assert!(std::ptr::eq(groups[1].items[0], &catalog[1]));
+        assert!(std::ptr::eq(groups[1].items[1], &channels[0]));
     }
 }

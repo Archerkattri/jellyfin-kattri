@@ -52,6 +52,18 @@ try {
         throw 'Linux release workflow does not build and package the jellyfin-kattri host binary.'
     }
 
+    $flatpakToolsCommit = '9d86d336a39b9af38b86f114b6ce5820fe260f91'
+    if ($linux -notmatch [regex]::Escape("FBT_COMMIT=$flatpakToolsCommit") -or
+        $linux -notmatch 'git -C "\$RUNNER_TEMP/fbt" fetch --depth 1 origin "\$FBT_COMMIT"' -or
+        $linux -notmatch 'ACTUAL_FBT_COMMIT="\$\(git -C "\$RUNNER_TEMP/fbt" rev-parse HEAD\)"' -or
+        $linux -notmatch 'if \[\[ "\$ACTUAL_FBT_COMMIT" != "\$FBT_COMMIT" \]\]') {
+        throw 'Flatpak release workflow must fetch the pinned flatpak-builder-tools commit and verify exact HEAD.'
+    }
+    $flatpakBuildStep = $linux.Substring($linux.IndexOf('Build Flatpak bundle'))
+    if ($flatpakBuildStep -notmatch 'KATTRI_RELEASE_VERSION:.*?github\.ref_type == .tag' -or
+        $flatpakBuildStep -notmatch 'if \[\[ "\$KATTRI_RELEASE_VERSION" != "" && "\$KATTRI_RELEASE_VERSION" != "v\$VERSION" \]\]') {
+        throw 'Flatpak release workflow must reject a tag that does not match the Cargo workspace version.'
+    }
     $debMetadata = Get-Content 'packaging/linux/deb/cargo-deb.toml' -Raw
     $rpmMetadata = Get-Content 'packaging/linux/rpm/generate-rpm.toml' -Raw
     if ($debMetadata -notmatch 'target/release/jellyfin-kattri' -or

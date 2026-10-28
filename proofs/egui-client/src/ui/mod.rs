@@ -196,7 +196,8 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
     // Keep each destination's scroll position independent; opening details starts at its title.
     let content_scroll_id = egui::Id::unique((
         "library_content_scroll",
-        format!("{:?}:{:?}", app.view, app.page),
+        app.view,
+        app.page,
         app.selected_item_id.as_deref(),
     ));
 
@@ -1505,9 +1506,7 @@ fn render_connected(
             ui.label(RichText::new(ui_text(ids::SEARCH_NOTICE_STALE)).color(colors.muted));
         }
         let query = app.submitted_search.clone();
-        let mut grouped_results = app.search_results.clone();
-        grouped_results.extend(app.live_tv_search_results.iter().cloned());
-        if grouped_results.is_empty() {
+        if app.search_results.is_empty() && app.live_tv_search_results.is_empty() {
             if let Some(query) = query {
                 if !app.catalog_loading
                     && !app.live_tv_search_loading
@@ -1538,7 +1537,8 @@ fn render_connected(
             let mut show_all_responses = Vec::new();
             let action = search::draw_with_focus_targets(
                 ui,
-                &grouped_results,
+                &app.search_results,
+                &app.live_tv_search_results,
                 app.live_tv_search_total,
                 |row, item, response| {
                     push_search_focus(entries, row, &item.id, response);

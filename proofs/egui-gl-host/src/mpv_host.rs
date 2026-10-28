@@ -3036,33 +3036,26 @@ impl<'session> MpvHost<'session> {
             renderer.close()?;
         }
         self.renderer.take();
-        if let Some(session) = self.session {
-            if let Some(observation) = self.subtitle_track_observation.take() {
-                let _ = session.unobserve_property(observation);
-            }
-            if let Some(observation) = self.subtitle_delay_observation.take() {
-                let _ = session.unobserve_property(observation);
-            }
-            if let Some(observation) = self.playback_position_observation.take() {
-                let _ = session.unobserve_property(observation);
-            }
-            if let Some(observation) = self.playback_paused_observation.take() {
-                let _ = session.unobserve_property(observation);
-            }
-            if let Some(observation) = self.playback_duration_observation.take() {
-                let _ = session.unobserve_property(observation);
-            }
-            if let Some(observation) = self.playback_speed_observation.take() {
-                let _ = session.unobserve_property(observation);
-            }
-            if let Some(observation) = self.playback_volume_observation.take() {
-                let _ = session.unobserve_property(observation);
-            }
-            if let Some(observation) = self.playback_mute_observation.take() {
-                let _ = session.unobserve_property(observation);
-            }
-        }
+        self.unobserve_properties();
         Ok(())
+    }
+
+    fn unobserve_properties(&mut self) {
+        let mut observations = [
+            self.subtitle_track_observation.take(),
+            self.subtitle_delay_observation.take(),
+            self.playback_position_observation.take(),
+            self.playback_paused_observation.take(),
+            self.playback_duration_observation.take(),
+            self.playback_speed_observation.take(),
+            self.playback_volume_observation.take(),
+            self.playback_mute_observation.take(),
+        ];
+        if let Some(session) = self.session {
+            drain_observations(&mut observations, |observation| {
+                let _ = session.unobserve_property(observation);
+            });
+        }
     }
 
     pub(crate) fn status(&self) -> &str {
@@ -3097,6 +3090,23 @@ impl<'session> MpvHost<'session> {
 
     pub(crate) fn has_media(&self) -> bool {
         self.file_loaded || self.pending_report_metadata.is_some()
+    }
+}
+
+impl Drop for MpvHost<'_> {
+    fn drop(&mut self) {
+        // The host may be replaced or dropped without the window's explicit close path.
+        // Unregister even if GL teardown fails; MpvRenderer::drop handles that case separately.
+        let _ = self.close();
+        self.unobserve_properties();
+    }
+}
+
+/// Generic over the id so the test can use plain integers; `ObservationId` cannot be built
+/// outside mpv-render.
+fn drain_observations<T>(observations: &mut [Option<T>], mut unobserve: impl FnMut(T)) {
+    for observation in observations.iter_mut().filter_map(Option::take) {
+        unobserve(observation);
     }
 }
 
@@ -3407,6 +3417,18 @@ pub(crate) fn local_media_path(arguments: Vec<OsString>) -> Result<Option<String
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn observation_cleanup_drains_each_registration_once() {
+        let mut observations = [Some(1_u64), None, Some(3)];
+        let mut removed = Vec::new();
+        super::drain_observations(&mut observations, |id| removed.push(id));
+
+        assert_eq!(removed, [1, 3]);
+        assert!(observations.iter().all(Option::is_none));
+        super::drain_observations(&mut observations, |id| removed.push(id));
+        assert_eq!(removed, [1, 3]);
+    }
+
     #[test]
     fn validation_reporting_policy_stays_disabled_when_schedulers_are_recreated() {
         assert!(super::playback_report_scheduler(true).is_some());

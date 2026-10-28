@@ -74,6 +74,25 @@ pub fn media_card(
     } else {
         ui_text(ids::ARTWORK_DESCRIPTION_PLACEHOLDER)
     };
+    // The accessible name is long: it carries the title, kind, subtitle, artwork state and an
+    // overview preview. Building it inside the closures keeps a frame of a large grid free of
+    // the formatting work when no screen reader is attached and nothing is hovered.
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::Role::Button,
+            true,
+            selected,
+            card_label(item, artwork_description),
+        )
+    });
+    if response.hovered() {
+        return response.on_hover_text(card_label(item, artwork_description));
+    }
+    response
+}
+
+/// Accessible name and hover text for one poster.
+fn card_label(item: &MediaItem, artwork_description: &str) -> String {
     let mut label = format!(
         "{}, {}. {}. {artwork_description} ",
         item.title,
@@ -97,10 +116,7 @@ pub fn media_card(
         label.push_str(". ");
     }
     label.push_str(ui_text(ids::ARTWORK_HINT_LOAD_DETAILS));
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::Button, true, selected, label.clone())
-    });
-    response.on_hover_text(label)
+    label
 }
 
 pub fn paint_artwork(painter: &egui::Painter, rect: Rect, art: ArtworkPalette) {
@@ -317,6 +333,42 @@ fn sound(painter: &egui::Painter, rect: Rect, art: ArtworkPalette) {
 
 fn lerp(start: u8, end: u8, t: f32) -> u8 {
     (f32::from(start) + (f32::from(end) - f32::from(start)) * t).round() as u8
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::{MediaItem, card_label};
+
+    fn movie(overview: &str) -> MediaItem {
+        MediaItem::from_api(
+            serde_json::from_value(serde_json::json!({
+                "Id": "m1",
+                "Name": "A Film",
+                "Type": "Movie",
+                "Overview": overview,
+            }))
+            .expect("item fixture"),
+        )
+    }
+
+    #[test]
+    fn the_card_label_carries_title_kind_and_a_bounded_overview_preview() {
+        let overview = "x".repeat(400);
+        let label = card_label(&movie(&overview), "Poster image");
+        assert!(label.contains("A Film"));
+        assert!(label.contains("Movie"));
+        assert!(label.contains("Poster image"));
+        assert!(label.contains(&"x".repeat(220)), "keeps the preview");
+        assert!(!label.contains(&"x".repeat(221)), "truncates at 220 chars");
+        assert!(label.contains('…'), "marks the truncated preview");
+    }
+
+    #[test]
+    fn a_card_without_an_overview_has_no_summary_section() {
+        let label = card_label(&movie("   "), "Placeholder artwork");
+        assert!(label.contains("A Film"));
+        assert!(!label.contains('…'));
+    }
 }
 
 #[cfg(test)]
