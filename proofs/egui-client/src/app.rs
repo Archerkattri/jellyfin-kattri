@@ -673,6 +673,9 @@ pub struct KattriApp {
     episode_neighbors: Option<EpisodeNeighbors>,
     /// The episode to play next in the series on screen.
     series_next_up: Option<SeriesNextUp>,
+    /// The other episodes of the season of the episode page on screen.
+    pub(crate) season_siblings: Vec<BaseItemDto>,
+    season_siblings_request_id: u64,
     /// Live TV recordings and scheduled timers, loaded when the Live TV page opens.
     pub(crate) live_tv_recordings: Vec<BaseItemDto>,
     pub(crate) live_tv_timers: Vec<jellyfin_api::LiveTvTimer>,
@@ -1148,6 +1151,8 @@ impl KattriApp {
             episode_neighbors: None,
             series_next_up: None,
             shuffle_queue: None,
+            season_siblings: Vec::new(),
+            season_siblings_request_id: 0,
             live_tv_recordings: Vec::new(),
             live_tv_timers: Vec::new(),
             live_tv_recordings_request_id: 0,
@@ -5301,6 +5306,30 @@ impl KattriApp {
         true
     }
 
+    /// For an episode page, asks for the rest of its season.
+    fn request_season_siblings(&mut self) {
+        self.season_siblings.clear();
+        self.season_siblings_request_id = self.allocate_request_id();
+        let Some((series_id, season)) = self.selected_details.as_ref().and_then(|item| {
+            (item.item_type.as_deref() == Some("Episode"))
+                .then(|| item.series_id.clone().zip(item.parent_index_number))
+                .flatten()
+        }) else {
+            return;
+        };
+        let request_id = self.season_siblings_request_id;
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.list_season_siblings(request_id, series_id, season);
+        }
+    }
+
+    /// Opens another episode of the same season, keeping where Back returns.
+    pub(crate) fn open_sibling_item(&mut self, item_id: String) {
+        let parent = self.detail_parent.clone();
+        self.select_item(item_id);
+        self.detail_parent = parent;
+    }
+
     /// Loads recordings and timers once per visit to the Live TV page.
     pub(crate) fn ensure_live_tv_recordings(&mut self) {
         if self.live_tv_recordings_state != RecordingsState::NotLoaded {
@@ -6499,6 +6528,7 @@ impl KattriApp {
                     {
                         self.request_series_seasons(series_id);
                     }
+                    self.request_season_siblings();
                     if self.music_queue_auto_play_item_id.as_deref()
                         == self.selected_item_id.as_deref()
                     {
@@ -6605,6 +6635,18 @@ impl KattriApp {
                 WorkerEvent::GenresLoaded { request_id, genres } => {
                     if request_id == self.catalog_genres_request_id {
                         self.catalog_genres = genres;
+                    }
+                }
+                WorkerEvent::SeasonSiblingsLoaded {
+                    request_id,
+                    episodes,
+                } => {
+                    if request_id == self.season_siblings_request_id {
+                        let current = self.selected_item_id.clone();
+                        self.season_siblings = episodes
+                            .into_iter()
+                            .filter(|episode| Some(&episode.id) != current.as_ref())
+                            .collect();
                     }
                 }
                 WorkerEvent::RecordingsLoaded { request_id, result } => {
@@ -11751,6 +11793,47 @@ mod photo_decode_event_tests {
         );
         assert_ne!(app.live_tv_recordings_request_id, first, "the lists reload");
         assert!(app.toast.is_some());
+    }
+
+    #[test]
+    fn an_episode_page_lists_the_rest_of_its_season() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.selected_item_id = Some("e2".into());
+        app.selected_details = Some(
+            serde_json::from_value(serde_json::json!({
+                "Id": "e2", "Name": "Two", "Type": "Episode", "SeriesId": "show",
+                "ParentIndexNumber": 1
+            }))
+            .expect("episode"),
+        );
+        app.request_season_siblings();
+        let request_id = app.season_siblings_request_id;
+        let episode = |id: &str| -> jellyfin_api::BaseItemDto {
+            serde_json::from_value(serde_json::json!({"Id": id, "Name": id})).expect("episode")
+        };
+        sender
+            .try_send(WorkerEvent::SeasonSiblingsLoaded {
+                request_id,
+                episodes: vec![episode("e1"), episode("e2"), episode("e3")],
+            })
+            .expect("send season");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        let ids: Vec<&str> = app.season_siblings.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["e1", "e3"], "the episode on screen is left out");
+
+        app.detail_parent = Some("show".into());
+        app.open_sibling_item("e3".into());
+        assert_eq!(
+            app.detail_parent.as_deref(),
+            Some("show"),
+            "Back still returns to the series"
+        );
     }
 
     #[test]

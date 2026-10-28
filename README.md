@@ -140,8 +140,8 @@ yet a replacement for the official clients. The main missing pieces:
   artist view; books, home videos and
   music videos have no views.
 - **Details pages:** a Media info section lists the source's container, size, bitrate
-  and streams. Missing: version picker, extras/special features, trailers, theme media,
-  "more from this season" and lyrics.
+  and streams; an episode page lists the rest of its season. Missing: version picker,
+  extras/special features, trailers, theme media and lyrics.
 - **Other:** photos have a slideshow, and the home sections can be turned off one by one
   in General settings, and sign-in has a Forgot password flow. Live TV lists recordings
   (playable) and scheduled recordings (cancellable), and records a channel's current

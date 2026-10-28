@@ -2368,6 +2368,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     let mut episode_to_open = None;
     let mut episode_page_to_open = None;
     let mut shuffle_series = None;
+    let mut sibling_to_open = None;
     let mut person_to_open = None;
     let mut similar_item_to_open = None;
     let mut download_target: Option<(String, String)> = None;
@@ -2443,6 +2444,28 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                             .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
                         );
                     }
+                }
+                if item.item_type.as_deref() == Some("Episode") && !app.season_siblings.is_empty() {
+                    ui.add_space(14.0);
+                    ui.heading(ui_text(ids::DETAIL_MORE_FROM_SEASON));
+                    egui::ScrollArea::horizontal()
+                        .id_salt("detail_season_siblings")
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for sibling in &app.season_siblings {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(episode_display_label(sibling))
+                                                .min_size(egui::vec2(0.0, 36.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        sibling_to_open = Some(sibling.id.clone());
+                                    }
+                                }
+                            });
+                        });
                 }
                 if item.item_type.as_deref() == Some("Series") {
                     ui.add_space(10.0);
@@ -2766,6 +2789,10 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     if let Some(episode_id) = episode_to_open {
         // The play button plays the episode, resuming where it was left.
         app.play_item(episode_id, false);
+        ui.ctx().request_repaint();
+    }
+    if let Some(episode_id) = sibling_to_open {
+        app.open_sibling_item(episode_id);
         ui.ctx().request_repaint();
     }
     if let Some(series_id) = shuffle_series {

@@ -344,6 +344,11 @@ pub enum WorkerEvent {
         request_id: u64,
         genres: Vec<String>,
     },
+    /// The episodes of the season an episode page belongs to. Empty on failure.
+    SeasonSiblingsLoaded {
+        request_id: u64,
+        episodes: Vec<BaseItemDto>,
+    },
     /// Live TV recordings and scheduled timers.
     RecordingsLoaded {
         request_id: u64,
@@ -828,6 +833,11 @@ enum WorkerCommand {
     },
     LoadRecordings {
         request_id: u64,
+    },
+    ListSeasonSiblings {
+        request_id: u64,
+        series_id: String,
+        season: i32,
     },
     ChangeTimer {
         request_id: u64,
@@ -1338,6 +1348,19 @@ impl ApiWorker {
             item_id,
             action,
             collection_id,
+        })
+    }
+
+    pub(crate) fn list_season_siblings(
+        &self,
+        request_id: u64,
+        series_id: String,
+        season: i32,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ListSeasonSiblings {
+            request_id,
+            series_id,
+            season,
         })
     }
 
@@ -3297,6 +3320,32 @@ async fn execute_command(
                     events,
                     ctx,
                     WorkerEvent::GenresLoaded { request_id, genres },
+                )
+                .await
+            }
+            WorkerCommand::ListSeasonSiblings {
+                request_id,
+                series_id,
+                season,
+            } => {
+                let episodes = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .season_episodes_by_number(session, &series_id, season)
+                        .await
+                        .map(|response| response.items)
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "season episodes unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::SeasonSiblingsLoaded {
+                        request_id,
+                        episodes,
+                    },
                 )
                 .await
             }

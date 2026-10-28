@@ -144,6 +144,28 @@ impl JellyfinClient {
         Ok(AdjacentEpisodes::from_items(response.items, episode_id))
     }
 
+    /// The episodes of season number `season` of a series, using
+    /// `GET /Shows/{seriesId}/Episodes?season=N`, for an episode page's "More from this season".
+    pub async fn season_episodes_by_number(
+        &self,
+        session: &Session,
+        series_id: &str,
+        season: i32,
+    ) -> Result<ItemsResponse, ApiError> {
+        validate_id(series_id)?;
+        self.get_series_items(
+            session,
+            &["Shows", series_id, "Episodes"],
+            &[
+                ("season", season.to_string()),
+                ("userId", session.user.id.clone()),
+                ("enableUserData", "true".to_owned()),
+                ("fields", "Overview,PrimaryImageAspectRatio".to_owned()),
+            ],
+        )
+        .await
+    }
+
     /// The episode to play next in one series, using
     /// `GET /Shows/NextUp?seriesId={seriesId}`: the episode in progress, else the first
     /// unplayed one after the last played. `None` when the server has none to offer.
@@ -384,6 +406,21 @@ mod tests {
         );
         assert_eq!(adjacent.previous.map(|item| item.id).as_deref(), Some("e1"));
         assert_eq!(adjacent.next.map(|item| item.id).as_deref(), Some("e3"));
+    }
+
+    #[tokio::test]
+    async fn season_episodes_are_asked_for_by_season_number() {
+        let body = r#"{"Items":[{"Id":"e1","Name":"One"}]}"#;
+        let (base, task) = mock_server(vec![(200, body)]).await;
+        let episodes = client(&base)
+            .season_episodes_by_number(&session(), "series-1", 2)
+            .await
+            .expect("season");
+        assert_eq!(episodes.items[0].id, "e1");
+        let requests = task.await.expect("server task");
+        let url = request_uri(&requests[0]);
+        assert_eq!(url.path(), "/jellyfin/Shows/series-1/Episodes");
+        assert_eq!(params(&url).get("season").map(String::as_str), Some("2"));
     }
 
     #[tokio::test]
