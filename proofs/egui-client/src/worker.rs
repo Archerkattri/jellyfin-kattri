@@ -344,6 +344,11 @@ pub enum WorkerEvent {
         request_id: u64,
         genres: Vec<String>,
     },
+    /// Lyrics of the track on screen. Empty when it has none or on failure.
+    LyricsLoaded {
+        request_id: u64,
+        lines: Vec<jellyfin_api::LyricLine>,
+    },
     /// Trailers and special features of the item on screen. Empty on failure.
     ExtrasLoaded {
         request_id: u64,
@@ -845,6 +850,10 @@ enum WorkerCommand {
         season: i32,
     },
     ListExtras {
+        request_id: u64,
+        item_id: String,
+    },
+    GetLyrics {
         request_id: u64,
         item_id: String,
     },
@@ -1357,6 +1366,17 @@ impl ApiWorker {
             item_id,
             action,
             collection_id,
+        })
+    }
+
+    pub(crate) fn get_lyrics(
+        &self,
+        request_id: u64,
+        item_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::GetLyrics {
+            request_id,
+            item_id,
         })
     }
 
@@ -3342,6 +3362,22 @@ async fn execute_command(
                     WorkerEvent::GenresLoaded { request_id, genres },
                 )
                 .await
+            }
+            WorkerCommand::GetLyrics {
+                request_id,
+                item_id,
+            } => {
+                let lines = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .track_lyrics(session, &item_id)
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "lyrics unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(events, ctx, WorkerEvent::LyricsLoaded { request_id, lines }).await
             }
             WorkerCommand::ListExtras {
                 request_id,

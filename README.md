@@ -142,7 +142,8 @@ yet a replacement for the official clients. The main missing pieces:
 - **Details pages:** a Media info section lists the source's container, size, bitrate
   and streams; an episode page lists the rest of its season; an item with several
   versions offers a Version picker that playback follows; movie and series pages list
-  their trailers and special features. Missing: theme media and lyrics.
+  their trailers and special features; music track pages show lyrics. Missing: theme
+  media and lyrics synced to playback.
 - **Other:** photos have a slideshow, and the home sections can be turned off one by one
   in General settings, and sign-in has a Forgot password flow. Live TV lists recordings
   (playable) and scheduled recordings (cancellable), and records a channel's current

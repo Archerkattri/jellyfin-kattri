@@ -675,6 +675,9 @@ pub struct KattriApp {
     series_next_up: Option<SeriesNextUp>,
     /// The version (media source index) the viewer picked for an item.
     preferred_source: Option<(String, usize)>,
+    /// Lyrics of the music track on screen.
+    pub(crate) track_lyrics: Vec<jellyfin_api::LyricLine>,
+    track_lyrics_request_id: u64,
     /// Trailers and special features of the movie or series on screen.
     pub(crate) item_extras: Vec<BaseItemDto>,
     item_extras_request_id: u64,
@@ -1157,6 +1160,8 @@ impl KattriApp {
             series_next_up: None,
             shuffle_queue: None,
             preferred_source: None,
+            track_lyrics: Vec::new(),
+            track_lyrics_request_id: 0,
             item_extras: Vec::new(),
             item_extras_request_id: 0,
             season_siblings: Vec::new(),
@@ -5342,6 +5347,23 @@ impl KattriApp {
         }
     }
 
+    /// For a music track page, asks for its lyrics.
+    fn request_track_lyrics(&mut self) {
+        self.track_lyrics.clear();
+        self.track_lyrics_request_id = self.allocate_request_id();
+        let Some(item_id) = self
+            .selected_details
+            .as_ref()
+            .and_then(|item| (item.item_type.as_deref() == Some("Audio")).then(|| item.id.clone()))
+        else {
+            return;
+        };
+        let request_id = self.track_lyrics_request_id;
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.get_lyrics(request_id, item_id);
+        }
+    }
+
     /// For a movie or series page, asks for its trailers and special features.
     fn request_item_extras(&mut self) {
         self.item_extras.clear();
@@ -6588,6 +6610,7 @@ impl KattriApp {
                     }
                     self.request_season_siblings();
                     self.request_item_extras();
+                    self.request_track_lyrics();
                     if self.music_queue_auto_play_item_id.as_deref()
                         == self.selected_item_id.as_deref()
                     {
@@ -6694,6 +6717,11 @@ impl KattriApp {
                 WorkerEvent::GenresLoaded { request_id, genres } => {
                     if request_id == self.catalog_genres_request_id {
                         self.catalog_genres = genres;
+                    }
+                }
+                WorkerEvent::LyricsLoaded { request_id, lines } => {
+                    if request_id == self.track_lyrics_request_id {
+                        self.track_lyrics = lines;
                     }
                 }
                 WorkerEvent::ExtrasLoaded { request_id, extras } => {

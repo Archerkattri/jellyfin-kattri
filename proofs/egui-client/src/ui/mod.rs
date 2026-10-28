@@ -2447,6 +2447,22 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                         );
                     }
                 }
+                if !app.track_lyrics.is_empty() {
+                    ui.add_space(14.0);
+                    egui::CollapsingHeader::new(ui_text(ids::DETAIL_LYRICS))
+                        .id_salt("detail_lyrics")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("detail_lyrics_scroll")
+                                .max_height(320.0)
+                                .show(ui, |ui| {
+                                    for line in &app.track_lyrics {
+                                        ui.label(RichText::new(&line.text).color(colors.text));
+                                    }
+                                });
+                        });
+                }
                 if !app.item_extras.is_empty() {
                     ui.add_space(14.0);
                     ui.heading(ui_text(ids::DETAIL_EXTRAS));

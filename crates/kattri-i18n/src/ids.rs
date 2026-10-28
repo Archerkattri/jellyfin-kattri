@@ -771,6 +771,7 @@ pub const ITEM_MENU_REFRESH_METADATA: &str = "item_menu.refresh_metadata";
 pub const ITEM_MENU_DELETE: &str = "item_menu.delete";
 pub const DETAIL_MORE_FROM_SEASON: &str = "detail.more_from_season";
 pub const DETAIL_EXTRAS: &str = "detail.extras";
+pub const DETAIL_LYRICS: &str = "detail.lyrics";
 pub const DETAIL_VERSION_LABEL: &str = "detail.version_label";
 pub const MUSIC_VIEW_ALL: &str = "music.view.all";
 pub const MUSIC_VIEW_ALBUMS: &str = "music.view.albums";
@@ -965,6 +966,7 @@ pub const ALL: &[&str] = &[
     ITEM_MENU_DELETE,
     DETAIL_MORE_FROM_SEASON,
     DETAIL_EXTRAS,
+    DETAIL_LYRICS,
     DETAIL_VERSION_LABEL,
     MUSIC_VIEW_ALL,
     MUSIC_VIEW_ALBUMS,

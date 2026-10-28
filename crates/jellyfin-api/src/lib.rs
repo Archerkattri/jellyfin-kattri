@@ -37,6 +37,7 @@ pub use device_profile::{
     CodecProfile, ContainerProfile, DeviceProfile, DirectPlayProfile, ProfileCondition,
     SubtitleProfile, TranscodingProfile,
 };
+pub use extras::LyricLine;
 pub use favorites::FavoriteToggle;
 pub use home::{MAX_HOME_LIMIT, UserView};
 pub use item_images::BackdropImageError;
