@@ -2144,10 +2144,55 @@ fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
             );
         }
     });
+    let mut name_prefix = app.catalog_name_prefix;
+    alphabet_picker(ui, &mut name_prefix, colors);
     app.set_catalog_sort(sort);
     app.set_catalog_sort_order(order);
     app.set_catalog_played_filter(played_filter);
     app.set_catalog_favorites_only(favorites_only);
+    app.set_catalog_name_prefix(name_prefix);
+}
+
+/// The letters the alphabet picker offers after "All": `#` for digits and symbols, then A-Z.
+const ALPHABET_PICKER_LETTERS: [char; 27] = [
+    '#', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
+    'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+];
+
+/// A row of letters that narrows the library to names starting with one of them.
+fn alphabet_picker(ui: &mut egui::Ui, prefix: &mut Option<char>, colors: Palette) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let all = ui.add(egui::Button::selectable(
+            prefix.is_none(),
+            RichText::new(ui_text(ids::BROWSE_ALPHABET_ALL)).color(colors.text),
+        ));
+        if all.clicked() {
+            *prefix = None;
+        }
+        for letter in ALPHABET_PICKER_LETTERS {
+            let selected = *prefix == Some(letter);
+            let response = ui
+                .add(
+                    egui::Button::selectable(
+                        selected,
+                        RichText::new(letter.to_string()).monospace(),
+                    )
+                    .min_size(egui::vec2(22.0, 22.0)),
+                )
+                .on_hover_text(if letter == '#' {
+                    ui_text(ids::BROWSE_ALPHABET_SYMBOLS).to_owned()
+                } else {
+                    ui_text_args(
+                        ids::BROWSE_ALPHABET_LETTER,
+                        &[("letter", &letter.to_string())],
+                    )
+                });
+            if response.clicked() {
+                *prefix = if selected { None } else { Some(letter) };
+            }
+        }
+    });
 }
 
 /// Only a movie or an episode is one file the server can return from `/Items/{id}/Download`.

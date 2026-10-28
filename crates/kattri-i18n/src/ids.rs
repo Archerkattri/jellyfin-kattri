@@ -757,6 +757,9 @@ pub const ITEM_MENU_MARK_UNPLAYED: &str = "item_menu.mark_unplayed";
 pub const ITEM_MENU_ADD_FAVORITE: &str = "item_menu.add_favorite";
 pub const ITEM_MENU_REMOVE_FAVORITE: &str = "item_menu.remove_favorite";
 pub const ITEM_MENU_DOWNLOAD: &str = "item_menu.download";
+pub const BROWSE_ALPHABET_ALL: &str = "browse.alphabet.all";
+pub const BROWSE_ALPHABET_SYMBOLS: &str = "browse.alphabet.symbols";
+pub const BROWSE_ALPHABET_LETTER: &str = "browse.alphabet.letter";
 pub const ITEM_MENU_ADD_TO_QUEUE: &str = "item_menu.add_to_queue";
 pub const ITEM_MENU_PLAY_NEXT: &str = "item_menu.play_next";
 pub const ITEM_MENU_ADD_TO_PLAYLIST: &str = "item_menu.add_to_playlist";
@@ -905,6 +908,9 @@ pub const ALL: &[&str] = &[
     ITEM_MENU_ADD_FAVORITE,
     ITEM_MENU_REMOVE_FAVORITE,
     ITEM_MENU_DOWNLOAD,
+    BROWSE_ALPHABET_ALL,
+    BROWSE_ALPHABET_SYMBOLS,
+    BROWSE_ALPHABET_LETTER,
     ITEM_MENU_ADD_TO_QUEUE,
     ITEM_MENU_PLAY_NEXT,
     ITEM_MENU_ADD_TO_PLAYLIST,

@@ -314,6 +314,8 @@ impl JellyfinClient {
                         ids: Some(batch.to_vec()),
                         limit: u32::try_from(batch.len()).map_err(|_| ApiError::InvalidResponse)?,
                         enable_total_record_count: Some(false),
+                        name_starts_with: None,
+                        name_less_than: None,
                         ..ItemQuery::default()
                     },
                 )
@@ -1501,6 +1503,12 @@ pub struct ItemQuery {
     /// list; the typed client caps a single request at 50 IDs.
     pub ids: Option<Vec<String>>,
     pub enable_total_record_count: Option<bool>,
+    /// Only items whose sort name starts with this text (`NameStartsWith`), for an
+    /// alphabet picker.
+    pub name_starts_with: Option<String>,
+    /// Only items whose sort name sorts before this text (`NameLessThan`); `"A"` selects
+    /// names starting with a digit or symbol.
+    pub name_less_than: Option<String>,
 }
 
 /// Jellyfin's `/Items` `sortBy` values used by the library browser.
@@ -1635,6 +1643,12 @@ impl ItemQuery {
                 enable_total_record_count.to_string(),
             ));
         }
+        if let Some(prefix) = &self.name_starts_with {
+            params.push(("nameStartsWith".into(), prefix.clone()));
+        }
+        if let Some(bound) = &self.name_less_than {
+            params.push(("nameLessThan".into(), bound.clone()));
+        }
         params
     }
 }
@@ -1656,6 +1670,8 @@ impl Default for ItemQuery {
             person_ids: None,
             ids: None,
             enable_total_record_count: None,
+            name_starts_with: None,
+            name_less_than: None,
         }
     }
 }
@@ -2354,6 +2370,8 @@ mod item_query_serialization_tests {
             person_ids: Some(vec!["person-1".into(), "person-2".into()]),
             ids: Some(vec!["item-1".into(), "item-2".into()]),
             enable_total_record_count: Some(false),
+            name_starts_with: None,
+            name_less_than: None,
             start_index: 100,
             limit: 50,
             ..ItemQuery::default()
@@ -2388,6 +2406,8 @@ mod item_query_serialization_tests {
             genres: Some(vec![]),
             years: Some(vec![]),
             enable_total_record_count: Some(true),
+            name_starts_with: None,
+            name_less_than: None,
             ..ItemQuery::default()
         };
         let actual = params(&query);
@@ -2400,5 +2420,21 @@ mod item_query_serialization_tests {
         assert!(!actual.contains_key("parentId"));
         assert!(!actual.contains_key("sortOrder"));
         assert!(!actual.contains_key("searchTerm"));
+        assert!(!actual.contains_key("nameStartsWith"));
+        assert!(!actual.contains_key("nameLessThan"));
+    }
+
+    #[test]
+    fn serializes_the_alphabet_picker_bounds() {
+        let letter = params(&ItemQuery {
+            name_starts_with: Some("K".into()),
+            ..ItemQuery::default()
+        });
+        assert_values(&letter, "nameStartsWith", &["K"]);
+        let symbols = params(&ItemQuery {
+            name_less_than: Some("A".into()),
+            ..ItemQuery::default()
+        });
+        assert_values(&symbols, "nameLessThan", &["A"]);
     }
 }

@@ -5008,6 +5008,8 @@ async fn list_music_album_tracks(
                     parent_id: Some(album_id.to_owned()),
                     include_item_types: Some(vec!["Audio".to_owned()]),
                     enable_total_record_count: Some(true),
+                    name_starts_with: None,
+                    name_less_than: None,
                     ..ItemQuery::default()
                 },
             )
@@ -5272,6 +5274,8 @@ fn item_query(
         person_ids: None,
         ids: None,
         enable_total_record_count: Some(true),
+        name_starts_with: None,
+        name_less_than: None,
     }
 }
 
@@ -5640,6 +5644,8 @@ mod item_query_tests {
                 person_ids: None,
                 ids: None,
                 enable_total_record_count: Some(true),
+                name_starts_with: None,
+                name_less_than: None,
             }
         );
     }

@@ -727,6 +727,8 @@ pub struct KattriApp {
     pub(crate) catalog_sort_order: ItemSortOrder,
     pub(crate) catalog_played_filter: CatalogPlayedFilter,
     pub(crate) catalog_favorites_only: bool,
+    /// The alphabet picker's letter, `'#'` for names that start with a digit or symbol.
+    pub(crate) catalog_name_prefix: Option<char>,
     pub(crate) high_contrast: bool,
     pub(crate) reduce_motion: bool,
     pub(crate) interface_size: kattri_settings::InterfaceSize,
@@ -1161,6 +1163,7 @@ impl KattriApp {
             catalog_sort_order: ItemSortOrder::Ascending,
             catalog_played_filter: CatalogPlayedFilter::Any,
             catalog_favorites_only: false,
+            catalog_name_prefix: None,
             high_contrast,
             interface_size,
             reduce_motion,
@@ -2478,6 +2481,7 @@ impl KattriApp {
         }
         self.cancel_navigation_requests();
         self.page = page;
+        self.catalog_name_prefix = None;
         self.photo_selected_id = None;
         self.photo_page_start = 0;
         self.photo_items.clear();
@@ -2561,6 +2565,7 @@ impl KattriApp {
         self.cancel_navigation_requests();
         self.view = AppView::Library;
         self.page = page;
+        self.catalog_name_prefix = None;
         self.photo_selected_id = None;
         self.photo_items.clear();
         self.photo_thumbnails.clear();
@@ -3675,17 +3680,38 @@ impl KattriApp {
         self.restart_catalog_query();
     }
 
+    pub(crate) fn set_catalog_name_prefix(&mut self, prefix: Option<char>) {
+        if self.catalog_name_prefix == prefix {
+            return;
+        }
+        self.catalog_name_prefix = prefix;
+        self.restart_catalog_query();
+    }
+
     pub(crate) fn clear_catalog_filters(&mut self) {
-        if self.catalog_played_filter == CatalogPlayedFilter::Any && !self.catalog_favorites_only {
+        if !self.has_catalog_filters() {
             return;
         }
         self.catalog_played_filter = CatalogPlayedFilter::Any;
         self.catalog_favorites_only = false;
+        self.catalog_name_prefix = None;
         self.restart_catalog_query();
     }
 
     pub(crate) fn has_catalog_filters(&self) -> bool {
-        self.catalog_played_filter != CatalogPlayedFilter::Any || self.catalog_favorites_only
+        self.catalog_played_filter != CatalogPlayedFilter::Any
+            || self.catalog_favorites_only
+            || self.catalog_name_prefix.is_some()
+    }
+
+    /// `(nameStartsWith, nameLessThan)` for the alphabet picker. `'#'` asks for names that
+    /// sort before "A", which are the ones starting with a digit or symbol.
+    fn catalog_name_bounds(&self) -> (Option<String>, Option<String>) {
+        match self.catalog_name_prefix {
+            Some('#') => (None, Some("A".to_owned())),
+            Some(letter) => (Some(letter.to_string()), None),
+            None => (None, None),
+        }
     }
 
     fn catalog_filters(&self) -> Option<Vec<ItemFilter>> {
@@ -3896,6 +3922,11 @@ impl KattriApp {
             return;
         }
 
+        let name_bounds = if is_search || is_search_browse {
+            (None, None)
+        } else {
+            self.catalog_name_bounds()
+        };
         let request_result =
             self.worker
                 .as_ref()
@@ -3966,6 +3997,8 @@ impl KattriApp {
                             person_ids: None,
                             ids: None,
                             enable_total_record_count: Some(true),
+                            name_starts_with: name_bounds.0,
+                            name_less_than: name_bounds.1,
                         },
                     )
                 });
@@ -7507,6 +7540,26 @@ mod catalog_query_tests {
     }
 
     #[test]
+    fn alphabet_picker_maps_to_name_bounds_and_counts_as_a_filter() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.worker = None;
+        assert_eq!(app.catalog_name_bounds(), (None, None));
+        app.set_catalog_name_prefix(Some('K'));
+        assert_eq!(app.catalog_name_bounds(), (Some("K".into()), None));
+        assert!(app.has_catalog_filters());
+        app.set_catalog_name_prefix(Some('#'));
+        assert_eq!(app.catalog_name_bounds(), (None, Some("A".into())));
+        app.clear_catalog_filters();
+        assert_eq!(app.catalog_name_prefix, None);
+        app.set_catalog_name_prefix(Some('B'));
+        app.navigate_to(crate::app::Page::Movies);
+        assert_eq!(
+            app.catalog_name_prefix, None,
+            "a new page starts unfiltered"
+        );
+    }
+
+    #[test]
     fn unsupported_filter_is_hidden_and_removed_before_the_retry() {
         let mut app = KattriApp::new(egui::Context::default());
         app.worker = None;
@@ -7613,6 +7666,8 @@ mod catalog_query_tests {
                 person_ids: None,
                 ids: None,
                 enable_total_record_count: Some(true),
+                name_starts_with: None,
+                name_less_than: None,
             };
             let old_page = client
                 .list_items(

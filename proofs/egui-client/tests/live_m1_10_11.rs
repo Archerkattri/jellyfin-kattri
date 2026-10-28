@@ -148,6 +148,8 @@ fn live_search_and_profile_playback_negotiation_are_read_only() {
                     sort_by: Some(vec![ItemSortBy::SortName]),
                     sort_order: Some(vec![ItemSortOrder::Ascending]),
                     enable_total_record_count: Some(true),
+                    name_starts_with: None,
+                    name_less_than: None,
                     ..ItemQuery::default()
                 },
             )
