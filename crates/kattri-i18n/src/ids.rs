@@ -768,6 +768,8 @@ pub const ITEM_MENU_PLAY_NEXT: &str = "item_menu.play_next";
 pub const ITEM_MENU_ADD_TO_PLAYLIST: &str = "item_menu.add_to_playlist";
 pub const ITEM_MENU_REFRESH_METADATA: &str = "item_menu.refresh_metadata";
 pub const ITEM_MENU_DELETE: &str = "item_menu.delete";
+pub const ITEM_MENU_ADD_TO_COLLECTION: &str = "item_menu.add_to_collection";
+pub const TOAST_ADDED_TO_COLLECTION: &str = "toast.added_to_collection";
 pub const DELETE_CONFIRM_TITLE: &str = "delete.confirm.title";
 pub const DELETE_CONFIRM_BODY: &str = "delete.confirm.body";
 pub const DELETE_CONFIRM_DELETE: &str = "delete.confirm.delete";
@@ -931,6 +933,8 @@ pub const ALL: &[&str] = &[
     ITEM_MENU_ADD_TO_PLAYLIST,
     ITEM_MENU_REFRESH_METADATA,
     ITEM_MENU_DELETE,
+    ITEM_MENU_ADD_TO_COLLECTION,
+    TOAST_ADDED_TO_COLLECTION,
     DELETE_CONFIRM_TITLE,
     DELETE_CONFIRM_BODY,
     DELETE_CONFIRM_DELETE,

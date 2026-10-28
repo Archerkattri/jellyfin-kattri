@@ -170,6 +170,7 @@ pub enum SyncPlayCommand {
 pub(crate) enum ItemAdminAction {
     RefreshMetadata,
     Delete,
+    AddToCollection,
 }
 
 /// How many playlists the card menu lists under Add to playlist.
@@ -325,6 +326,11 @@ pub enum WorkerEvent {
     GenresLoaded {
         request_id: u64,
         genres: Vec<String>,
+    },
+    /// The server's collections as `(id, name)`, for the card menu. Empty on failure.
+    MenuCollectionsLoaded {
+        request_id: u64,
+        collections: Vec<(String, String)>,
     },
     /// The signed-in user's playlists as `(id, name)`, for the card menu. Empty on failure.
     UserPlaylistsLoaded {
@@ -778,6 +784,11 @@ enum WorkerCommand {
         request_id: u64,
         item_id: String,
         action: ItemAdminAction,
+        /// The box set for [`ItemAdminAction::AddToCollection`].
+        collection_id: Option<String>,
+    },
+    ListMenuCollections {
+        request_id: u64,
     },
     ListMusicAlbumTracks {
         request_id: u64,
@@ -1271,12 +1282,19 @@ impl ApiWorker {
         request_id: u64,
         item_id: String,
         action: ItemAdminAction,
+        collection_id: Option<String>,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::ItemAdmin {
             request_id,
             item_id,
             action,
+            collection_id,
         })
+    }
+
+    pub(crate) fn list_menu_collections(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::ListMenuCollections { request_id })
     }
 
     pub(crate) fn list_genres(
@@ -3140,6 +3158,7 @@ async fn execute_command(
                 request_id,
                 item_id,
                 action,
+                collection_id,
             } => {
                 let result = match (client.as_ref(), session.as_ref()) {
                     (Some(client), Some(session)) => match action {
@@ -3147,6 +3166,14 @@ async fn execute_command(
                             client.refresh_item_metadata(session, &item_id).await
                         }
                         ItemAdminAction::Delete => client.delete_item(session, &item_id).await,
+                        ItemAdminAction::AddToCollection => match collection_id.as_deref() {
+                            Some(collection_id) => {
+                                client
+                                    .add_to_collection(session, collection_id, &item_id)
+                                    .await
+                            }
+                            None => Err(ApiError::InvalidConfiguration),
+                        },
                     },
                     _ => Err(ApiError::InvalidConfiguration),
                 };
@@ -3181,6 +3208,28 @@ async fn execute_command(
                     events,
                     ctx,
                     WorkerEvent::GenresLoaded { request_id, genres },
+                )
+                .await
+            }
+            WorkerCommand::ListMenuCollections { request_id } => {
+                let collections = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .box_sets(session, MAX_MENU_PLAYLISTS)
+                        .await
+                        .map(|items| items.into_iter().map(|item| (item.id, item.name)).collect())
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "collections for the item menu unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::MenuCollectionsLoaded {
+                        request_id,
+                        collections,
+                    },
                 )
                 .await
             }

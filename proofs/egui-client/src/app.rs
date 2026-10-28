@@ -677,6 +677,9 @@ pub struct KattriApp {
     episode_thumbnail_pending: HashMap<u64, String>,
     /// The user's playlists for the card menu's Add to playlist.
     menu_playlists: crate::ui::item_menu::MenuPlaylists,
+    /// The server's collections for the administrator entry Add to collection.
+    menu_collections: crate::ui::item_menu::MenuPlaylists,
+    menu_collections_request_id: u64,
     menu_playlists_request_id: u64,
     /// A card-menu playlist addition in flight: request, item title, playlist name.
     menu_playlist_add: Option<(u64, String, String)>,
@@ -1131,6 +1134,8 @@ impl KattriApp {
             episode_thumbnails: HashMap::new(),
             episode_thumbnail_pending: HashMap::new(),
             menu_playlists: Default::default(),
+            menu_collections: Default::default(),
+            menu_collections_request_id: 0,
             menu_playlists_request_id: 0,
             menu_playlist_add: None,
             toast: None,
@@ -2713,7 +2718,7 @@ impl KattriApp {
         }
     }
 
-    /// Refreshes the playlists the card menu offers under Add to playlist.
+    /// Refreshes the playlists (and, for administrators, the collections) the card menu offers.
     fn request_menu_playlists(&mut self) {
         let request_id = self.allocate_request_id();
         if self
@@ -2722,6 +2727,16 @@ impl KattriApp {
             .is_some_and(|worker| worker.list_user_playlists(request_id).is_ok())
         {
             self.menu_playlists_request_id = request_id;
+        }
+        if self.user_is_admin {
+            let request_id = self.allocate_request_id();
+            if self
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.list_menu_collections(request_id).is_ok())
+            {
+                self.menu_collections_request_id = request_id;
+            }
         }
     }
 
@@ -6398,6 +6413,9 @@ impl KattriApp {
                             (crate::worker::ItemAdminAction::Delete, Ok(())) => {
                                 ui_text_args(ids::TOAST_DELETED, &args)
                             }
+                            (crate::worker::ItemAdminAction::AddToCollection, Ok(())) => {
+                                ui_text_args(ids::TOAST_ADDED_TO_COLLECTION, &args)
+                            }
                             (_, Err(_)) => ui_text_args(ids::TOAST_ADMIN_FAILED, &args),
                         };
                         self.show_toast(text);
@@ -6409,6 +6427,14 @@ impl KattriApp {
                 WorkerEvent::GenresLoaded { request_id, genres } => {
                     if request_id == self.catalog_genres_request_id {
                         self.catalog_genres = genres;
+                    }
+                }
+                WorkerEvent::MenuCollectionsLoaded {
+                    request_id,
+                    collections,
+                } => {
+                    if request_id == self.menu_collections_request_id {
+                        self.menu_collections = std::sync::Arc::new(collections);
                     }
                 }
                 WorkerEvent::UserPlaylistsLoaded {
@@ -8381,6 +8407,7 @@ impl KattriApp {
         }
         crate::ui::item_menu::publish_playlists(&ctx, self.menu_playlists.clone());
         crate::ui::item_menu::publish_admin(&ctx, self.user_is_admin);
+        crate::ui::item_menu::publish_collections(&ctx, self.menu_collections.clone());
         crate::ui::draw(root, self, width);
         if let Some((target, action)) = crate::ui::item_menu::take(&ctx) {
             self.apply_item_menu_action(target, action);
@@ -8394,16 +8421,17 @@ impl KattriApp {
         item_id: String,
         title: String,
         action: crate::worker::ItemAdminAction,
+        collection_id: Option<String>,
     ) {
         if !self.user_is_admin {
             return;
         }
         let request_id = self.allocate_request_id();
-        if self
-            .worker
-            .as_ref()
-            .is_some_and(|worker| worker.item_admin(request_id, item_id, action).is_ok())
-        {
+        if self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .item_admin(request_id, item_id, action, collection_id)
+                .is_ok()
+        }) {
             self.admin_requests.insert(request_id, title);
         }
     }
@@ -8442,7 +8470,12 @@ impl KattriApp {
         match choice {
             Some(true) => {
                 self.pending_delete = None;
-                self.submit_item_admin(item_id, title, crate::worker::ItemAdminAction::Delete);
+                self.submit_item_admin(
+                    item_id,
+                    title,
+                    crate::worker::ItemAdminAction::Delete,
+                    None,
+                );
             }
             Some(false) => self.pending_delete = None,
             None => {}
@@ -8487,13 +8520,24 @@ impl KattriApp {
                     target.item_id,
                     target.title,
                     crate::worker::ItemAdminAction::RefreshMetadata,
+                    None,
                 );
+            }
+            ItemMenuAction::AddToCollection => {
+                if let Some(collection_id) = target.list_id {
+                    self.submit_item_admin(
+                        target.item_id,
+                        target.title,
+                        crate::worker::ItemAdminAction::AddToCollection,
+                        Some(collection_id),
+                    );
+                }
             }
             ItemMenuAction::Delete => {
                 self.pending_delete = Some((target.item_id, target.title));
             }
             ItemMenuAction::AddToPlaylist => {
-                let Some(playlist_id) = target.playlist_id else {
+                let Some(playlist_id) = target.list_id else {
                     return;
                 };
                 let playlist_name = self
@@ -11139,7 +11183,7 @@ mod photo_decode_event_tests {
             item_id: "track".into(),
             title: "Song".into(),
             series_id: None,
-            playlist_id: playlist_id.map(str::to_owned),
+            list_id: playlist_id.map(str::to_owned),
         };
         app.apply_item_menu_action(target(None), ItemMenuAction::AddToQueue);
         assert_eq!(
@@ -11231,7 +11275,7 @@ mod photo_decode_event_tests {
             item_id: "movie".into(),
             title: "Film".into(),
             series_id: None,
-            playlist_id: None,
+            list_id: None,
         };
         app.apply_item_menu_action(target(), ItemMenuAction::RefreshMetadata);
         assert!(app.admin_requests.is_empty(), "not an administrator");
@@ -11244,7 +11288,7 @@ mod photo_decode_event_tests {
             "nothing is sent before the confirmation"
         );
         let (item_id, title) = app.pending_delete.take().expect("pending delete");
-        app.submit_item_admin(item_id, title, crate::worker::ItemAdminAction::Delete);
+        app.submit_item_admin(item_id, title, crate::worker::ItemAdminAction::Delete, None);
         let (&request_id, _) = app.admin_requests.iter().next().expect("delete sent");
 
         app.items.push(crate::catalog::MediaItem::from_api(

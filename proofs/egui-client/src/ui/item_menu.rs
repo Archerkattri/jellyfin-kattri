@@ -16,8 +16,8 @@ pub(crate) struct ItemMenuTarget {
     pub item_id: String,
     pub title: String,
     pub series_id: Option<String>,
-    /// The playlist chosen under Add to playlist.
-    pub playlist_id: Option<String>,
+    /// The playlist or collection chosen under Add to playlist or Add to collection.
+    pub list_id: Option<String>,
 }
 
 /// The user's playlists as `(id, name)`, published by the app for the Add to playlist submenu.
@@ -42,6 +42,8 @@ pub(crate) enum ItemMenuAction {
     RefreshMetadata,
     /// Administrators: delete the item, after a confirmation.
     Delete,
+    /// Administrators: add the item to the collection in [`ItemMenuTarget::list_id`].
+    AddToCollection,
 }
 
 /// Entries offered for `item`, in menu order. Folders and playlists only open; series and
@@ -105,6 +107,7 @@ fn label(action: ItemMenuAction) -> &'static str {
         ItemMenuAction::AddToPlaylist => ids::ITEM_MENU_ADD_TO_PLAYLIST,
         ItemMenuAction::RefreshMetadata => ids::ITEM_MENU_REFRESH_METADATA,
         ItemMenuAction::Delete => ids::ITEM_MENU_DELETE,
+        ItemMenuAction::AddToCollection => ids::ITEM_MENU_ADD_TO_COLLECTION,
     })
 }
 
@@ -114,6 +117,15 @@ fn chosen_id() -> egui::Id {
 
 fn playlists_id() -> egui::Id {
     egui::Id::unique("kattri-item-menu-playlists")
+}
+
+fn collections_id() -> egui::Id {
+    egui::Id::unique("kattri-item-menu-collections")
+}
+
+/// Makes `collections` available to the administrator entries of every card menu.
+pub(crate) fn publish_collections(ctx: &egui::Context, collections: MenuPlaylists) {
+    ctx.data_mut(|data| data.insert_temp(collections_id(), collections));
 }
 
 fn admin_id() -> egui::Id {
@@ -139,12 +151,12 @@ pub(crate) fn publish_playlists(ctx: &egui::Context, playlists: MenuPlaylists) {
     ctx.data_mut(|data| data.insert_temp(playlists_id(), playlists));
 }
 
-fn choose(ui: &egui::Ui, item: &MediaItem, action: ItemMenuAction, playlist_id: Option<String>) {
+fn choose(ui: &egui::Ui, item: &MediaItem, action: ItemMenuAction, list_id: Option<String>) {
     let target = ItemMenuTarget {
         item_id: item.id.clone(),
         title: item.title.clone(),
         series_id: item.series_id.clone(),
-        playlist_id,
+        list_id,
     };
     ui.ctx()
         .data_mut(|data| data.insert_temp(chosen_id(), (target, action)));
@@ -169,7 +181,7 @@ fn show(ui: &mut egui::Ui, item: &MediaItem) {
     if let Some(playlists) = playlists.filter(|playlists| !playlists.is_empty())
         && can_join_playlist(item)
     {
-        add_to_playlist_menu(ui, item, &playlists);
+        list_submenu(ui, item, ItemMenuAction::AddToPlaylist, &playlists);
     }
     let admin: bool = ui
         .ctx()
@@ -177,6 +189,13 @@ fn show(ui: &mut egui::Ui, item: &MediaItem) {
         .unwrap_or(false);
     if admin {
         ui.separator();
+        let collections: Option<MenuPlaylists> =
+            ui.ctx().data(|data| data.get_temp(collections_id()));
+        if let Some(collections) = collections.filter(|collections| !collections.is_empty())
+            && can_join_playlist(item)
+        {
+            list_submenu(ui, item, ItemMenuAction::AddToCollection, &collections);
+        }
         for &action in admin_entries(item) {
             if ui.button(label(action)).clicked() {
                 choose(ui, item, action, None);
@@ -186,19 +205,20 @@ fn show(ui: &mut egui::Ui, item: &MediaItem) {
     }
 }
 
-fn add_to_playlist_menu(ui: &mut egui::Ui, item: &MediaItem, playlists: &MenuPlaylists) {
-    ui.menu_button(label(ItemMenuAction::AddToPlaylist), |ui| {
+/// A submenu of named lists (playlists or collections); choosing one records `action` with it.
+fn list_submenu(
+    ui: &mut egui::Ui,
+    item: &MediaItem,
+    action: ItemMenuAction,
+    lists: &MenuPlaylists,
+) {
+    ui.menu_button(label(action), |ui| {
         egui::ScrollArea::vertical()
             .max_height(320.0)
             .show(ui, |ui| {
-                for (playlist_id, name) in playlists.iter() {
+                for (list_id, name) in lists.iter() {
                     if ui.button(name).clicked() {
-                        choose(
-                            ui,
-                            item,
-                            ItemMenuAction::AddToPlaylist,
-                            Some(playlist_id.clone()),
-                        );
+                        choose(ui, item, action, Some(list_id.clone()));
                         ui.close();
                     }
                 }
@@ -300,7 +320,7 @@ mod tests {
             item_id: "a".into(),
             title: "A".into(),
             series_id: None,
-            playlist_id: None,
+            list_id: None,
         };
         ctx.data_mut(|data| data.insert_temp(chosen_id(), (target.clone(), ItemMenuAction::Play)));
         assert_eq!(take(&ctx), Some((target, ItemMenuAction::Play)));

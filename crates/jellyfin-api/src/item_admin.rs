@@ -37,6 +37,25 @@ impl JellyfinClient {
         self.send_admin(session, request).await
     }
 
+    /// Add `item_id` to the box set `collection_id` (`POST /Collections/{id}/Items`).
+    pub async fn add_to_collection(
+        &self,
+        session: &Session,
+        collection_id: &str,
+        item_id: &str,
+    ) -> Result<(), ApiError> {
+        home::validate_id(collection_id)?;
+        home::validate_id(item_id)?;
+        let request = self
+            .http
+            .request(
+                Method::POST,
+                self.endpoint(&["Collections", collection_id, "Items"]),
+            )
+            .query(&[("ids", item_id)]);
+        self.send_admin(session, request).await
+    }
+
     async fn send_admin(
         &self,
         session: &Session,
@@ -139,6 +158,20 @@ mod tests {
             client(&base).delete_item(&session(), "item-1").await,
             Err(ApiError::Forbidden)
         ));
+    }
+
+    #[tokio::test]
+    async fn add_to_collection_posts_the_item_id() {
+        let (base, task) = serve(204).await;
+        client(&base)
+            .add_to_collection(&session(), "box-1", "item-1")
+            .await
+            .expect("added");
+        let request = task.await.expect("server");
+        assert!(
+            request.starts_with("POST /Collections/box-1/Items?ids=item-1 "),
+            "{request}"
+        );
     }
 
     #[test]
