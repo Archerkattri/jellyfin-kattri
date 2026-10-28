@@ -50,6 +50,8 @@ modules:
       - -DCMAKE_BUILD_TYPE=Release
       - -DBUILD_BINARY=OFF
       - -DBUILD_STATIC=OFF
+      # uchardet 0.0.8 declares cmake_minimum_required(2.8), which CMake 4 refuses.
+      - -DCMAKE_POLICY_VERSION_MINIMUM=3.5
     sources:
       - type: archive
         url: https://www.freedesktop.org/software/uchardet/releases/uchardet-0.0.8.tar.xz
