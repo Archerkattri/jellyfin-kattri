@@ -38,6 +38,10 @@ pub(crate) enum ItemMenuAction {
     PlayNextInQueue,
     /// Add the item to the playlist in [`ItemMenuTarget::playlist_id`].
     AddToPlaylist,
+    /// Administrators: ask the server to refresh the item's metadata.
+    RefreshMetadata,
+    /// Administrators: delete the item, after a confirmation.
+    Delete,
 }
 
 /// Entries offered for `item`, in menu order. Folders and playlists only open; series and
@@ -99,6 +103,8 @@ fn label(action: ItemMenuAction) -> &'static str {
         ItemMenuAction::AddToQueue => ids::ITEM_MENU_ADD_TO_QUEUE,
         ItemMenuAction::PlayNextInQueue => ids::ITEM_MENU_PLAY_NEXT,
         ItemMenuAction::AddToPlaylist => ids::ITEM_MENU_ADD_TO_PLAYLIST,
+        ItemMenuAction::RefreshMetadata => ids::ITEM_MENU_REFRESH_METADATA,
+        ItemMenuAction::Delete => ids::ITEM_MENU_DELETE,
     })
 }
 
@@ -108,6 +114,24 @@ fn chosen_id() -> egui::Id {
 
 fn playlists_id() -> egui::Id {
     egui::Id::unique("kattri-item-menu-playlists")
+}
+
+fn admin_id() -> egui::Id {
+    egui::Id::unique("kattri-item-menu-admin")
+}
+
+/// Whether card menus drawn after this call offer the administrator entries.
+pub(crate) fn publish_admin(ctx: &egui::Context, admin: bool) {
+    ctx.data_mut(|data| data.insert_temp(admin_id(), admin));
+}
+
+/// Administrator entries for `item`: refresh and delete for media, nothing for folders.
+pub(crate) fn admin_entries(item: &MediaItem) -> &'static [ItemMenuAction] {
+    if matches!(item.kind, MediaKind::Folder | MediaKind::Other) {
+        &[ItemMenuAction::RefreshMetadata]
+    } else {
+        &[ItemMenuAction::RefreshMetadata, ItemMenuAction::Delete]
+    }
 }
 
 /// Makes `playlists` available to every card menu drawn after this call.
@@ -145,24 +169,41 @@ fn show(ui: &mut egui::Ui, item: &MediaItem) {
     if let Some(playlists) = playlists.filter(|playlists| !playlists.is_empty())
         && can_join_playlist(item)
     {
-        ui.menu_button(label(ItemMenuAction::AddToPlaylist), |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(320.0)
-                .show(ui, |ui| {
-                    for (playlist_id, name) in playlists.iter() {
-                        if ui.button(name).clicked() {
-                            choose(
-                                ui,
-                                item,
-                                ItemMenuAction::AddToPlaylist,
-                                Some(playlist_id.clone()),
-                            );
-                            ui.close();
-                        }
-                    }
-                });
-        });
+        add_to_playlist_menu(ui, item, &playlists);
     }
+    let admin: bool = ui
+        .ctx()
+        .data(|data| data.get_temp(admin_id()))
+        .unwrap_or(false);
+    if admin {
+        ui.separator();
+        for &action in admin_entries(item) {
+            if ui.button(label(action)).clicked() {
+                choose(ui, item, action, None);
+                ui.close();
+            }
+        }
+    }
+}
+
+fn add_to_playlist_menu(ui: &mut egui::Ui, item: &MediaItem, playlists: &MenuPlaylists) {
+    ui.menu_button(label(ItemMenuAction::AddToPlaylist), |ui| {
+        egui::ScrollArea::vertical()
+            .max_height(320.0)
+            .show(ui, |ui| {
+                for (playlist_id, name) in playlists.iter() {
+                    if ui.button(name).clicked() {
+                        choose(
+                            ui,
+                            item,
+                            ItemMenuAction::AddToPlaylist,
+                            Some(playlist_id.clone()),
+                        );
+                        ui.close();
+                    }
+                }
+            });
+    });
 }
 
 /// The entry chosen since the last call, if any.

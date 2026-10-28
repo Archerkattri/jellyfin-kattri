@@ -302,6 +302,13 @@ impl HomeState {
             .flat_map(|row| row.cards.iter_mut().map(|card| &mut card.media))
             .chain(self.collections.iter_mut().map(|card| &mut card.media))
     }
+    /// Drops `item_id` from every row, after the server deleted it.
+    pub fn remove_item(&mut self, item_id: &str) {
+        for row in &mut self.rows {
+            row.cards.retain(|card| card.media.id != item_id);
+        }
+        self.collections.retain(|card| card.media.id != item_id);
+    }
 }
 
 impl HomeState {

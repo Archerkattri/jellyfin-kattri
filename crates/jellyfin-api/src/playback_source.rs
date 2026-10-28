@@ -553,6 +553,7 @@ mod tests {
         Session {
             access_token: "session-token-secret".to_owned(),
             user: UserDto {
+                policy: None,
                 id: "user-id".to_owned(),
                 name: "test-user".to_owned(),
                 server_id: None,

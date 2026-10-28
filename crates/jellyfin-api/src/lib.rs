@@ -8,6 +8,7 @@ pub mod connectivity;
 mod device_profile;
 mod favorites;
 mod home;
+mod item_admin;
 pub mod item_images;
 mod json_response;
 mod live_tv;
@@ -1496,6 +1497,26 @@ pub struct UserDto {
     pub name: String,
     #[serde(default)]
     pub server_id: Option<String>,
+    /// The user's server policy, when the server sent it (sign-in and `/Users/Me` do).
+    #[serde(default)]
+    pub policy: Option<UserPolicy>,
+}
+
+impl UserDto {
+    /// Whether the server marks this user an administrator. False when no policy was sent.
+    pub fn is_administrator(&self) -> bool {
+        self.policy
+            .as_ref()
+            .is_some_and(|policy| policy.is_administrator)
+    }
+}
+
+/// The part of Jellyfin's `UserPolicy` the client reads.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct UserPolicy {
+    #[serde(default)]
+    pub is_administrator: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -1912,6 +1933,7 @@ mod primary_image_tests {
         Session {
             access_token: "secret-token".into(),
             user: UserDto {
+                policy: None,
                 id: "user-id".into(),
                 name: "Test user".into(),
                 server_id: None,

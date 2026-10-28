@@ -766,6 +766,15 @@ pub const BROWSE_ALPHABET_LETTER: &str = "browse.alphabet.letter";
 pub const ITEM_MENU_ADD_TO_QUEUE: &str = "item_menu.add_to_queue";
 pub const ITEM_MENU_PLAY_NEXT: &str = "item_menu.play_next";
 pub const ITEM_MENU_ADD_TO_PLAYLIST: &str = "item_menu.add_to_playlist";
+pub const ITEM_MENU_REFRESH_METADATA: &str = "item_menu.refresh_metadata";
+pub const ITEM_MENU_DELETE: &str = "item_menu.delete";
+pub const DELETE_CONFIRM_TITLE: &str = "delete.confirm.title";
+pub const DELETE_CONFIRM_BODY: &str = "delete.confirm.body";
+pub const DELETE_CONFIRM_DELETE: &str = "delete.confirm.delete";
+pub const DELETE_CONFIRM_CANCEL: &str = "delete.confirm.cancel";
+pub const TOAST_REFRESH_QUEUED: &str = "toast.refresh_queued";
+pub const TOAST_DELETED: &str = "toast.deleted";
+pub const TOAST_ADMIN_FAILED: &str = "toast.admin_failed";
 pub const TOAST_ADDED_TO_QUEUE: &str = "toast.added_to_queue";
 pub const TOAST_ADDED_TO_PLAYLIST: &str = "toast.added_to_playlist";
 pub const TOAST_ADD_TO_PLAYLIST_FAILED: &str = "toast.add_to_playlist_failed";
@@ -920,6 +929,15 @@ pub const ALL: &[&str] = &[
     ITEM_MENU_ADD_TO_QUEUE,
     ITEM_MENU_PLAY_NEXT,
     ITEM_MENU_ADD_TO_PLAYLIST,
+    ITEM_MENU_REFRESH_METADATA,
+    ITEM_MENU_DELETE,
+    DELETE_CONFIRM_TITLE,
+    DELETE_CONFIRM_BODY,
+    DELETE_CONFIRM_DELETE,
+    DELETE_CONFIRM_CANCEL,
+    TOAST_REFRESH_QUEUED,
+    TOAST_DELETED,
+    TOAST_ADMIN_FAILED,
     TOAST_ADDED_TO_QUEUE,
     TOAST_ADDED_TO_PLAYLIST,
     TOAST_ADD_TO_PLAYLIST_FAILED,

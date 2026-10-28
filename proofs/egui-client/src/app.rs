@@ -561,6 +561,12 @@ pub struct KattriApp {
     pub(crate) saved_sign_in_available: Option<bool>,
     pub(crate) server: Option<ServerIdentity>,
     pub(crate) user_name: Option<String>,
+    /// The signed-in user is a server administrator: the card menu offers admin actions.
+    pub(crate) user_is_admin: bool,
+    /// An item the viewer asked to delete, waiting for confirmation: `(id, title)`.
+    pub(crate) pending_delete: Option<(String, String)>,
+    /// Admin actions in flight: request id to item title.
+    admin_requests: HashMap<u64, String>,
     pub(crate) items: Vec<crate::catalog::MediaItem>,
     pub(crate) total_record_count: Option<u32>,
     pub(crate) collection_runtime: CollectionRuntime,
@@ -1023,6 +1029,9 @@ impl KattriApp {
             saved_sign_in_available: None,
             server: None,
             user_name: None,
+            user_is_admin: false,
+            pending_delete: None,
+            admin_requests: HashMap::new(),
             items: Vec::new(),
             total_record_count: None,
             collection_runtime: CollectionRuntime::default(),
@@ -2279,6 +2288,7 @@ impl KattriApp {
         self.playback_start_request_id = self.allocate_request_id();
         self.server = None;
         self.user_name = None;
+        self.user_is_admin = false;
         self.items.clear();
         self.selected_item_id = None;
         self.selected_details = None;
@@ -2712,6 +2722,16 @@ impl KattriApp {
             .is_some_and(|worker| worker.list_user_playlists(request_id).is_ok())
         {
             self.menu_playlists_request_id = request_id;
+        }
+    }
+
+    /// Removes a deleted item from every list showing it, and leaves its page.
+    fn forget_deleted_item(&mut self, item_id: &str) {
+        self.items.retain(|item| item.id != item_id);
+        self.home.remove_item(item_id);
+        self.series_episodes.retain(|episode| episode.id != item_id);
+        if self.selected_item_id.as_deref() == Some(item_id) {
+            self.navigate_back();
         }
     }
 
@@ -5708,6 +5728,7 @@ impl KattriApp {
         self.artwork_access_ticks.clear();
         self.server = None;
         self.user_name = None;
+        self.user_is_admin = false;
         self.items.clear();
         self.total_record_count = None;
         self.start_index = 0;
@@ -5967,6 +5988,7 @@ impl KattriApp {
                         self.quick_connect = None;
                     }
                     self.server = Some(server);
+                    self.user_is_admin = user.is_administrator();
                     self.user_name = Some(user.name);
                     self.catalog_loading = true;
                     if !self.catalog_loaded {
@@ -6233,6 +6255,7 @@ impl KattriApp {
                     let ceiling = self.browse_rating_ceiling(ctx);
                     if self.apply_catalog_response(request_id, page, ceiling) {
                         self.server = Some(server);
+                        self.user_is_admin = user.is_administrator();
                         self.user_name = Some(user.name);
                     }
                 }
@@ -6359,6 +6382,29 @@ impl KattriApp {
                 {
                     self.series_episodes_loading = false;
                     self.series_episodes_error = Some(message);
+                }
+                WorkerEvent::ItemAdminFinished {
+                    request_id,
+                    item_id,
+                    action,
+                    result,
+                } => {
+                    if let Some(title) = self.admin_requests.remove(&request_id) {
+                        let args = [("title", title.as_str())];
+                        let text = match (action, &result) {
+                            (crate::worker::ItemAdminAction::RefreshMetadata, Ok(())) => {
+                                ui_text_args(ids::TOAST_REFRESH_QUEUED, &args)
+                            }
+                            (crate::worker::ItemAdminAction::Delete, Ok(())) => {
+                                ui_text_args(ids::TOAST_DELETED, &args)
+                            }
+                            (_, Err(_)) => ui_text_args(ids::TOAST_ADMIN_FAILED, &args),
+                        };
+                        self.show_toast(text);
+                        if action == crate::worker::ItemAdminAction::Delete && result.is_ok() {
+                            self.forget_deleted_item(&item_id);
+                        }
+                    }
                 }
                 WorkerEvent::GenresLoaded { request_id, genres } => {
                     if request_id == self.catalog_genres_request_id {
@@ -8334,11 +8380,73 @@ impl KattriApp {
             self.pending_stream_url = Some(url);
         }
         crate::ui::item_menu::publish_playlists(&ctx, self.menu_playlists.clone());
+        crate::ui::item_menu::publish_admin(&ctx, self.user_is_admin);
         crate::ui::draw(root, self, width);
         if let Some((target, action)) = crate::ui::item_menu::take(&ctx) {
             self.apply_item_menu_action(target, action);
         }
+        self.draw_delete_confirmation(&ctx);
         self.draw_toast(&ctx);
+    }
+
+    fn submit_item_admin(
+        &mut self,
+        item_id: String,
+        title: String,
+        action: crate::worker::ItemAdminAction,
+    ) {
+        if !self.user_is_admin {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.item_admin(request_id, item_id, action).is_ok())
+        {
+            self.admin_requests.insert(request_id, title);
+        }
+    }
+
+    /// Asks before a delete; the server removes the files, so there is no undo.
+    fn draw_delete_confirmation(&mut self, ctx: &egui::Context) {
+        let Some((item_id, title)) = self.pending_delete.clone() else {
+            return;
+        };
+        let mut choice = None;
+        let modal = egui::Modal::new(egui::Id::unique("kattri-confirm-delete")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.heading(ui_text_args(
+                ids::DELETE_CONFIRM_TITLE,
+                &[("title", title.as_str())],
+            ));
+            ui.label(ui_text(ids::DELETE_CONFIRM_BODY));
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let delete = egui::Button::new(
+                    egui::RichText::new(ui_text(ids::DELETE_CONFIRM_DELETE))
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(0xB0, 0x2A, 0x2A));
+                if ui.add(delete).clicked() {
+                    choice = Some(true);
+                }
+                if ui.button(ui_text(ids::DELETE_CONFIRM_CANCEL)).clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+        if modal.should_close() && choice.is_none() {
+            choice = Some(false);
+        }
+        match choice {
+            Some(true) => {
+                self.pending_delete = None;
+                self.submit_item_admin(item_id, title, crate::worker::ItemAdminAction::Delete);
+            }
+            Some(false) => self.pending_delete = None,
+            None => {}
+        }
     }
 
     /// Runs an entry chosen from a card's context menu. Played and favorite changes are sent
@@ -8373,6 +8481,16 @@ impl KattriApp {
                     ));
                     self.music_track_names.insert(target.item_id, target.title);
                 }
+            }
+            ItemMenuAction::RefreshMetadata => {
+                self.submit_item_admin(
+                    target.item_id,
+                    target.title,
+                    crate::worker::ItemAdminAction::RefreshMetadata,
+                );
+            }
+            ItemMenuAction::Delete => {
+                self.pending_delete = Some((target.item_id, target.title));
             }
             ItemMenuAction::AddToPlaylist => {
                 let Some(playlist_id) = target.playlist_id else {
@@ -11101,6 +11219,59 @@ mod photo_decode_event_tests {
         assert!(app.episode_thumbnail_pending.is_empty());
         app.reset_series_detail();
         assert!(app.episode_thumbnails.is_empty());
+    }
+
+    #[test]
+    fn admin_actions_need_an_administrator_and_a_confirmed_delete_drops_the_item() {
+        use crate::ui::item_menu::{ItemMenuAction, ItemMenuTarget};
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        let target = || ItemMenuTarget {
+            item_id: "movie".into(),
+            title: "Film".into(),
+            series_id: None,
+            playlist_id: None,
+        };
+        app.apply_item_menu_action(target(), ItemMenuAction::RefreshMetadata);
+        assert!(app.admin_requests.is_empty(), "not an administrator");
+
+        app.user_is_admin = true;
+        app.apply_item_menu_action(target(), ItemMenuAction::Delete);
+        assert_eq!(app.pending_delete, Some(("movie".into(), "Film".into())));
+        assert!(
+            app.admin_requests.is_empty(),
+            "nothing is sent before the confirmation"
+        );
+        let (item_id, title) = app.pending_delete.take().expect("pending delete");
+        app.submit_item_admin(item_id, title, crate::worker::ItemAdminAction::Delete);
+        let (&request_id, _) = app.admin_requests.iter().next().expect("delete sent");
+
+        app.items.push(crate::catalog::MediaItem::from_api(
+            serde_json::from_value(
+                serde_json::json!({"Id": "movie", "Name": "Film", "Type": "Movie"}),
+            )
+            .expect("movie fixture"),
+        ));
+        sender
+            .try_send(WorkerEvent::ItemAdminFinished {
+                request_id,
+                item_id: "movie".into(),
+                action: crate::worker::ItemAdminAction::Delete,
+                result: Ok(()),
+            })
+            .expect("send result");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert!(app.items.is_empty());
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(text, _)| text.contains("Film"))
+        );
     }
 
     #[test]

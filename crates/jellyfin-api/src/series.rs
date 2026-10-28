@@ -243,6 +243,7 @@ mod tests {
         Session {
             access_token: "unit-test-token".into(),
             user: UserDto {
+                policy: None,
                 id: "user-id".into(),
                 name: "Test user".into(),
                 server_id: None,

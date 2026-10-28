@@ -165,6 +165,13 @@ pub enum SyncPlayCommand {
     },
 }
 
+/// An administrator action from the card menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ItemAdminAction {
+    RefreshMetadata,
+    Delete,
+}
+
 /// How many playlists the card menu lists under Add to playlist.
 const MAX_MENU_PLAYLISTS: u32 = 100;
 
@@ -306,6 +313,13 @@ pub enum WorkerEvent {
         request_id: u64,
         season_id: String,
         message: String,
+    },
+    /// An administrator action on one item finished.
+    ItemAdminFinished {
+        request_id: u64,
+        item_id: String,
+        action: ItemAdminAction,
+        result: Result<(), ErrorClass>,
     },
     /// Genre names for the library page's genre filter. Empty on failure.
     GenresLoaded {
@@ -759,6 +773,11 @@ enum WorkerCommand {
         request_id: u64,
         parent_id: Option<String>,
         item_types: Option<Vec<String>>,
+    },
+    ItemAdmin {
+        request_id: u64,
+        item_id: String,
+        action: ItemAdminAction,
     },
     ListMusicAlbumTracks {
         request_id: u64,
@@ -1244,6 +1263,19 @@ impl ApiWorker {
             request_id,
             series_id,
             episode_id,
+        })
+    }
+
+    pub(crate) fn item_admin(
+        &self,
+        request_id: u64,
+        item_id: String,
+        action: ItemAdminAction,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ItemAdmin {
+            request_id,
+            item_id,
+            action,
         })
     }
 
@@ -3100,6 +3132,32 @@ async fn execute_command(
                         episode_id,
                         previous: adjacent.previous.map(Box::new),
                         next: adjacent.next.map(Box::new),
+                    },
+                )
+                .await
+            }
+            WorkerCommand::ItemAdmin {
+                request_id,
+                item_id,
+                action,
+            } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => match action {
+                        ItemAdminAction::RefreshMetadata => {
+                            client.refresh_item_metadata(session, &item_id).await
+                        }
+                        ItemAdminAction::Delete => client.delete_item(session, &item_id).await,
+                    },
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::ItemAdminFinished {
+                        request_id,
+                        item_id,
+                        action,
+                        result: result.map_err(|error| error.classify()),
                     },
                 )
                 .await

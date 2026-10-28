@@ -117,9 +117,9 @@ yet a replacement for the official clients. The main missing pieces:
 - **Item context menu:** right-click on library cards, home rows and search results
   offers Play, Play from beginning, Open details, Go to series, Mark played/unplayed,
   Add/remove favorite, Download, Add to playlist and, for music tracks, Play next and Add
-  to queue. Still missing: shuffle, add to collection, media info, multi-select and, for
-  administrators, edit metadata, identify, refresh metadata, edit images, edit subtitles
-  and delete.
+  to queue. Administrators also get Refresh metadata and Delete (with a confirmation).
+  Still missing: shuffle, add to collection, media info, multi-select and, for
+  administrators, edit metadata, identify, edit images and edit subtitles.
 - **Episodes and series:** the series page offers the server's Next Up episode (Play or
   Resume), and episode rows show the still, overview, runtime, progress and a watched
   mark.
