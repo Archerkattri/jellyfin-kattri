@@ -80,6 +80,10 @@ modules:
   # Keep the version equal to rust-toolchain.toml.
   - name: rust
     buildsystem: simple
+    # Stripping the toolchain breaks its LLVM library; nothing of it ships.
+    build-options:
+      strip: false
+      no-debuginfo: true
     cleanup:
       - "*"
     build-commands:
