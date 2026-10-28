@@ -40,6 +40,7 @@ use kattri_client_core::subtitles::{
     SubtitleReselectGate, SubtitleTrackId, choose_secondary_in_inventory, reconcile_secondary,
     reselect_sid_writes, secondary_candidates,
 };
+use kattri_client_core::volume::clamp_volume;
 use kattri_player::{
     ProbeValue, ProbeWarning, RuntimeCapabilitySnapshot, RuntimeIdentity,
     cache_runtime_capabilities, cached_runtime_capabilities,
@@ -480,6 +481,10 @@ pub(crate) struct PlaybackControlsSnapshot<'a> {
     pub(crate) duration_seconds: Option<f64>,
     pub(crate) paused: Option<bool>,
     pub(crate) speed_multiplier: Option<f64>,
+    /// Observed mpv `volume` in percent, before the boost cap is applied.
+    pub(crate) volume_percent: Option<f64>,
+    /// Observed mpv `mute`. Session-only (M2-16).
+    pub(crate) muted: Option<bool>,
     pub(crate) chapters: &'a [PlaybackChapter],
 }
 
@@ -489,6 +494,8 @@ struct PlaybackControlsState {
     duration_seconds: Option<f64>,
     paused: Option<bool>,
     speed_multiplier: Option<f64>,
+    volume_percent: Option<f64>,
+    muted: Option<bool>,
     chapters: Vec<PlaybackChapter>,
 }
 
@@ -503,6 +510,8 @@ impl PlaybackControlsState {
             duration_seconds: self.duration_seconds,
             paused: self.paused,
             speed_multiplier: self.speed_multiplier,
+            volume_percent: self.volume_percent,
+            muted: self.muted,
             chapters: &self.chapters,
         }
     }
@@ -526,6 +535,12 @@ impl PlaybackControlsState {
             }
             (PlaybackProperty::Speed, PlaybackPropertyValue::Speed(speed)) => {
                 self.speed_multiplier = speed.filter(|value| value.is_finite() && *value > 0.0);
+            }
+            (PlaybackProperty::Volume, PlaybackPropertyValue::Volume(percent)) => {
+                self.volume_percent = percent.filter(|value| value.is_finite() && *value >= 0.0);
+            }
+            (PlaybackProperty::Mute, PlaybackPropertyValue::Muted(muted)) => {
+                self.muted = muted;
             }
             _ => {}
         }
@@ -851,6 +866,8 @@ pub(crate) struct MpvHost<'session> {
     playback_paused_observation: Option<ObservationId>,
     playback_duration_observation: Option<ObservationId>,
     playback_speed_observation: Option<ObservationId>,
+    playback_volume_observation: Option<ObservationId>,
+    playback_mute_observation: Option<ObservationId>,
     subtitle_track_id: Option<i64>,
     subtitle_delay_seconds: Option<f64>,
     controls: PlaybackControlsState,
@@ -962,6 +979,8 @@ impl<'session> MpvHost<'session> {
                 playback_paused_observation: None,
                 playback_duration_observation: None,
                 playback_speed_observation: None,
+                playback_volume_observation: None,
+                playback_mute_observation: None,
                 subtitle_track_id: None,
                 subtitle_delay_seconds: None,
                 controls: PlaybackControlsState::default(),
@@ -1019,6 +1038,8 @@ impl<'session> MpvHost<'session> {
         let playback_duration_observation =
             session.observe_property(PlaybackProperty::Duration).ok();
         let playback_speed_observation = session.observe_property(PlaybackProperty::Speed).ok();
+        let playback_volume_observation = session.observe_property(PlaybackProperty::Volume).ok();
+        let playback_mute_observation = session.observe_property(PlaybackProperty::Mute).ok();
         let capability_snapshot_request = session.request_capability_snapshot().ok();
         let capability_warning = capability_snapshot_request
             .is_none()
@@ -1056,6 +1077,8 @@ impl<'session> MpvHost<'session> {
                     playback_paused_observation,
                     playback_duration_observation,
                     playback_speed_observation,
+                    playback_volume_observation,
+                    playback_mute_observation,
                     subtitle_track_id: None,
                     subtitle_delay_seconds: None,
                     controls: PlaybackControlsState::default(),
@@ -1122,6 +1145,8 @@ impl<'session> MpvHost<'session> {
             playback_paused_observation,
             playback_duration_observation,
             playback_speed_observation,
+            playback_volume_observation,
+            playback_mute_observation,
             subtitle_track_id: None,
             subtitle_delay_seconds: None,
             controls: PlaybackControlsState::default(),
@@ -1410,15 +1435,26 @@ impl<'session> MpvHost<'session> {
                     }
                     self.request_track_inventory();
                     self.request_chapter_list();
-                    // StartFile cleared the controls. Pause and speed keep their values across a
-                    // file load, so mpv sends no change event; read them once so the pause button
-                    // and the speed menu know their state.
-                    for property in [PlaybackProperty::Paused, PlaybackProperty::Speed] {
+                    // StartFile cleared the controls. Pause, speed, volume and mute keep their
+                    // values across a file load, so mpv sends no change event; read them once so
+                    // the pause button, speed menu, volume slider and mute button know their state.
+                    for property in [
+                        PlaybackProperty::Paused,
+                        PlaybackProperty::Speed,
+                        PlaybackProperty::Volume,
+                        PlaybackProperty::Mute,
+                    ] {
                         let _ = session.request_property(property);
                     }
                 }
                 EventKind::PropertyReadReply { property, value }
-                    if matches!(property, PlaybackProperty::Paused | PlaybackProperty::Speed) =>
+                    if matches!(
+                        property,
+                        PlaybackProperty::Paused
+                            | PlaybackProperty::Speed
+                            | PlaybackProperty::Volume
+                            | PlaybackProperty::Mute
+                    ) =>
                 {
                     #[cfg(debug_assertions)]
                     crate::debug_harness::log_if_changed(
@@ -1729,6 +1765,20 @@ impl<'session> MpvHost<'session> {
                     self.controls
                         .apply_observation(change.property, change.value);
                 }
+                EventKind::PropertyChange(change)
+                    if change.property == PlaybackProperty::Volume
+                        && Some(change.observation_id) == self.playback_volume_observation =>
+                {
+                    self.controls
+                        .apply_observation(change.property, change.value);
+                }
+                EventKind::PropertyChange(change)
+                    if change.property == PlaybackProperty::Mute
+                        && Some(change.observation_id) == self.playback_mute_observation =>
+                {
+                    self.controls
+                        .apply_observation(change.property, change.value);
+                }
                 _ => {}
             }
 
@@ -2003,6 +2053,61 @@ impl<'session> MpvHost<'session> {
             return;
         };
         self.seek_absolute(target);
+    }
+
+    /// One press of the muted control (M2-16). Mute is session-only: it is never written to
+    /// settings, so a later run starts unmuted.
+    pub(crate) fn toggle_mute(&mut self) {
+        let Some(session) = self.session else {
+            self.controls_feedback = Some("libmpv is unavailable.".into());
+            return;
+        };
+        let muted = self.controls.muted.unwrap_or(false);
+        let write = match validate("mute", OptionValue::Flag(!muted)) {
+            Ok(option) => option,
+            Err(error) => {
+                tracing::warn!(setting = "mute", %error, "mute refused by the mpv allowlist");
+                self.controls_feedback = Some("Could not apply mute: value refused.".into());
+                return;
+            }
+        };
+        let result = session
+            .command(&["set", write.name, &write.value])
+            .map(|_| ());
+        self.record_control_result(result, "mute");
+    }
+
+    /// Set the playback volume in percent, clamped to the configured boost cap. The slider
+    /// and the remote-control path both end up here.
+    pub(crate) fn set_volume_percent(&mut self, percent: u32, max_percent: u32) {
+        let Some(session) = self.session else {
+            self.controls_feedback = Some("libmpv is unavailable.".into());
+            return;
+        };
+        let clamped = clamp_volume(percent, max_percent);
+        let write = match validate("volume", OptionValue::Int(i64::from(clamped))) {
+            Ok(option) => option,
+            Err(error) => {
+                tracing::warn!(setting = "volume", %error, "volume refused by the mpv allowlist");
+                self.controls_feedback = Some("Could not apply volume: value refused.".into());
+                return;
+            }
+        };
+        let result = session
+            .command(&["set", write.name, &write.value])
+            .map(|_| ());
+        self.record_control_result(result, "volume");
+    }
+
+    /// Move one chapter forward or back. Shares the PageUp/PageDown path so the button and the
+    /// key cannot disagree.
+    pub(crate) fn step_chapter_control(&mut self, forward: bool) {
+        let step = if forward {
+            ChapterStep::Next
+        } else {
+            ChapterStep::Previous
+        };
+        self.dispatch_playback_key(PlaybackKeyAction::Chapter(step));
     }
 
     fn record_control_result(&mut self, result: Result<(), impl std::fmt::Display>, action: &str) {
@@ -2948,6 +3053,12 @@ impl<'session> MpvHost<'session> {
                 let _ = session.unobserve_property(observation);
             }
             if let Some(observation) = self.playback_speed_observation.take() {
+                let _ = session.unobserve_property(observation);
+            }
+            if let Some(observation) = self.playback_volume_observation.take() {
+                let _ = session.unobserve_property(observation);
+            }
+            if let Some(observation) = self.playback_mute_observation.take() {
                 let _ = session.unobserve_property(observation);
             }
         }

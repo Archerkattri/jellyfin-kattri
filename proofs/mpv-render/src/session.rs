@@ -240,6 +240,8 @@ pub enum PlaybackProperty {
     Paused,
     Speed,
     Volume,
+    /// Session mute (mpv `mute`, M2-16). Not persisted across runs.
+    Mute,
     SubtitleDelay,
     SubtitleTrackId,
 }
@@ -252,6 +254,7 @@ impl PlaybackProperty {
             Self::Paused => "pause",
             Self::Speed => "speed",
             Self::Volume => "volume",
+            Self::Mute => "mute",
             Self::SubtitleDelay => "sub-delay",
             Self::SubtitleTrackId => "current-tracks/sub/id",
         }
@@ -264,7 +267,7 @@ impl PlaybackProperty {
             | Self::Speed
             | Self::Volume
             | Self::SubtitleDelay => MPV_FORMAT_DOUBLE,
-            Self::Paused => MPV_FORMAT_FLAG,
+            Self::Paused | Self::Mute => MPV_FORMAT_FLAG,
             Self::SubtitleTrackId => MPV_FORMAT_INT64,
         }
     }
@@ -282,6 +285,8 @@ pub enum PlaybackPropertyValue {
     Speed(Option<f64>),
     /// The libmpv volume property value. `None` means unavailable.
     Volume(Option<f64>),
+    /// Whether the session is muted. `None` means libmpv reported it unavailable.
+    Muted(Option<bool>),
     /// Primary subtitle delay in seconds. `None` means unavailable or that
     /// libmpv reported a non-finite value.
     SubtitleDelay(Option<f64>),
@@ -2714,6 +2719,7 @@ fn decode_property_value(
         PlaybackProperty::Paused => PlaybackPropertyValue::Paused(None),
         PlaybackProperty::Speed => PlaybackPropertyValue::Speed(None),
         PlaybackProperty::Volume => PlaybackPropertyValue::Volume(None),
+        PlaybackProperty::Mute => PlaybackPropertyValue::Muted(None),
         PlaybackProperty::SubtitleDelay => PlaybackPropertyValue::SubtitleDelay(None),
         PlaybackProperty::SubtitleTrackId => PlaybackPropertyValue::SubtitleTrackId(None),
     };
@@ -2774,6 +2780,17 @@ fn decode_property_value(
             let value = unsafe { ptr::read_unaligned(property_event.data.cast::<f64>()) };
             PlaybackPropertyValue::Volume(Some(value))
         }
+        PlaybackProperty::Mute => {
+            // SAFETY: Format was checked against MPV_FORMAT_FLAG (C int) and
+            // data is non-null. The scalar is copied before the next wait.
+            let value =
+                unsafe { ptr::read_unaligned(property_event.data.cast::<std::ffi::c_int>()) };
+            match value {
+                0 => PlaybackPropertyValue::Muted(Some(false)),
+                1 => PlaybackPropertyValue::Muted(Some(true)),
+                other => PlaybackPropertyValue::InvalidFlagValue(other),
+            }
+        }
         PlaybackProperty::SubtitleDelay => {
             // SAFETY: Format was checked against MPV_FORMAT_DOUBLE and data is
             // non-null. Non-finite values are kept out of the public value.
@@ -2796,6 +2813,7 @@ fn unavailable_property_value(property: PlaybackProperty) -> PlaybackPropertyVal
         PlaybackProperty::Paused => PlaybackPropertyValue::Paused(None),
         PlaybackProperty::Speed => PlaybackPropertyValue::Speed(None),
         PlaybackProperty::Volume => PlaybackPropertyValue::Volume(None),
+        PlaybackProperty::Mute => PlaybackPropertyValue::Muted(None),
         PlaybackProperty::SubtitleDelay => PlaybackPropertyValue::SubtitleDelay(None),
         PlaybackProperty::SubtitleTrackId => PlaybackPropertyValue::SubtitleTrackId(None),
     }
@@ -2829,13 +2847,19 @@ fn decode_property_read_value(
         };
     }
     match property {
-        PlaybackProperty::Paused => {
+        PlaybackProperty::Paused | PlaybackProperty::Mute => {
             // SAFETY: FLAG replies contain one C int, just like property-change events.
             let value =
                 unsafe { ptr::read_unaligned(property_event.data.cast::<std::ffi::c_int>()) };
             match value {
-                0 => PlaybackPropertyValue::Paused(Some(false)),
-                1 => PlaybackPropertyValue::Paused(Some(true)),
+                0 | 1 => {
+                    let flag = Some(value == 1);
+                    if property == PlaybackProperty::Paused {
+                        PlaybackPropertyValue::Paused(flag)
+                    } else {
+                        PlaybackPropertyValue::Muted(flag)
+                    }
+                }
                 other => PlaybackPropertyValue::InvalidFlagValue(other),
             }
         }
@@ -2858,9 +2882,9 @@ fn decode_property_read_value(
                 PlaybackProperty::SubtitleDelay => {
                     PlaybackPropertyValue::SubtitleDelay(Some(value))
                 }
-                PlaybackProperty::Paused | PlaybackProperty::SubtitleTrackId => {
-                    PlaybackPropertyValue::InvalidData(property)
-                }
+                PlaybackProperty::Paused
+                | PlaybackProperty::Mute
+                | PlaybackProperty::SubtitleTrackId => PlaybackPropertyValue::InvalidData(property),
             }
         }
         PlaybackProperty::SubtitleTrackId => {

@@ -54,6 +54,16 @@ pub struct PlayerControlsView<'a> {
     pub ab_loop_a: Option<Duration>,
     /// A-B loop point B for the current item, when one is set (M6-12). Session-only.
     pub ab_loop_b: Option<Duration>,
+    /// Title of the item now playing, shown above the transport row.
+    pub title: Option<&'a str>,
+    /// Observed mpv volume in percent. `None` hides the slider until mpv reports it.
+    pub volume_percent: Option<f64>,
+    /// Highest volume the settings allow, so the slider cannot exceed the boost cap.
+    pub volume_max_percent: u32,
+    /// Whether the session is muted (M2-16, session-only).
+    pub muted: Option<bool>,
+    /// Whether the window is fullscreen now.
+    pub fullscreen: bool,
 }
 
 /// One secondary subtitle the selector offers.
@@ -136,6 +146,17 @@ pub enum PlayerControlAction {
     },
     /// One press of the A-B control: set A, then set B, then clear both (M6-12).
     CycleAbLoop,
+    /// Set the playback volume in percent, before the boost cap is applied (M2-16).
+    SetVolume(u32),
+    /// Mute or unmute the session (M2-16, session-only).
+    ToggleMute,
+    /// Move one chapter forward or back through the same path as PageUp/PageDown.
+    StepChapter {
+        /// True moves to the next chapter.
+        forward: bool,
+    },
+    /// Enter or leave fullscreen.
+    ToggleFullscreen,
 }
 
 /// Segment skip for the current item. The caller keeps `skipper` loaded with the item's
@@ -173,6 +194,11 @@ enum ControlId {
     FrameBack,
     FrameForward,
     AbLoop,
+    ChapterPrevious,
+    ChapterNext,
+    MuteToggle,
+    VolumeSlider,
+    Fullscreen,
 }
 
 const THEATER_BG: Color32 = Color32::from_rgb(24, 25, 27);
@@ -276,6 +302,15 @@ fn draw_inner_with_skip(
             ui.visuals_mut().widgets.active.bg_fill = OSD_ACCENT;
             ui.visuals_mut().widgets.active.fg_stroke.color = OSD_TEXT;
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+
+            if let Some(title) = view.title.map(str::trim).filter(|t| !t.is_empty()) {
+                ui.label(
+                    RichText::new(title)
+                        .size(15.0)
+                        .strong()
+                        .color(OSD_TEXT),
+                );
+            }
 
             if seek_available {
                 let duration = view.duration.unwrap_or_default();
@@ -486,6 +521,24 @@ fn draw_inner_with_skip(
                 observe(ControlId::SpeedMenu, speed_menu.response.rect);
 
                 if !view.chapters.is_empty() {
+                    if labeled_button(
+                        ui,
+                        "CH−",
+                        "Previous chapter",
+                        seek_available,
+                        |rect| observe(ControlId::ChapterPrevious, rect),
+                    ) {
+                        actions.push(PlayerControlAction::StepChapter { forward: false });
+                    }
+                    if labeled_button(
+                        ui,
+                        "CH+",
+                        "Next chapter",
+                        seek_available,
+                        |rect| observe(ControlId::ChapterNext, rect),
+                    ) {
+                        actions.push(PlayerControlAction::StepChapter { forward: true });
+                    }
                     let response = egui::ComboBox::from_id_salt("player-control-chapter")
                         .width(ui.available_width().clamp(1.0, 260.0))
                         .selected_text("Chapters")
@@ -557,6 +610,50 @@ fn draw_inner_with_skip(
                         RichText::new("Subtitle offset affects the primary track only.")
                             .color(OSD_MUTED),
                     );
+                }
+            });
+
+            // Volume and fullscreen sit on their own row: the transport row is already wide, and
+            // the slider needs a stable width at every window size. The row wraps, so a narrow
+            // window moves the fullscreen button to a second line instead of clipping it.
+            ui.horizontal_wrapped(|ui| {
+                let (mute_label, mute_accessible) = mute_label(view.muted);
+                if labeled_button(ui, mute_label, mute_accessible, true, |rect| {
+                    observe(ControlId::MuteToggle, rect);
+                }) {
+                    actions.push(PlayerControlAction::ToggleMute);
+                }
+
+                if let Some(percent) = view.volume_percent {
+                    let max = f64::from(view.volume_max_percent.max(1));
+                    let mut value = percent.clamp(0.0, max);
+                    // Inside a wrapped row `available_width` spans the whole container, so the
+                    // slider is sized from the room left after the mute button.
+                    let room = (ui.available_rect_before_wrap().right() - ui.cursor().min.x).max(0.0);
+                    ui.spacing_mut().slider_width = room.clamp(60.0, 320.0);
+                    ui.spacing_mut().slider_rail_height = 6.0;
+                    let slider = egui::Slider::new(&mut value, 0.0..=max)
+                        .show_value(false)
+                        .clamping(egui::SliderClamping::Always);
+                    let response = ui.add(slider);
+                    response.widget_info(|| WidgetInfo::labeled(Role::Slider, true, "Volume"));
+                    observe(ControlId::VolumeSlider, response.rect);
+                    if response.changed() {
+                        actions.push(PlayerControlAction::SetVolume(value.round() as u32));
+                    }
+                    ui.label(
+                        RichText::new(format!("{:.0}%", value))
+                            .monospace()
+                            .size(12.0)
+                            .color(OSD_MUTED),
+                    );
+                }
+
+                let (label, accessible) = fullscreen_label(view.fullscreen);
+                if labeled_button(ui, label, accessible, true, |rect| {
+                    observe(ControlId::Fullscreen, rect);
+                }) {
+                    actions.push(PlayerControlAction::ToggleFullscreen);
                 }
             });
         });
@@ -871,6 +968,25 @@ fn ab_loop_label(a: Option<Duration>, b: Option<Duration>) -> (&'static str, &'s
     }
 }
 
+/// Mute control label. `None` (mpv has not reported the flag yet) reads as unmuted, which is
+/// mpv's own default.
+fn mute_label(muted: Option<bool>) -> (&'static str, &'static str) {
+    if muted == Some(true) {
+        ("Unmute", "Unmute")
+    } else {
+        ("Mute", "Mute")
+    }
+}
+
+/// Fullscreen control label: the button offers the state it is not in.
+fn fullscreen_label(fullscreen: bool) -> (&'static str, &'static str) {
+    if fullscreen {
+        ("Windowed", "Leave fullscreen")
+    } else {
+        ("Fullscreen", "Enter fullscreen")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -934,6 +1050,11 @@ mod tests {
             pip_available: true,
             ab_loop_a: None,
             ab_loop_b: None,
+            title: Some("Test item"),
+            volume_percent: Some(80.0),
+            volume_max_percent: 100,
+            muted: Some(false),
+            fullscreen: false,
         }
     }
 
@@ -974,6 +1095,39 @@ mod tests {
             super::ab_loop_label(Some(Duration::from_secs(5)), Some(Duration::from_secs(9))),
             ("A-B on", "Clear the A-B loop")
         );
+    }
+
+    #[test]
+    fn mute_and_fullscreen_labels_offer_the_state_they_switch_to() {
+        assert_eq!(super::mute_label(Some(false)), ("Mute", "Mute"));
+        assert_eq!(super::mute_label(None), ("Mute", "Mute"));
+        assert_eq!(super::mute_label(Some(true)), ("Unmute", "Unmute"));
+        assert_eq!(
+            super::fullscreen_label(false),
+            ("Fullscreen", "Enter fullscreen")
+        );
+        assert_eq!(
+            super::fullscreen_label(true),
+            ("Windowed", "Leave fullscreen")
+        );
+    }
+
+    #[test]
+    fn the_volume_slider_is_bounded_by_the_boost_cap() {
+        let context = Context::default();
+        let state = PlayerControlsView {
+            volume_percent: Some(250.0),
+            volume_max_percent: 100,
+            ..view(&[])
+        };
+        let frame = overlay_frame(&context, RawInput::default(), state);
+        let slider = frame
+            .rects
+            .iter()
+            .find(|(id, _)| *id == ControlId::VolumeSlider)
+            .map(|(_, rect)| *rect)
+            .expect("volume slider is drawn");
+        assert!(slider.width() > 0.0);
     }
 
     #[test]
@@ -1839,7 +1993,7 @@ mod tests {
     /// Every control in draw order, with the skip button offered (position 20 s is inside the
     /// intro), chapters present, and a second subtitle track present. Tab must reach them in
     /// this order (M2-18).
-    const DRAW_ORDER: [ControlId; 15] = [
+    const DRAW_ORDER: [ControlId; 20] = [
         ControlId::SeekBar,
         ControlId::PreviousTrack,
         ControlId::NextTrack,
@@ -1853,8 +2007,13 @@ mod tests {
         ControlId::SkipSegment,
         ControlId::PipToggle,
         ControlId::SpeedMenu,
+        ControlId::ChapterPrevious,
+        ControlId::ChapterNext,
         ControlId::ChapterMenu,
         ControlId::SecondarySubtitleMenu,
+        ControlId::MuteToggle,
+        ControlId::VolumeSlider,
+        ControlId::Fullscreen,
     ];
 
     /// The position in `DRAW_ORDER`. Matching every variant means a new control fails to compile
@@ -1874,8 +2033,13 @@ mod tests {
             ControlId::SkipSegment => 10,
             ControlId::PipToggle => 11,
             ControlId::SpeedMenu => 12,
-            ControlId::ChapterMenu => 13,
-            ControlId::SecondarySubtitleMenu => 14,
+            ControlId::ChapterPrevious => 13,
+            ControlId::ChapterNext => 14,
+            ControlId::ChapterMenu => 15,
+            ControlId::SecondarySubtitleMenu => 16,
+            ControlId::MuteToggle => 17,
+            ControlId::VolumeSlider => 18,
+            ControlId::Fullscreen => 19,
         }
     }
 
@@ -2018,6 +2182,8 @@ mod tests {
             (ControlId::AbLoop, PlayerControlAction::CycleAbLoop),
             (ControlId::Stop, PlayerControlAction::Stop),
             (ControlId::PipToggle, PlayerControlAction::TogglePip),
+            (ControlId::MuteToggle, PlayerControlAction::ToggleMute),
+            (ControlId::Fullscreen, PlayerControlAction::ToggleFullscreen),
         ];
         for (id, action) in expected {
             let context = Context::default();

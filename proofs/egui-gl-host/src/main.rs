@@ -536,12 +536,21 @@ impl<'session> GlHost<'session> {
         let secondary_choices = self.mpv.secondary_subtitle_choices();
         let secondary_selected = self.mpv.secondary_subtitle_selected();
         let (ab_loop_a, ab_loop_b) = self.mpv.ab_loop_points();
+        let playing_title = playing_item_id
+            .as_deref()
+            .and_then(|id| self.kattri_app.item_title(id))
+            .map(str::to_owned);
+        let volume_percent = controls_snapshot.volume_percent;
+        let volume_max_percent = self.kattri_app.audio_settings().max_volume_percent;
+        let muted = controls_snapshot.muted;
+        let fullscreen = self.window.fullscreen().is_some();
         if screenshot_requested {
             self.take_screenshot();
         }
         let pip_active = self.pip.is_pip();
         let pip_available = renderer_available && media_active;
         let mut pip_toggle_requested = false;
+        let mut fullscreen_toggle_requested = false;
         let shell_notice = self.shell_notice.as_ref().and_then(|(text, shown_at)| {
             let age = osd_now.saturating_sub(*shown_at);
             (age < SHELL_NOTICE_DURATION).then(|| (text.clone(), SHELL_NOTICE_DURATION - age))
@@ -578,6 +587,11 @@ impl<'session> GlHost<'session> {
             pip_available,
             ab_loop_a,
             ab_loop_b,
+            title: playing_title.as_deref(),
+            volume_percent,
+            volume_max_percent,
+            muted,
+            fullscreen,
             skip_settings,
             feedback: controls_feedback.as_deref(),
             audio_tracks: audio_track_options.as_deref(),
@@ -679,6 +693,7 @@ impl<'session> GlHost<'session> {
                                         kattri_app,
                                         &osd,
                                         &mut pip_toggle_requested,
+                                        &mut fullscreen_toggle_requested,
                                     );
                                 });
                         }
@@ -765,7 +780,14 @@ impl<'session> GlHost<'session> {
                     ui.image((video_texture_id, video_size_points));
                     if renderer_available && controls_visible {
                         ui.add_space(6.0);
-                        osd_controls(ui, mpv, kattri_app, &osd, &mut pip_toggle_requested);
+                        osd_controls(
+                            ui,
+                            mpv,
+                            kattri_app,
+                            &osd,
+                            &mut pip_toggle_requested,
+                            &mut fullscreen_toggle_requested,
+                        );
                     }
                     ui.add_space(8.0);
                     ui.label(&playback_status);
@@ -899,6 +921,17 @@ impl<'session> GlHost<'session> {
         // The window is changed after the UI pass, so no borrow of the UI is held here.
         if pip_toggle_requested {
             self.toggle_pip(event_loop);
+        }
+        if fullscreen_toggle_requested {
+            // Borderless fullscreen on the current monitor, the same mode the saved placement
+            // restores, so leaving fullscreen returns to the stored window rect.
+            let next = self
+                .window
+                .fullscreen()
+                .is_none()
+                .then_some(winit::window::Fullscreen::Borderless(None));
+            self.window.set_fullscreen(next);
+            self.window.request_redraw();
         }
         // Track choices the viewer made this frame go to the per-series memory (M2-10).
         for (series_id, event) in self.mpv.take_track_memory_events() {
@@ -1408,6 +1441,11 @@ struct OsdState<'a> {
     pip_available: bool,
     ab_loop_a: Option<Duration>,
     ab_loop_b: Option<Duration>,
+    title: Option<&'a str>,
+    volume_percent: Option<f64>,
+    volume_max_percent: u32,
+    muted: Option<bool>,
+    fullscreen: bool,
     skip_settings: Option<kattri_client_core::segments::SkipSettings>,
     feedback: Option<&'a str>,
     audio_tracks: Option<&'a [mpv_host::TrackMenuOption]>,
@@ -1422,6 +1460,7 @@ fn osd_controls(
     kattri_app: &mut KattriApp,
     osd: &OsdState<'_>,
     pip_toggle_requested: &mut bool,
+    fullscreen_toggle_requested: &mut bool,
 ) {
     let live_stream_active = mpv.live_stream_active();
     let skip = osd.skip_settings.map(|settings| SkipControls {
@@ -1445,6 +1484,11 @@ fn osd_controls(
             pip_available: osd.pip_available,
             ab_loop_a: osd.ab_loop_a,
             ab_loop_b: osd.ab_loop_b,
+            title: osd.title,
+            volume_percent: osd.volume_percent,
+            volume_max_percent: osd.volume_max_percent,
+            muted: osd.muted,
+            fullscreen: osd.fullscreen,
         },
         skip,
     );
@@ -1480,6 +1524,12 @@ fn osd_controls(
                 mpv.dispatch_playback_key(mpv_host::PlaybackKeyAction::FrameStep { backward });
             }
             PlayerControlAction::CycleAbLoop => mpv.cycle_ab_loop(),
+            PlayerControlAction::SetVolume(percent) => {
+                mpv.set_volume_percent(percent, osd.volume_max_percent);
+            }
+            PlayerControlAction::ToggleMute => mpv.toggle_mute(),
+            PlayerControlAction::StepChapter { forward } => mpv.step_chapter_control(forward),
+            PlayerControlAction::ToggleFullscreen => *fullscreen_toggle_requested = true,
         }
     }
     if let Some(feedback) = osd.feedback {

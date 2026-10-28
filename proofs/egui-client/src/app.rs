@@ -1305,6 +1305,22 @@ impl KattriApp {
         &self.settings.settings().subtitles
     }
 
+    /// Title of an item by id, for chrome such as the player's on-screen title. Falls back to the
+    /// loaded music-queue names, which outlive a catalog reload.
+    pub fn item_title(&self, item_id: &str) -> Option<&str> {
+        self.items
+            .iter()
+            .find(|item| item.id == item_id)
+            .map(|item| item.title.as_str())
+            .or_else(|| {
+                self.selected_details
+                    .as_ref()
+                    .filter(|item| item.id == item_id)
+                    .map(|item| item.name.as_str())
+            })
+            .or_else(|| self.music_track_names.get(item_id).map(String::as_str))
+    }
+
     /// Video settings of the running profile: the decode mode for the next file load (M2-22).
     pub fn video_settings(&self) -> &kattri_settings::VideoSettings {
         &self.settings.settings().video
@@ -7092,6 +7108,23 @@ mod catalog_query_tests {
         ClientConfig, ErrorClass, ItemFilter, ItemQuery, ItemSortBy, ItemSortOrder, JellyfinClient,
     };
     use mock_jellyfin::{MockConfig, spawn};
+
+    #[test]
+    fn item_title_resolves_from_the_catalog_details_and_queue_names() {
+        let mut app = KattriApp::new(egui::Context::default());
+        assert_eq!(app.item_title("missing"), None);
+
+        app.music_track_names
+            .insert("track-1".to_owned(), "Queue name".to_owned());
+        assert_eq!(app.item_title("track-1"), Some("Queue name"));
+
+        app.selected_details = Some(
+            serde_json::from_value(serde_json::json!({"Id": "track-1", "Name": "Details name"}))
+                .expect("details fixture"),
+        );
+        // The details entry wins over the remembered queue name for the same id.
+        assert_eq!(app.item_title("track-1"), Some("Details name"));
+    }
 
     #[test]
     fn offline_banner_requires_two_connection_failures_and_clears_on_success() {
