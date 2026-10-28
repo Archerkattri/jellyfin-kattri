@@ -41,7 +41,7 @@ use crate::worker::HomeRowKind;
 use egui::{self, Align, Align2, Color32, CornerRadius, FontId, RichText, Stroke};
 use jellyfin_api::{ItemFilter, ItemSortOrder};
 use kattri_client_core::focus::{FocusGraph, FocusId, FocusNode, NavAction};
-use kattri_client_core::playback_plan::{PlaybackMethod, select_playback_info_source_for_profile};
+use kattri_client_core::playback_plan::PlaybackMethod;
 use kattri_i18n::ids;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -2369,6 +2369,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     let mut episode_page_to_open = None;
     let mut shuffle_series = None;
     let mut sibling_to_open = None;
+    let mut version_picked = None;
     let mut person_to_open = None;
     let mut similar_item_to_open = None;
     let mut download_target: Option<(String, String)> = None;
@@ -2688,9 +2689,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                 .color(colors.muted),
                         );
                     } else {
-                        if let Some(selection) =
-                            select_playback_info_source_for_profile(info, app.device_profile())
-                        {
+                        if let Some(selection) = app.chosen_playback_selection(info) {
                             let label = match selection.method {
                                 PlaybackMethod::DirectPlay => {
                                     ui_text(ids::PLAYBACK_METHOD_DIRECT_PLAY)
@@ -2721,8 +2720,35 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                 if let Some(info) = app.playback_info.as_ref()
                     && info.error_code.is_none()
                 {
-                    let index = select_playback_info_source_for_profile(info, app.device_profile())
+                    let index = app
+                        .chosen_playback_selection(info)
                         .map_or(0, |selection| selection.source_index);
+                    if info.media_sources.len() > 1 {
+                        let mut picked = index;
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(ui_text(ids::DETAIL_VERSION_LABEL))
+                                    .color(colors.muted),
+                            );
+                            egui::ComboBox::from_id_salt("detail_version")
+                                .selected_text(media_source::version_label(
+                                    &info.media_sources[index],
+                                    index,
+                                ))
+                                .show_ui(ui, |ui| {
+                                    for (option, source) in info.media_sources.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut picked,
+                                            option,
+                                            media_source::version_label(source, option),
+                                        );
+                                    }
+                                });
+                        });
+                        if picked != index {
+                            version_picked = Some(picked);
+                        }
+                    }
                     if let Some(source) = info.media_sources.get(index) {
                         egui::CollapsingHeader::new(ui_text(ids::DETAIL_MEDIA_INFO))
                             .id_salt("detail_media_info")
@@ -2790,6 +2816,9 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
         // The play button plays the episode, resuming where it was left.
         app.play_item(episode_id, false);
         ui.ctx().request_repaint();
+    }
+    if let Some(index) = version_picked {
+        app.set_preferred_source(index);
     }
     if let Some(episode_id) = sibling_to_open {
         app.open_sibling_item(episode_id);

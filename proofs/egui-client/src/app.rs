@@ -673,6 +673,8 @@ pub struct KattriApp {
     episode_neighbors: Option<EpisodeNeighbors>,
     /// The episode to play next in the series on screen.
     series_next_up: Option<SeriesNextUp>,
+    /// The version (media source index) the viewer picked for an item.
+    preferred_source: Option<(String, usize)>,
     /// The other episodes of the season of the episode page on screen.
     pub(crate) season_siblings: Vec<BaseItemDto>,
     season_siblings_request_id: u64,
@@ -1151,6 +1153,7 @@ impl KattriApp {
             episode_neighbors: None,
             series_next_up: None,
             shuffle_queue: None,
+            preferred_source: None,
             season_siblings: Vec::new(),
             season_siblings_request_id: 0,
             live_tv_recordings: Vec::new(),
@@ -5031,12 +5034,7 @@ impl KattriApp {
                 OptionsState::Unusable
             }
             Some(info) => OptionsState::Ready {
-                pick: select_playback_info_source_for_profile(info, self.device_profile()).map(
-                    |selection| kattri_client_core::playback_plan::PlaybackSelection {
-                        source_index: selection.source_index,
-                        method: selection.method,
-                    },
-                ),
+                pick: self.chosen_playback_selection(info),
             },
         };
         let details = match self.selected_details.as_ref() {
@@ -5304,6 +5302,39 @@ impl KattriApp {
         };
         self.play_item(next, false);
         true
+    }
+
+    /// The source and method playback uses: the version the viewer picked when this device can
+    /// play it, else the first playable source.
+    pub(crate) fn chosen_playback_selection(
+        &self,
+        info: &jellyfin_api::PlaybackInfoResponse,
+    ) -> Option<PlaybackSelection> {
+        let profile = self.device_profile();
+        if let Some(index) = self.preferred_source_index()
+            && let Some(selection) = playback_info_candidates_for_profile(info, profile)
+                .find(|selection| selection.source_index == index)
+        {
+            return Some(selection);
+        }
+        select_playback_info_source_for_profile(info, profile).map(|selection| PlaybackSelection {
+            source_index: selection.source_index,
+            method: selection.method,
+        })
+    }
+
+    /// The version picked for the item on screen, if any.
+    pub(crate) fn preferred_source_index(&self) -> Option<usize> {
+        self.preferred_source
+            .as_ref()
+            .filter(|(item_id, _)| self.selected_item_id.as_deref() == Some(item_id.as_str()))
+            .map(|(_, index)| *index)
+    }
+
+    pub(crate) fn set_preferred_source(&mut self, index: usize) {
+        if let Some(item_id) = self.selected_item_id.clone() {
+            self.preferred_source = Some((item_id, index));
+        }
     }
 
     /// For an episode page, asks for the rest of its season.
@@ -11833,6 +11864,22 @@ mod photo_decode_event_tests {
             app.detail_parent.as_deref(),
             Some("show"),
             "Back still returns to the series"
+        );
+    }
+
+    #[test]
+    fn a_picked_version_is_kept_for_its_item_only() {
+        let mut app = KattriApp::new(Context::default());
+        app.worker = None;
+        app.selected_item_id = Some("film".into());
+        assert_eq!(app.preferred_source_index(), None);
+        app.set_preferred_source(1);
+        assert_eq!(app.preferred_source_index(), Some(1));
+        app.selected_item_id = Some("other".into());
+        assert_eq!(
+            app.preferred_source_index(),
+            None,
+            "another item uses its default"
         );
     }
 

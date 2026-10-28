@@ -27,6 +27,35 @@ pub(crate) fn summary_lines(source: &MediaSourceInfo) -> Vec<String> {
     lines
 }
 
+/// The name a version picker shows for one source: the server's name for it, else its
+/// resolution and container, else its position.
+pub(crate) fn version_label(source: &MediaSourceInfo, index: usize) -> String {
+    if let Some(name) = source
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+    {
+        return name.to_owned();
+    }
+    let video = source
+        .media_streams
+        .iter()
+        .flatten()
+        .find(|stream| stream.stream_type.as_deref() == Some("Video"));
+    let mut parts = Vec::new();
+    if let Some(height) = video.and_then(|stream| stream.height) {
+        parts.push(format!("{height}p"));
+    }
+    if let Some(container) = source.container.as_deref().filter(|text| !text.is_empty()) {
+        parts.push(container.to_owned());
+    }
+    if parts.is_empty() {
+        format!("Version {}", index + 1)
+    } else {
+        parts.join(" ")
+    }
+}
+
 fn stream_line(stream: &MediaStreamInfo) -> Option<String> {
     let kind = stream.stream_type.as_deref()?;
     let mut parts = Vec::new();
@@ -136,6 +165,34 @@ mod tests {
             ]
         );
         assert!(lines.iter().all(|line| !line.contains("/srv")));
+    }
+
+    #[test]
+    fn versions_are_named_by_the_server_or_by_their_picture() {
+        let source = |json: serde_json::Value| -> jellyfin_api::MediaSourceInfo {
+            serde_json::from_value(json).expect("source")
+        };
+        assert_eq!(
+            super::version_label(
+                &source(serde_json::json!({"Id": "a", "Name": "Director's Cut"})),
+                0
+            ),
+            "Director's Cut"
+        );
+        assert_eq!(
+            super::version_label(
+                &source(serde_json::json!({
+                    "Id": "b", "Container": "mkv",
+                    "MediaStreams": [{"Type": "Video", "Height": 2160}]
+                })),
+                1
+            ),
+            "2160p mkv"
+        );
+        assert_eq!(
+            super::version_label(&source(serde_json::json!({"Id": "c"})), 2),
+            "Version 3"
+        );
     }
 
     #[test]
