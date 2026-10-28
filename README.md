@@ -136,7 +136,8 @@ yet a replacement for the official clients. The main missing pieces:
   player.
 - **Library views:** one grid per type with sort, played/favorite and genre filters and
   an alphabet picker. Missing Suggestions, Studios, Collections, Upcoming and Episodes
-  tabs and view modes; music has no album/artist views; books, home videos and
+  tabs and view modes; music can list everything, albums only or songs only, but has no
+  artist view; books, home videos and
   music videos have no views.
 - **Details pages:** a Media info section lists the source's container, size, bitrate
   and streams. Missing: version picker, extras/special features, trailers, theme media,

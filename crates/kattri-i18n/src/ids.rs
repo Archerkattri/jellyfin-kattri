@@ -769,6 +769,9 @@ pub const ITEM_MENU_PLAY_NEXT: &str = "item_menu.play_next";
 pub const ITEM_MENU_ADD_TO_PLAYLIST: &str = "item_menu.add_to_playlist";
 pub const ITEM_MENU_REFRESH_METADATA: &str = "item_menu.refresh_metadata";
 pub const ITEM_MENU_DELETE: &str = "item_menu.delete";
+pub const MUSIC_VIEW_ALL: &str = "music.view.all";
+pub const MUSIC_VIEW_ALBUMS: &str = "music.view.albums";
+pub const MUSIC_VIEW_SONGS: &str = "music.view.songs";
 pub const LIVE_TV_BUTTON_RECORD: &str = "live_tv.button.record";
 pub const LIVE_TV_BUTTON_RECORD_PROGRAM: &str = "live_tv.button.record_program";
 pub const LIVE_TV_BUTTON_CANCEL_RECORDING: &str = "live_tv.button.cancel_recording";
@@ -957,6 +960,9 @@ pub const ALL: &[&str] = &[
     ITEM_MENU_ADD_TO_PLAYLIST,
     ITEM_MENU_REFRESH_METADATA,
     ITEM_MENU_DELETE,
+    MUSIC_VIEW_ALL,
+    MUSIC_VIEW_ALBUMS,
+    MUSIC_VIEW_SONGS,
     LIVE_TV_BUTTON_RECORD,
     LIVE_TV_BUTTON_RECORD_PROGRAM,
     LIVE_TV_BUTTON_CANCEL_RECORDING,

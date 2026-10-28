@@ -758,6 +758,8 @@ pub struct KattriApp {
     pub(crate) catalog_name_prefix: Option<char>,
     /// The genre filter's choice.
     pub(crate) catalog_genre: Option<String>,
+    /// What the Music page lists.
+    pub(crate) music_view: MusicView,
     /// Genres offered by the genre filter, for [`Self::catalog_genres_scope`].
     pub(crate) catalog_genres: Vec<String>,
     catalog_genres_request_id: u64,
@@ -1216,6 +1218,7 @@ impl KattriApp {
             catalog_favorites_only: false,
             catalog_name_prefix: None,
             catalog_genre: None,
+            music_view: MusicView::All,
             catalog_genres: Vec::new(),
             catalog_genres_request_id: 0,
             catalog_genres_scope: None,
@@ -3819,6 +3822,22 @@ impl KattriApp {
         self.restart_catalog_query();
     }
 
+    /// The item types the current page lists, with the Music page's view applied.
+    fn page_item_types(&self) -> Option<&'static [&'static str]> {
+        if self.page == Page::Music {
+            return Some(self.music_view.item_types());
+        }
+        self.page.item_types()
+    }
+
+    pub(crate) fn set_music_view(&mut self, view: MusicView) {
+        if self.music_view == view {
+            return;
+        }
+        self.music_view = view;
+        self.restart_catalog_query();
+    }
+
     pub(crate) fn set_catalog_genre(&mut self, genre: Option<String>) {
         if self.catalog_genre == genre {
             return;
@@ -4116,8 +4135,7 @@ impl KattriApp {
             .map(|genre| vec![genre]);
         if browsing && start_index == 0 {
             let page_types = self
-                .page
-                .item_types()
+                .page_item_types()
                 .map(|types| types.iter().map(|kind| (*kind).to_owned()).collect());
             self.request_catalog_genres(page_types);
         }
@@ -4150,7 +4168,7 @@ impl KattriApp {
                                 .collect()
                         })
                     } else {
-                        self.page.item_types().map(|types| {
+                        self.page_item_types().map(|types| {
                             types
                                 .iter()
                                 .map(|item_type| (*item_type).to_owned())
@@ -8055,6 +8073,24 @@ mod catalog_query_tests {
     }
 
     #[test]
+    fn the_music_view_chooses_the_item_types() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.worker = None;
+        app.page = crate::app::Page::Music;
+        assert_eq!(app.page_item_types(), Some(&["Audio", "MusicAlbum"][..]));
+        app.set_music_view(crate::app::MusicView::Albums);
+        assert_eq!(app.page_item_types(), Some(&["MusicAlbum"][..]));
+        app.set_music_view(crate::app::MusicView::Songs);
+        assert_eq!(app.page_item_types(), Some(&["Audio"][..]));
+        app.page = crate::app::Page::Movies;
+        assert_eq!(
+            app.page_item_types(),
+            Some(&["Movie"][..]),
+            "other pages ignore it"
+        );
+    }
+
+    #[test]
     fn unsupported_filter_is_hidden_and_removed_before_the_retry() {
         let mut app = KattriApp::new(egui::Context::default());
         app.worker = None;
@@ -8386,6 +8422,26 @@ struct EpisodeNeighbors {
     next_label: Option<String>,
     /// The viewer dismissed Up Next for this episode: it ends without starting the next.
     up_next_cancelled: bool,
+}
+
+/// What the Music page lists: everything, albums only, or songs only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MusicView {
+    All,
+    Albums,
+    Songs,
+}
+
+impl MusicView {
+    pub(crate) const ALL: [Self; 3] = [Self::All, Self::Albums, Self::Songs];
+
+    const fn item_types(self) -> &'static [&'static str] {
+        match self {
+            Self::All => &["Audio", "MusicAlbum"],
+            Self::Albums => &["MusicAlbum"],
+            Self::Songs => &["Audio"],
+        }
+    }
 }
 
 /// Where the Live TV page's recordings list stands.

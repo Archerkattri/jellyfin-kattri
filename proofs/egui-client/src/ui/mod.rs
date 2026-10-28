@@ -2240,6 +2240,20 @@ fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
             );
         }
     });
+    if app.page == Page::Music && app.browse_context.is_none() {
+        let mut view = app.music_view;
+        ui.horizontal(|ui| {
+            for option in crate::app::MusicView::ALL {
+                let label = match option {
+                    crate::app::MusicView::All => ui_text(ids::MUSIC_VIEW_ALL),
+                    crate::app::MusicView::Albums => ui_text(ids::MUSIC_VIEW_ALBUMS),
+                    crate::app::MusicView::Songs => ui_text(ids::MUSIC_VIEW_SONGS),
+                };
+                ui.selectable_value(&mut view, option, label);
+            }
+        });
+        app.set_music_view(view);
+    }
     let mut genre = app.catalog_genre.clone();
     if !app.catalog_genres.is_empty() {
         ui.horizontal(|ui| {
