@@ -38,6 +38,11 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of Jellyfin Kattri is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
+    <!-- Application icon. One File entry in the package carries it, and both the Add/Remove
+         Programs entry and the Start menu shortcut point at it. -->
+    <Icon Id="KattriIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="KattriIcon" />
+
     <Feature Id="MainFeature" Title="Jellyfin Kattri" Level="1">
       <ComponentRef Id="ExecutableComponent" />
       <ComponentRef Id="LicenseComponent" />
@@ -77,7 +82,8 @@
             Name="Jellyfin Kattri"
             Description="Jellyfin Kattri"
             Target="[INSTALLFOLDER]$(var.ExeName)"
-            WorkingDirectory="INSTALLFOLDER" />
+            WorkingDirectory="INSTALLFOLDER"
+            Icon="KattriIcon" />
           <RegistryValue
             Root="HKMU"
             Key="Software\Jellyfin Kattri"

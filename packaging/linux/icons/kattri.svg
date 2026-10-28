@@ -1,6 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Jellyfin Kattri media player icon">
-  <rect width="512" height="512" rx="112" fill="#17212b"/>
-  <path d="M112 112h48v288h-48z" fill="#56b6c2"/>
-  <path d="M208 256 368 160v192z" fill="#f2f5f7"/>
-  <path d="M112 80h48v24h-48zm0 328h48v24h-48z" fill="#89d3dc"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Jellyfin Kattri">
+  <linearGradient id="blood" gradientUnits="userSpaceOnUse" x1="51.29" y1="51.20" x2="460.71" y2="460.80">
+    <stop offset="0" stop-color="#6B070C"/>
+    <stop offset="0.5" stop-color="#C41218"/>
+    <stop offset="1" stop-color="#FF5A42"/>
+  </linearGradient>
+  <g transform="translate(48.357 51.194) scale(5.689096)" fill="url(#blood)" fill-rule="evenodd">
+    <path d="M.98 64.996C-3.695 55.606 26.977.001 36.5.001c9.533 0 40.153 55.713 35.527 64.995s-66.368 9.391-71.045 0m12.255-8.148c3.065 6.152 43.518 6.084 46.548 0 3.03-6.086-17.033-42.587-23.275-42.587S10.17 50.695 13.234 56.848z"/>
+    <path d="M24.711 49.158c-1.552-3.116 8.626-21.57 11.788-21.57 3.167.002 13.323 18.488 11.788 21.57-1.535 3.081-22.025 3.115-23.577 0z"/>
+  </g>
 </svg>
