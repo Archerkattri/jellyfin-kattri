@@ -1601,8 +1601,15 @@ fn render_connected(
             ui.label(RichText::new(ui_text(ids::SEARCH_NOTICE_STALE)).color(colors.muted));
         }
         let query = app.submitted_search.clone();
-        let mut grouped_results = app.search_results.clone();
-        grouped_results.extend(app.live_tv_search_results.iter().cloned());
+        // Borrowed in the usual case; copied only when channel results must be appended.
+        let grouped_results: std::borrow::Cow<'_, [jellyfin_api::BaseItemDto]> =
+            if app.live_tv_search_results.is_empty() {
+                std::borrow::Cow::Borrowed(&app.search_results)
+            } else {
+                let mut merged = app.search_results.clone();
+                merged.extend(app.live_tv_search_results.iter().cloned());
+                std::borrow::Cow::Owned(merged)
+            };
         if grouped_results.is_empty() {
             if let Some(query) = query {
                 if !app.catalog_loading
