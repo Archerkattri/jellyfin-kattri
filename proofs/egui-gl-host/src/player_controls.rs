@@ -9,6 +9,14 @@ use kattri_client_core::segments::{
 };
 use kattri_settings::PlaybackSettings;
 
+use crate::player_icons::{self, OsdIcon};
+
+/// Size of one icon button in points. Compact enough for a row of transports without the
+/// control bar dwarfing the video.
+const ICON_BUTTON: f32 = 34.0;
+/// The play/pause button, the one control a viewer looks for first.
+const PRIMARY_BUTTON: f32 = 40.0;
+
 /// Maximum number of chapter entries exposed in the menu.
 pub const MAX_CHAPTER_CHOICES: usize = 128;
 
@@ -285,12 +293,16 @@ fn draw_inner_with_skip(
         }
     }
 
-    let horizontal_margin = if ui.available_width() < 360.0 { 8 } else { 16 };
+    // The position readout is drawn on the transport row, so the bar stays three rows tall
+    // (timeline, transport, secondary) no matter how wide the window is.
+    let mut timeline: Option<(Duration, Duration)> = None;
+
+    let horizontal_margin = if ui.available_width() < 360.0 { 8 } else { 12 };
     egui::Frame::new()
         .fill(THEATER_BG.gamma_multiply(0.97))
         .stroke(egui::Stroke::new(1.0, Color32::from_white_alpha(24)))
-        .corner_radius(egui::CornerRadius::same(18))
-        .inner_margin(egui::Margin::symmetric(horizontal_margin, 14))
+        .corner_radius(egui::CornerRadius::same(14))
+        .inner_margin(egui::Margin::symmetric(horizontal_margin, 10))
         .show(ui, |ui| {
             ui.set_min_width(0.0);
             ui.visuals_mut().selection.bg_fill = OSD_ACCENT;
@@ -301,12 +313,12 @@ fn draw_inner_with_skip(
             ui.visuals_mut().widgets.hovered.fg_stroke.color = OSD_TEXT;
             ui.visuals_mut().widgets.active.bg_fill = OSD_ACCENT;
             ui.visuals_mut().widgets.active.fg_stroke.color = OSD_TEXT;
-            ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
 
             if let Some(title) = view.title.map(str::trim).filter(|t| !t.is_empty()) {
                 ui.label(
                     RichText::new(title)
-                        .size(15.0)
+                        .size(13.0)
                         .strong()
                         .color(OSD_TEXT),
                 );
@@ -321,7 +333,7 @@ fn draw_inner_with_skip(
                     .clamp(0.0, seek_end.as_secs_f64());
                 // Keep the timeline inside the OSD at every window width.
                 ui.spacing_mut().slider_width = ui.available_width().max(1.0);
-                ui.spacing_mut().slider_rail_height = 8.0;
+                ui.spacing_mut().slider_rail_height = 6.0;
                 let slider = egui::Slider::new(&mut position, 0.0..=seek_end.as_secs_f64())
                     .show_value(false)
                     .clamping(egui::SliderClamping::Always);
@@ -351,31 +363,34 @@ fn draw_inner_with_skip(
                 } else {
                     view.position.min(seek_end)
                 };
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        RichText::new(format_time(displayed_position))
-                            .monospace()
-                            .size(13.0)
-                            .color(OSD_TEXT)
-                            .strong(),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let remaining = duration.saturating_sub(displayed_position);
-                        ui.label(RichText::new(format!("−{}", format_time(remaining)))
-                            .monospace()
-                            .size(13.0)
-                            .color(OSD_MUTED));
-                    });
-                });
+                timeline = Some((displayed_position, duration));
             }
 
-            ui.add_space(6.0);
+            ui.add_space(4.0);
+            // Transport row: the position readout, item and chapter stepping around the one
+            // primary control.
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.spacing_mut().item_spacing.y = 8.0;
-                if labeled_button(
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.spacing_mut().item_spacing.y = 6.0;
+                if let Some((elapsed, total)) = timeline {
+                    ui.label(
+                        RichText::new(format_time(elapsed))
+                            .monospace()
+                            .size(12.0)
+                            .strong()
+                            .color(OSD_TEXT),
+                    );
+                    ui.label(
+                        RichText::new(format!("/ {}", format_time(total)))
+                            .monospace()
+                            .size(12.0)
+                            .color(OSD_MUTED),
+                    );
+                    ui.separator();
+                }
+                if icon_button(
                     ui,
-                    "|◀",
+                    OsdIcon::PreviousItem,
                     "Previous track (restarts after 3 seconds)",
                     view.previous_track_enabled,
                     |rect| observe(ControlId::PreviousTrack, rect),
@@ -383,19 +398,9 @@ fn draw_inner_with_skip(
                     actions.push(PlayerControlAction::PreviousTrack);
                 }
 
-                if labeled_button(
+                if icon_button(
                     ui,
-                    "▶|",
-                    "Next track",
-                    view.previous_track_enabled,
-                    |rect| observe(ControlId::NextTrack, rect),
-                ) {
-                    actions.push(PlayerControlAction::NextTrack);
-                }
-
-                if labeled_button(
-                    ui,
-                    "−10 s",
+                    OsdIcon::Rewind,
                     "Seek backward 10 seconds",
                     seek_available,
                     |rect| observe(ControlId::SeekBackward, rect),
@@ -403,22 +408,20 @@ fn draw_inner_with_skip(
                     actions.push(PlayerControlAction::SeekRelative(-10));
                 }
 
-                let (label, accessible) = button_label(view.paused);
-                if primary_button(ui, label, accessible, view.paused.is_some(), |rect| {
-                    observe(ControlId::PlayPause, rect);
-                }) {
+                let (play_icon, play_accessible) = transport_icon(view.paused);
+                if primary_icon_button(
+                    ui,
+                    play_icon,
+                    play_accessible,
+                    view.paused.is_some(),
+                    |rect| observe(ControlId::PlayPause, rect),
+                ) {
                     actions.push(PlayerControlAction::TogglePause);
                 }
 
-                if labeled_button(ui, "■", "Stop playback", view.stop_enabled, |rect| {
-                    observe(ControlId::Stop, rect);
-                }) {
-                    actions.push(PlayerControlAction::Stop);
-                }
-
-                if labeled_button(
+                if icon_button(
                     ui,
-                    "+10 s",
+                    OsdIcon::Forward,
                     "Seek forward 10 seconds",
                     seek_available,
                     |rect| observe(ControlId::SeekForward, rect),
@@ -426,37 +429,24 @@ fn draw_inner_with_skip(
                     actions.push(PlayerControlAction::SeekRelative(10));
                 }
 
-                // Frame stepping and the A-B control need the same seek capability as the
-                // timeline: neither can act on live or unknown-length media.
-                if labeled_button(
+                if icon_button(
                     ui,
-                    "−1f",
-                    "Step back one frame",
-                    seek_available,
-                    |rect| observe(ControlId::FrameBack, rect),
+                    OsdIcon::NextItem,
+                    "Next track",
+                    view.previous_track_enabled,
+                    |rect| observe(ControlId::NextTrack, rect),
                 ) {
-                    actions.push(PlayerControlAction::StepFrame { backward: true });
+                    actions.push(PlayerControlAction::NextTrack);
                 }
 
-                if labeled_button(
+                if icon_button(
                     ui,
-                    "+1f",
-                    "Step forward one frame",
-                    seek_available,
-                    |rect| observe(ControlId::FrameForward, rect),
+                    OsdIcon::Stop,
+                    "Stop playback",
+                    view.stop_enabled,
+                    |rect| observe(ControlId::Stop, rect),
                 ) {
-                    actions.push(PlayerControlAction::StepFrame { backward: false });
-                }
-
-                let (loop_label, loop_accessible) = ab_loop_label(view.ab_loop_a, view.ab_loop_b);
-                if labeled_button(
-                    ui,
-                    loop_label,
-                    loop_accessible,
-                    seek_available,
-                    |rect| observe(ControlId::AbLoop, rect),
-                ) {
-                    actions.push(PlayerControlAction::CycleAbLoop);
+                    actions.push(PlayerControlAction::Stop);
                 }
 
                 if let Some(decision) = offered.as_ref() {
@@ -473,66 +463,20 @@ fn draw_inner_with_skip(
                     }
                 }
 
-                let (pip_label, pip_accessible) = if view.pip_active {
-                    ("Exit PiP", "Exit picture-in-picture")
-                } else {
-                    ("PiP", "Picture-in-picture")
-                };
-                if labeled_button(
-                    ui,
-                    pip_label,
-                    pip_accessible,
-                    view.pip_active || view.pip_available,
-                    |rect| observe(ControlId::PipToggle, rect),
-                ) {
-                    actions.push(PlayerControlAction::TogglePip);
-                }
-
-                ui.separator();
-                let speed_menu = egui::ComboBox::from_id_salt("player-control-speed")
-                    .width(ui.available_width().clamp(1.0, 220.0))
-                    .selected_text(speed_label(view.speed_multiplier))
-                    .show_ui(ui, |ui| {
-                        for speed in PlaybackSpeed::ALL {
-                            let selected = view
-                                .speed_multiplier
-                                .is_some_and(|value| (value - speed.multiplier()).abs() < 0.001);
-                            let response = ui
-                                .selectable_label(selected, speed_label(Some(speed.multiplier())));
-                            response.widget_info(|| {
-                                WidgetInfo::selected(
-                                    Role::RadioButton,
-                                    true,
-                                    selected,
-                                    format!(
-                                        "Playback speed {}",
-                                        speed_label(Some(speed.multiplier()))
-                                    ),
-                                )
-                            });
-                            if response.clicked() && !selected {
-                                actions.push(PlayerControlAction::SetSpeed(speed));
-                            }
-                        }
-                    });
-                speed_menu.response.widget_info(|| {
-                    WidgetInfo::labeled(Role::ComboBox, true, "Playback speed")
-                });
-                observe(ControlId::SpeedMenu, speed_menu.response.rect);
-
                 if !view.chapters.is_empty() {
-                    if labeled_button(
+                    ui.separator();
+                    if icon_button(
                         ui,
-                        "CH−",
+                        OsdIcon::ChapterPrevious,
                         "Previous chapter",
                         seek_available,
                         |rect| observe(ControlId::ChapterPrevious, rect),
                     ) {
                         actions.push(PlayerControlAction::StepChapter { forward: false });
                     }
-                    if labeled_button(
+                    if icon_button(
                         ui,
-                        "CH+",
+                        OsdIcon::ChapterNext,
                         "Next chapter",
                         seek_available,
                         |rect| observe(ControlId::ChapterNext, rect),
@@ -540,7 +484,7 @@ fn draw_inner_with_skip(
                         actions.push(PlayerControlAction::StepChapter { forward: true });
                     }
                     let response = egui::ComboBox::from_id_salt("player-control-chapter")
-                        .width(ui.available_width().clamp(1.0, 260.0))
+                        .width(ui.available_width().clamp(1.0, 180.0))
                         .selected_text("Chapters")
                         .show_ui(ui, |ui| {
                             for chapter in view.chapters.iter().take(MAX_CHAPTER_CHOICES) {
@@ -613,12 +557,14 @@ fn draw_inner_with_skip(
                 }
             });
 
-            // Volume and fullscreen sit on their own row: the transport row is already wide, and
-            // the slider needs a stable width at every window size. The row wraps, so a narrow
-            // window moves the fullscreen button to a second line instead of clipping it.
+            // Secondary row: volume, frame stepping, speed and the window toggles. It wraps, so a
+            // narrow window moves controls to another line instead of clipping them.
+            ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
-                let (mute_label, mute_accessible) = mute_label(view.muted);
-                if labeled_button(ui, mute_label, mute_accessible, true, |rect| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.spacing_mut().item_spacing.y = 6.0;
+                let (mute_icon, mute_accessible) = OsdIcon::for_mute(view.muted);
+                if icon_button(ui, mute_icon, mute_accessible, true, |rect| {
                     observe(ControlId::MuteToggle, rect);
                 }) {
                     actions.push(PlayerControlAction::ToggleMute);
@@ -628,10 +574,11 @@ fn draw_inner_with_skip(
                     let max = f64::from(view.volume_max_percent.max(1));
                     let mut value = percent.clamp(0.0, max);
                     // Inside a wrapped row `available_width` spans the whole container, so the
-                    // slider is sized from the room left after the mute button.
+                    // slider is sized from the room left after the mute button and the percent
+                    // label that follows it.
                     let room = (ui.available_rect_before_wrap().right() - ui.cursor().min.x).max(0.0);
-                    ui.spacing_mut().slider_width = room.clamp(60.0, 320.0);
-                    ui.spacing_mut().slider_rail_height = 6.0;
+                    ui.spacing_mut().slider_width = (room - 56.0).clamp(60.0, 240.0);
+                    ui.spacing_mut().slider_rail_height = 5.0;
                     let slider = egui::Slider::new(&mut value, 0.0..=max)
                         .show_value(false)
                         .clamping(egui::SliderClamping::Always);
@@ -649,10 +596,95 @@ fn draw_inner_with_skip(
                     );
                 }
 
-                let (label, accessible) = fullscreen_label(view.fullscreen);
-                if labeled_button(ui, label, accessible, true, |rect| {
-                    observe(ControlId::Fullscreen, rect);
-                }) {
+                ui.separator();
+                // Frame stepping and the A-B control need the same seek capability as the
+                // timeline: neither can act on live or unknown-length media.
+                if icon_button(
+                    ui,
+                    OsdIcon::FrameBack,
+                    "Step back one frame",
+                    seek_available,
+                    |rect| observe(ControlId::FrameBack, rect),
+                ) {
+                    actions.push(PlayerControlAction::StepFrame { backward: true });
+                }
+
+                if icon_button(
+                    ui,
+                    OsdIcon::FrameForward,
+                    "Step forward one frame",
+                    seek_available,
+                    |rect| observe(ControlId::FrameForward, rect),
+                ) {
+                    actions.push(PlayerControlAction::StepFrame { backward: false });
+                }
+
+                let (loop_label, loop_accessible) = ab_loop_label(view.ab_loop_a, view.ab_loop_b);
+                if labeled_button(
+                    ui,
+                    loop_label,
+                    loop_accessible,
+                    seek_available,
+                    |rect| observe(ControlId::AbLoop, rect),
+                ) {
+                    actions.push(PlayerControlAction::CycleAbLoop);
+                }
+
+                let speed_menu = egui::ComboBox::from_id_salt("player-control-speed")
+                    .width(78.0)
+                    .selected_text(speed_label(view.speed_multiplier))
+                    .show_ui(ui, |ui| {
+                        for speed in PlaybackSpeed::ALL {
+                            let selected = view
+                                .speed_multiplier
+                                .is_some_and(|value| (value - speed.multiplier()).abs() < 0.001);
+                            let response = ui
+                                .selectable_label(selected, speed_label(Some(speed.multiplier())));
+                            response.widget_info(|| {
+                                WidgetInfo::selected(
+                                    Role::RadioButton,
+                                    true,
+                                    selected,
+                                    format!(
+                                        "Playback speed {}",
+                                        speed_label(Some(speed.multiplier()))
+                                    ),
+                                )
+                            });
+                            if response.clicked() && !selected {
+                                actions.push(PlayerControlAction::SetSpeed(speed));
+                            }
+                        }
+                    });
+                speed_menu.response.widget_info(|| {
+                    WidgetInfo::labeled(Role::ComboBox, true, "Playback speed")
+                });
+                observe(ControlId::SpeedMenu, speed_menu.response.rect);
+
+                let (pip_icon, pip_accessible) = if view.pip_active {
+                    (OsdIcon::Pip, "Exit picture-in-picture")
+                } else {
+                    (OsdIcon::Pip, "Picture-in-picture")
+                };
+                if icon_button(
+                    ui,
+                    pip_icon,
+                    pip_accessible,
+                    view.pip_active || view.pip_available,
+                    |rect| observe(ControlId::PipToggle, rect),
+                ) {
+                    actions.push(PlayerControlAction::TogglePip);
+                }
+
+                let (fullscreen_icon, fullscreen_accessible) =
+                    fullscreen_icon_label(view.fullscreen);
+                if icon_button(
+                    ui,
+                    fullscreen_icon,
+                    fullscreen_accessible,
+                    true,
+                    |rect| observe(ControlId::Fullscreen, rect),
+                ) {
                     actions.push(PlayerControlAction::ToggleFullscreen);
                 }
             });
@@ -850,40 +882,78 @@ fn labeled_button(
 ) -> bool {
     let response = ui.add_enabled(
         enabled,
-        egui::Button::new(RichText::new(label).size(16.0).color(OSD_TEXT))
-            .min_size(egui::vec2(48.0, 46.0))
-            .corner_radius(egui::CornerRadius::same(13)),
+        egui::Button::new(RichText::new(label).size(14.0).color(OSD_TEXT))
+            .min_size(egui::vec2(46.0, ICON_BUTTON))
+            .corner_radius(egui::CornerRadius::same(11)),
     );
-    focus_ring(ui, &response, egui::CornerRadius::same(13));
+    focus_ring(ui, &response, egui::CornerRadius::same(11));
     observe(response.rect);
     response.widget_info(|| WidgetInfo::labeled(Role::Button, true, accessible_name));
     response.clicked()
 }
 
-fn primary_button(
+/// An icon-only button. The glyph is painted, not typeset, so it cannot fall back to a box,
+/// and the accessible name carries the meaning for screen readers and the tooltip.
+fn icon_button(
     ui: &mut egui::Ui,
-    label: &str,
+    icon: OsdIcon,
     accessible_name: &str,
     enabled: bool,
     observe: impl FnOnce(egui::Rect),
 ) -> bool {
+    let rounding = egui::CornerRadius::same(11);
     let response = ui.add_enabled(
         enabled,
-        egui::Button::new(
-            RichText::new(label)
-                .size(21.0)
-                .color(Color32::WHITE)
-                .strong(),
-        )
-        .fill(OSD_ACCENT)
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(0x78, 0xD5, 0xF1)))
-        .min_size(egui::vec2(58.0, 52.0))
-        .corner_radius(egui::CornerRadius::same(16)),
+        egui::Button::new("")
+            .min_size(egui::vec2(ICON_BUTTON, ICON_BUTTON))
+            .corner_radius(rounding),
     );
-    focus_ring(ui, &response, egui::CornerRadius::same(16));
+    let color = if !enabled {
+        OSD_MUTED
+    } else if response.hovered() {
+        Color32::WHITE
+    } else {
+        OSD_TEXT
+    };
+    player_icons::paint(ui.painter(), icon_area(response.rect, 0.56), icon, color);
+    focus_ring(ui, &response, rounding);
+    observe(response.rect);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, accessible_name));
+    let clicked = response.clicked();
+    response.on_hover_text(accessible_name);
+    clicked
+}
+
+/// The play/pause button. It is the only filled control on the bar, so the eye lands on it.
+fn primary_icon_button(
+    ui: &mut egui::Ui,
+    icon: OsdIcon,
+    accessible_name: &str,
+    enabled: bool,
+    observe: impl FnOnce(egui::Rect),
+) -> bool {
+    let rounding = egui::CornerRadius::same(15);
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new("")
+            .fill(if enabled { OSD_ACCENT } else { OSD_CONTROL })
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(0x78, 0xD5, 0xF1)))
+            .min_size(egui::vec2(PRIMARY_BUTTON, PRIMARY_BUTTON))
+            .corner_radius(rounding),
+    );
+    let color = if enabled { Color32::WHITE } else { OSD_MUTED };
+    player_icons::paint(ui.painter(), icon_area(response.rect, 0.52), icon, color);
+    focus_ring(ui, &response, rounding);
     observe(response.rect);
     response.widget_info(|| WidgetInfo::labeled(Role::Button, true, accessible_name));
     response.clicked()
+}
+
+/// The square an icon is drawn in, centred in a button. `fraction` sets how much of the button
+/// the icon covers.
+fn icon_area(button: egui::Rect, fraction: f32) -> egui::Rect {
+    let side = (button.width().min(button.height()) * fraction).max(8.0);
+    egui::Rect::from_center_size(button.center(), egui::vec2(side, side))
 }
 
 fn focus_ring(ui: &egui::Ui, response: &egui::Response, rounding: egui::CornerRadius) {
@@ -950,11 +1020,11 @@ fn format_time(time: Duration) -> String {
     }
 }
 
-fn button_label(paused: Option<bool>) -> (&'static str, &'static str) {
+fn transport_icon(paused: Option<bool>) -> (OsdIcon, &'static str) {
     match paused {
-        Some(true) => ("▶", "Play"),
-        Some(false) => ("||", "Pause"),
-        None => ("…", "Playback state unavailable"),
+        Some(true) => (OsdIcon::Play, "Play"),
+        Some(false) => (OsdIcon::Pause, "Pause"),
+        None => (OsdIcon::Play, "Playback state unavailable"),
     }
 }
 
@@ -968,22 +1038,12 @@ fn ab_loop_label(a: Option<Duration>, b: Option<Duration>) -> (&'static str, &'s
     }
 }
 
-/// Mute control label. `None` (mpv has not reported the flag yet) reads as unmuted, which is
-/// mpv's own default.
-fn mute_label(muted: Option<bool>) -> (&'static str, &'static str) {
-    if muted == Some(true) {
-        ("Unmute", "Unmute")
-    } else {
-        ("Mute", "Mute")
-    }
-}
-
-/// Fullscreen control label: the button offers the state it is not in.
-fn fullscreen_label(fullscreen: bool) -> (&'static str, &'static str) {
+/// Fullscreen control icon and accessible name. The control offers the state it switches to.
+fn fullscreen_icon_label(fullscreen: bool) -> (OsdIcon, &'static str) {
     if fullscreen {
-        ("Windowed", "Leave fullscreen")
+        (OsdIcon::ExitFullscreen, "Leave fullscreen")
     } else {
-        ("Fullscreen", "Enter fullscreen")
+        (OsdIcon::EnterFullscreen, "Enter fullscreen")
     }
 }
 
@@ -997,6 +1057,7 @@ mod tests {
         screenshot_key_pressed, skip_settings, speed_label, ticks_to_duration, track_menu_contents,
         track_section_inner,
     };
+    use crate::player_icons::OsdIcon;
 
     #[test]
     fn a_gamepad_drives_the_player_while_a_video_fills_the_window() {
@@ -1098,17 +1159,26 @@ mod tests {
     }
 
     #[test]
-    fn mute_and_fullscreen_labels_offer_the_state_they_switch_to() {
-        assert_eq!(super::mute_label(Some(false)), ("Mute", "Mute"));
-        assert_eq!(super::mute_label(None), ("Mute", "Mute"));
-        assert_eq!(super::mute_label(Some(true)), ("Unmute", "Unmute"));
+    fn the_transport_mute_and_fullscreen_controls_offer_the_state_they_switch_to() {
+        assert_eq!(super::transport_icon(Some(true)), (OsdIcon::Play, "Play"));
         assert_eq!(
-            super::fullscreen_label(false),
-            ("Fullscreen", "Enter fullscreen")
+            super::transport_icon(Some(false)),
+            (OsdIcon::Pause, "Pause")
         );
         assert_eq!(
-            super::fullscreen_label(true),
-            ("Windowed", "Leave fullscreen")
+            super::transport_icon(None),
+            (OsdIcon::Play, "Playback state unavailable")
+        );
+        assert_eq!(OsdIcon::for_mute(Some(false)), (OsdIcon::Volume, "Mute"));
+        assert_eq!(OsdIcon::for_mute(None), (OsdIcon::Volume, "Mute"));
+        assert_eq!(OsdIcon::for_mute(Some(true)), (OsdIcon::Muted, "Unmute"));
+        assert_eq!(
+            super::fullscreen_icon_label(false),
+            (OsdIcon::EnterFullscreen, "Enter fullscreen")
+        );
+        assert_eq!(
+            super::fullscreen_icon_label(true),
+            (OsdIcon::ExitFullscreen, "Leave fullscreen")
         );
     }
 
@@ -1138,13 +1208,6 @@ mod tests {
         assert_eq!(speed_label(None), "Speed unavailable");
         assert_eq!(format_time(Duration::from_secs(65)), "1:05");
         assert_eq!(format_time(Duration::from_secs(3661)), "1:01:01");
-
-        assert_eq!(super::button_label(Some(true)), ("▶", "Play"));
-        assert_eq!(super::button_label(Some(false)), ("||", "Pause"));
-        assert_eq!(
-            super::button_label(None),
-            ("…", "Playback state unavailable")
-        );
     }
 
     #[test]
@@ -1996,23 +2059,23 @@ mod tests {
     const DRAW_ORDER: [ControlId; 20] = [
         ControlId::SeekBar,
         ControlId::PreviousTrack,
-        ControlId::NextTrack,
         ControlId::SeekBackward,
         ControlId::PlayPause,
-        ControlId::Stop,
         ControlId::SeekForward,
-        ControlId::FrameBack,
-        ControlId::FrameForward,
-        ControlId::AbLoop,
+        ControlId::NextTrack,
+        ControlId::Stop,
         ControlId::SkipSegment,
-        ControlId::PipToggle,
-        ControlId::SpeedMenu,
         ControlId::ChapterPrevious,
         ControlId::ChapterNext,
         ControlId::ChapterMenu,
         ControlId::SecondarySubtitleMenu,
         ControlId::MuteToggle,
         ControlId::VolumeSlider,
+        ControlId::FrameBack,
+        ControlId::FrameForward,
+        ControlId::AbLoop,
+        ControlId::SpeedMenu,
+        ControlId::PipToggle,
         ControlId::Fullscreen,
     ];
 
@@ -2022,23 +2085,23 @@ mod tests {
         match id {
             ControlId::SeekBar => 0,
             ControlId::PreviousTrack => 1,
-            ControlId::NextTrack => 2,
-            ControlId::SeekBackward => 3,
-            ControlId::PlayPause => 4,
-            ControlId::Stop => 5,
-            ControlId::SeekForward => 6,
-            ControlId::FrameBack => 7,
-            ControlId::FrameForward => 8,
-            ControlId::AbLoop => 9,
-            ControlId::SkipSegment => 10,
-            ControlId::PipToggle => 11,
-            ControlId::SpeedMenu => 12,
-            ControlId::ChapterPrevious => 13,
-            ControlId::ChapterNext => 14,
-            ControlId::ChapterMenu => 15,
-            ControlId::SecondarySubtitleMenu => 16,
-            ControlId::MuteToggle => 17,
-            ControlId::VolumeSlider => 18,
+            ControlId::SeekBackward => 2,
+            ControlId::PlayPause => 3,
+            ControlId::SeekForward => 4,
+            ControlId::NextTrack => 5,
+            ControlId::Stop => 6,
+            ControlId::SkipSegment => 7,
+            ControlId::ChapterPrevious => 8,
+            ControlId::ChapterNext => 9,
+            ControlId::ChapterMenu => 10,
+            ControlId::SecondarySubtitleMenu => 11,
+            ControlId::MuteToggle => 12,
+            ControlId::VolumeSlider => 13,
+            ControlId::FrameBack => 14,
+            ControlId::FrameForward => 15,
+            ControlId::AbLoop => 16,
+            ControlId::SpeedMenu => 17,
+            ControlId::PipToggle => 18,
             ControlId::Fullscreen => 19,
         }
     }

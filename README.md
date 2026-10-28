@@ -122,8 +122,11 @@ yet a replacement for the official clients. The main missing pieces:
 - **Episodes and series:** no episode details page (clicking an episode plays it), episode
   rows have no thumbnail, overview or progress, the series page has no Play / Next Up /
   Shuffle, and the player has no previous/next episode, Up Next or auto-play next.
-- **Player OSD:** no title, volume, fullscreen or chapter buttons; no trickplay
-  thumbnails; quality is not selectable in the player.
+- **Player OSD:** title, elapsed/total time, transport, chapter stepping, volume with
+  mute, frame stepping, A-B loop, speed, PiP and a fullscreen toggle, as a compact
+  icon bar. Still missing: trickplay thumbnails on the seek bar, quality/source
+  selection inside the player, Up Next, and previous/next episode (those buttons are
+  enabled for music only).
 - **Library views:** one flat grid per type. Missing Suggestions, Genres, Studios,
   Collections, Upcoming and Episodes tabs, the alphabet picker and view modes; music has
   no album/artist views; books, home videos and music videos have no views.

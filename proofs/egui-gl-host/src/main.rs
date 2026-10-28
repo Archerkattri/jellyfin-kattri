@@ -52,6 +52,7 @@ mod gl_adapter;
 mod media_info_panel;
 mod mpv_host;
 mod player_controls;
+mod player_icons;
 mod report_handoff;
 mod video_target;
 mod window_hooks;
