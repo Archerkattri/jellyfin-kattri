@@ -2644,7 +2644,7 @@ fn series_next_up_button(
 }
 
 /// "S1:E3 · Title" for an episode with season and episode numbers, else its name.
-fn episode_display_label(episode: &jellyfin_api::BaseItemDto) -> String {
+pub(crate) fn episode_display_label(episode: &jellyfin_api::BaseItemDto) -> String {
     match (episode.parent_index_number, episode.index_number) {
         (Some(season), Some(number)) => format!("S{season}:E{number} · {}", episode.name),
         (None, Some(number)) => format!("E{number} · {}", episode.name),

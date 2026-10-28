@@ -4939,6 +4939,8 @@ impl KattriApp {
             request_id,
             previous: None,
             next: None,
+            next_label: None,
+            up_next_cancelled: false,
         });
     }
 
@@ -4982,7 +4984,28 @@ impl KattriApp {
 
     /// An episode played to its end. Starts the next one when the viewer allows it.
     pub fn on_episode_ended(&mut self, ended_item_id: &str) -> bool {
-        self.playback_settings().auto_play_next_episode && self.on_episode_next(ended_item_id)
+        self.up_next_label(ended_item_id).is_some() && self.on_episode_next(ended_item_id)
+    }
+
+    /// The next episode's label while it is set to start when `playing_item_id` ends.
+    pub fn up_next_label(&self, playing_item_id: &str) -> Option<&str> {
+        if !self.playback_settings().auto_play_next_episode {
+            return None;
+        }
+        self.neighbors_of(playing_item_id)
+            .filter(|neighbors| !neighbors.up_next_cancelled && neighbors.next.is_some())
+            .map(|neighbors| neighbors.next_label.as_deref().unwrap_or_default())
+    }
+
+    /// The viewer dismissed the Up Next card: `playing_item_id` ends without auto-play.
+    pub fn cancel_up_next(&mut self, playing_item_id: &str) {
+        if let Some(neighbors) = self
+            .episode_neighbors
+            .as_mut()
+            .filter(|neighbors| neighbors.episode_id == playing_item_id)
+        {
+            neighbors.up_next_cancelled = true;
+        }
     }
 
     fn retry_playback_start(&mut self) -> bool {
@@ -6228,6 +6251,8 @@ impl KattriApp {
                         && neighbors.episode_id == episode_id
                     {
                         neighbors.previous = previous.map(|item| item.id);
+                        neighbors.next_label =
+                            next.as_deref().map(crate::ui::episode_display_label);
                         neighbors.next = next.map(|item| item.id);
                     }
                 }
@@ -7785,6 +7810,10 @@ struct EpisodeNeighbors {
     request_id: u64,
     previous: Option<String>,
     next: Option<String>,
+    /// "S1:E4 · Title" of the next episode, for the Up Next card.
+    next_label: Option<String>,
+    /// The viewer dismissed Up Next for this episode: it ends without starting the next.
+    up_next_cancelled: bool,
 }
 
 /// The server's Next Up episode for one series.
@@ -10647,8 +10676,17 @@ mod photo_decode_event_tests {
         assert_eq!(app.episode_navigation("other"), (false, false));
         assert!(!app.on_episode_previous("e2"));
 
+        assert_eq!(app.up_next_label("e2"), Some("e3"));
+        app.cancel_up_next("e2");
+        assert_eq!(app.up_next_label("e2"), None);
+        assert!(!app.on_episode_ended("e2"), "Up Next was dismissed");
+        app.episode_neighbors
+            .as_mut()
+            .expect("neighbours")
+            .up_next_cancelled = false;
         app.settings.settings_mut().playback.auto_play_next_episode = false;
         assert!(!app.on_episode_ended("e2"), "auto-play is off");
+        assert_eq!(app.up_next_label("e2"), None);
 
         assert!(app.on_episode_next("e2"));
         assert_eq!(app.selected_item_id.as_deref(), Some("e3"));

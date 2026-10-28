@@ -719,6 +719,7 @@ impl<'session> GlHost<'session> {
                                     );
                                 });
                         }
+                        up_next_card(ui.ctx(), mpv, kattri_app, &osd);
                         if let Some(info) = &media_info
                             && media_info_panel::show(ui.ctx(), info).close
                         {
@@ -1476,6 +1477,70 @@ struct OsdState<'a> {
     track_feedback: Option<&'a str>,
 }
 
+/// How long before the end of an episode the Up Next card appears.
+const UP_NEXT_LEAD: Duration = Duration::from_secs(30);
+
+/// Whether the Up Next card is due at `position`. Short videos never show it.
+fn up_next_due(position: Duration, duration: Duration) -> bool {
+    duration > UP_NEXT_LEAD * 4 && position + UP_NEXT_LEAD >= duration
+}
+
+/// Near the end of an episode with a next one set to auto-play: names it, counts down, and
+/// offers Play now and Cancel.
+fn up_next_card(
+    ctx: &egui::Context,
+    mpv: &mut MpvHost<'_>,
+    kattri_app: &mut KattriApp,
+    osd: &OsdState<'_>,
+) {
+    let (Some(duration), Some(playing)) = (osd.duration, mpv.playing_item_id().map(str::to_owned))
+    else {
+        return;
+    };
+    if !up_next_due(osd.position, duration) {
+        return;
+    }
+    let Some(label) = kattri_app.up_next_label(&playing).map(str::to_owned) else {
+        return;
+    };
+    let remaining = duration.saturating_sub(osd.position).as_secs();
+    egui::Area::new(egui::Id::unique("up_next_card"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-28.0, -150.0))
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(egui::Color32::from_black_alpha(200))
+                .corner_radius(egui::CornerRadius::same(14))
+                .inner_margin(egui::Margin::same(16))
+                .show(ui, |ui| {
+                    ui.set_max_width(340.0);
+                    ui.label(
+                        egui::RichText::new("Up next")
+                            .size(13.0)
+                            .color(egui::Color32::from_gray(190)),
+                    );
+                    ui.label(
+                        egui::RichText::new(&label)
+                            .size(17.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("Starts in {remaining} s"))
+                            .color(egui::Color32::from_gray(190)),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Play now").clicked() {
+                            kattri_app.on_episode_next(&playing);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            kattri_app.cancel_up_next(&playing);
+                        }
+                    });
+                });
+        });
+}
+
 /// Draws the playback controls and performs the actions they return.
 fn osd_controls(
     ui: &mut egui::Ui,
@@ -2188,5 +2253,24 @@ mod tests {
         );
         assert_eq!(duration_from_seconds(f64::NAN), None);
         assert_eq!(duration_from_seconds(-1.0), None);
+    }
+}
+
+#[cfg(test)]
+mod up_next_tests {
+    use super::{UP_NEXT_LEAD, up_next_due};
+    use std::time::Duration;
+
+    #[test]
+    fn up_next_appears_in_the_last_half_minute_of_a_long_video_only() {
+        let episode = Duration::from_secs(45 * 60);
+        assert!(!up_next_due(
+            episode - UP_NEXT_LEAD - Duration::from_secs(1),
+            episode
+        ));
+        assert!(up_next_due(episode - UP_NEXT_LEAD, episode));
+        assert!(up_next_due(episode, episode));
+        let clip = Duration::from_secs(90);
+        assert!(!up_next_due(clip, clip), "a short clip has no Up Next card");
     }
 }

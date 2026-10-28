@@ -29,14 +29,14 @@ desktop window.
 | Sign-in | Password sign-in, Quick Connect, saved servers, multiple profiles, stay signed in |
 | Home | Continue Watching, Next Up, Latest, My Media and Collections shelves, hero banner |
 | Library | Paging, sorting, play-state and favorites filters, 1,000-item photo and poster grids |
-| Details | Metadata, overview, cast, similar titles, seasons and episodes, play and download actions |
+| Details | Metadata, overview, cast, similar titles, seasons and episodes with overview and progress, Next Up on series pages, play and download actions |
 | Search | Debounced cross-type search grouped by movies, series, episodes, music, playlists, photos, people and channels |
 | Playback | Direct play, direct stream and transcode through the relay, resume, playback reporting, audio and subtitle tracks, subtitle delay, chapters, speed control, segment skip |
-| Player | Media info panel (`I`), equalizer and loudness filters, A-B loop and frame stepping, HDR to SDR tone mapping, refresh-rate matching on Windows, open a stream address |
+| Player | Icon control bar with title, time, volume and chapters; previous/next for tracks and episodes, an Up Next card and auto-play of the next episode; media info panel (`I`), equalizer and loudness filters, A-B loop and frame stepping, HDR to SDR tone mapping, refresh-rate matching on Windows, open a stream address |
 | Music | Album and playlist browsing, queue with shuffle and repeat, queue restore after restart |
 | Live TV | Channel list, 24-hour guide, tune through the relay |
 | Offline | Download manager with pause, resume, range fallback, checksum verification and external subtitles |
-| Extras | Playlists, collections, favorites, watched state, photos, admin-lite dashboard, parental PIN |
+| Extras | Right-click item menu (play, mark watched, favorite, download, add to playlist or queue), playlists, collections, favorites, photos, admin-lite dashboard, parental PIN |
 | Settings | General, playback, audio, subtitles, video, input, server, About; versioned TOML per profile |
 | Input | Keyboard map, gamepad support (in menus and during playback), full focus navigation, rebindable actions |
 | Interface | Standard, Large and TV (10-foot) sizes |
@@ -122,15 +122,16 @@ yet a replacement for the official clients. The main missing pieces:
   and delete.
 - **Episodes and series:** the series page offers the server's Next Up episode (Play or
   Resume), and episode rows show the overview, runtime, progress and a watched mark.
-  Still missing: an episode details page (clicking an episode plays it), episode
-  thumbnails, Shuffle, and an Up Next countdown in the player. The player's previous and next
+  In the player, an Up Next card counts down the last 30 seconds of an episode with
+  Play now and Cancel. Still missing: an episode details page (clicking an episode plays
+  it), episode thumbnails and Shuffle. The player's previous and next
   buttons move between episodes, and the next episode starts when one ends (a Playback
   setting, on by default).
 - **Player OSD:** title, elapsed/total time, transport, chapter stepping, volume with
   mute, frame stepping, A-B loop, speed, PiP and a fullscreen toggle, as a compact
-  icon bar, with previous/next for music tracks and episodes. Still missing: trickplay
-  thumbnails on the seek bar, quality/source selection inside the player, and an Up Next
-  countdown.
+  icon bar, with previous/next for music tracks and episodes and an Up Next card. Still
+  missing: trickplay thumbnails on the seek bar and quality/source selection inside the
+  player.
 - **Library views:** one flat grid per type. Missing Suggestions, Genres, Studios,
   Collections, Upcoming and Episodes tabs, the alphabet picker and view modes; music has
   no album/artist views; books, home videos and music videos have no views.
