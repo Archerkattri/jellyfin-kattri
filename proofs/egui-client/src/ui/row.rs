@@ -76,6 +76,8 @@ pub struct RowResponse {
     pub focus_response: egui::Response,
     /// Horizontal center of each card, in the UI's logical coordinate space.
     pub card_centers: Vec<f32>,
+    /// Card whose context menu is open (set by a secondary click, kept while the menu shows).
+    pub menu_card: Option<usize>,
 }
 
 /// Persistent state for one row: focus index plus displayed and target scroll offsets.
@@ -85,6 +87,7 @@ pub struct PosterRow {
     offset: f32,
     target: f32,
     pending_focus: Option<usize>,
+    menu_card: Option<usize>,
 }
 
 impl PosterRow {
@@ -136,6 +139,7 @@ impl PosterRow {
                 visible: 0..0,
                 focus_response: response,
                 card_centers: Vec::new(),
+                menu_card: self.menu_card.filter(|index| *index < count),
             };
         }
 
@@ -158,6 +162,11 @@ impl PosterRow {
                 self.set_focus(index, card_w, gap, viewport_w);
                 activated = Some(index);
             }
+        }
+        if response.secondary_clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            self.menu_card = card_at(pos.x - rect.left(), self.offset, count, card_w, step);
         }
         if response.dragged() {
             self.offset = (self.offset - response.drag_delta().x).clamp(0.0, max_offset);
@@ -259,6 +268,7 @@ impl PosterRow {
             visible,
             focus_response: response,
             card_centers,
+            menu_card: self.menu_card.filter(|index| *index < count),
         }
     }
 

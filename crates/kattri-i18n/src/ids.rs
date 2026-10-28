@@ -744,6 +744,16 @@ pub const DETAIL_ERROR_FAVORITE_FAILED: &str = "detail.error.favorite_failed";
 pub const PLAYBACK_ERROR_SESSION_UPDATE: &str = "playback.error.session_update";
 
 /// Every id in this module, for the en-US coverage test.
+pub const ITEM_MENU_PLAY: &str = "item_menu.play";
+pub const ITEM_MENU_PLAY_FROM_START: &str = "item_menu.play_from_start";
+pub const ITEM_MENU_OPEN: &str = "item_menu.open";
+pub const ITEM_MENU_GO_TO_SERIES: &str = "item_menu.go_to_series";
+pub const ITEM_MENU_MARK_PLAYED: &str = "item_menu.mark_played";
+pub const ITEM_MENU_MARK_UNPLAYED: &str = "item_menu.mark_unplayed";
+pub const ITEM_MENU_ADD_FAVORITE: &str = "item_menu.add_favorite";
+pub const ITEM_MENU_REMOVE_FAVORITE: &str = "item_menu.remove_favorite";
+pub const ITEM_MENU_DOWNLOAD: &str = "item_menu.download";
+
 pub const ALL: &[&str] = &[
     CONNECT_WORKER_UNAVAILABLE,
     CONNECT_CHECKING_SERVER,
@@ -873,6 +883,15 @@ pub const ALL: &[&str] = &[
     DETAIL_STATE_FAVORITE,
     DETAIL_STATE_PLAYED,
     PLAYBACK_BUTTON_PLAY,
+    ITEM_MENU_PLAY,
+    ITEM_MENU_PLAY_FROM_START,
+    ITEM_MENU_OPEN,
+    ITEM_MENU_GO_TO_SERIES,
+    ITEM_MENU_MARK_PLAYED,
+    ITEM_MENU_MARK_UNPLAYED,
+    ITEM_MENU_ADD_FAVORITE,
+    ITEM_MENU_REMOVE_FAVORITE,
+    ITEM_MENU_DOWNLOAD,
     DETAIL_BUTTON_DOWNLOAD,
     PLAYBACK_STATUS_REQUESTING,
     DETAIL_BUTTON_REMOVE_FAVORITE,

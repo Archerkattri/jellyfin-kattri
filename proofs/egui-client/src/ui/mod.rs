@@ -5,6 +5,7 @@ pub(crate) mod detail;
 pub mod downloads;
 pub mod hero;
 pub mod home;
+pub(crate) mod item_menu;
 pub mod live_tv;
 pub mod music;
 pub(crate) mod open_url;
@@ -3152,6 +3153,7 @@ fn catalog_card(
     visible_artwork: &mut Vec<(String, String)>,
 ) -> bool {
     let response = artwork::media_card(ui, item, colors, selected);
+    item_menu::attach(&response, item);
     if ui.clip_rect().intersects(response.rect)
         && let Some(tag) = item.primary_image_tag.as_deref()
     {

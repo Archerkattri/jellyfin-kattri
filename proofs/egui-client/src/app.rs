@@ -7722,6 +7722,60 @@ impl KattriApp {
             self.pending_stream_url = Some(url);
         }
         crate::ui::draw(root, self, width);
+        if let Some((target, action)) = crate::ui::item_menu::take(&ctx) {
+            self.apply_item_menu_action(target, action);
+        }
+    }
+
+    /// Runs an entry chosen from a card's context menu. Played and favorite changes are sent
+    /// straight to the server for that item and mirrored on every loaded card that shows it.
+    pub(crate) fn apply_item_menu_action(
+        &mut self,
+        target: crate::ui::item_menu::ItemMenuTarget,
+        action: crate::ui::item_menu::ItemMenuAction,
+    ) {
+        use crate::ui::item_menu::ItemMenuAction;
+        match action {
+            ItemMenuAction::Play => self.play_item(target.item_id, false),
+            ItemMenuAction::PlayFromStart => self.play_item(target.item_id, true),
+            ItemMenuAction::Open => self.select_item(target.item_id),
+            ItemMenuAction::GoToSeries => {
+                if let Some(series_id) = target.series_id {
+                    self.select_item(series_id);
+                }
+            }
+            ItemMenuAction::Download => self.start_download(&target.item_id, &target.title),
+            ItemMenuAction::SetPlayed(played) => {
+                let request_id = self.allocate_request_id();
+                let sent = self.worker.as_ref().is_some_and(|worker| {
+                    worker
+                        .set_played(request_id, target.item_id.clone(), played)
+                        .is_ok()
+                });
+                if sent {
+                    for item in self.items.iter_mut().chain(self.home.media_mut()) {
+                        if item.id == target.item_id {
+                            item.played = played;
+                        }
+                    }
+                }
+            }
+            ItemMenuAction::SetFavorite(favorite) => {
+                let request_id = self.allocate_request_id();
+                let sent = self.worker.as_ref().is_some_and(|worker| {
+                    worker
+                        .set_favorite(request_id, target.item_id.clone(), favorite)
+                        .is_ok()
+                });
+                if sent {
+                    for item in self.items.iter_mut().chain(self.home.media_mut()) {
+                        if item.id == target.item_id {
+                            item.favorite = favorite;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Consume a profile-mapped play/pause shortcut while the native player owns the screen.
@@ -9351,6 +9405,10 @@ mod artwork_cache_tests {
             access_ticks.insert((id.clone(), tag.clone()), index as u64);
             attempted.insert((id.clone(), tag.clone()));
             items.push(MediaItem {
+                series_id: None,
+                played: false,
+                favorite: false,
+                resumable: false,
                 artwork_id: id.clone(),
                 backdrop_id: id.clone(),
                 id,

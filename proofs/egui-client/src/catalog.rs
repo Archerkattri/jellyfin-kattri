@@ -73,6 +73,11 @@ pub struct MediaItem {
     /// Jellyfin's own clients show it, otherwise the item itself.
     pub backdrop_id: String,
     pub primary_image_tag: Option<String>,
+    pub series_id: Option<String>,
+    pub played: bool,
+    pub favorite: bool,
+    /// Has a saved position, so "Play from beginning" differs from "Play".
+    pub resumable: bool,
     pub artwork_texture: Option<egui::TextureHandle>,
 }
 
@@ -104,7 +109,17 @@ impl MediaItem {
             .clone()
             .filter(|_| matches!(item.item_type.as_deref(), Some("Episode" | "Season")))
             .unwrap_or_else(|| item.id.clone());
+        let user_data = item.user_data.as_ref();
+        let played = user_data.and_then(|data| data.played).unwrap_or(false);
+        let favorite = user_data.and_then(|data| data.is_favorite).unwrap_or(false);
+        let resumable = user_data
+            .and_then(|data| data.playback_position_ticks)
+            .is_some_and(|ticks| ticks > 0);
         Self {
+            series_id: item.series_id.clone(),
+            played,
+            favorite,
+            resumable,
             artwork_id,
             backdrop_id,
             id: item.id,

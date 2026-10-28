@@ -547,6 +547,9 @@ pub(super) fn show(
             ..RowOptions::default()
         };
         let response = row.poster.show(ui, title, &cards, &options);
+        if let Some(card) = response.menu_card.and_then(|index| row.cards.get(index)) {
+            super::item_menu::attach(&response.focus_response, &card.media);
+        }
         let focus_row = match kind {
             HomeRowKind::ContinueWatching => 0,
             HomeRowKind::NextUp => 1,
