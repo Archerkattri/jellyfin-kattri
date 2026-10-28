@@ -75,23 +75,25 @@ fn chosen_id() -> egui::Id {
 
 /// Shows the menu when `response` is secondary-clicked, and records the chosen entry.
 pub(crate) fn attach(response: &egui::Response, item: &MediaItem) {
-    response.context_menu(|ui| {
-        ui.set_min_width(200.0);
-        ui.label(egui::RichText::new(&item.title).strong());
-        ui.separator();
-        for action in entries(item) {
-            if ui.button(label(action)).clicked() {
-                let target = ItemMenuTarget {
-                    item_id: item.id.clone(),
-                    title: item.title.clone(),
-                    series_id: item.series_id.clone(),
-                };
-                ui.ctx()
-                    .data_mut(|data| data.insert_temp(chosen_id(), (target, action)));
-                ui.close();
-            }
+    response.context_menu(|ui| show(ui, item));
+}
+
+fn show(ui: &mut egui::Ui, item: &MediaItem) {
+    ui.set_min_width(200.0);
+    ui.label(egui::RichText::new(&item.title).strong());
+    ui.separator();
+    for action in entries(item) {
+        if ui.button(label(action)).clicked() {
+            let target = ItemMenuTarget {
+                item_id: item.id.clone(),
+                title: item.title.clone(),
+                series_id: item.series_id.clone(),
+            };
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(chosen_id(), (target, action)));
+            ui.close();
         }
-    });
+    }
 }
 
 /// The entry chosen since the last call, if any.
@@ -101,6 +103,12 @@ pub(crate) fn take(ctx: &egui::Context) -> Option<(ItemMenuTarget, ItemMenuActio
         data.remove::<(ItemMenuTarget, ItemMenuAction)>(chosen_id());
         chosen
     })
+}
+
+/// Same menu for a server DTO such as a search result, which is not a catalog entry yet. The
+/// catalog item is built only when the menu opens, so a frame of results costs nothing.
+pub(crate) fn attach_dto(response: &egui::Response, dto: &jellyfin_api::BaseItemDto) {
+    response.context_menu(|ui| show(ui, &MediaItem::from_api(dto.clone())));
 }
 
 #[cfg(test)]
@@ -140,6 +148,26 @@ mod tests {
         assert!(!actions.contains(&ItemMenuAction::PlayFromStart));
         let folder = item(serde_json::json!({"Id": "f", "Name": "F", "Type": "Folder"}));
         assert_eq!(entries(&folder), [ItemMenuAction::Open]);
+    }
+
+    #[test]
+    fn a_search_result_offers_the_menu_a_catalog_card_does() {
+        // Search hands the menu a server DTO, so it converts on demand. The entries must match
+        // what the same item shows as a library card.
+        let dto: jellyfin_api::BaseItemDto = serde_json::from_value(serde_json::json!({
+            "Id": "mov", "Name": "Film", "Type": "Movie"
+        }))
+        .expect("dto fixture");
+        assert_eq!(
+            entries(&MediaItem::from_api(dto)),
+            [
+                ItemMenuAction::Play,
+                ItemMenuAction::Open,
+                ItemMenuAction::SetPlayed(true),
+                ItemMenuAction::SetFavorite(true),
+                ItemMenuAction::Download,
+            ]
+        );
     }
 
     #[test]

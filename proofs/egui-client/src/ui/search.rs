@@ -125,6 +125,9 @@ pub(super) fn draw_with_focus_targets(
             for item in items.iter().take(SEARCH_GROUP_RESULT_LIMIT) {
                 let label = egui::RichText::new(&item.name).strong();
                 let response = ui.add_sized(egui::vec2(card_width, 54.0), egui::Button::new(label));
+                // The same context menu as a library card: a search result is a server DTO, so
+                // the menu converts it on demand.
+                super::item_menu::attach_dto(&response, item);
                 if response.clicked() {
                     selected_id = Some(SearchAction::SelectItem(item.id.clone()));
                 }
