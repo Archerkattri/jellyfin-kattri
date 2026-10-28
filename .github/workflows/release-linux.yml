@@ -3,8 +3,7 @@
 # floor is the oldest one the release targets). Runner: ubuntu-22.04, confirmed against
 # the actions/runner-images README, which lists ubuntu-22.04 as an x64 image.
 #
-# Flatpak is not built here. Its manifest is in packaging/flatpak and is built by a
-# separate job when that is added.
+# The Flatpak job builds packaging/flatpak/org.kattri.JellyfinKattri.yml into a bundle.
 #
 # Not verified: this workflow has not been run. The AppImage bundles the pinned,
 # SHA-256-verified libmpv archive (packaging/libmpv/manifest.toml, linux-x64). Deb and
@@ -209,5 +208,58 @@ jobs:
             dist/linux/kattri_*.deb.sha256
             dist/linux/kattri-*.rpm
             dist/linux/kattri-*.rpm.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  # Flatpak bundle (M5-10). Unverified: this job has not run yet. It builds offline from
+  # Cargo.lock: flatpak-cargo-generator writes cargo-sources.json next to the manifest, then
+  # flatpak-builder installs the pinned runtime, SDK and Rust extension from Flathub.
+  # flatpak-builder-tools is taken at its default branch and its commit is logged; pin it
+  # before a release. If the Flathub Rust extension is older than rust-toolchain.toml, the
+  # cargo build fails here and the extension branch in the manifest must move.
+  flatpak:
+    name: Flatpak (x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder python3-aiohttp python3-tomlkit
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Generate cargo-sources.json
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/flatpak/flatpak-builder-tools.git "$RUNNER_TEMP/fbt"
+          echo "flatpak-builder-tools commit: $(git -C "$RUNNER_TEMP/fbt" rev-parse HEAD)"
+          python3 "$RUNNER_TEMP/fbt/cargo/flatpak-cargo-generator.py" Cargo.lock \
+            -o packaging/flatpak/cargo-sources.json
+
+      - name: Build Flatpak bundle
+        env:
+          KATTRI_RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          flatpak-builder --user --force-clean --install-deps-from=flathub \
+            --repo="$RUNNER_TEMP/repo" "$RUNNER_TEMP/build" \
+            packaging/flatpak/org.kattri.JellyfinKattri.yml
+          mkdir -p dist/linux
+          flatpak build-bundle "$RUNNER_TEMP/repo" \
+            "dist/linux/kattri-${VERSION}-linux-x64.flatpak" org.kattri.JellyfinKattri
+          cd dist/linux
+          sha256sum "kattri-${VERSION}-linux-x64.flatpak" > "kattri-${VERSION}-linux-x64.flatpak.sha256"
+
+      - name: Upload Flatpak bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: kattri-linux-flatpak
+          path: |
+            dist/linux/kattri-*-linux-x64.flatpak
+            dist/linux/kattri-*-linux-x64.flatpak.sha256
           if-no-files-found: error
           retention-days: 30

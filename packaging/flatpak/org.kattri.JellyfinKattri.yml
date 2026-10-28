@@ -11,9 +11,8 @@
 # listing; check it before the first build.
 #
 # libmpv is built as a module in this manifest from the mpv v0.41.0 tag (the latest
-# GitHub release at the time of writing). The tag is pinned but no commit hash is
-# recorded yet; add `commit:` before a release. libass, libplacebo and Vulkan are
-# disabled, so ASS subtitle rendering is not in this build. Those need their own
+# GitHub release at the time of writing), pinned to its commit below. libass, libplacebo
+# and Vulkan are disabled, so ASS subtitle rendering is not in this build. Those need their own
 # modules before the Flatpak is a full playback build.
 #
 # Offline build: flatpak-builder runs cargo with --offline. Every crate comes from
