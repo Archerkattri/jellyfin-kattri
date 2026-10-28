@@ -670,6 +670,10 @@ pub struct KattriApp {
     episode_neighbors: Option<EpisodeNeighbors>,
     /// The episode to play next in the series on screen.
     series_next_up: Option<SeriesNextUp>,
+    /// A shuffled run of episodes; previous, next and auto-play follow it while one of its
+    /// episodes plays.
+    shuffle_queue: Option<ShuffleQueue>,
+    shuffle_request_id: u64,
     /// The page an item was opened from (a series for its episode), where Back returns.
     detail_parent: Option<String>,
     /// Stills for the episode rows of the series on screen.
@@ -1130,6 +1134,8 @@ impl KattriApp {
             music_queue: Queue::new(),
             episode_neighbors: None,
             series_next_up: None,
+            shuffle_queue: None,
+            shuffle_request_id: 0,
             detail_parent: None,
             episode_thumbnails: HashMap::new(),
             episode_thumbnail_pending: HashMap::new(),
@@ -5146,19 +5152,48 @@ impl KattriApp {
             .filter(|neighbors| neighbors.episode_id == playing_item_id)
     }
 
+    fn adjacent(&self, playing_item_id: &str) -> Option<Adjacent<'_>> {
+        if let Some(queue) = self.shuffle_queue.as_ref()
+            && let Some(index) = queue
+                .episodes
+                .iter()
+                .position(|(id, _)| id == playing_item_id)
+        {
+            return Some(Adjacent {
+                previous: index
+                    .checked_sub(1)
+                    .map(|previous| queue.episodes[previous].0.as_str()),
+                next: queue
+                    .episodes
+                    .get(index + 1)
+                    .map(|(id, label)| (id.as_str(), label.as_str())),
+                up_next_cancelled: queue.up_next_cancelled_for.as_deref() == Some(playing_item_id),
+            });
+        }
+        self.neighbors_of(playing_item_id)
+            .map(|neighbors| Adjacent {
+                previous: neighbors.previous.as_deref(),
+                next: neighbors
+                    .next
+                    .as_deref()
+                    .map(|id| (id, neighbors.next_label.as_deref().unwrap_or_default())),
+                up_next_cancelled: neighbors.up_next_cancelled,
+            })
+    }
+
     /// Whether the player's previous and next buttons have an episode to go to.
     pub fn episode_navigation(&self, playing_item_id: &str) -> (bool, bool) {
-        self.neighbors_of(playing_item_id)
-            .map_or((false, false), |neighbors| {
-                (neighbors.previous.is_some(), neighbors.next.is_some())
+        self.adjacent(playing_item_id)
+            .map_or((false, false), |adjacent| {
+                (adjacent.previous.is_some(), adjacent.next.is_some())
             })
     }
 
     /// The player's Previous control on an episode. True when the previous episode was started.
     pub fn on_episode_previous(&mut self, playing_item_id: &str) -> bool {
         let Some(previous) = self
-            .neighbors_of(playing_item_id)
-            .and_then(|neighbors| neighbors.previous.clone())
+            .adjacent(playing_item_id)
+            .and_then(|adjacent| adjacent.previous.map(str::to_owned))
         else {
             return false;
         };
@@ -5169,13 +5204,25 @@ impl KattriApp {
     /// The player's Next control on an episode. True when the next episode was started.
     pub fn on_episode_next(&mut self, playing_item_id: &str) -> bool {
         let Some(next) = self
-            .neighbors_of(playing_item_id)
-            .and_then(|neighbors| neighbors.next.clone())
+            .adjacent(playing_item_id)
+            .and_then(|adjacent| adjacent.next.map(|(id, _)| id.to_owned()))
         else {
             return false;
         };
         self.play_item(next, false);
         true
+    }
+
+    /// Starts a shuffled run of `series_id`'s episodes.
+    pub(crate) fn shuffle_series(&mut self, series_id: String) {
+        let request_id = self.allocate_request_id();
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.shuffle_series(request_id, series_id).is_ok())
+        {
+            self.shuffle_request_id = request_id;
+        }
     }
 
     /// An episode played to its end. Starts the next one when the viewer allows it.
@@ -5188,13 +5235,19 @@ impl KattriApp {
         if !self.playback_settings().auto_play_next_episode {
             return None;
         }
-        self.neighbors_of(playing_item_id)
-            .filter(|neighbors| !neighbors.up_next_cancelled && neighbors.next.is_some())
-            .map(|neighbors| neighbors.next_label.as_deref().unwrap_or_default())
+        self.adjacent(playing_item_id)
+            .filter(|adjacent| !adjacent.up_next_cancelled)
+            .and_then(|adjacent| adjacent.next.map(|(_, label)| label))
     }
 
     /// The viewer dismissed the Up Next card: `playing_item_id` ends without auto-play.
     pub fn cancel_up_next(&mut self, playing_item_id: &str) {
+        if let Some(queue) = self.shuffle_queue.as_mut()
+            && queue.episodes.iter().any(|(id, _)| id == playing_item_id)
+        {
+            queue.up_next_cancelled_for = Some(playing_item_id.to_owned());
+            return;
+        }
         if let Some(neighbors) = self
             .episode_neighbors
             .as_mut()
@@ -6427,6 +6480,28 @@ impl KattriApp {
                 WorkerEvent::GenresLoaded { request_id, genres } => {
                     if request_id == self.catalog_genres_request_id {
                         self.catalog_genres = genres;
+                    }
+                }
+                WorkerEvent::ShuffleLoaded {
+                    request_id,
+                    episodes,
+                } => {
+                    if request_id == self.shuffle_request_id && !episodes.is_empty() {
+                        let episodes: Vec<(String, String)> = episodes
+                            .iter()
+                            .map(|episode| {
+                                (
+                                    episode.id.clone(),
+                                    crate::ui::episode_display_label(episode),
+                                )
+                            })
+                            .collect();
+                        let first = episodes[0].0.clone();
+                        self.shuffle_queue = Some(ShuffleQueue {
+                            episodes,
+                            up_next_cancelled_for: None,
+                        });
+                        self.play_item(first, true);
                     }
                 }
                 WorkerEvent::MenuCollectionsLoaded {
@@ -8152,6 +8227,22 @@ struct EpisodeNeighbors {
     /// "S1:E4 · Title" of the next episode, for the Up Next card.
     next_label: Option<String>,
     /// The viewer dismissed Up Next for this episode: it ends without starting the next.
+    up_next_cancelled: bool,
+}
+
+/// Episodes in shuffled order as `(id, label)`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ShuffleQueue {
+    episodes: Vec<(String, String)>,
+    /// The episode whose Up Next card was dismissed.
+    up_next_cancelled_for: Option<String>,
+}
+
+/// What comes before and after the playing item: from the shuffle when it holds the item,
+/// else from the server's episode order.
+struct Adjacent<'a> {
+    previous: Option<&'a str>,
+    next: Option<(&'a str, &'a str)>,
     up_next_cancelled: bool,
 }
 
@@ -11316,6 +11407,47 @@ mod photo_decode_event_tests {
                 .as_ref()
                 .is_some_and(|(text, _)| text.contains("Film"))
         );
+    }
+
+    #[test]
+    fn shuffle_starts_a_random_run_that_previous_next_and_up_next_follow() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.shuffle_series("show".into());
+        let request_id = app.shuffle_request_id;
+        let episode = |id: &str, number: i32| -> jellyfin_api::BaseItemDto {
+            serde_json::from_value(serde_json::json!({
+                "Id": id, "Name": id, "ParentIndexNumber": 1, "IndexNumber": number
+            }))
+            .expect("episode fixture")
+        };
+        sender
+            .try_send(WorkerEvent::ShuffleLoaded {
+                request_id,
+                episodes: vec![episode("e7", 7), episode("e2", 2), episode("e5", 5)],
+            })
+            .expect("send shuffle");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(
+            app.selected_item_id.as_deref(),
+            Some("e7"),
+            "the run starts"
+        );
+        assert_eq!(app.episode_navigation("e7"), (false, true));
+        assert_eq!(app.episode_navigation("e2"), (true, true));
+        assert_eq!(app.episode_navigation("e5"), (true, false));
+        assert_eq!(app.up_next_label("e2"), Some("S1:E5 · e5"));
+        app.cancel_up_next("e2");
+        assert_eq!(app.up_next_label("e2"), None);
+        assert!(app.on_episode_next("e2"));
+        assert_eq!(app.selected_item_id.as_deref(), Some("e5"));
+        assert!(app.on_episode_previous("e5"));
+        assert_eq!(app.selected_item_id.as_deref(), Some("e2"));
     }
 
     #[test]

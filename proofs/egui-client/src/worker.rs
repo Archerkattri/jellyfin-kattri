@@ -173,6 +173,9 @@ pub(crate) enum ItemAdminAction {
     AddToCollection,
 }
 
+/// Most episodes one shuffle queues.
+const MAX_SHUFFLE_EPISODES: u32 = 200;
+
 /// How many playlists the card menu lists under Add to playlist.
 const MAX_MENU_PLAYLISTS: u32 = 100;
 
@@ -326,6 +329,11 @@ pub enum WorkerEvent {
     GenresLoaded {
         request_id: u64,
         genres: Vec<String>,
+    },
+    /// A series' episodes in random order. Empty on failure.
+    ShuffleLoaded {
+        request_id: u64,
+        episodes: Vec<BaseItemDto>,
     },
     /// The server's collections as `(id, name)`, for the card menu. Empty on failure.
     MenuCollectionsLoaded {
@@ -789,6 +797,10 @@ enum WorkerCommand {
     },
     ListMenuCollections {
         request_id: u64,
+    },
+    ShuffleSeries {
+        request_id: u64,
+        series_id: String,
     },
     ListMusicAlbumTracks {
         request_id: u64,
@@ -1289,6 +1301,17 @@ impl ApiWorker {
             item_id,
             action,
             collection_id,
+        })
+    }
+
+    pub(crate) fn shuffle_series(
+        &self,
+        request_id: u64,
+        series_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ShuffleSeries {
+            request_id,
+            series_id,
         })
     }
 
@@ -3208,6 +3231,40 @@ async fn execute_command(
                     events,
                     ctx,
                     WorkerEvent::GenresLoaded { request_id, genres },
+                )
+                .await
+            }
+            WorkerCommand::ShuffleSeries {
+                request_id,
+                series_id,
+            } => {
+                let episodes = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .list_items(
+                            session,
+                            &ItemQuery {
+                                parent_id: Some(series_id),
+                                include_item_types: Some(vec!["Episode".to_owned()]),
+                                sort_by: Some(vec![jellyfin_api::ItemSortBy::Random]),
+                                limit: MAX_SHUFFLE_EPISODES,
+                                ..ItemQuery::default()
+                            },
+                        )
+                        .await
+                        .map(|response| response.items)
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "shuffle unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::ShuffleLoaded {
+                        request_id,
+                        episodes,
+                    },
                 )
                 .await
             }

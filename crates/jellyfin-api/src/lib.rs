@@ -1581,6 +1581,8 @@ pub enum ItemSortBy {
     DateCreated,
     PremiereDate,
     CommunityRating,
+    /// A new random order on every request (shuffle).
+    Random,
 }
 
 impl ItemSortBy {
@@ -1590,6 +1592,7 @@ impl ItemSortBy {
             Self::DateCreated => "DateCreated",
             Self::PremiereDate => "PremiereDate",
             Self::CommunityRating => "CommunityRating",
+            Self::Random => "Random",
         }
     }
 }

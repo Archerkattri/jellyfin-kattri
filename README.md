@@ -118,15 +118,15 @@ yet a replacement for the official clients. The main missing pieces:
   offers Play, Play from beginning, Open details, Go to series, Mark played/unplayed,
   Add/remove favorite, Download, Add to playlist and, for music tracks, Play next and Add
   to queue. Administrators also get Add to collection, Refresh metadata and Delete (with
-  a confirmation). Still missing: shuffle, media info, multi-select and, for
+  a confirmation). Still missing: shuffle from the menu, multi-select and, for
   administrators, edit metadata, identify, edit images and edit subtitles.
 - **Episodes and series:** the series page offers the server's Next Up episode (Play or
   Resume), and episode rows show the still, overview, runtime, progress and a watched
   mark.
   In the player, an Up Next card counts down the last 30 seconds of an episode with
   Play now and Cancel. An episode's title opens its own page (Back returns to the
-  series) and its ▶ button plays it; rows show the episode's still. Still missing:
-  Shuffle. The player's previous and next
+  series) and its ▶ button plays it; rows show the episode's still. Shuffle plays the
+  series' episodes in random order, with previous/next and Up Next following that order. The player's previous and next
   buttons move between episodes, and the next episode starts when one ends (a Playback
   setting, on by default).
 - **Player OSD:** title, elapsed/total time, transport, chapter stepping, volume with
