@@ -307,7 +307,7 @@ impl HomeState {
 impl HomeState {
     /// Id of the item the hero shows, so the app can fetch its backdrop.
     pub fn hero_item_id(&self) -> Option<String> {
-        hero_card(&self.rows).map(|card| card.media.id.clone())
+        hero_card(&self.rows).map(|card| card.media.backdrop_id.clone())
     }
 }
 
@@ -568,7 +568,7 @@ pub(super) fn show(
             if let Some(card) = row.cards.get(index)
                 && let Some(tag) = card.media.primary_image_tag.as_deref()
             {
-                visible_artwork.push((card.media.id.clone(), tag.to_owned()));
+                visible_artwork.push((card.media.artwork_id.clone(), tag.to_owned()));
             }
         }
         if let Some(index) = response.activated
@@ -717,7 +717,7 @@ pub(super) fn show(
                 if let Some(card) = collections.get(index)
                     && let Some(tag) = card.media.primary_image_tag.as_deref()
                 {
-                    visible_artwork.push((card.media.id.clone(), tag.to_owned()));
+                    visible_artwork.push((card.media.artwork_id.clone(), tag.to_owned()));
                 }
             }
             if let Some(index) = response.activated

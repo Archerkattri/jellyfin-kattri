@@ -1735,7 +1735,7 @@ fn render_connected(
 
     let matches_item: fn(MediaKind) -> bool = match app.page {
         Page::Movies => |kind| kind == MediaKind::Movie,
-        Page::Series => |kind| matches!(kind, MediaKind::Series | MediaKind::Episode),
+        Page::Series => |kind| kind == MediaKind::Series,
         Page::Music => |kind| kind == MediaKind::Audio,
         Page::Photos => |kind| kind == MediaKind::Photo,
         Page::Playlists => |kind| kind == MediaKind::Playlist,
@@ -3155,7 +3155,7 @@ fn catalog_card(
     if ui.clip_rect().intersects(response.rect)
         && let Some(tag) = item.primary_image_tag.as_deref()
     {
-        visible_artwork.push((item.id.clone(), tag.to_owned()));
+        visible_artwork.push((item.artwork_id.clone(), tag.to_owned()));
     }
     let clicked = response.clicked();
     entries.push(CardFocus {

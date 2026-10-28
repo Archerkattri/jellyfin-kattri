@@ -34,7 +34,14 @@ impl JellyfinClient {
         let request = self
             .http
             .request(Method::GET, url)
-            .query(&[("imageIndex", "0"), ("format", "jpg")])
+            // A full-width hero needs more than a card, but an original backdrop can be
+            // 4K or larger; 1920 wide keeps it sharp and inside the response cap.
+            .query(&[
+                ("imageIndex", "0"),
+                ("format", "jpg"),
+                ("maxWidth", "1920"),
+                ("quality", "90"),
+            ])
             .timeout(Duration::from_secs(15));
         let request = self
             .add_metadata(request, Some(&session.access_token))

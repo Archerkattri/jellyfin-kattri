@@ -111,6 +111,7 @@ mod tests {
             parent_index_number: None,
             index_number: None,
             series_id: None,
+            series_primary_image_tag: None,
             genres: None,
             people: None,
             primary_image_aspect_ratio: None,

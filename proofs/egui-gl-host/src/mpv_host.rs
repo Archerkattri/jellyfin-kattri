@@ -1341,7 +1341,7 @@ impl<'session> MpvHost<'session> {
             },
         });
         self.pending_report_metadata = Some(report_metadata);
-        self.status = "Loading server-transcoded Jellyfin playback through the local relay".into();
+        self.status = "Loading the Jellyfin stream through the local relay".into();
         self.sync_controller.reset();
         self.policy.reset_item();
         self.subtitle_track_id = None;
@@ -1399,7 +1399,7 @@ impl<'session> MpvHost<'session> {
                     self.file_loaded = true;
                     self.playback_loaded_generation = self.active_generation;
                     self.status = if self.report_metadata.is_some() {
-                        "Server-transcoded Jellyfin stream is loaded".into()
+                        "Jellyfin stream is loaded".into()
                     } else {
                         "Media is loaded in libmpv".into()
                     };

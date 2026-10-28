@@ -1699,6 +1699,9 @@ pub struct BaseItemDto {
     pub index_number: Option<i32>,
     #[serde(default)]
     pub series_id: Option<String>,
+    /// Tag of the series poster for episodes and seasons (`SeriesPrimaryImageTag`).
+    #[serde(default)]
+    pub series_primary_image_tag: Option<String>,
     #[serde(default)]
     pub genres: Option<Vec<String>>,
     #[serde(default)]

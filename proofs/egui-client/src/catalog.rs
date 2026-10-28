@@ -66,6 +66,12 @@ pub struct MediaItem {
     pub overview: Option<String>,
     pub kind: MediaKind,
     pub artwork: ArtworkPalette,
+    /// Item whose Primary image is shown for this entry: the item itself, or its series
+    /// when an episode or season has no image of its own.
+    pub artwork_id: String,
+    /// Item whose backdrop represents this entry: the series for episodes and seasons, as
+    /// Jellyfin's own clients show it, otherwise the item itself.
+    pub backdrop_id: String,
     pub primary_image_tag: Option<String>,
     pub artwork_texture: Option<egui::TextureHandle>,
 }
@@ -74,7 +80,7 @@ impl MediaItem {
     pub fn from_api(item: BaseItemDto) -> Self {
         let kind = MediaKind::from_server_type(item.item_type.as_deref());
         let artwork = placeholder_artwork(&item.id);
-        let primary_image_tag = item
+        let own_tag = item
             .image_tags
             .as_ref()
             .and_then(|tags| tags.get("Primary"))
@@ -82,7 +88,25 @@ impl MediaItem {
             .map(str::trim)
             .filter(|tag| !tag.is_empty())
             .map(str::to_owned);
+        let series_artwork = item.series_id.as_deref().zip(
+            item.series_primary_image_tag
+                .as_deref()
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty()),
+        );
+        let (artwork_id, primary_image_tag) = match (own_tag, series_artwork) {
+            (Some(tag), _) => (item.id.clone(), Some(tag)),
+            (None, Some((series_id, tag))) => (series_id.to_owned(), Some(tag.to_owned())),
+            (None, None) => (item.id.clone(), None),
+        };
+        let backdrop_id = item
+            .series_id
+            .clone()
+            .filter(|_| matches!(item.item_type.as_deref(), Some("Episode" | "Season")))
+            .unwrap_or_else(|| item.id.clone());
         Self {
+            artwork_id,
+            backdrop_id,
             id: item.id,
             title: item.name,
             remote_type: item.item_type,
@@ -146,4 +170,38 @@ fn placeholder_artwork(id: &str) -> ArtworkPalette {
         .fold(0usize, |sum, byte| sum.wrapping_add(byte as usize))
         % PALETTES.len();
     PALETTES[index]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MediaItem;
+
+    fn item(json: serde_json::Value) -> MediaItem {
+        MediaItem::from_api(serde_json::from_value(json).expect("item fixture"))
+    }
+
+    #[test]
+    fn episode_without_its_own_image_uses_the_series_poster_and_backdrop() {
+        let episode = item(serde_json::json!({
+            "Id": "ep", "Name": "Pilot", "Type": "Episode",
+            "SeriesId": "show", "SeriesPrimaryImageTag": "poster"
+        }));
+        assert_eq!(episode.artwork_id, "show");
+        assert_eq!(episode.primary_image_tag.as_deref(), Some("poster"));
+        assert_eq!(episode.backdrop_id, "show");
+    }
+
+    #[test]
+    fn own_primary_image_wins_and_movies_keep_their_own_backdrop() {
+        let episode = item(serde_json::json!({
+            "Id": "ep", "Name": "Pilot", "Type": "Episode", "ImageTags": {"Primary": "still"},
+            "SeriesId": "show", "SeriesPrimaryImageTag": "poster"
+        }));
+        assert_eq!(episode.artwork_id, "ep");
+        assert_eq!(episode.primary_image_tag.as_deref(), Some("still"));
+        let movie = item(serde_json::json!({"Id": "film", "Name": "Film", "Type": "Movie"}));
+        assert_eq!(movie.artwork_id, "film");
+        assert_eq!(movie.backdrop_id, "film");
+        assert!(movie.primary_image_tag.is_none());
+    }
 }

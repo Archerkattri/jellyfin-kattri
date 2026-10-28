@@ -461,7 +461,8 @@ impl Page {
     pub(crate) const fn item_types(self) -> Option<&'static [&'static str]> {
         match self {
             Self::Movies => Some(&["Movie"]),
-            Self::Series => Some(&["Series", "Episode"]),
+            // Shows only, as in Jellyfin's own clients; episodes are reached through each show.
+            Self::Series => Some(&["Series"]),
             Self::Music => Some(&["Audio", "MusicAlbum"]),
             Self::Photos => Some(&["Photo", "Folder", "CollectionFolder"]),
             Self::Playlists => Some(&["Playlist"]),
@@ -4915,7 +4916,7 @@ impl KattriApp {
         for (item_id, image_tag) in requests {
             let key = (item_id.clone(), image_tag.clone());
             let item_exists = self.artwork_items().any(|item| {
-                item.id == item_id && item.primary_image_tag.as_deref() == Some(&image_tag)
+                item.artwork_id == item_id && item.primary_image_tag.as_deref() == Some(&image_tag)
             });
             if !item_exists {
                 continue;
@@ -4926,7 +4927,7 @@ impl KattriApp {
                 .insert(key.clone(), self.next_artwork_access_tick);
 
             let already_loaded = self.artwork_items().any(|item| {
-                item.id == item_id
+                item.artwork_id == item_id
                     && item.primary_image_tag.as_deref() == Some(&image_tag)
                     && item.artwork_texture.is_some()
             });
@@ -6438,25 +6439,28 @@ impl KattriApp {
                     } else if let Some((expected_item_id, expected_tag)) =
                         self.pending_artwork_requests.remove(&request_id)
                         && expected_item_id == item_id
-                        && let Some(item) =
-                            self.items
-                                .iter_mut()
-                                .chain(self.home.media_mut())
-                                .find(|item| {
-                                    item.id == item_id
-                                        && item.primary_image_tag.as_deref()
-                                            == Some(expected_tag.as_str())
-                                })
                     {
-                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                            [width as usize, height as usize],
-                            &rgba,
-                        );
-                        item.artwork_texture = Some(ctx.load_texture(
-                            format!("jellyfin-primary:{item_id}:{expected_tag}"),
-                            color_image,
-                            egui::TextureOptions::LINEAR,
-                        ));
+                        // Episodes of one series can share the series poster, so every entry
+                        // showing this image gets the texture.
+                        let mut texture: Option<egui::TextureHandle> = None;
+                        for item in self.items.iter_mut().chain(self.home.media_mut()) {
+                            if item.artwork_id != item_id
+                                || item.primary_image_tag.as_deref() != Some(expected_tag.as_str())
+                            {
+                                continue;
+                            }
+                            let texture = texture.get_or_insert_with(|| {
+                                ctx.load_texture(
+                                    format!("jellyfin-primary:{item_id}:{expected_tag}"),
+                                    egui::ColorImage::from_rgba_unmultiplied(
+                                        [width as usize, height as usize],
+                                        &rgba,
+                                    ),
+                                    egui::TextureOptions::LINEAR,
+                                )
+                            });
+                            item.artwork_texture = Some(texture.clone());
+                        }
                     }
                     self.trim_artwork_cache();
                 }
@@ -7526,7 +7530,7 @@ fn trim_artwork_textures(
         .filter(|item| item.artwork_texture.is_some())
         .filter_map(|item| {
             item.primary_image_tag.as_ref().map(|tag| {
-                let key = (item.id.clone(), tag.clone());
+                let key = (item.artwork_id.clone(), tag.clone());
                 let tick = access_ticks.get(&key).copied().unwrap_or(0);
                 (tick, key)
             })
@@ -7539,7 +7543,9 @@ fn trim_artwork_textures(
         .take(loaded_count - MAX_CACHED_ARTWORK_TEXTURES)
     {
         for item in items.iter_mut() {
-            if item.id == item_id && item.primary_image_tag.as_deref() == Some(image_tag.as_str()) {
+            if item.artwork_id == item_id
+                && item.primary_image_tag.as_deref() == Some(image_tag.as_str())
+            {
                 item.artwork_texture = None;
             }
         }
@@ -7875,10 +7881,7 @@ mod page_query_tests {
     fn library_categories_map_to_jellyfin_server_item_types() {
         assert_eq!(Page::Home.item_types(), None);
         assert_eq!(Page::Movies.item_types(), Some(["Movie"].as_slice()));
-        assert_eq!(
-            Page::Series.item_types(),
-            Some(["Series", "Episode"].as_slice())
-        );
+        assert_eq!(Page::Series.item_types(), Some(["Series"].as_slice()));
         assert_eq!(
             Page::Music.item_types(),
             Some(["Audio", "MusicAlbum"].as_slice())
@@ -7919,6 +7922,7 @@ mod home_navigation_tests {
             parent_index_number: None,
             index_number: None,
             series_id: None,
+            series_primary_image_tag: None,
             genres: None,
             people: None,
             primary_image_aspect_ratio: None,
@@ -9347,6 +9351,8 @@ mod artwork_cache_tests {
             access_ticks.insert((id.clone(), tag.clone()), index as u64);
             attempted.insert((id.clone(), tag.clone()));
             items.push(MediaItem {
+                artwork_id: id.clone(),
+                backdrop_id: id.clone(),
                 id,
                 title: format!("Title {index}"),
                 remote_type: Some("Movie".into()),

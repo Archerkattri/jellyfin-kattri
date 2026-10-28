@@ -779,7 +779,7 @@ impl<'session> GlHost<'session> {
                         ui.label("Install a matching libmpv runtime to enable the local video surface.");
                     } else {
                         ui.label(
-                            "Pass a local file as the first argument, or choose a server-transcoded stream from an item.",
+                            "Pass a local file as the first argument, or choose a stream from an item.",
                         );
                     }
                     ui.label(
@@ -1842,6 +1842,13 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
                 );
             }
             if let Some(deadline) = host.window_geometry_deadline() {
+                self.redraw_at = Some(
+                    self.redraw_at
+                        .map_or(deadline, |current| current.min(deadline)),
+                );
+            }
+            #[cfg(debug_assertions)]
+            if let Some(deadline) = debug_harness::poll_deadline() {
                 self.redraw_at = Some(
                     self.redraw_at
                         .map_or(deadline, |current| current.min(deadline)),

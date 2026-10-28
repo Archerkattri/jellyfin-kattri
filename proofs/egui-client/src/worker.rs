@@ -4191,6 +4191,23 @@ async fn decode_artwork(
     .map_err(|_| ())?
 }
 
+/// Backdrops fill the hero and the detail header, so they get larger limits than card
+/// artwork (which is capped at 512x768 and would reject a full-width backdrop).
+async fn decode_backdrop(bytes: Vec<u8>, events: &WorkerSink) -> Result<(u32, u32, Vec<u8>), ()> {
+    let permit = events
+        .decoders
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| ())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        decode_backdrop_artwork(bytes)
+    })
+    .await
+    .map_err(|_| ())?
+}
+
 async fn decode_live_tv_logo(
     bytes: Vec<u8>,
     events: &WorkerSink,
@@ -4353,6 +4370,31 @@ fn decode_primary_artwork(bytes: Vec<u8>) -> Result<(u32, u32, Vec<u8>), ()> {
     Ok((width, height, image.into_raw()))
 }
 
+fn decode_backdrop_artwork(bytes: Vec<u8>) -> Result<(u32, u32, Vec<u8>), ()> {
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| ())?;
+    if !matches!(reader.format(), Some(ImageFormat::Jpeg | ImageFormat::Png)) {
+        return Err(());
+    }
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(BACKDROP_MAX_WIDTH);
+    limits.max_image_height = Some(BACKDROP_MAX_HEIGHT);
+    limits.max_alloc = Some(u64::from(BACKDROP_MAX_WIDTH) * u64::from(BACKDROP_MAX_HEIGHT) * 4);
+    reader.limits(limits);
+    let image = reader.decode().map_err(|_| ())?.to_rgba8();
+    let (width, height) = (image.width(), image.height());
+    if width == 0 || height == 0 {
+        return Err(());
+    }
+    Ok((width, height, image.into_raw()))
+}
+
+/// The request asks for 1920 wide; these bounds also accept a server that ignores maxWidth
+/// on a 4K backdrop.
+const BACKDROP_MAX_WIDTH: u32 = 3840;
+const BACKDROP_MAX_HEIGHT: u32 = 2160;
+
 fn decode_person_artwork(bytes: Vec<u8>) -> Result<(u32, u32, Vec<u8>), ()> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
@@ -4514,7 +4556,7 @@ async fn start_backdrop_artwork_load(
 
     let result = (client.get_backdrop_image(&session, &item_id)).await;
     match result {
-        Ok(bytes) => match decode_artwork(bytes, false, &events).await {
+        Ok(bytes) => match decode_backdrop(bytes, &events).await {
             Ok((width, height, rgba)) => {
                 send_event(
                     &events,

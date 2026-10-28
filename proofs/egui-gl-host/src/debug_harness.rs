@@ -151,6 +151,13 @@ fn parse_command(line: &str, window: &winit::window::Window) {
         .extend(batches);
 }
 
+/// An idle window paints nothing, so `commands.txt` and `screenshot.request` would wait for
+/// the next real input. While the harness is active the host wakes on this deadline instead.
+pub fn poll_deadline() -> Option<std::time::Instant> {
+    debug_dir()?;
+    Some(std::time::Instant::now() + std::time::Duration::from_millis(150))
+}
+
 /// Reads `commands.txt` if present and adds one pending input batch to `input.events`.
 pub fn inject(input: &mut egui::RawInput, window: &winit::window::Window, ctx: &egui::Context) {
     let Some(dir) = debug_dir() else { return };
