@@ -97,23 +97,53 @@ credentials and server addresses; nothing is uploaded anywhere.
 
 Kattri is an early development build, not a production release. Public CI is green
 on Windows x64/ARM64, macOS, and Linux x64/ARM64. Windows x64 has been exercised
-against Jellyfin 12.0.0 for browsing, search, PlaybackInfo, native video rendering,
+against Jellyfin 12.x for browsing, search, PlaybackInfo, native video rendering,
 and authorized stream-only relay playback. A separate Windows RTX 4060 run used
 NVDEC and rendered an HDR10 source tone-mapped to SDR. These checks do not establish
 complete playback, release readiness, or feature parity with Jellyfin Web/Desktop.
+
+Last visual pass (2026-10-27, Windows x64, real server, stream-only): home, all items,
+movies, series, music, photos, playlists, downloads, Live TV, Watch Together and
+settings render; an episode played by DirectPlay with hardware decoding (d3d11va) and
+WASAPI audio. Fixed in that pass: episode cards without their own image now use the
+series poster, the home hero uses a full-resolution series backdrop, and the Series
+page lists shows instead of episodes.
+
+### Feature parity with Jellyfin Web
+
+A source-level audit against jellyfin-web (2026-10-27) found large gaps. Kattri is not
+yet a replacement for the official clients. The main missing pieces:
+
+- **Item context menu:** no right-click menu on cards or rows. Missing actions include
+  play next / add to queue, shuffle, add to collection, go to series/season/album,
+  media info, copy stream URL, multi-select and, for administrators, edit metadata,
+  identify, refresh metadata, edit images, edit subtitles and delete.
+- **Episodes and series:** no episode details page (clicking an episode plays it), episode
+  rows have no thumbnail, overview or progress, the series page has no Play / Next Up /
+  Shuffle, and the player has no previous/next episode, Up Next or auto-play next.
+- **Player OSD:** no title, volume, fullscreen or chapter buttons; no trickplay
+  thumbnails; quality is not selectable in the player.
+- **Library views:** one flat grid per type. Missing Suggestions, Genres, Studios,
+  Collections, Upcoming and Episodes tabs, the alphabet picker and view modes; music has
+  no album/artist views; books, home videos and music videos have no views.
+- **Details pages:** no version picker, extras/special features, trailers, theme media,
+  "more from this season", lyrics or media-info dialog.
+- **Other:** no photo slideshow, Live TV recordings and timers, forgot-password flow,
+  home-screen section preferences or library management; the dashboard is admin-lite.
 
 ### Work still required for a production release
 
 **Playback and reliability**
 
-- Add position-safe recovery after a stream has started. Startup fallback and
-  generation-aware replacement handling exist; mid-stream retries remain open.
+- Validate mid-stream recovery in the running app. A movie or episode that fails after
+  it starts now reopens the same source at its last position (then other sources),
+  bounded to three reopens; this is unit-tested, not exercised against a real failure.
 - Validate the complete graphical path: visible video, audible audio, pause, seek,
   speed, chapters, tracks, subtitles, stop, and clean shutdown.
 - Exercise relay replacement in the running graphical host. Unit and software/null
   libmpv replacement-event checks pass, but the full rendered relay flow is unverified.
-- Address the 4,096-entry HLS alias limit for long rolling playlists without breaking
-  late segment reads or seeking. The limit currently fails safely and remains.
+- Run a long live HLS session. The relay now evicts least-recently-used aliases past
+  4,096 instead of refusing (tested with 40,960 rolling segments in unit tests).
 - Exercise DirectPlay, DirectStream, and Transcode end to end. Previous server samples
   did not offer DirectStream.
 - Validate resume, start/progress/stop reporting, failure reporting, and watched-state
@@ -160,11 +190,14 @@ complete playback, release readiness, or feature parity with Jellyfin Web/Deskto
 
 **Distribution and release gates**
 
-- Pin Linux and macOS libmpv artifacts with checksums. Their build workflow exists,
-  while packaging manifest entries remain TODO.
+- Play with the bundled libmpv on clean Linux and macOS machines. All four platforms
+  are now pinned with checksums (Linux x64 and macOS universal from release
+  `libmpv-v0.41.0-abe7469`); the AppImage now bundles the pinned build.
 - Build and test Windows x64/ARM64, macOS universal, Linux packages, AppImage, and
   Flatpak on clean systems.
-- Complete Windows signing and macOS signing/notarization; verify each artifact.
+- 1.0 ships unsigned on Windows (owner decision); complete macOS signing/notarization
+  and verify each artifact. The Windows MSI is dual-purpose (per user by default,
+  per machine with `ALLUSERS=1`).
 - Exercise tag-based packaging, uploads, checksums, and publication on the release head.
 - Verify the final embedded SBOM, shipped license notices, and reproducible-build result.
 - Review three ignored Linux accessibility dependency advisories and record the release
