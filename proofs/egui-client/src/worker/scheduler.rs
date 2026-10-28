@@ -180,7 +180,8 @@ impl WorkerCommand {
             | Self::LoadPhotoThumbnail { .. }
             | Self::LoadPhotoFullSize { .. }
             | Self::GetBackdropArtwork { .. }
-            | Self::GetLiveTvLogo { .. } => Lane::Artwork,
+            | Self::GetLiveTvLogo { .. }
+            | Self::MetadataThumbnail { .. } => Lane::Artwork,
             command if command.read_key().is_some() => Lane::Read,
             _ => Lane::Control,
         }

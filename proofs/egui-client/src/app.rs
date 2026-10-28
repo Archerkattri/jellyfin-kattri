@@ -570,6 +570,12 @@ pub struct KattriApp {
     pub(crate) pending_delete: Option<(String, String)>,
     /// Admin actions in flight: request id to item title.
     admin_requests: HashMap<u64, String>,
+    /// The open administrator metadata, identify or image dialog.
+    pub(crate) metadata_editor: Option<crate::ui::metadata_editor::MetadataEditor>,
+    /// The dialog request in flight; replies to older requests are ignored.
+    metadata_editor_request: u64,
+    /// Dialog previews in flight: request id to preview key.
+    metadata_thumbnail_requests: HashMap<u64, String>,
     pub(crate) items: Vec<crate::catalog::MediaItem>,
     pub(crate) total_record_count: Option<u32>,
     pub(crate) collection_runtime: CollectionRuntime,
@@ -1067,6 +1073,9 @@ impl KattriApp {
             user_is_admin: false,
             pending_delete: None,
             admin_requests: HashMap::new(),
+            metadata_editor: None,
+            metadata_editor_request: 0,
+            metadata_thumbnail_requests: HashMap::new(),
             items: Vec::new(),
             total_record_count: None,
             collection_runtime: CollectionRuntime::default(),
@@ -6714,6 +6723,31 @@ impl KattriApp {
                         self.forgot_password_notice = Some(forgot_password_message(&result));
                     }
                 }
+                WorkerEvent::MetadataFinished { request_id, result } => {
+                    if request_id == self.metadata_editor_request
+                        && let Some(editor) = self.metadata_editor.as_mut()
+                    {
+                        let outcome = editor.on_reply(result);
+                        self.apply_metadata_outcome(outcome);
+                    }
+                }
+                WorkerEvent::MetadataThumbnailLoaded { request_id, image } => {
+                    if let Some(key) = self.metadata_thumbnail_requests.remove(&request_id)
+                        && let Some((width, height, rgba)) = image
+                        && let Some(editor) = self.metadata_editor.as_mut()
+                    {
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                            [width as usize, height as usize],
+                            &rgba,
+                        );
+                        let texture = ctx.load_texture(
+                            format!("kattri-metadata:{key}"),
+                            color_image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        editor.thumbnail_loaded(key, texture);
+                    }
+                }
                 WorkerEvent::ItemAdminFinished {
                     request_id,
                     item_id,
@@ -8901,6 +8935,7 @@ impl KattriApp {
             self.apply_item_menu_action(target, action);
         }
         self.draw_delete_confirmation(&ctx);
+        self.draw_metadata_editor(&ctx);
         self.draw_toast(&ctx);
     }
 
@@ -8921,6 +8956,68 @@ impl KattriApp {
                 .is_ok()
         }) {
             self.admin_requests.insert(request_id, title);
+        }
+    }
+
+    /// Opens an administrator metadata dialog for one item.
+    fn open_metadata_editor(
+        &mut self,
+        target: crate::ui::item_menu::ItemMenuTarget,
+        mode: crate::ui::metadata_editor::EditorMode,
+    ) {
+        if !self.user_is_admin {
+            return;
+        }
+        self.metadata_thumbnail_requests.clear();
+        let (editor, outcome) =
+            crate::ui::metadata_editor::MetadataEditor::open(target.item_id, target.title, mode);
+        self.metadata_editor = Some(editor);
+        self.apply_metadata_outcome(outcome);
+    }
+
+    fn draw_metadata_editor(&mut self, ctx: &egui::Context) {
+        let Some(editor) = self.metadata_editor.as_mut() else {
+            return;
+        };
+        let outcome = editor.show(ctx);
+        self.apply_metadata_outcome(outcome);
+    }
+
+    /// Sends a dialog's requests to the worker and closes it when asked.
+    fn apply_metadata_outcome(&mut self, outcome: crate::ui::metadata_editor::EditorOutcome) {
+        use crate::ui::metadata_editor::EditorRequest;
+        let Some(item_id) = self
+            .metadata_editor
+            .as_ref()
+            .map(|editor| editor.item_id.clone())
+        else {
+            return;
+        };
+        for request in outcome.requests {
+            let request_id = self.allocate_request_id();
+            let Some(worker) = self.worker.as_ref() else {
+                break;
+            };
+            match request {
+                EditorRequest::Op(op) => {
+                    if worker.metadata(request_id, item_id.clone(), op).is_ok() {
+                        self.metadata_editor_request = request_id;
+                    }
+                }
+                EditorRequest::Thumbnail { key, source } => {
+                    if worker.metadata_thumbnail(request_id, source).is_ok() {
+                        self.metadata_thumbnail_requests.insert(request_id, key);
+                    }
+                }
+            }
+        }
+        if let Some(toast) = outcome.close {
+            self.metadata_editor = None;
+            self.metadata_editor_request = 0;
+            self.metadata_thumbnail_requests.clear();
+            if let Some(toast) = toast {
+                self.show_toast(toast);
+            }
         }
     }
 
@@ -9023,6 +9120,15 @@ impl KattriApp {
             }
             ItemMenuAction::Delete => {
                 self.pending_delete = Some((target.item_id, target.title));
+            }
+            ItemMenuAction::EditMetadata => {
+                self.open_metadata_editor(target, crate::ui::metadata_editor::EditorMode::Edit)
+            }
+            ItemMenuAction::Identify => {
+                self.open_metadata_editor(target, crate::ui::metadata_editor::EditorMode::Identify)
+            }
+            ItemMenuAction::EditImages => {
+                self.open_metadata_editor(target, crate::ui::metadata_editor::EditorMode::Images)
             }
             ItemMenuAction::AddToPlaylist => {
                 let Some(playlist_id) = target.list_id else {

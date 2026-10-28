@@ -8,6 +8,7 @@ pub mod home;
 pub(crate) mod item_menu;
 pub mod live_tv;
 mod media_source;
+pub(crate) mod metadata_editor;
 pub mod music;
 pub(crate) mod open_url;
 mod people;

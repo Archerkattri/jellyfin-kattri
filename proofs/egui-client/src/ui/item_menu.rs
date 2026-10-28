@@ -44,6 +44,12 @@ pub(crate) enum ItemMenuAction {
     Delete,
     /// Administrators: add the item to the collection in [`ItemMenuTarget::list_id`].
     AddToCollection,
+    /// Administrators: open the metadata editor.
+    EditMetadata,
+    /// Administrators: match the item against the server's metadata providers.
+    Identify,
+    /// Administrators: open the image editor.
+    EditImages,
 }
 
 /// Entries offered for `item`, in menu order. Folders and playlists only open; series and
@@ -108,6 +114,9 @@ fn label(action: ItemMenuAction) -> &'static str {
         ItemMenuAction::RefreshMetadata => ids::ITEM_MENU_REFRESH_METADATA,
         ItemMenuAction::Delete => ids::ITEM_MENU_DELETE,
         ItemMenuAction::AddToCollection => ids::ITEM_MENU_ADD_TO_COLLECTION,
+        ItemMenuAction::EditMetadata => ids::ITEM_MENU_EDIT_METADATA,
+        ItemMenuAction::Identify => ids::ITEM_MENU_IDENTIFY,
+        ItemMenuAction::EditImages => ids::ITEM_MENU_EDIT_IMAGES,
     })
 }
 
@@ -137,13 +146,31 @@ pub(crate) fn publish_admin(ctx: &egui::Context, admin: bool) {
     ctx.data_mut(|data| data.insert_temp(admin_id(), admin));
 }
 
-/// Administrator entries for `item`: refresh and delete for media, nothing for folders.
-pub(crate) fn admin_entries(item: &MediaItem) -> &'static [ItemMenuAction] {
-    if matches!(item.kind, MediaKind::Folder | MediaKind::Other) {
-        &[ItemMenuAction::RefreshMetadata]
-    } else {
-        &[ItemMenuAction::RefreshMetadata, ItemMenuAction::Delete]
+/// Administrator entries for `item`, as Jellyfin Web offers them: edit metadata and images
+/// for everything but library views, identify for the types the providers can match, refresh,
+/// and delete for media.
+pub(crate) fn admin_entries(item: &MediaItem) -> Vec<ItemMenuAction> {
+    let view = matches!(
+        item.remote_type.as_deref(),
+        Some("UserView" | "CollectionFolder" | "UserRootFolder")
+    );
+    let mut entries = Vec::new();
+    if !view {
+        entries.push(ItemMenuAction::EditMetadata);
+        if item
+            .remote_type
+            .as_deref()
+            .is_some_and(jellyfin_api::is_identifiable)
+        {
+            entries.push(ItemMenuAction::Identify);
+        }
+        entries.push(ItemMenuAction::EditImages);
     }
+    entries.push(ItemMenuAction::RefreshMetadata);
+    if !matches!(item.kind, MediaKind::Folder | MediaKind::Other) {
+        entries.push(ItemMenuAction::Delete);
+    }
+    entries
 }
 
 /// Makes `playlists` available to every card menu drawn after this call.
@@ -232,7 +259,7 @@ fn show(ui: &mut egui::Ui, item: &MediaItem) {
         {
             list_submenu(ui, item, ItemMenuAction::AddToCollection, &collections);
         }
-        for &action in admin_entries(item) {
+        for action in admin_entries(item) {
             if ui.button(label(action)).clicked() {
                 choose(ui, item, action, None);
                 ui.close();
@@ -381,6 +408,26 @@ mod tests {
         };
         assert!(frame(&ctx, vec![shift_f10], false), "opens under the card");
         assert!(frame(&ctx, Vec::new(), false), "and stays open");
+    }
+
+    #[test]
+    fn admin_entries_follow_jellyfin_web() {
+        let movie = item(serde_json::json!({"Id": "m", "Name": "Film", "Type": "Movie"}));
+        assert_eq!(
+            admin_entries(&movie),
+            [
+                ItemMenuAction::EditMetadata,
+                ItemMenuAction::Identify,
+                ItemMenuAction::EditImages,
+                ItemMenuAction::RefreshMetadata,
+                ItemMenuAction::Delete,
+            ]
+        );
+        let episode = item(serde_json::json!({"Id": "e", "Name": "Pilot", "Type": "Episode"}));
+        assert!(!admin_entries(&episode).contains(&ItemMenuAction::Identify));
+        let view =
+            item(serde_json::json!({"Id": "v", "Name": "Films", "Type": "CollectionFolder"}));
+        assert_eq!(admin_entries(&view), [ItemMenuAction::RefreshMetadata]);
     }
 
     #[test]

@@ -812,6 +812,57 @@ pub const TOAST_ADMIN_FAILED: &str = "toast.admin_failed";
 pub const TOAST_ADDED_TO_QUEUE: &str = "toast.added_to_queue";
 pub const TOAST_ADDED_TO_PLAYLIST: &str = "toast.added_to_playlist";
 pub const TOAST_ADD_TO_PLAYLIST_FAILED: &str = "toast.add_to_playlist_failed";
+pub const ITEM_MENU_EDIT_METADATA: &str = "item_menu.edit_metadata";
+pub const ITEM_MENU_IDENTIFY: &str = "item_menu.identify";
+pub const ITEM_MENU_EDIT_IMAGES: &str = "item_menu.edit_images";
+pub const METADATA_EDIT_TITLE: &str = "metadata.edit.title";
+pub const METADATA_IDENTIFY_TITLE: &str = "metadata.identify.title";
+pub const METADATA_IMAGES_TITLE: &str = "metadata.images.title";
+pub const METADATA_LOADING: &str = "metadata.loading";
+pub const METADATA_ERROR_FAILED: &str = "metadata.error.failed";
+pub const METADATA_ERROR_FORBIDDEN: &str = "metadata.error.forbidden";
+pub const METADATA_ERROR_NAME_REQUIRED: &str = "metadata.error.name_required";
+pub const METADATA_ERROR_YEAR: &str = "metadata.error.year";
+pub const METADATA_ERROR_DATE: &str = "metadata.error.date";
+pub const METADATA_ERROR_RATING: &str = "metadata.error.rating";
+pub const METADATA_ERROR_NAME_OR_ID: &str = "metadata.error.name_or_id";
+pub const METADATA_FIELD_NAME: &str = "metadata.field.name";
+pub const METADATA_FIELD_SORT_NAME: &str = "metadata.field.sort_name";
+pub const METADATA_FIELD_ORIGINAL_TITLE: &str = "metadata.field.original_title";
+pub const METADATA_FIELD_OVERVIEW: &str = "metadata.field.overview";
+pub const METADATA_FIELD_YEAR: &str = "metadata.field.year";
+pub const METADATA_FIELD_PREMIERE_DATE: &str = "metadata.field.premiere_date";
+pub const METADATA_FIELD_OFFICIAL_RATING: &str = "metadata.field.official_rating";
+pub const METADATA_FIELD_COMMUNITY_RATING: &str = "metadata.field.community_rating";
+pub const METADATA_FIELD_GENRES: &str = "metadata.field.genres";
+pub const METADATA_FIELD_TAGS: &str = "metadata.field.tags";
+pub const METADATA_FIELD_STUDIOS: &str = "metadata.field.studios";
+pub const METADATA_FIELD_PEOPLE: &str = "metadata.field.people";
+pub const METADATA_LIST_HINT: &str = "metadata.list_hint";
+pub const METADATA_PEOPLE_EMPTY: &str = "metadata.people_empty";
+pub const METADATA_LOCK_DATA: &str = "metadata.lock_data";
+pub const METADATA_LOCKED_FIELDS: &str = "metadata.locked_fields";
+pub const METADATA_LOCK_PRODUCTION_LOCATIONS: &str = "metadata.lock.production_locations";
+pub const METADATA_LOCK_RUNTIME: &str = "metadata.lock.runtime";
+pub const METADATA_SAVE: &str = "metadata.save";
+pub const METADATA_CANCEL: &str = "metadata.cancel";
+pub const METADATA_CLOSE: &str = "metadata.close";
+pub const METADATA_SEARCH: &str = "metadata.search";
+pub const METADATA_NOT_IDENTIFIABLE: &str = "metadata.not_identifiable";
+pub const METADATA_NO_RESULTS: &str = "metadata.no_results";
+pub const METADATA_REPLACE_IMAGES: &str = "metadata.replace_images";
+pub const METADATA_APPLY: &str = "metadata.apply";
+pub const METADATA_CURRENT_IMAGES: &str = "metadata.current_images";
+pub const METADATA_NO_IMAGES: &str = "metadata.no_images";
+pub const METADATA_DELETE_IMAGE: &str = "metadata.delete_image";
+pub const METADATA_DELETE_IMAGE_CONFIRM: &str = "metadata.delete_image_confirm";
+pub const METADATA_BROWSE_REMOTE: &str = "metadata.browse_remote";
+pub const METADATA_IMAGE_TYPE: &str = "metadata.image_type";
+pub const METADATA_ALL_LANGUAGES: &str = "metadata.all_languages";
+pub const METADATA_REMOTE_EMPTY: &str = "metadata.remote_empty";
+pub const METADATA_DOWNLOAD: &str = "metadata.download";
+pub const TOAST_METADATA_SAVED: &str = "toast.metadata_saved";
+pub const TOAST_IDENTIFY_APPLIED: &str = "toast.identify_applied";
 
 pub const ALL: &[&str] = &[
     CONNECT_WORKER_UNAVAILABLE,
@@ -1617,4 +1668,55 @@ pub const ALL: &[&str] = &[
     DETAIL_ERROR_WATCHED_FAILED,
     DETAIL_ERROR_FAVORITE_FAILED,
     PLAYBACK_ERROR_SESSION_UPDATE,
+    ITEM_MENU_EDIT_METADATA,
+    ITEM_MENU_IDENTIFY,
+    ITEM_MENU_EDIT_IMAGES,
+    METADATA_EDIT_TITLE,
+    METADATA_IDENTIFY_TITLE,
+    METADATA_IMAGES_TITLE,
+    METADATA_LOADING,
+    METADATA_ERROR_FAILED,
+    METADATA_ERROR_FORBIDDEN,
+    METADATA_ERROR_NAME_REQUIRED,
+    METADATA_ERROR_YEAR,
+    METADATA_ERROR_DATE,
+    METADATA_ERROR_RATING,
+    METADATA_ERROR_NAME_OR_ID,
+    METADATA_FIELD_NAME,
+    METADATA_FIELD_SORT_NAME,
+    METADATA_FIELD_ORIGINAL_TITLE,
+    METADATA_FIELD_OVERVIEW,
+    METADATA_FIELD_YEAR,
+    METADATA_FIELD_PREMIERE_DATE,
+    METADATA_FIELD_OFFICIAL_RATING,
+    METADATA_FIELD_COMMUNITY_RATING,
+    METADATA_FIELD_GENRES,
+    METADATA_FIELD_TAGS,
+    METADATA_FIELD_STUDIOS,
+    METADATA_FIELD_PEOPLE,
+    METADATA_LIST_HINT,
+    METADATA_PEOPLE_EMPTY,
+    METADATA_LOCK_DATA,
+    METADATA_LOCKED_FIELDS,
+    METADATA_LOCK_PRODUCTION_LOCATIONS,
+    METADATA_LOCK_RUNTIME,
+    METADATA_SAVE,
+    METADATA_CANCEL,
+    METADATA_CLOSE,
+    METADATA_SEARCH,
+    METADATA_NOT_IDENTIFIABLE,
+    METADATA_NO_RESULTS,
+    METADATA_REPLACE_IMAGES,
+    METADATA_APPLY,
+    METADATA_CURRENT_IMAGES,
+    METADATA_NO_IMAGES,
+    METADATA_DELETE_IMAGE,
+    METADATA_DELETE_IMAGE_CONFIRM,
+    METADATA_BROWSE_REMOTE,
+    METADATA_IMAGE_TYPE,
+    METADATA_ALL_LANGUAGES,
+    METADATA_REMOTE_EMPTY,
+    METADATA_DOWNLOAD,
+    TOAST_METADATA_SAVED,
+    TOAST_IDENTIFY_APPLIED,
 ];

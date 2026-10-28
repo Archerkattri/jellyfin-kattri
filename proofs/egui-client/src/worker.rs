@@ -173,6 +173,62 @@ pub(crate) enum ItemAdminAction {
     AddToCollection,
 }
 
+/// One step of an administrator metadata dialog (edit, identify or images).
+#[derive(Clone, Debug)]
+pub(crate) enum MetadataOp {
+    Load,
+    Save {
+        item: Box<jellyfin_api::EditableItem>,
+        fields: Box<jellyfin_api::MetadataFields>,
+    },
+    Search {
+        item_type: String,
+        query: jellyfin_api::RemoteSearchQuery,
+    },
+    Apply {
+        result: Box<jellyfin_api::RemoteSearchResult>,
+        replace_images: bool,
+    },
+    ListImages,
+    RemoteImages {
+        image_type: jellyfin_api::ImageType,
+        all_languages: bool,
+    },
+    Download {
+        image_type: jellyfin_api::ImageType,
+        url: String,
+    },
+    DeleteImage {
+        image_type: jellyfin_api::ImageType,
+        index: u32,
+    },
+}
+
+/// The server's answer to a [`MetadataOp`].
+#[derive(Debug)]
+pub(crate) enum MetadataReply {
+    Loaded(Box<jellyfin_api::EditableItem>),
+    Saved,
+    SearchResults(Vec<jellyfin_api::RemoteSearchResult>),
+    Applied,
+    Images(Vec<jellyfin_api::ItemImage>),
+    RemoteImages(Vec<jellyfin_api::RemoteImage>),
+    /// An image was downloaded or deleted; the list needs a reload.
+    ImagesChanged,
+}
+
+/// Where a metadata dialog preview comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ThumbnailSource {
+    /// One of the item's current images, from the Jellyfin server.
+    Item {
+        item_id: String,
+        image: jellyfin_api::ItemImage,
+    },
+    /// A provider address; fetched without Jellyfin credentials.
+    Remote(String),
+}
+
 /// A change to the Live TV recording schedule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TimerChange {
@@ -331,6 +387,16 @@ pub enum WorkerEvent {
     ForgotPasswordFinished {
         request_id: u64,
         result: Result<jellyfin_api::ForgotPasswordResult, ErrorClass>,
+    },
+    /// A metadata dialog request finished.
+    MetadataFinished {
+        request_id: u64,
+        result: Result<MetadataReply, ErrorClass>,
+    },
+    /// A metadata dialog preview, decoded. `None` when it could not be loaded.
+    MetadataThumbnailLoaded {
+        request_id: u64,
+        image: Option<(u32, u32, Vec<u8>)>,
     },
     /// An administrator action on one item finished.
     ItemAdminFinished {
@@ -837,6 +903,15 @@ enum WorkerCommand {
     },
     ListMenuCollections {
         request_id: u64,
+    },
+    Metadata {
+        request_id: u64,
+        item_id: String,
+        op: MetadataOp,
+    },
+    MetadataThumbnail {
+        request_id: u64,
+        source: ThumbnailSource,
     },
     ShuffleSeries {
         request_id: u64,
@@ -1368,6 +1443,28 @@ impl ApiWorker {
             action,
             collection_id,
         })
+    }
+
+    pub(crate) fn metadata(
+        &self,
+        request_id: u64,
+        item_id: String,
+        op: MetadataOp,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::Metadata {
+            request_id,
+            item_id,
+            op,
+        })
+    }
+
+    pub(crate) fn metadata_thumbnail(
+        &self,
+        request_id: u64,
+        source: ThumbnailSource,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::MetadataThumbnail { request_id, source })
     }
 
     pub(crate) fn get_lyrics(
@@ -3342,6 +3439,59 @@ async fn execute_command(
                 )
                 .await
             }
+            WorkerCommand::Metadata {
+                request_id,
+                item_id,
+                op,
+            } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        run_metadata_op(client, session, &item_id, op).await
+                    }
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                if matches!(result, Err(ApiError::ReauthenticationRequired)) {
+                    send_event(
+                        events,
+                        ctx,
+                        WorkerEvent::ReauthenticationRequired {
+                            request_id,
+                            message: "The server requires you to sign in again.".into(),
+                        },
+                    )
+                    .await;
+                }
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::MetadataFinished {
+                        request_id,
+                        result: result.map_err(|error| error.classify()),
+                    },
+                )
+                .await
+            }
+            WorkerCommand::MetadataThumbnail { request_id, source } => {
+                let bytes = match (client.as_ref(), session.as_ref(), &source) {
+                    (Some(client), Some(session), ThumbnailSource::Item { item_id, image }) => {
+                        client.get_item_image(session, item_id, image).await.ok()
+                    }
+                    (Some(client), _, ThumbnailSource::Remote(url)) => {
+                        client.get_remote_thumbnail(url).await.ok()
+                    }
+                    _ => None,
+                };
+                let image = match bytes {
+                    Some(bytes) => decode_metadata_thumbnail(bytes, events).await.ok(),
+                    None => None,
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::MetadataThumbnailLoaded { request_id, image },
+                )
+                .await
+            }
             WorkerCommand::ListGenres {
                 request_id,
                 parent_id,
@@ -4786,6 +4936,109 @@ async fn execute_command(
         clock_sampler,
         saved_sign_in,
     };
+}
+
+async fn run_metadata_op(
+    client: &JellyfinClient,
+    session: &Session,
+    item_id: &str,
+    op: MetadataOp,
+) -> Result<MetadataReply, ApiError> {
+    Ok(match op {
+        MetadataOp::Load => {
+            MetadataReply::Loaded(Box::new(client.get_item_metadata(session, item_id).await?))
+        }
+        MetadataOp::Save { item, fields } => {
+            client.update_item_metadata(session, &item, &fields).await?;
+            MetadataReply::Saved
+        }
+        MetadataOp::Search { item_type, query } => MetadataReply::SearchResults(
+            client
+                .remote_search(session, item_id, &item_type, &query)
+                .await?,
+        ),
+        MetadataOp::Apply {
+            result,
+            replace_images,
+        } => {
+            client
+                .apply_remote_search_result(session, item_id, &result, replace_images)
+                .await?;
+            MetadataReply::Applied
+        }
+        MetadataOp::ListImages => {
+            MetadataReply::Images(client.item_images(session, item_id).await?)
+        }
+        MetadataOp::RemoteImages {
+            image_type,
+            all_languages,
+        } => MetadataReply::RemoteImages(
+            client
+                .remote_images(session, item_id, image_type, all_languages)
+                .await?,
+        ),
+        MetadataOp::Download { image_type, url } => {
+            client
+                .download_remote_image(session, item_id, image_type, &url)
+                .await?;
+            MetadataReply::ImagesChanged
+        }
+        MetadataOp::DeleteImage { image_type, index } => {
+            client
+                .delete_item_image(session, item_id, image_type, index)
+                .await?;
+            MetadataReply::ImagesChanged
+        }
+    })
+}
+
+async fn decode_metadata_thumbnail(
+    bytes: Vec<u8>,
+    events: &WorkerSink,
+) -> Result<(u32, u32, Vec<u8>), ()> {
+    let permit = events
+        .decoders
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| ())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        decode_metadata_thumbnail_bytes(bytes)
+    })
+    .await
+    .map_err(|_| ())?
+}
+
+/// Provider previews can be poster-sized; they are decoded with bounded limits, then shrunk
+/// to a small preview so a dialog of results keeps little texture memory.
+fn decode_metadata_thumbnail_bytes(bytes: Vec<u8>) -> Result<(u32, u32, Vec<u8>), ()> {
+    const MAX_SOURCE_DIMENSION: u32 = 4_000;
+    const MAX_SOURCE_ALLOC: u64 = 64 * 1024 * 1024;
+    const PREVIEW_DIMENSION: u32 = 240;
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| ())?;
+    if !matches!(reader.format(), Some(ImageFormat::Jpeg | ImageFormat::Png)) {
+        return Err(());
+    }
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
+    limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
+    limits.max_alloc = Some(MAX_SOURCE_ALLOC);
+    reader.limits(limits);
+    let decoded = reader.decode().map_err(|_| ())?;
+    let image = if decoded.width() > PREVIEW_DIMENSION || decoded.height() > PREVIEW_DIMENSION {
+        decoded.thumbnail(PREVIEW_DIMENSION, PREVIEW_DIMENSION)
+    } else {
+        decoded
+    }
+    .to_rgba8();
+    let (width, height) = (image.width(), image.height());
+    if width == 0 || height == 0 {
+        return Err(());
+    }
+    Ok((width, height, image.into_raw()))
 }
 
 async fn decode_artwork(
