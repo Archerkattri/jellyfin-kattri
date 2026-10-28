@@ -56,7 +56,7 @@ impl JellyfinClient {
         self.send_admin(session, request).await
     }
 
-    async fn send_admin(
+    pub(crate) async fn send_admin(
         &self,
         session: &Session,
         request: reqwest::RequestBuilder,

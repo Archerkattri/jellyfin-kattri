@@ -8,6 +8,7 @@
 mod admin;
 mod favorites;
 mod live_tv;
+mod metadata;
 mod playlists;
 mod png;
 mod remote;
@@ -157,6 +158,7 @@ pub async fn spawn(config: MockConfig) -> std::io::Result<RunningServer> {
         quick_connect: Mutex::new(HashMap::new()),
         quick_connect_counter: AtomicUsize::new(0),
         playlist_store: Arc::new(playlists::PlaylistStore::default()),
+        metadata: metadata::MetadataStore::default(),
     });
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let app = router(state);
@@ -198,6 +200,8 @@ struct AppState {
     quick_connect_counter: AtomicUsize,
     /// Mock playlist storage shared by playlist routes and `GET /Items`.
     playlist_store: Arc<playlists::PlaylistStore>,
+    /// Metadata edits and image lists changed by the administrator routes.
+    metadata: metadata::MetadataStore,
     /// Playback reports in arrival order, served at `GET /__mock/sessions`.
     sessions: Mutex<Vec<Value>>,
     /// Sanitized capability advertisements, served at `GET /__mock/capabilities`.
@@ -232,7 +236,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/Persons/{name}/Images/{image_type}", get(person_image))
         .route("/Items/Latest", get(latest))
         .route("/Items", get(list_items))
-        .route("/Items/{id}", get(get_item))
+        .route("/Items/{id}", get(get_item).post(metadata::update_item))
         .route("/MediaSegments/{id}", get(media_segments))
         .route("/Items/{id}/PlaybackInfo", post(playback_info))
         .route("/Items/{id}/Images/{image_type}", get(image))
@@ -252,6 +256,7 @@ fn router(state: Arc<AppState>) -> Router {
         .merge(favorites::router())
         .merge(live_tv::router())
         .merge(admin::router())
+        .merge(metadata::router())
         .merge(system::router())
         .merge(syncplay::router())
         .merge(remote::router())
@@ -1128,6 +1133,7 @@ async fn get_item(
             {
                 user_data.insert("IsFavorite".into(), json!(favorite));
             }
+            metadata::apply_edits(&state, &id, &mut body);
             json_ok(body)
         }
         None => StatusCode::NOT_FOUND.into_response(),
