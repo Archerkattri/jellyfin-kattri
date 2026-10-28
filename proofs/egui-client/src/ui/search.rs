@@ -89,21 +89,18 @@ pub(super) fn draw_with_channel_total_and_focus(
     channel_total: Option<u32>,
     result_focus: impl FnMut(usize, &BaseItemDto, egui::Response),
 ) -> Option<SearchAction> {
-    draw_with_focus_targets(ui, results, &[], channel_total, result_focus, |_, _, _| {})
+    draw_with_focus_targets(ui, results, channel_total, result_focus, |_, _, _| {})
 }
 
 /// Draw results and report both media cards and the Show All controls as focus targets.
-/// `extra_results` are drawn as further matches in the same groups, so the caller can pass a
-/// second request's results without cloning them into one vector.
 pub(super) fn draw_with_focus_targets(
     ui: &mut Ui,
     results: &[BaseItemDto],
-    extra_results: &[BaseItemDto],
     channel_total: Option<u32>,
     mut result_focus: impl FnMut(usize, &BaseItemDto, egui::Response),
     mut show_all_focus: impl FnMut(usize, SearchGroup, egui::Response),
 ) -> Option<SearchAction> {
-    let groups = group_results_with(results, extra_results);
+    let groups = group_results(results);
     let mut selected_id = None;
     let mut focus_row = 0;
     let mut last_result_center_y: Option<f32> = None;
@@ -166,17 +163,8 @@ pub(super) fn draw_with_focus_targets(
 
 /// Groups recognized item types while preserving result order within a group.
 /// Unknown or missing Jellyfin item types are intentionally omitted.
-#[cfg(test)]
 pub fn group_results(results: &[BaseItemDto]) -> Vec<(SearchGroup, Vec<&BaseItemDto>)> {
-    group_results_with(results, &[])
-}
-
-/// The same grouping over two result lists, in order.
-pub fn group_results_with<'a>(
-    results: &'a [BaseItemDto],
-    extra: &'a [BaseItemDto],
-) -> Vec<(SearchGroup, Vec<&'a BaseItemDto>)> {
-    kattri_client_core::search::group_search_results_with(results, extra)
+    kattri_client_core::search::group_search_results(results)
         .into_iter()
         .map(|group| {
             let kind = match group.kind {
@@ -513,7 +501,6 @@ mod tests {
             draw_with_focus_targets(
                 ui,
                 &results,
-                &[],
                 None,
                 |row, item, response| {
                     targets.push((row, Some(item.id.clone()), response.rect));

@@ -143,6 +143,9 @@ impl JellyfinClient {
             ),
             search_term: Some(term.to_owned()),
             enable_total_record_count: Some(true),
+            name_starts_with: None,
+            name_less_than: None,
+            studio_ids: None,
             ..ItemQuery::default()
         };
         Ok(self.list_items(session, &query).await?)

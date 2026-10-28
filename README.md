@@ -29,17 +29,17 @@ desktop window.
 | Sign-in | Password sign-in, Quick Connect, saved servers, multiple profiles, stay signed in |
 | Home | Continue Watching, Next Up, Latest, My Media and Collections shelves, hero banner |
 | Library | Paging, sorting, play-state and favorites filters, 1,000-item photo and poster grids |
-| Details | Metadata, overview, cast, similar titles, seasons and episodes, play and download actions |
+| Details | Metadata, overview, cast, similar titles, seasons and episodes with overview and progress, Next Up on series pages, play and download actions |
 | Search | Debounced cross-type search grouped by movies, series, episodes, music, playlists, photos, people and channels |
 | Playback | Direct play, direct stream and transcode through the relay, resume, playback reporting, audio and subtitle tracks, subtitle delay, chapters, speed control, segment skip |
-| Player | Icon control bar (transport, 10-second seek, frame step, chapter step and chapter menu, volume and mute, speed, A-B loop, picture-in-picture, fullscreen) with title and elapsed/total time, audio and subtitle menu with subtitle sync, auto-hiding overlay, media info panel (`I`), equalizer and loudness filters, HDR to SDR tone mapping, refresh-rate matching on Windows, open a stream address |
+| Player | Icon control bar (transport, 10-second seek, frame step, chapter step and chapter menu, volume and mute, speed, A-B loop, picture-in-picture, fullscreen) with title and elapsed/total time; previous/next for tracks and episodes, an Up Next card and auto-play of the next episode; audio and subtitle menu with subtitle sync, auto-hiding overlay, media info panel (`I`), equalizer and loudness filters, HDR to SDR tone mapping, refresh-rate matching on Windows, open a stream address |
 | Music | Album and playlist browsing, queue with shuffle and repeat, queue restore after restart |
-| Live TV | Channel list, 24-hour guide, tune through the relay |
+| Live TV | Channel list, 24-hour guide, tune through the relay, record the current program, recordings and scheduled recordings |
 | Offline | Download manager with pause, resume, range fallback, checksum verification and external subtitles |
-| Extras | Playlists, collections, favorites, watched state, photos, admin-lite dashboard, parental PIN |
+| Extras | Right-click item menu (play, mark watched, favorite, download, add to playlist or queue), playlists, collections, favorites, photos, admin-lite dashboard, parental PIN |
 | Settings | General, playback, audio, subtitles, video, input, server, About; versioned TOML per profile |
 | Input | Keyboard map, gamepad support (in menus and during playback), full focus navigation, rebindable actions |
-| Interface | Standard, Large and TV (10-foot) sizes |
+| Interface | Standard, Large and TV (10-foot) sizes; choose which home sections appear |
 
 ### Library browsing
 
@@ -114,26 +114,41 @@ page lists shows instead of episodes.
 A source-level audit against jellyfin-web (2026-10-27) found large gaps. Kattri is not
 yet a replacement for the official clients. The main missing pieces:
 
-- **Item context menu:** right-click on library cards and home rows now offers Play,
-  Play from beginning, Open details, Go to series, Mark played/unplayed, Add/remove
-  favorite and Download. Still missing: play next / add to queue, shuffle, add to
-  playlist or collection, media info, multi-select and, for administrators, edit
-  metadata, identify, refresh metadata, edit images, edit subtitles and delete.
-- **Episodes and series:** no episode details page (clicking an episode plays it), episode
-  rows have no thumbnail, overview or progress, the series page has no Play / Next Up /
-  Shuffle, and the player has no previous/next episode, Up Next or auto-play next.
+- **Item context menu:** right-click (or Shift+F10 / the Menu key on a focused card) on
+  library cards, home rows and search results offers Play, Play from beginning, Open details, Go to series, Mark played/unplayed,
+  Add/remove favorite, Download, Add to playlist and, for music tracks, Play next and Add
+  to queue. Administrators also get Add to collection, Refresh metadata and Delete (with
+  a confirmation). Still missing: shuffle from the menu, multi-select and, for
+  administrators, edit metadata, identify, edit images and edit subtitles.
+- **Episodes and series:** the series page offers the server's Next Up episode (Play or
+  Resume), and episode rows show the still, overview, runtime, progress and a watched
+  mark.
+  In the player, an Up Next card counts down the last 30 seconds of an episode with
+  Play now and Cancel. An episode's title opens its own page (Back returns to the
+  series) and its ▶ button plays it; rows show the episode's still. Shuffle plays the
+  series' episodes in random order, with previous/next and Up Next following that order. The player's previous and next
+  buttons move between episodes, and the next episode starts when one ends (a Playback
+  setting, on by default).
 - **Player OSD:** title, elapsed/total time, transport, chapter stepping, volume with
   mute, frame stepping, A-B loop, speed, PiP and a fullscreen toggle, as a compact
-  icon bar. Still missing: trickplay thumbnails on the seek bar, quality/source
-  selection inside the player, Up Next, and previous/next episode (those buttons are
-  enabled for music only).
-- **Library views:** one flat grid per type. Missing Suggestions, Genres, Studios,
-  Collections, Upcoming and Episodes tabs, the alphabet picker and view modes; music has
-  no album/artist views; books, home videos and music videos have no views.
-- **Details pages:** no version picker, extras/special features, trailers, theme media,
-  "more from this season", lyrics or media-info dialog.
-- **Other:** no photo slideshow, Live TV recordings and timers, forgot-password flow,
-  home-screen section preferences or library management; the dashboard is admin-lite.
+  icon bar, with previous/next for music tracks and episodes and an Up Next card. Still
+  missing: trickplay thumbnails on the seek bar and quality/source selection inside the
+  player.
+- **Library views:** one grid per type with sort, played/favorite, genre and studio
+  filters and an alphabet picker. Missing Suggestions, Collections, Upcoming and Episodes
+  tabs and view modes; music can list everything, albums only or songs only, but has no
+  artist view; books, home videos and
+  music videos have no views.
+- **Details pages:** a Media info section lists the source's container, size, bitrate
+  and streams; an episode page lists the rest of its season; an item with several
+  versions offers a Version picker that playback follows; movie and series pages list
+  their trailers and special features; music track pages show lyrics. Missing: theme
+  media and lyrics synced to playback.
+- **Other:** photos have a slideshow, and the home sections can be turned off one by one
+  in General settings, and sign-in has a Forgot password flow. Live TV lists recordings
+  (playable) and scheduled recordings (cancellable), and records a channel's current
+  program. Missing: series recordings and library management; the dashboard is
+  admin-lite.
 
 ### Work still required for a production release
 
@@ -196,9 +211,10 @@ yet a replacement for the official clients. The main missing pieces:
 
 - Play with the bundled libmpv on clean Linux and macOS machines. All four platforms
   are now pinned with checksums (Linux x64 and macOS universal from release
-  `libmpv-v0.41.0-abe7469`); the AppImage now bundles the pinned build.
-- Build and test Windows x64/ARM64, macOS universal, Linux packages, AppImage, and
-  Flatpak on clean systems.
+  `libmpv-v0.41.0-abe7469`); the AppImage and the Flatpak bundle the pinned build.
+- Test Windows x64/ARM64, macOS universal, Linux packages, AppImage, and Flatpak on clean
+  systems. All of them now build in CI from the release workflows (2026-10-28: Windows
+  MSI and zip for x64 and ARM64, macOS universal, AppImage, deb, rpm and Flatpak).
 - 1.0 ships unsigned on Windows (owner decision); complete macOS signing/notarization
   and verify each artifact. The Windows MSI is dual-purpose (per user by default,
   per machine with `ALLUSERS=1`).

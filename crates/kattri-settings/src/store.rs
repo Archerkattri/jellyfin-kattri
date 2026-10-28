@@ -156,7 +156,16 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
     for (section, known) in [
         (
             "general",
-            &["high_contrast", "reduce_motion", "interface_size"][..],
+            &[
+                "high_contrast",
+                "reduce_motion",
+                "interface_size",
+                "home_continue_watching",
+                "home_next_up",
+                "home_latest",
+                "home_my_media",
+                "home_collections",
+            ][..],
         ),
         (
             "playback",
@@ -172,6 +181,7 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
                 "auto_skip_intro",
                 "auto_skip_outro",
                 "outro_delay_ms",
+                "auto_play_next_episode",
                 "external_player",
                 "max_streaming_bitrate",
             ][..],

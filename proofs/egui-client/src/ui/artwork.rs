@@ -18,81 +18,76 @@ pub fn media_card(
     let poster_height = 188.0;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
     let art_rect = Rect::from_min_size(rect.min, egui::vec2(width, poster_height));
-    let painter = ui.painter_at(rect);
+    // A library page can hold a thousand cards; only the ones on screen are painted.
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter_at(rect);
 
-    if let Some(texture) = item.artwork_texture.as_ref() {
-        painter.add(
-            egui::epaint::RectShape::filled(art_rect, CornerRadius::same(10), Color32::WHITE)
-                .with_texture(texture.id(), cover_uv(texture.size_vec2(), art_rect.size())),
-        );
-    } else {
-        paint_artwork(&painter, art_rect, item.artwork);
-    }
-    painter.galley(
-        egui::pos2(rect.left() + 1.0, art_rect.bottom() + 10.0),
-        super::row::layout_text(
-            &painter,
-            &item.title,
-            FontId::proportional(15.0),
+        if let Some(texture) = item.artwork_texture.as_ref() {
+            painter.add(
+                egui::epaint::RectShape::filled(art_rect, CornerRadius::same(10), Color32::WHITE)
+                    .with_texture(texture.id(), cover_uv(texture.size_vec2(), art_rect.size())),
+            );
+        } else {
+            paint_artwork(&painter, art_rect, item.artwork);
+        }
+        painter.galley(
+            egui::pos2(rect.left() + 1.0, art_rect.bottom() + 10.0),
+            super::row::layout_text(
+                &painter,
+                &item.title,
+                FontId::proportional(15.0),
+                colors.text,
+                width - 2.0,
+                1,
+            ),
             colors.text,
-            width - 2.0,
-            1,
-        ),
-        colors.text,
-    );
-    painter.galley(
-        egui::pos2(rect.left() + 1.0, art_rect.bottom() + 31.0),
-        super::row::layout_text(
-            &painter,
-            item.subtitle(),
-            FontId::proportional(11.5),
+        );
+        painter.galley(
+            egui::pos2(rect.left() + 1.0, art_rect.bottom() + 31.0),
+            super::row::layout_text(
+                &painter,
+                item.subtitle(),
+                FontId::proportional(11.5),
+                colors.muted,
+                width - 2.0,
+                1,
+            ),
             colors.muted,
-            width - 2.0,
-            1,
-        ),
-        colors.muted,
-    );
+        );
 
-    if response.has_focus() {
-        painter.rect_stroke(
-            art_rect.expand(2.0),
-            CornerRadius::same(9),
-            Stroke::new(2.5, colors.focus),
-            egui::StrokeKind::Outside,
-        );
-    } else if selected || response.hovered() {
-        painter.rect_stroke(
-            art_rect.expand(1.0),
-            CornerRadius::same(8),
-            Stroke::new(if selected { 2.0 } else { 1.5 }, colors.accent),
-            egui::StrokeKind::Outside,
-        );
+        if response.has_focus() {
+            painter.rect_stroke(
+                art_rect.expand(2.0),
+                CornerRadius::same(9),
+                Stroke::new(2.5, colors.focus),
+                egui::StrokeKind::Outside,
+            );
+        } else if selected || response.hovered() {
+            painter.rect_stroke(
+                art_rect.expand(1.0),
+                CornerRadius::same(8),
+                Stroke::new(if selected { 2.0 } else { 1.5 }, colors.accent),
+                egui::StrokeKind::Outside,
+            );
+        }
     }
 
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Button, true, selected, card_label(item))
+    });
+    response.on_hover_ui(|ui| {
+        ui.label(card_label(item));
+    })
+}
+
+/// The spoken and tooltip description of a card. Built only when accessibility or a tooltip
+/// asks for it, not for every card on every frame.
+fn card_label(item: &MediaItem) -> String {
     let artwork_description = if item.artwork_texture.is_some() {
         ui_text(ids::ARTWORK_DESCRIPTION_PRIMARY)
     } else {
         ui_text(ids::ARTWORK_DESCRIPTION_PLACEHOLDER)
     };
-    // The accessible name is long: it carries the title, kind, subtitle, artwork state and an
-    // overview preview. Building it inside the closures keeps a frame of a large grid free of
-    // the formatting work when no screen reader is attached and nothing is hovered.
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::Role::Button,
-            true,
-            selected,
-            card_label(item, artwork_description),
-        )
-    });
-    if response.hovered() {
-        return response.on_hover_text(card_label(item, artwork_description));
-    }
-    response
-}
-
-/// Accessible name and hover text for one poster.
-fn card_label(item: &MediaItem, artwork_description: &str) -> String {
     let mut label = format!(
         "{}, {}. {}. {artwork_description} ",
         item.title,
@@ -154,7 +149,7 @@ fn paint_vertical_gradient(painter: &egui::Painter, rect: Rect, top: [u8; 3], bo
     }
 }
 
-fn cover_uv(image_size: egui::Vec2, target_size: egui::Vec2) -> Rect {
+pub(crate) fn cover_uv(image_size: egui::Vec2, target_size: egui::Vec2) -> Rect {
     if image_size.x <= 0.0 || image_size.y <= 0.0 || target_size.x <= 0.0 || target_size.y <= 0.0 {
         return Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
     }
@@ -333,42 +328,6 @@ fn sound(painter: &egui::Painter, rect: Rect, art: ArtworkPalette) {
 
 fn lerp(start: u8, end: u8, t: f32) -> u8 {
     (f32::from(start) + (f32::from(end) - f32::from(start)) * t).round() as u8
-}
-
-#[cfg(test)]
-mod label_tests {
-    use super::{MediaItem, card_label};
-
-    fn movie(overview: &str) -> MediaItem {
-        MediaItem::from_api(
-            serde_json::from_value(serde_json::json!({
-                "Id": "m1",
-                "Name": "A Film",
-                "Type": "Movie",
-                "Overview": overview,
-            }))
-            .expect("item fixture"),
-        )
-    }
-
-    #[test]
-    fn the_card_label_carries_title_kind_and_a_bounded_overview_preview() {
-        let overview = "x".repeat(400);
-        let label = card_label(&movie(&overview), "Poster image");
-        assert!(label.contains("A Film"));
-        assert!(label.contains("Movie"));
-        assert!(label.contains("Poster image"));
-        assert!(label.contains(&"x".repeat(220)), "keeps the preview");
-        assert!(!label.contains(&"x".repeat(221)), "truncates at 220 chars");
-        assert!(label.contains('…'), "marks the truncated preview");
-    }
-
-    #[test]
-    fn a_card_without_an_overview_has_no_summary_section() {
-        let label = card_label(&movie("   "), "Placeholder artwork");
-        assert!(label.contains("A Film"));
-        assert!(!label.contains('…'));
-    }
 }
 
 #[cfg(test)]

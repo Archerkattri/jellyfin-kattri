@@ -23,6 +23,9 @@ on:
   push:
     tags:
       - "v*"
+  # A dispatch from a branch packages the head with the workspace version, to check the
+  # packaging before a tag. Nothing is published either way; the job only uploads artifacts.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -54,9 +57,14 @@ jobs:
       - name: Derive version from tag
         shell: pwsh
         env:
-          KATTRI_TAG: ${{ github.ref_name }}
+          KATTRI_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: |
-          $version = $env:KATTRI_TAG -replace '^v', ''
+          if ($env:KATTRI_TAG) {
+            $version = $env:KATTRI_TAG -replace '^v', ''
+          } else {
+            $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$' |
+              Select-Object -First 1).Matches[0].Groups[1].Value
+          }
           if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
             throw "Tag '$env:KATTRI_TAG' does not give a numeric version (expected vX.Y.Z)."
           }

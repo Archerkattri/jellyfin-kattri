@@ -104,8 +104,59 @@ impl HomeRowState {
     }
 }
 
+/// Which home sections the viewer chose to show (General settings).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HomeSections {
+    pub continue_watching: bool,
+    pub next_up: bool,
+    pub latest: bool,
+    pub my_media: bool,
+    pub collections: bool,
+}
+
+impl Default for HomeSections {
+    fn default() -> Self {
+        Self {
+            continue_watching: true,
+            next_up: true,
+            latest: true,
+            my_media: true,
+            collections: true,
+        }
+    }
+}
+
+impl HomeSections {
+    pub fn from_settings(general: &kattri_settings::GeneralSettings) -> Self {
+        Self {
+            continue_watching: general.home_continue_watching,
+            next_up: general.home_next_up,
+            latest: general.home_latest,
+            my_media: general.home_my_media,
+            collections: general.home_collections,
+        }
+    }
+
+    pub fn shows_row(self, kind: HomeRowKind) -> bool {
+        match kind {
+            HomeRowKind::ContinueWatching => self.continue_watching,
+            HomeRowKind::NextUp => self.next_up,
+            HomeRowKind::Latest => self.latest,
+        }
+    }
+
+    pub fn shows_catalog(self, kind: HomeCatalogKind) -> bool {
+        match kind {
+            HomeCatalogKind::Libraries => self.my_media,
+            HomeCatalogKind::Collections => self.collections,
+        }
+    }
+}
+
 /// Home screen data for the signed-in account. Reset on sign-out and on every new connection.
 pub struct HomeState {
+    /// The sections drawn; hidden ones are neither drawn nor loaded.
+    pub sections: HomeSections,
     rows: [HomeRowState; 3],
     hero: HeroBanner,
     libraries_status: RowStatus,
@@ -120,6 +171,7 @@ pub struct HomeState {
 impl Default for HomeState {
     fn default() -> Self {
         Self {
+            sections: HomeSections::default(),
             rows: HomeRowKind::ALL.map(HomeRowState::new),
             hero: HeroBanner::default(),
             libraries_status: RowStatus::Idle,
@@ -276,6 +328,24 @@ impl HomeState {
             .then_some(ui_text(ids::HOME_EMPTY_NO_LIBRARIES))
     }
 
+    /// Shown sections that were never requested, for the app to load.
+    pub fn idle_sections(&self) -> (Vec<HomeRowKind>, Vec<HomeCatalogKind>) {
+        let rows = self
+            .rows
+            .iter()
+            .filter(|row| self.sections.shows_row(row.kind) && row.status == RowStatus::Idle)
+            .map(|row| row.kind)
+            .collect();
+        let mut catalogs = Vec::new();
+        if self.sections.my_media && self.libraries_status == RowStatus::Idle {
+            catalogs.push(HomeCatalogKind::Libraries);
+        }
+        if self.sections.collections && self.collections_status == RowStatus::Idle {
+            catalogs.push(HomeCatalogKind::Collections);
+        }
+        (rows, catalogs)
+    }
+
     pub fn collections_are_visible(&self) -> bool {
         !(self.collections_status == RowStatus::Ready && self.collections.is_empty())
     }
@@ -301,6 +371,13 @@ impl HomeState {
             .iter_mut()
             .flat_map(|row| row.cards.iter_mut().map(|card| &mut card.media))
             .chain(self.collections.iter_mut().map(|card| &mut card.media))
+    }
+    /// Drops `item_id` from every row, after the server deleted it.
+    pub fn remove_item(&mut self, item_id: &str) {
+        for row in &mut self.rows {
+            row.cards.retain(|card| card.media.id != item_id);
+        }
+        self.collections.retain(|card| card.media.id != item_id);
     }
 }
 
@@ -452,6 +529,7 @@ pub(super) fn show(
     let library_tiles = state.my_media_tiles();
     let library_empty_message = state.my_media_empty_message();
     let show_collections = state.collections_are_visible();
+    let sections = state.sections;
     let HomeState {
         rows,
         hero,
@@ -491,7 +569,7 @@ pub(super) fn show(
         }
     }
 
-    for row in rows.iter_mut() {
+    for row in rows.iter_mut().filter(|row| sections.shows_row(row.kind)) {
         let kind = row.kind;
         let title = title_for(kind);
         ui.add_space(26.0);
@@ -607,88 +685,91 @@ pub(super) fn show(
         }
     }
 
-    ui.add_space(24.0);
-    ui.label(
-        RichText::new(ui_text(ids::HOME_HEADING_MY_MEDIA))
-            .size(22.0)
-            .color(colors.text),
-    );
-    ui.add_space(8.0);
-    if !libraries.is_empty() {
-        egui::ScrollArea::horizontal()
-            .id_salt("home_my_media")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for tile in library_tiles {
-                        let response = ui.add_sized(
-                            egui::vec2(176.0, 96.0),
-                            egui::Button::new(
-                                RichText::new(&tile.name)
-                                    .size(18.0)
-                                    .strong()
-                                    .color(colors.text),
-                            )
-                            .fill(colors.panel)
-                            .stroke(Stroke::new(1.0, colors.divider))
-                            .corner_radius(CornerRadius::same(16)),
-                        );
-                        focus_entries.push(CardFocus {
-                            row: 3,
-                            id: FocusId::new(format!("home:library:{}", tile.id)),
-                            center_x: response.rect.center().x,
-                            focused: response.has_focus(),
-                            response: response.clone(),
-                            home_poster: None,
-                            selection: HomeAction::OpenLibrary(tile.clone()),
-                        });
-                        if response.clicked() && action.is_none() {
-                            action = Some(HomeAction::OpenLibrary(tile));
+    if sections.my_media {
+        ui.add_space(24.0);
+        ui.label(
+            RichText::new(ui_text(ids::HOME_HEADING_MY_MEDIA))
+                .size(22.0)
+                .color(colors.text),
+        );
+        ui.add_space(8.0);
+        if !libraries.is_empty() {
+            egui::ScrollArea::horizontal()
+                .id_salt("home_my_media")
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for tile in library_tiles {
+                            let response = ui.add_sized(
+                                egui::vec2(176.0, 96.0),
+                                egui::Button::new(
+                                    RichText::new(&tile.name)
+                                        .size(18.0)
+                                        .strong()
+                                        .color(colors.text),
+                                )
+                                .fill(colors.panel)
+                                .stroke(Stroke::new(1.0, colors.divider))
+                                .corner_radius(CornerRadius::same(16)),
+                            );
+                            focus_entries.push(CardFocus {
+                                row: 3,
+                                id: FocusId::new(format!("home:library:{}", tile.id)),
+                                center_x: response.rect.center().x,
+                                focused: response.has_focus(),
+                                response: response.clone(),
+                                home_poster: None,
+                                selection: HomeAction::OpenLibrary(tile.clone()),
+                            });
+                            if response.clicked() && action.is_none() {
+                                action = Some(HomeAction::OpenLibrary(tile));
+                            }
+                            ui.add_space(8.0);
                         }
-                        ui.add_space(8.0);
-                    }
+                    });
                 });
-            });
-    }
-    match libraries_status {
-        RowStatus::Idle | RowStatus::Loading if libraries.is_empty() => {
-            ui.horizontal(|ui| {
-                ui.spinner();
+        }
+        match libraries_status {
+            RowStatus::Idle | RowStatus::Loading if libraries.is_empty() => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(
+                        RichText::new(ui_text(ids::HOME_STATUS_LOADING_LIBRARIES))
+                            .color(colors.muted),
+                    );
+                });
+            }
+            RowStatus::Idle | RowStatus::Loading => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(
+                        RichText::new(ui_text(ids::HOME_STATUS_REFRESHING_LIBRARIES))
+                            .color(colors.muted),
+                    );
+                });
+            }
+            RowStatus::Ready if libraries.is_empty() => {
                 ui.label(
-                    RichText::new(ui_text(ids::HOME_STATUS_LOADING_LIBRARIES)).color(colors.muted),
+                    RichText::new(
+                        library_empty_message.unwrap_or(ui_text(ids::HOME_EMPTY_NO_LIBRARIES)),
+                    )
+                    .color(colors.muted),
                 );
-            });
-        }
-        RowStatus::Idle | RowStatus::Loading => {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(
-                    RichText::new(ui_text(ids::HOME_STATUS_REFRESHING_LIBRARIES))
-                        .color(colors.muted),
-                );
-            });
-        }
-        RowStatus::Ready if libraries.is_empty() => {
-            ui.label(
-                RichText::new(
-                    library_empty_message.unwrap_or(ui_text(ids::HOME_EMPTY_NO_LIBRARIES)),
-                )
-                .color(colors.muted),
-            );
-        }
-        RowStatus::Ready => {}
-        RowStatus::Failed(message) => {
-            failure_line(ui, ui_text(ids::HOME_HEADING_MY_MEDIA), message);
-            if ui
-                .button(ui_text(ids::HOME_BUTTON_RETRY_MY_MEDIA))
-                .clicked()
-            {
-                action = action.or(Some(HomeAction::RetryCatalog(HomeCatalogKind::Libraries)));
+            }
+            RowStatus::Ready => {}
+            RowStatus::Failed(message) => {
+                failure_line(ui, ui_text(ids::HOME_HEADING_MY_MEDIA), message);
+                if ui
+                    .button(ui_text(ids::HOME_BUTTON_RETRY_MY_MEDIA))
+                    .clicked()
+                {
+                    action = action.or(Some(HomeAction::RetryCatalog(HomeCatalogKind::Libraries)));
+                }
             }
         }
     }
 
-    if show_collections {
+    if show_collections && sections.collections {
         ui.add_space(24.0);
         if !collections.is_empty() {
             let cards: Vec<RowCard> = collections.iter().map(card_view).collect();
@@ -812,6 +893,28 @@ mod tests {
 
     fn card(id: &str) -> HomeCard {
         card_from_item(item(json!({ "Id": id, "Name": format!("Title {id}") })))
+    }
+
+    #[test]
+    fn hidden_home_sections_are_not_loaded() {
+        let mut state = HomeState {
+            sections: HomeSections {
+                next_up: false,
+                collections: false,
+                ..HomeSections::default()
+            },
+            ..HomeState::default()
+        };
+        let (rows, catalogs) = state.idle_sections();
+        assert_eq!(rows, [HomeRowKind::ContinueWatching, HomeRowKind::Latest]);
+        assert_eq!(catalogs, [HomeCatalogKind::Libraries]);
+        state.begin_load(HomeRowKind::Latest, 3);
+        let (rows, _) = state.idle_sections();
+        assert_eq!(
+            rows,
+            [HomeRowKind::ContinueWatching],
+            "a requested row is not idle"
+        );
     }
 
     #[test]

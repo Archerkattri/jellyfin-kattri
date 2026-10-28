@@ -309,13 +309,13 @@ impl CatalogPlayedFilter {
 }
 
 /// Top-level view: the Home screen (rows and hero) or the Library catalog pages.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppView {
     Home,
     Library,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Home,
     Movies,
@@ -551,6 +551,9 @@ pub struct KattriApp {
     ui_time: Duration,
     pub(crate) server_url: String,
     pub(crate) username: String,
+    /// The answer to the last Forgot password request, shown under the sign-in form.
+    pub(crate) forgot_password_notice: Option<String>,
+    forgot_password_request_id: u64,
     // This is only the volatile input buffer; it is moved to the worker and zeroized on drop.
     pub(crate) password_input: Zeroizing<String>,
     pub(crate) allow_insecure_remote_http: bool,
@@ -561,6 +564,12 @@ pub struct KattriApp {
     pub(crate) saved_sign_in_available: Option<bool>,
     pub(crate) server: Option<ServerIdentity>,
     pub(crate) user_name: Option<String>,
+    /// The signed-in user is a server administrator: the card menu offers admin actions.
+    pub(crate) user_is_admin: bool,
+    /// An item the viewer asked to delete, waiting for confirmation: `(id, title)`.
+    pub(crate) pending_delete: Option<(String, String)>,
+    /// Admin actions in flight: request id to item title.
+    admin_requests: HashMap<u64, String>,
     pub(crate) items: Vec<crate::catalog::MediaItem>,
     pub(crate) total_record_count: Option<u32>,
     pub(crate) collection_runtime: CollectionRuntime,
@@ -655,9 +664,52 @@ pub struct KattriApp {
     pub(crate) photo_page_start: usize,
     photo_thumbnail_pending: HashMap<u64, String>,
     photo_thumbnail_attempted: HashSet<String>,
+    /// Photo ids in the visible thumbnail window of the latest frame.
+    photo_visible_ids: HashSet<String>,
     photo_full_size_pending: HashMap<u64, String>,
     pub(crate) photo_full_size_failed: HashSet<String>,
     pub(crate) music_queue: Queue,
+    /// Neighbours of the episode last started, for previous/next and auto-play.
+    episode_neighbors: Option<EpisodeNeighbors>,
+    /// The episode to play next in the series on screen.
+    series_next_up: Option<SeriesNextUp>,
+    /// The version (media source index) the viewer picked for an item.
+    preferred_source: Option<(String, usize)>,
+    /// Lyrics of the music track on screen.
+    pub(crate) track_lyrics: Vec<jellyfin_api::LyricLine>,
+    track_lyrics_request_id: u64,
+    /// Trailers and special features of the movie or series on screen.
+    pub(crate) item_extras: Vec<BaseItemDto>,
+    item_extras_request_id: u64,
+    /// The other episodes of the season of the episode page on screen.
+    pub(crate) season_siblings: Vec<BaseItemDto>,
+    season_siblings_request_id: u64,
+    /// Live TV recordings and scheduled timers, loaded when the Live TV page opens.
+    pub(crate) live_tv_recordings: Vec<BaseItemDto>,
+    pub(crate) live_tv_timers: Vec<jellyfin_api::LiveTvTimer>,
+    live_tv_recordings_request_id: u64,
+    pub(crate) live_tv_recordings_state: RecordingsState,
+    timer_change_request_id: u64,
+    /// A shuffled run of episodes; previous, next and auto-play follow it while one of its
+    /// episodes plays.
+    shuffle_queue: Option<ShuffleQueue>,
+    shuffle_request_id: u64,
+    /// The page an item was opened from (a series for its episode), where Back returns.
+    detail_parent: Option<String>,
+    /// Stills for the episode rows of the series on screen.
+    pub(crate) episode_thumbnails: HashMap<String, egui::TextureHandle>,
+    episode_thumbnail_pending: HashMap<u64, String>,
+    /// The user's playlists for the card menu's Add to playlist.
+    menu_playlists: crate::ui::item_menu::MenuPlaylists,
+    /// The server's collections for the administrator entry Add to collection.
+    menu_collections: crate::ui::item_menu::MenuPlaylists,
+    menu_collections_request_id: u64,
+    menu_playlists_request_id: u64,
+    /// A card-menu playlist addition in flight: request, item title, playlist name.
+    menu_playlist_add: Option<(u64, String, String)>,
+    /// A short confirmation shown over the page, with the time it disappears (set when first
+    /// drawn).
+    toast: Option<(String, Option<f64>)>,
     pub(crate) music_track_names: HashMap<String, String>,
     pub(crate) music_album_tracks_loading: bool,
     pub(crate) music_album_tracks_error: Option<ErrorClass>,
@@ -713,6 +765,21 @@ pub struct KattriApp {
     pub(crate) catalog_sort_order: ItemSortOrder,
     pub(crate) catalog_played_filter: CatalogPlayedFilter,
     pub(crate) catalog_favorites_only: bool,
+    /// The alphabet picker's letter, `'#'` for names that start with a digit or symbol.
+    pub(crate) catalog_name_prefix: Option<char>,
+    /// The genre filter's choice.
+    pub(crate) catalog_genre: Option<String>,
+    /// What the Music page lists.
+    pub(crate) music_view: MusicView,
+    /// Genres offered by the genre filter, for [`Self::catalog_genres_scope`].
+    pub(crate) catalog_genres: Vec<String>,
+    /// Studios `(id, name)` offered by the studio filter, for the same scope.
+    pub(crate) catalog_studios: Vec<(String, String)>,
+    /// The studio filter's choice (studio id).
+    pub(crate) catalog_studio: Option<String>,
+    catalog_genres_request_id: u64,
+    /// The page and folder the genre list belongs to.
+    catalog_genres_scope: Option<(Page, Option<String>)>,
     pub(crate) high_contrast: bool,
     pub(crate) reduce_motion: bool,
     pub(crate) interface_size: kattri_settings::InterfaceSize,
@@ -778,10 +845,10 @@ pub struct KattriApp {
     pending_artwork_requests: HashMap<u64, (String, String)>,
     attempted_artwork: HashSet<(String, String)>,
     artwork_access_ticks: HashMap<(String, String), u64>,
-    /// The artwork the last frame asked for, in draw order. Poster artwork work is skipped while
-    /// the visible set stays the same, which is the common case for an idle grid.
-    visible_artwork: Vec<(String, String)>,
     next_artwork_access_tick: u64,
+    /// First access tick of the latest visible-artwork pass. Textures touched at or after it
+    /// are on screen and are never evicted.
+    visible_artwork_from_tick: u64,
 }
 
 impl KattriApp {
@@ -824,6 +891,7 @@ impl KattriApp {
     }
 
     pub(crate) fn update_photo_thumbnail_window(&mut self, visible: &[(String, String)]) {
+        self.photo_visible_ids = visible.iter().map(|(item_id, _)| item_id.clone()).collect();
         let requested_ids = visible
             .iter()
             .map(|(item_id, _)| item_id.as_str())
@@ -988,12 +1056,17 @@ impl KattriApp {
             ui_time: Duration::ZERO,
             server_url: String::new(),
             username: String::new(),
+            forgot_password_notice: None,
+            forgot_password_request_id: 0,
             password_input: Zeroizing::new(String::new()),
             allow_insecure_remote_http: false,
             remember_sign_in: false,
             saved_sign_in_available: None,
             server: None,
             user_name: None,
+            user_is_admin: false,
+            pending_delete: None,
+            admin_requests: HashMap::new(),
             items: Vec::new(),
             total_record_count: None,
             collection_runtime: CollectionRuntime::default(),
@@ -1083,9 +1156,35 @@ impl KattriApp {
             photo_page_start: 0,
             photo_thumbnail_pending: HashMap::new(),
             photo_thumbnail_attempted: HashSet::new(),
+            photo_visible_ids: HashSet::new(),
             photo_full_size_pending: HashMap::new(),
             photo_full_size_failed: HashSet::new(),
             music_queue: Queue::new(),
+            episode_neighbors: None,
+            series_next_up: None,
+            shuffle_queue: None,
+            preferred_source: None,
+            track_lyrics: Vec::new(),
+            track_lyrics_request_id: 0,
+            item_extras: Vec::new(),
+            item_extras_request_id: 0,
+            season_siblings: Vec::new(),
+            season_siblings_request_id: 0,
+            live_tv_recordings: Vec::new(),
+            live_tv_timers: Vec::new(),
+            live_tv_recordings_request_id: 0,
+            live_tv_recordings_state: RecordingsState::NotLoaded,
+            timer_change_request_id: 0,
+            shuffle_request_id: 0,
+            detail_parent: None,
+            episode_thumbnails: HashMap::new(),
+            episode_thumbnail_pending: HashMap::new(),
+            menu_playlists: Default::default(),
+            menu_collections: Default::default(),
+            menu_collections_request_id: 0,
+            menu_playlists_request_id: 0,
+            menu_playlist_add: None,
+            toast: None,
             music_track_names: HashMap::new(),
             music_album_tracks_loading: false,
             music_album_tracks_error: None,
@@ -1139,6 +1238,14 @@ impl KattriApp {
             catalog_sort_order: ItemSortOrder::Ascending,
             catalog_played_filter: CatalogPlayedFilter::Any,
             catalog_favorites_only: false,
+            catalog_name_prefix: None,
+            catalog_genre: None,
+            music_view: MusicView::All,
+            catalog_genres: Vec::new(),
+            catalog_studios: Vec::new(),
+            catalog_studio: None,
+            catalog_genres_request_id: 0,
+            catalog_genres_scope: None,
             high_contrast,
             interface_size,
             reduce_motion,
@@ -1189,8 +1296,8 @@ impl KattriApp {
             pending_artwork_requests: HashMap::new(),
             attempted_artwork: HashSet::new(),
             artwork_access_ticks: HashMap::new(),
-            visible_artwork: Vec::new(),
             next_artwork_access_tick: 0,
+            visible_artwork_from_tick: 0,
         }
     }
 
@@ -2134,6 +2241,36 @@ impl KattriApp {
         }
     }
 
+    /// Asks the server to start a password reset for the username typed in the form.
+    pub(crate) fn start_forgot_password(&mut self) {
+        let username = self.username.trim().to_owned();
+        if username.is_empty() {
+            self.forgot_password_notice = Some(ui_text(ids::FORGOT_PASSWORD_NEED_USERNAME).into());
+            return;
+        }
+        if self.server_preview().is_none() {
+            self.forgot_password_notice = Some(ui_text(ids::CONNECT_ERROR_CHECK_ADDRESS).into());
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        let sent = self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .forgot_password(
+                    request_id,
+                    self.server_url.trim().to_owned(),
+                    self.allow_insecure_remote_http,
+                    username,
+                )
+                .is_ok()
+        });
+        if sent {
+            self.forgot_password_request_id = request_id;
+            self.forgot_password_notice = Some(ui_text(ids::FORGOT_PASSWORD_SENDING).into());
+        } else {
+            self.forgot_password_notice = Some(ui_text(ids::CONNECT_WORKER_UNAVAILABLE).into());
+        }
+    }
+
     pub(crate) fn start_quick_connect(&mut self) {
         if self.server_url.trim().is_empty() {
             self.connection = ConnectionStatus::Disconnected {
@@ -2235,6 +2372,7 @@ impl KattriApp {
         self.playback_start_request_id = self.allocate_request_id();
         self.server = None;
         self.user_name = None;
+        self.user_is_admin = false;
         self.items.clear();
         self.selected_item_id = None;
         self.selected_details = None;
@@ -2264,7 +2402,6 @@ impl KattriApp {
         self.pending_artwork_requests.clear();
         self.attempted_artwork.clear();
         self.artwork_access_ticks.clear();
-        self.visible_artwork.clear();
         self.pending_playback = None;
         self.submitted_search = None;
         self.search_active = false;
@@ -2457,6 +2594,13 @@ impl KattriApp {
         }
         self.cancel_navigation_requests();
         self.page = page;
+        if page == Page::LiveTv {
+            self.live_tv_recordings_state = RecordingsState::NotLoaded;
+        }
+        self.catalog_name_prefix = None;
+        self.catalog_genre = None;
+        self.catalog_studio = None;
+        self.detail_parent = None;
         self.photo_selected_id = None;
         self.photo_page_start = 0;
         self.photo_items.clear();
@@ -2540,6 +2684,9 @@ impl KattriApp {
         self.cancel_navigation_requests();
         self.view = AppView::Library;
         self.page = page;
+        self.catalog_name_prefix = None;
+        self.catalog_genre = None;
+        self.catalog_studio = None;
         self.photo_selected_id = None;
         self.photo_items.clear();
         self.photo_thumbnails.clear();
@@ -2616,6 +2763,12 @@ impl KattriApp {
             self.person_items_error = None;
             return;
         }
+        if self.selected_item_id.is_some()
+            && let Some(parent) = self.detail_parent.take()
+        {
+            self.select_item(parent);
+            return;
+        }
         if self.selected_item_id.take().is_some() {
             self.details_request_id = self.allocate_request_id();
             self.playback_request_id = self.allocate_request_id();
@@ -2640,12 +2793,98 @@ impl KattriApp {
     /// Reloads the home rows and library/collection tiles. Previous content stays visible while
     /// each request is pending.
     pub(crate) fn refresh_home(&mut self) {
+        self.request_menu_playlists();
+        let sections = self.home.sections;
         for kind in HomeRowKind::ALL {
-            self.request_home_row(kind);
+            if sections.shows_row(kind) {
+                self.request_home_row(kind);
+            }
         }
         for kind in HomeCatalogKind::ALL {
+            if sections.shows_catalog(kind) {
+                self.request_home_catalog(kind);
+            }
+        }
+    }
+
+    /// Applies the home section settings, and loads a section the viewer just turned on.
+    fn sync_home_sections(&mut self) {
+        self.home.sections =
+            crate::ui::home::HomeSections::from_settings(&self.settings.settings().general);
+        if self.user_name.is_none() {
+            return;
+        }
+        let (rows, catalogs) = self.home.idle_sections();
+        for kind in rows {
+            self.request_home_row(kind);
+        }
+        for kind in catalogs {
             self.request_home_catalog(kind);
         }
+    }
+
+    /// Refreshes the playlists (and, for administrators, the collections) the card menu offers.
+    fn request_menu_playlists(&mut self) {
+        let request_id = self.allocate_request_id();
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.list_user_playlists(request_id).is_ok())
+        {
+            self.menu_playlists_request_id = request_id;
+        }
+        if self.user_is_admin {
+            let request_id = self.allocate_request_id();
+            if self
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.list_menu_collections(request_id).is_ok())
+            {
+                self.menu_collections_request_id = request_id;
+            }
+        }
+    }
+
+    /// Removes a deleted item from every list showing it, and leaves its page.
+    fn forget_deleted_item(&mut self, item_id: &str) {
+        self.items.retain(|item| item.id != item_id);
+        self.home.remove_item(item_id);
+        self.series_episodes.retain(|episode| episode.id != item_id);
+        if self.selected_item_id.as_deref() == Some(item_id) {
+            self.navigate_back();
+        }
+    }
+
+    fn show_toast(&mut self, text: String) {
+        self.toast = Some((text, None));
+    }
+
+    /// Draws the toast at the bottom of the window until it expires.
+    fn draw_toast(&mut self, ctx: &egui::Context) {
+        const TOAST_SECONDS: f64 = 3.0;
+        let now = ctx.input(|input| input.time);
+        let Some((text, until)) = self.toast.as_mut() else {
+            return;
+        };
+        let until = *until.get_or_insert(now + TOAST_SECONDS);
+        if now >= until {
+            self.toast = None;
+            return;
+        }
+        egui::Area::new(egui::Id::unique("kattri-toast"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -32.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_unmultiplied(20, 20, 24, 235))
+                    .corner_radius(egui::CornerRadius::same(12))
+                    .inner_margin(egui::Margin::symmetric(18, 12))
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(text.as_str()).color(egui::Color32::WHITE));
+                    });
+            });
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(until - now));
     }
 
     pub(crate) fn request_home_row(&mut self, kind: HomeRowKind) {
@@ -3568,7 +3807,8 @@ impl KattriApp {
                 "Jellyfin catalog page repeated item IDs; duplicates were dropped"
             );
         }
-        self.prune_artwork_bookkeeping();
+        self.attempted_artwork.clear();
+        self.artwork_access_ticks.clear();
         self.catalog_loaded = true;
         self.catalog_loading = false;
         self.catalog_error = None;
@@ -3608,17 +3848,108 @@ impl KattriApp {
         self.restart_catalog_query();
     }
 
+    /// The item types the current page lists, with the Music page's view applied.
+    fn page_item_types(&self) -> Option<&'static [&'static str]> {
+        if self.page == Page::Music {
+            return Some(self.music_view.item_types());
+        }
+        self.page.item_types()
+    }
+
+    pub(crate) fn set_music_view(&mut self, view: MusicView) {
+        if self.music_view == view {
+            return;
+        }
+        self.music_view = view;
+        self.restart_catalog_query();
+    }
+
+    pub(crate) fn set_catalog_studio(&mut self, studio: Option<String>) {
+        if self.catalog_studio == studio {
+            return;
+        }
+        self.catalog_studio = studio;
+        self.restart_catalog_query();
+    }
+
+    pub(crate) fn set_catalog_genre(&mut self, genre: Option<String>) {
+        if self.catalog_genre == genre {
+            return;
+        }
+        self.catalog_genre = genre;
+        self.restart_catalog_query();
+    }
+
+    /// Pages whose items carry genres.
+    fn page_has_genres(page: Page) -> bool {
+        matches!(page, Page::Movies | Page::Series | Page::Music)
+    }
+
+    /// Loads the genre list for the page and folder on screen, once per scope.
+    fn request_catalog_genres(&mut self, item_types: Option<Vec<String>>) {
+        let parent_id = self
+            .browse_context
+            .as_ref()
+            .map(|context| context.parent_id.clone());
+        let scope = (self.page, parent_id.clone());
+        if !Self::page_has_genres(self.page) {
+            self.catalog_genres.clear();
+            self.catalog_studios.clear();
+            self.catalog_genres_scope = None;
+            return;
+        }
+        if self.catalog_genres_scope.as_ref() == Some(&scope) {
+            return;
+        }
+        self.catalog_genres.clear();
+        self.catalog_studios.clear();
+        let request_id = self.allocate_request_id();
+        if self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .list_genres(request_id, parent_id, item_types)
+                .is_ok()
+        }) {
+            self.catalog_genres_request_id = request_id;
+            self.catalog_genres_scope = Some(scope);
+        }
+    }
+
+    pub(crate) fn set_catalog_name_prefix(&mut self, prefix: Option<char>) {
+        if self.catalog_name_prefix == prefix {
+            return;
+        }
+        self.catalog_name_prefix = prefix;
+        self.restart_catalog_query();
+    }
+
     pub(crate) fn clear_catalog_filters(&mut self) {
-        if self.catalog_played_filter == CatalogPlayedFilter::Any && !self.catalog_favorites_only {
+        if !self.has_catalog_filters() {
             return;
         }
         self.catalog_played_filter = CatalogPlayedFilter::Any;
         self.catalog_favorites_only = false;
+        self.catalog_name_prefix = None;
+        self.catalog_genre = None;
+        self.catalog_studio = None;
         self.restart_catalog_query();
     }
 
     pub(crate) fn has_catalog_filters(&self) -> bool {
-        self.catalog_played_filter != CatalogPlayedFilter::Any || self.catalog_favorites_only
+        self.catalog_played_filter != CatalogPlayedFilter::Any
+            || self.catalog_favorites_only
+            || self.catalog_name_prefix.is_some()
+            || self.catalog_genre.is_some()
+            || self.catalog_studio.is_some()
+    }
+
+    /// `(nameStartsWith, nameLessThan)` for the alphabet picker. `'#'` asks for names that
+    /// sort before "A", which are the ones starting with a digit or symbol.
+    fn catalog_name_bounds(&self) -> (Option<String>, Option<String>) {
+        match self.catalog_name_prefix {
+            Some('#') => (None, Some("A".to_owned())),
+            Some(letter) => (Some(letter.to_string()), None),
+            None => (None, None),
+        }
     }
 
     fn catalog_filters(&self) -> Option<Vec<ItemFilter>> {
@@ -3829,6 +4160,28 @@ impl KattriApp {
             return;
         }
 
+        let browsing = !is_search && !is_search_browse;
+        let name_bounds = if browsing {
+            self.catalog_name_bounds()
+        } else {
+            (None, None)
+        };
+        let genres = self
+            .catalog_genre
+            .clone()
+            .filter(|_| browsing)
+            .map(|genre| vec![genre]);
+        let studio_ids = self
+            .catalog_studio
+            .clone()
+            .filter(|_| browsing)
+            .map(|studio| vec![studio]);
+        if browsing && start_index == 0 {
+            let page_types = self
+                .page_item_types()
+                .map(|types| types.iter().map(|kind| (*kind).to_owned()).collect());
+            self.request_catalog_genres(page_types);
+        }
         let request_result =
             self.worker
                 .as_ref()
@@ -3858,7 +4211,7 @@ impl KattriApp {
                                 .collect()
                         })
                     } else {
-                        self.page.item_types().map(|types| {
+                        self.page_item_types().map(|types| {
                             types
                                 .iter()
                                 .map(|item_type| (*item_type).to_owned())
@@ -3894,11 +4247,14 @@ impl KattriApp {
                             } else {
                                 self.catalog_filters()
                             },
-                            genres: None,
+                            genres,
                             years: None,
                             person_ids: None,
                             ids: None,
                             enable_total_record_count: Some(true),
+                            name_starts_with: name_bounds.0,
+                            name_less_than: name_bounds.1,
+                            studio_ids,
                         },
                     )
                 });
@@ -3933,12 +4289,20 @@ impl KattriApp {
         }
     }
 
+    /// Opens `item_id` (an episode) from the page on screen; Back returns to that page.
+    pub(crate) fn open_child_item(&mut self, item_id: String) {
+        let parent = self.selected_item_id.clone();
+        self.select_item(item_id);
+        self.detail_parent = parent;
+    }
+
     pub(crate) fn select_item(&mut self, item_id: String) {
         if self.selected_item_id.as_deref() == Some(item_id.as_str())
             && (self.selected_details.is_some() || self.details_loading)
         {
             return;
         }
+        self.detail_parent = None;
         self.cancel_navigation_requests();
         self.music_album_tracks_request_id = self.allocate_request_id();
         self.music_album_tracks_loading = false;
@@ -4214,6 +4578,43 @@ impl KattriApp {
         self.series_episodes.clear();
         self.series_episodes_loading = false;
         self.series_episodes_error = None;
+        self.episode_thumbnails.clear();
+        self.episode_thumbnail_pending.clear();
+    }
+
+    /// Asks for the stills of the episodes now listed, keeping at most
+    /// [`MAX_EPISODE_THUMBNAILS`] textures.
+    fn request_episode_thumbnails(&mut self) {
+        if self.episode_thumbnails.len() > MAX_EPISODE_THUMBNAILS {
+            self.episode_thumbnails.clear();
+        }
+        let wanted: Vec<(String, String)> = self
+            .series_episodes
+            .iter()
+            .filter(|episode| !self.episode_thumbnails.contains_key(&episode.id))
+            .filter_map(|episode| {
+                episode
+                    .image_tags
+                    .as_ref()
+                    .and_then(|tags| tags.get("Primary").cloned().flatten())
+                    .map(|tag| (episode.id.clone(), tag))
+            })
+            .take(MAX_EPISODE_THUMBNAILS)
+            .collect();
+        self.episode_thumbnail_pending.clear();
+        for (episode_id, tag) in wanted {
+            let request_id = self.allocate_request_id();
+            let sent = self.worker.as_ref().is_some_and(|worker| {
+                worker
+                    .get_primary_artwork(request_id, episode_id.clone(), Some(tag))
+                    .is_ok()
+            });
+            if !sent {
+                break;
+            }
+            self.episode_thumbnail_pending
+                .insert(request_id, episode_id);
+        }
     }
 
     fn reset_people_detail(&mut self) {
@@ -4343,6 +4744,20 @@ impl KattriApp {
         self.series_episodes_error = None;
         self.series_seasons_loading = true;
         self.series_episodes_loading = false;
+        let next_up_request_id = self.allocate_request_id();
+        self.series_next_up = self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| {
+                worker
+                    .get_series_next_up(next_up_request_id, series_id.clone())
+                    .is_ok()
+            })
+            .then(|| SeriesNextUp {
+                series_id: series_id.clone(),
+                request_id: next_up_request_id,
+                episode: None,
+            });
         let request_id = self.allocate_request_id();
         self.series_seasons_request_id = request_id;
         if self
@@ -4353,6 +4768,14 @@ impl KattriApp {
             self.series_seasons_loading = false;
             self.series_seasons_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into());
         }
+    }
+
+    /// The episode the series page offers to play, once the server has named one.
+    pub(crate) fn series_next_up_episode(&self, series_id: &str) -> Option<&BaseItemDto> {
+        self.series_next_up
+            .as_ref()
+            .filter(|next_up| next_up.series_id == series_id)
+            .and_then(|next_up| next_up.episode.as_ref())
     }
 
     pub(crate) fn select_series_season(&mut self, season_id: String) {
@@ -4647,12 +5070,7 @@ impl KattriApp {
                 OptionsState::Unusable
             }
             Some(info) => OptionsState::Ready {
-                pick: select_playback_info_source_for_profile(info, self.device_profile()).map(
-                    |selection| kattri_client_core::playback_plan::PlaybackSelection {
-                        source_index: selection.source_index,
-                        method: selection.method,
-                    },
-                ),
+                pick: self.chosen_playback_selection(info),
             },
         };
         let details = match self.selected_details.as_ref() {
@@ -4815,7 +5233,283 @@ impl KattriApp {
                 });
             }
         }
+        self.request_episode_neighbors();
         self.prepare_server_playback(source_index, play_method, start_time_ticks);
+    }
+
+    /// Asks for the neighbours of the episode about to play, once per episode.
+    fn request_episode_neighbors(&mut self) {
+        let Some((episode_id, series_id)) = self.selected_details.as_ref().and_then(|item| {
+            (item.item_type.as_deref() == Some("Episode"))
+                .then(|| {
+                    item.series_id
+                        .clone()
+                        .map(|series| (item.id.clone(), series))
+                })
+                .flatten()
+        }) else {
+            return;
+        };
+        if self
+            .episode_neighbors
+            .as_ref()
+            .is_some_and(|neighbors| neighbors.episode_id == episode_id)
+        {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        let submitted = self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .get_adjacent_episodes(request_id, series_id, episode_id.clone())
+                .is_ok()
+        });
+        self.episode_neighbors = submitted.then_some(EpisodeNeighbors {
+            episode_id,
+            request_id,
+            previous: None,
+            next: None,
+            next_label: None,
+            up_next_cancelled: false,
+        });
+    }
+
+    fn neighbors_of(&self, playing_item_id: &str) -> Option<&EpisodeNeighbors> {
+        self.episode_neighbors
+            .as_ref()
+            .filter(|neighbors| neighbors.episode_id == playing_item_id)
+    }
+
+    fn adjacent(&self, playing_item_id: &str) -> Option<Adjacent<'_>> {
+        if let Some(queue) = self.shuffle_queue.as_ref()
+            && let Some(index) = queue
+                .episodes
+                .iter()
+                .position(|(id, _)| id == playing_item_id)
+        {
+            return Some(Adjacent {
+                previous: index
+                    .checked_sub(1)
+                    .map(|previous| queue.episodes[previous].0.as_str()),
+                next: queue
+                    .episodes
+                    .get(index + 1)
+                    .map(|(id, label)| (id.as_str(), label.as_str())),
+                up_next_cancelled: queue.up_next_cancelled_for.as_deref() == Some(playing_item_id),
+            });
+        }
+        self.neighbors_of(playing_item_id)
+            .map(|neighbors| Adjacent {
+                previous: neighbors.previous.as_deref(),
+                next: neighbors
+                    .next
+                    .as_deref()
+                    .map(|id| (id, neighbors.next_label.as_deref().unwrap_or_default())),
+                up_next_cancelled: neighbors.up_next_cancelled,
+            })
+    }
+
+    /// Whether the player's previous and next buttons have an episode to go to.
+    pub fn episode_navigation(&self, playing_item_id: &str) -> (bool, bool) {
+        self.adjacent(playing_item_id)
+            .map_or((false, false), |adjacent| {
+                (adjacent.previous.is_some(), adjacent.next.is_some())
+            })
+    }
+
+    /// The player's Previous control on an episode. True when the previous episode was started.
+    pub fn on_episode_previous(&mut self, playing_item_id: &str) -> bool {
+        let Some(previous) = self
+            .adjacent(playing_item_id)
+            .and_then(|adjacent| adjacent.previous.map(str::to_owned))
+        else {
+            return false;
+        };
+        self.play_item(previous, false);
+        true
+    }
+
+    /// The player's Next control on an episode. True when the next episode was started.
+    pub fn on_episode_next(&mut self, playing_item_id: &str) -> bool {
+        let Some(next) = self
+            .adjacent(playing_item_id)
+            .and_then(|adjacent| adjacent.next.map(|(id, _)| id.to_owned()))
+        else {
+            return false;
+        };
+        self.play_item(next, false);
+        true
+    }
+
+    /// The source and method playback uses: the version the viewer picked when this device can
+    /// play it, else the first playable source.
+    pub(crate) fn chosen_playback_selection(
+        &self,
+        info: &jellyfin_api::PlaybackInfoResponse,
+    ) -> Option<PlaybackSelection> {
+        let profile = self.device_profile();
+        if let Some(index) = self.preferred_source_index()
+            && let Some(selection) = playback_info_candidates_for_profile(info, profile)
+                .find(|selection| selection.source_index == index)
+        {
+            return Some(selection);
+        }
+        select_playback_info_source_for_profile(info, profile).map(|selection| PlaybackSelection {
+            source_index: selection.source_index,
+            method: selection.method,
+        })
+    }
+
+    /// The version picked for the item on screen, if any.
+    pub(crate) fn preferred_source_index(&self) -> Option<usize> {
+        self.preferred_source
+            .as_ref()
+            .filter(|(item_id, _)| self.selected_item_id.as_deref() == Some(item_id.as_str()))
+            .map(|(_, index)| *index)
+    }
+
+    pub(crate) fn set_preferred_source(&mut self, index: usize) {
+        if let Some(item_id) = self.selected_item_id.clone() {
+            self.preferred_source = Some((item_id, index));
+        }
+    }
+
+    /// For a music track page, asks for its lyrics.
+    fn request_track_lyrics(&mut self) {
+        self.track_lyrics.clear();
+        self.track_lyrics_request_id = self.allocate_request_id();
+        let Some(item_id) = self
+            .selected_details
+            .as_ref()
+            .and_then(|item| (item.item_type.as_deref() == Some("Audio")).then(|| item.id.clone()))
+        else {
+            return;
+        };
+        let request_id = self.track_lyrics_request_id;
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.get_lyrics(request_id, item_id);
+        }
+    }
+
+    /// For a movie or series page, asks for its trailers and special features.
+    fn request_item_extras(&mut self) {
+        self.item_extras.clear();
+        self.item_extras_request_id = self.allocate_request_id();
+        let Some(item_id) = self.selected_details.as_ref().and_then(|item| {
+            matches!(item.item_type.as_deref(), Some("Movie" | "Series")).then(|| item.id.clone())
+        }) else {
+            return;
+        };
+        let request_id = self.item_extras_request_id;
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.list_extras(request_id, item_id);
+        }
+    }
+
+    /// For an episode page, asks for the rest of its season.
+    fn request_season_siblings(&mut self) {
+        self.season_siblings.clear();
+        self.season_siblings_request_id = self.allocate_request_id();
+        let Some((series_id, season)) = self.selected_details.as_ref().and_then(|item| {
+            (item.item_type.as_deref() == Some("Episode"))
+                .then(|| item.series_id.clone().zip(item.parent_index_number))
+                .flatten()
+        }) else {
+            return;
+        };
+        let request_id = self.season_siblings_request_id;
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.list_season_siblings(request_id, series_id, season);
+        }
+    }
+
+    /// Plays an extra of the page on screen; Back from it returns to that page.
+    pub(crate) fn play_child_item(&mut self, item_id: String) {
+        let parent = self.selected_item_id.clone();
+        self.play_item(item_id, true);
+        self.detail_parent = parent;
+    }
+
+    /// Opens another episode of the same season, keeping where Back returns.
+    pub(crate) fn open_sibling_item(&mut self, item_id: String) {
+        let parent = self.detail_parent.clone();
+        self.select_item(item_id);
+        self.detail_parent = parent;
+    }
+
+    /// Loads recordings and timers once per visit to the Live TV page.
+    pub(crate) fn ensure_live_tv_recordings(&mut self) {
+        if self.live_tv_recordings_state != RecordingsState::NotLoaded {
+            return;
+        }
+        self.reload_live_tv_recordings();
+    }
+
+    fn reload_live_tv_recordings(&mut self) {
+        let request_id = self.allocate_request_id();
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.load_recordings(request_id).is_ok())
+        {
+            self.live_tv_recordings_request_id = request_id;
+            self.live_tv_recordings_state = RecordingsState::Loading;
+        }
+    }
+
+    /// Schedules or cancels a recording; the lists reload when the server answers.
+    pub(crate) fn change_live_tv_timer(&mut self, change: crate::worker::TimerChange) {
+        let request_id = self.allocate_request_id();
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.change_timer(request_id, change).is_ok())
+        {
+            self.timer_change_request_id = request_id;
+        }
+    }
+
+    /// Starts a shuffled run of `series_id`'s episodes.
+    pub(crate) fn shuffle_series(&mut self, series_id: String) {
+        let request_id = self.allocate_request_id();
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.shuffle_series(request_id, series_id).is_ok())
+        {
+            self.shuffle_request_id = request_id;
+        }
+    }
+
+    /// An episode played to its end. Starts the next one when the viewer allows it.
+    pub fn on_episode_ended(&mut self, ended_item_id: &str) -> bool {
+        self.up_next_label(ended_item_id).is_some() && self.on_episode_next(ended_item_id)
+    }
+
+    /// The next episode's label while it is set to start when `playing_item_id` ends.
+    pub fn up_next_label(&self, playing_item_id: &str) -> Option<&str> {
+        if !self.playback_settings().auto_play_next_episode {
+            return None;
+        }
+        self.adjacent(playing_item_id)
+            .filter(|adjacent| !adjacent.up_next_cancelled)
+            .and_then(|adjacent| adjacent.next.map(|(_, label)| label))
+    }
+
+    /// The viewer dismissed the Up Next card: `playing_item_id` ends without auto-play.
+    pub fn cancel_up_next(&mut self, playing_item_id: &str) {
+        if let Some(queue) = self.shuffle_queue.as_mut()
+            && queue.episodes.iter().any(|(id, _)| id == playing_item_id)
+        {
+            queue.up_next_cancelled_for = Some(playing_item_id.to_owned());
+            return;
+        }
+        if let Some(neighbors) = self
+            .episode_neighbors
+            .as_mut()
+            .filter(|neighbors| neighbors.episode_id == playing_item_id)
+        {
+            neighbors.up_next_cancelled = true;
+        }
     }
 
     fn retry_playback_start(&mut self) -> bool {
@@ -4933,29 +5627,26 @@ impl KattriApp {
     }
 
     pub(crate) fn request_visible_artwork(&mut self, requests: Vec<(String, String)>) {
-        // A grid that is not scrolling asks for the same artwork every frame. Returning early
-        // keeps an idle frame free of three scans over the catalog and of an LRU tick bump per
-        // poster.
-        if requests == self.visible_artwork {
-            return;
-        }
-        // One pass over the catalog instead of two scans per visible poster.
-        let mut catalog: HashMap<(String, String), bool> = HashMap::new();
+        self.visible_artwork_from_tick = self.next_artwork_access_tick.saturating_add(1);
+        // One pass over the items instead of two scans per visible card.
+        let mut known: HashMap<(&str, &str), bool> = HashMap::new();
         for item in self.artwork_items() {
-            if let Some(tag) = item.primary_image_tag.as_ref() {
-                catalog.insert(
-                    (item.artwork_id.clone(), tag.clone()),
-                    item.artwork_texture.is_some(),
-                );
+            if let Some(tag) = item.primary_image_tag.as_deref() {
+                let loaded = known
+                    .entry((item.artwork_id.as_str(), tag))
+                    .or_insert(false);
+                *loaded |= item.artwork_texture.is_some();
             }
         }
-        let pending: HashSet<(String, String)> =
+        let known: HashMap<(String, String), bool> = known
+            .into_iter()
+            .map(|((id, tag), loaded)| ((id.to_owned(), tag.to_owned()), loaded))
+            .collect();
+        let mut pending: HashSet<(String, String)> =
             self.pending_artwork_requests.values().cloned().collect();
-        let mut retry_submission = false;
-
-        for (item_id, image_tag) in &requests {
+        for (item_id, image_tag) in requests {
             let key = (item_id.clone(), image_tag.clone());
-            let Some(&already_loaded) = catalog.get(&key) else {
+            let Some(&already_loaded) = known.get(&key) else {
                 continue;
             };
 
@@ -4981,41 +5672,17 @@ impl KattriApp {
                 .as_ref()
                 .ok_or(WorkerSubmitError::Stopped)
                 .and_then(|worker| {
-                    worker.get_primary_artwork(request_id, item_id.clone(), Some(image_tag.clone()))
+                    worker.get_primary_artwork(request_id, item_id, Some(image_tag))
                 });
             if result.is_ok() {
+                pending.insert(key.clone());
                 self.pending_artwork_requests.insert(request_id, key);
             } else {
                 self.attempted_artwork.remove(&key);
-                retry_submission = matches!(result, Err(WorkerSubmitError::Busy));
                 break;
             }
         }
-        if retry_submission {
-            self.visible_artwork.clear();
-        } else {
-            self.visible_artwork = requests;
-        }
         self.trim_artwork_cache();
-    }
-
-    /// Drops LRU ticks and attempt records for artwork that is no longer in the catalog or on a
-    /// home shelf. A page append used to clear the whole map, which reset every loaded poster to
-    /// tick 0, so the next trim evicted them in arbitrary order and they were fetched again.
-    fn prune_artwork_bookkeeping(&mut self) {
-        let live: HashSet<(String, String)> = self
-            .artwork_items()
-            .filter_map(|item| {
-                item.primary_image_tag
-                    .as_ref()
-                    .map(|tag| (item.artwork_id.clone(), tag.clone()))
-            })
-            .collect();
-        self.artwork_access_ticks
-            .retain(|key, _| live.contains(key));
-        self.attempted_artwork.retain(|key| live.contains(key));
-        // A reload can replace textures even when the visible IDs stay the same.
-        self.visible_artwork.clear();
     }
 
     fn trim_artwork_cache(&mut self) {
@@ -5025,6 +5692,7 @@ impl KattriApp {
             &mut media,
             &mut self.artwork_access_ticks,
             &mut self.attempted_artwork,
+            self.visible_artwork_from_tick,
         );
     }
 
@@ -5381,9 +6049,9 @@ impl KattriApp {
         self.pending_artwork_requests.clear();
         self.attempted_artwork.clear();
         self.artwork_access_ticks.clear();
-        self.visible_artwork.clear();
         self.server = None;
         self.user_name = None;
+        self.user_is_admin = false;
         self.items.clear();
         self.total_record_count = None;
         self.start_index = 0;
@@ -5643,6 +6311,7 @@ impl KattriApp {
                         self.quick_connect = None;
                     }
                     self.server = Some(server);
+                    self.user_is_admin = user.is_administrator();
                     self.user_name = Some(user.name);
                     self.catalog_loading = true;
                     if !self.catalog_loaded {
@@ -5822,10 +6491,6 @@ impl KattriApp {
                             && let Some(evicted) = self.live_tv_channel_logos.keys().next().cloned()
                         {
                             self.live_tv_channel_logos.remove(&evicted);
-                            // The channel may come back on screen later; forgetting the attempt
-                            // lets the next guide pass fetch its logo again instead of
-                            // leaving it on the placeholder for the rest of the session.
-                            self.live_tv_logo_attempted.remove(&evicted);
                         }
                         let color_image = egui::ColorImage::from_rgba_unmultiplied(
                             [width as usize, height as usize],
@@ -5913,6 +6578,7 @@ impl KattriApp {
                     let ceiling = self.browse_rating_ceiling(ctx);
                     if self.apply_catalog_response(request_id, page, ceiling) {
                         self.server = Some(server);
+                        self.user_is_admin = user.is_administrator();
                         self.user_name = Some(user.name);
                     }
                 }
@@ -5968,6 +6634,9 @@ impl KattriApp {
                     {
                         self.request_series_seasons(series_id);
                     }
+                    self.request_season_siblings();
+                    self.request_item_extras();
+                    self.request_track_lyrics();
                     if self.music_queue_auto_play_item_id.as_deref()
                         == self.selected_item_id.as_deref()
                     {
@@ -6028,6 +6697,7 @@ impl KattriApp {
                     self.series_episodes_loading = false;
                     self.series_episodes_error = None;
                     self.series_episodes = episodes;
+                    self.request_episode_thumbnails();
                 }
                 WorkerEvent::SeriesEpisodesFailed {
                     request_id,
@@ -6038,6 +6708,186 @@ impl KattriApp {
                 {
                     self.series_episodes_loading = false;
                     self.series_episodes_error = Some(message);
+                }
+                WorkerEvent::ForgotPasswordFinished { request_id, result } => {
+                    if request_id == self.forgot_password_request_id {
+                        self.forgot_password_notice = Some(forgot_password_message(&result));
+                    }
+                }
+                WorkerEvent::ItemAdminFinished {
+                    request_id,
+                    item_id,
+                    action,
+                    result,
+                } => {
+                    if let Some(title) = self.admin_requests.remove(&request_id) {
+                        let args = [("title", title.as_str())];
+                        let text = match (action, &result) {
+                            (crate::worker::ItemAdminAction::RefreshMetadata, Ok(())) => {
+                                ui_text_args(ids::TOAST_REFRESH_QUEUED, &args)
+                            }
+                            (crate::worker::ItemAdminAction::Delete, Ok(())) => {
+                                ui_text_args(ids::TOAST_DELETED, &args)
+                            }
+                            (crate::worker::ItemAdminAction::AddToCollection, Ok(())) => {
+                                ui_text_args(ids::TOAST_ADDED_TO_COLLECTION, &args)
+                            }
+                            (_, Err(_)) => ui_text_args(ids::TOAST_ADMIN_FAILED, &args),
+                        };
+                        self.show_toast(text);
+                        if action == crate::worker::ItemAdminAction::Delete && result.is_ok() {
+                            self.forget_deleted_item(&item_id);
+                        }
+                    }
+                }
+                WorkerEvent::GenresLoaded {
+                    request_id,
+                    genres,
+                    studios,
+                } => {
+                    if request_id == self.catalog_genres_request_id {
+                        self.catalog_genres = genres;
+                        self.catalog_studios = studios;
+                    }
+                }
+                WorkerEvent::LyricsLoaded { request_id, lines } => {
+                    if request_id == self.track_lyrics_request_id {
+                        self.track_lyrics = lines;
+                    }
+                }
+                WorkerEvent::ExtrasLoaded { request_id, extras } => {
+                    if request_id == self.item_extras_request_id {
+                        self.item_extras = extras;
+                    }
+                }
+                WorkerEvent::SeasonSiblingsLoaded {
+                    request_id,
+                    episodes,
+                } => {
+                    if request_id == self.season_siblings_request_id {
+                        let current = self.selected_item_id.clone();
+                        self.season_siblings = episodes
+                            .into_iter()
+                            .filter(|episode| Some(&episode.id) != current.as_ref())
+                            .collect();
+                    }
+                }
+                WorkerEvent::RecordingsLoaded { request_id, result } => {
+                    if request_id == self.live_tv_recordings_request_id {
+                        match result {
+                            Ok((recordings, timers)) => {
+                                self.live_tv_recordings = recordings;
+                                self.live_tv_timers = timers;
+                                self.live_tv_recordings_state = RecordingsState::Loaded;
+                            }
+                            Err(_) => {
+                                self.live_tv_recordings.clear();
+                                self.live_tv_timers.clear();
+                                self.live_tv_recordings_state = RecordingsState::Unavailable;
+                            }
+                        }
+                    }
+                }
+                WorkerEvent::TimerChanged { request_id, result } => {
+                    if request_id == self.timer_change_request_id {
+                        self.show_toast(
+                            ui_text(if result.is_ok() {
+                                ids::TOAST_SCHEDULE_UPDATED
+                            } else {
+                                ids::TOAST_SCHEDULE_FAILED
+                            })
+                            .to_owned(),
+                        );
+                        self.reload_live_tv_recordings();
+                    }
+                }
+                WorkerEvent::ShuffleLoaded {
+                    request_id,
+                    episodes,
+                } => {
+                    if request_id == self.shuffle_request_id && !episodes.is_empty() {
+                        let episodes: Vec<(String, String)> = episodes
+                            .iter()
+                            .map(|episode| {
+                                (
+                                    episode.id.clone(),
+                                    crate::ui::episode_display_label(episode),
+                                )
+                            })
+                            .collect();
+                        let first = episodes[0].0.clone();
+                        self.shuffle_queue = Some(ShuffleQueue {
+                            episodes,
+                            up_next_cancelled_for: None,
+                        });
+                        self.play_item(first, true);
+                    }
+                }
+                WorkerEvent::MenuCollectionsLoaded {
+                    request_id,
+                    collections,
+                } => {
+                    if request_id == self.menu_collections_request_id {
+                        self.menu_collections = std::sync::Arc::new(collections);
+                    }
+                }
+                WorkerEvent::UserPlaylistsLoaded {
+                    request_id,
+                    playlists,
+                } => {
+                    if request_id == self.menu_playlists_request_id {
+                        self.menu_playlists = std::sync::Arc::new(playlists);
+                    }
+                }
+                WorkerEvent::PlaylistMutationCompleted { request_id, .. }
+                | WorkerEvent::PlaylistMutationFailed { request_id, .. }
+                    if self
+                        .menu_playlist_add
+                        .as_ref()
+                        .is_some_and(|(pending, _, _)| *pending == request_id) =>
+                {
+                    let added = matches!(event, WorkerEvent::PlaylistMutationCompleted { .. });
+                    if let Some((_, title, playlist)) = self.menu_playlist_add.take() {
+                        let args = [("title", title.as_str()), ("playlist", playlist.as_str())];
+                        self.show_toast(if added {
+                            ui_text_args(ids::TOAST_ADDED_TO_PLAYLIST, &args)
+                        } else {
+                            ui_text_args(ids::TOAST_ADD_TO_PLAYLIST_FAILED, &args)
+                        });
+                    }
+                    if let WorkerEvent::PlaylistMutationCompleted { playlist_id, .. } = &event
+                        && self.opened_playlist_id.as_deref() == Some(playlist_id.as_str())
+                    {
+                        self.request_playlist_items(playlist_id.clone());
+                    }
+                }
+                WorkerEvent::SeriesNextUpLoaded {
+                    request_id,
+                    series_id,
+                    episode,
+                } => {
+                    if let Some(next_up) = self.series_next_up.as_mut()
+                        && next_up.request_id == request_id
+                        && next_up.series_id == series_id
+                    {
+                        next_up.episode = episode.map(|episode| *episode);
+                    }
+                }
+                WorkerEvent::AdjacentEpisodesLoaded {
+                    request_id,
+                    episode_id,
+                    previous,
+                    next,
+                } => {
+                    if let Some(neighbors) = self.episode_neighbors.as_mut()
+                        && neighbors.request_id == request_id
+                        && neighbors.episode_id == episode_id
+                    {
+                        neighbors.previous = previous.map(|item| item.id);
+                        neighbors.next_label =
+                            next.as_deref().map(crate::ui::episode_display_label);
+                        neighbors.next = next.map(|item| item.id);
+                    }
                 }
                 WorkerEvent::MusicAlbumTracksLoaded {
                     request_id,
@@ -6153,6 +7003,7 @@ impl KattriApp {
                     }
                     self.playlist_mutation_notice =
                         Some(ui_text(ids::PLAYLISTS_NOTICE_CREATED).into());
+                    self.request_menu_playlists();
                     self.request_catalog(0, None);
                     self.select_item(playlist_id);
                 }
@@ -6389,16 +7240,12 @@ impl KattriApp {
                                 egui::TextureOptions::LINEAR,
                             ),
                         );
-                        while self.photo_thumbnails.len() > 64 {
-                            if let Some(key) = self.photo_thumbnails.keys().next().cloned() {
-                                self.photo_thumbnails.remove(&key);
-                                // Same as the Live TV logos: an evicted thumbnail must be
-                                // fetchable if the photo scrolls back into view.
-                                self.photo_thumbnail_attempted.remove(&key);
-                            } else {
-                                break;
-                            }
-                        }
+                        evict_photo_thumbnails(
+                            &mut self.photo_thumbnails,
+                            &mut self.photo_thumbnail_attempted,
+                            &self.photo_visible_ids,
+                            &item_id,
+                        );
                     }
                 }
                 WorkerEvent::PhotoThumbnailFailed {
@@ -6484,8 +7331,6 @@ impl KattriApp {
                     height,
                     rgba,
                 } => {
-                    // Completing a bounded batch must schedule the rest of the visible cards.
-                    self.visible_artwork.clear();
                     if request_id == self.detail_artwork_request_id
                         && self.selected_item_id.as_deref() == Some(item_id.as_str())
                     {
@@ -6498,6 +7343,22 @@ impl KattriApp {
                             color_image,
                             egui::TextureOptions::LINEAR,
                         ));
+                    } else if let Some(episode_id) =
+                        self.episode_thumbnail_pending.remove(&request_id)
+                    {
+                        if episode_id == item_id {
+                            self.episode_thumbnails.insert(
+                                item_id.clone(),
+                                ctx.load_texture(
+                                    format!("jellyfin-episode-still:{item_id}"),
+                                    egui::ColorImage::from_rgba_unmultiplied(
+                                        [width as usize, height as usize],
+                                        &rgba,
+                                    ),
+                                    egui::TextureOptions::LINEAR,
+                                ),
+                            );
+                        }
                     } else if let Some((expected_item_id, expected_tag)) =
                         self.pending_artwork_requests.remove(&request_id)
                         && expected_item_id == item_id
@@ -6528,7 +7389,7 @@ impl KattriApp {
                 }
                 WorkerEvent::PrimaryArtworkFailed { request_id } => {
                     self.pending_artwork_requests.remove(&request_id);
-                    self.visible_artwork.clear();
+                    self.episode_thumbnail_pending.remove(&request_id);
                 }
                 WorkerEvent::BackdropArtworkLoaded {
                     request_id,
@@ -7296,6 +8157,111 @@ mod catalog_query_tests {
     }
 
     #[test]
+    fn alphabet_picker_maps_to_name_bounds_and_counts_as_a_filter() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.worker = None;
+        assert_eq!(app.catalog_name_bounds(), (None, None));
+        app.set_catalog_name_prefix(Some('K'));
+        assert_eq!(app.catalog_name_bounds(), (Some("K".into()), None));
+        assert!(app.has_catalog_filters());
+        app.set_catalog_name_prefix(Some('#'));
+        assert_eq!(app.catalog_name_bounds(), (None, Some("A".into())));
+        app.clear_catalog_filters();
+        assert_eq!(app.catalog_name_prefix, None);
+        app.set_catalog_name_prefix(Some('B'));
+        app.navigate_to(crate::app::Page::Movies);
+        assert_eq!(
+            app.catalog_name_prefix, None,
+            "a new page starts unfiltered"
+        );
+    }
+
+    #[test]
+    fn genre_list_loads_once_per_page_and_the_choice_is_a_filter() {
+        let mut app = KattriApp::new(egui::Context::default());
+        let (worker, sender) = crate::worker::ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.page = crate::app::Page::Movies;
+        app.request_catalog_genres(Some(vec!["Movie".into()]));
+        let request_id = app.catalog_genres_request_id;
+        assert_ne!(request_id, 0);
+        app.request_catalog_genres(Some(vec!["Movie".into()]));
+        assert_eq!(
+            app.catalog_genres_request_id, request_id,
+            "same scope, no new request"
+        );
+        sender
+            .try_send(crate::worker::WorkerEvent::GenresLoaded {
+                request_id,
+                genres: vec!["Action".into(), "Drama".into()],
+                studios: vec![("s1".into(), "Studio One".into())],
+            })
+            .expect("send genres");
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.catalog_genres, ["Action", "Drama"]);
+        assert_eq!(app.catalog_studios.len(), 1);
+        app.set_catalog_studio(Some("s1".into()));
+        assert!(app.has_catalog_filters());
+        app.clear_catalog_filters();
+        assert_eq!(app.catalog_studio, None);
+        app.set_catalog_genre(Some("Drama".into()));
+        assert!(app.has_catalog_filters());
+        app.clear_catalog_filters();
+        assert_eq!(app.catalog_genre, None);
+
+        app.page = crate::app::Page::Photos;
+        app.request_catalog_genres(None);
+        assert!(app.catalog_genres.is_empty(), "photos have no genre filter");
+    }
+
+    #[test]
+    fn an_episode_opened_from_its_series_goes_back_to_the_series() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.worker = None;
+        app.select_item("show".into());
+        app.open_child_item("episode".into());
+        assert_eq!(app.selected_item_id.as_deref(), Some("episode"));
+        app.navigate_back();
+        assert_eq!(app.selected_item_id.as_deref(), Some("show"));
+        app.navigate_back();
+        assert_eq!(
+            app.selected_item_id, None,
+            "the series page goes back to the library"
+        );
+
+        app.select_item("show".into());
+        app.open_child_item("episode".into());
+        app.select_item("elsewhere".into());
+        app.navigate_back();
+        assert_eq!(
+            app.selected_item_id, None,
+            "another selection forgets the series"
+        );
+    }
+
+    #[test]
+    fn the_music_view_chooses_the_item_types() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.worker = None;
+        app.page = crate::app::Page::Music;
+        assert_eq!(app.page_item_types(), Some(&["Audio", "MusicAlbum"][..]));
+        app.set_music_view(crate::app::MusicView::Albums);
+        assert_eq!(app.page_item_types(), Some(&["MusicAlbum"][..]));
+        app.set_music_view(crate::app::MusicView::Songs);
+        assert_eq!(app.page_item_types(), Some(&["Audio"][..]));
+        app.page = crate::app::Page::Movies;
+        assert_eq!(
+            app.page_item_types(),
+            Some(&["Movie"][..]),
+            "other pages ignore it"
+        );
+    }
+
+    #[test]
     fn unsupported_filter_is_hidden_and_removed_before_the_retry() {
         let mut app = KattriApp::new(egui::Context::default());
         app.worker = None;
@@ -7402,6 +8368,9 @@ mod catalog_query_tests {
                 person_ids: None,
                 ids: None,
                 enable_total_record_count: Some(true),
+                name_starts_with: None,
+                name_less_than: None,
+                studio_ids: None,
             };
             let old_page = client
                 .list_items(
@@ -7592,10 +8561,131 @@ mod search_browse_tests {
     }
 }
 
+/// What to tell the user after a Forgot password request.
+fn forgot_password_message(
+    result: &Result<jellyfin_api::ForgotPasswordResult, jellyfin_api::ErrorClass>,
+) -> String {
+    use jellyfin_api::ForgotPasswordAction;
+    match result {
+        Ok(reset) => match reset.action {
+            ForgotPasswordAction::PinCode => {
+                let file = reset.pin_file.as_deref().unwrap_or_default();
+                ui_text_args(ids::FORGOT_PASSWORD_PIN_WRITTEN, &[("file", file)])
+            }
+            ForgotPasswordAction::InNetworkRequired => {
+                ui_text(ids::FORGOT_PASSWORD_IN_NETWORK).to_owned()
+            }
+            ForgotPasswordAction::ContactAdmin | ForgotPasswordAction::Other(_) => {
+                ui_text(ids::FORGOT_PASSWORD_CONTACT_ADMIN).to_owned()
+            }
+        },
+        Err(_) => ui_text(ids::FORGOT_PASSWORD_FAILED).to_owned(),
+    }
+}
+
+/// The episodes before and after one episode, as the server ordered them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EpisodeNeighbors {
+    episode_id: String,
+    request_id: u64,
+    previous: Option<String>,
+    next: Option<String>,
+    /// "S1:E4 · Title" of the next episode, for the Up Next card.
+    next_label: Option<String>,
+    /// The viewer dismissed Up Next for this episode: it ends without starting the next.
+    up_next_cancelled: bool,
+}
+
+/// What the Music page lists: everything, albums only, or songs only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MusicView {
+    All,
+    Albums,
+    Songs,
+}
+
+impl MusicView {
+    pub(crate) const ALL: [Self; 3] = [Self::All, Self::Albums, Self::Songs];
+
+    const fn item_types(self) -> &'static [&'static str] {
+        match self {
+            Self::All => &["Audio", "MusicAlbum"],
+            Self::Albums => &["MusicAlbum"],
+            Self::Songs => &["Audio"],
+        }
+    }
+}
+
+/// Where the Live TV page's recordings list stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecordingsState {
+    NotLoaded,
+    Loading,
+    Loaded,
+    /// The server has no recording support set up, or refused.
+    Unavailable,
+}
+
+/// Episodes in shuffled order as `(id, label)`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ShuffleQueue {
+    episodes: Vec<(String, String)>,
+    /// The episode whose Up Next card was dismissed.
+    up_next_cancelled_for: Option<String>,
+}
+
+/// What comes before and after the playing item: from the shuffle when it holds the item,
+/// else from the server's episode order.
+struct Adjacent<'a> {
+    previous: Option<&'a str>,
+    next: Option<(&'a str, &'a str)>,
+    up_next_cancelled: bool,
+}
+
+/// The server's Next Up episode for one series.
+#[derive(Clone, Debug, PartialEq)]
+struct SeriesNextUp {
+    series_id: String,
+    request_id: u64,
+    episode: Option<BaseItemDto>,
+}
+
+const MAX_PHOTO_THUMBNAILS: usize = 64;
+/// Most episode stills kept for one series page (about two seasons).
+const MAX_EPISODE_THUMBNAILS: usize = 48;
+
+/// Keeps at most [`MAX_PHOTO_THUMBNAILS`] thumbnails, never evicting one in the visible
+/// window or the one just loaded. An evicted id may be requested again when it scrolls back.
+fn evict_photo_thumbnails(
+    thumbnails: &mut HashMap<String, egui::TextureHandle>,
+    attempted: &mut HashSet<String>,
+    visible: &HashSet<String>,
+    just_loaded: &str,
+) {
+    if thumbnails.len() <= MAX_PHOTO_THUMBNAILS {
+        return;
+    }
+    let excess = thumbnails.len() - MAX_PHOTO_THUMBNAILS;
+    let evict: Vec<String> = thumbnails
+        .keys()
+        .filter(|id| id.as_str() != just_loaded && !visible.contains(id.as_str()))
+        .take(excess)
+        .cloned()
+        .collect();
+    for id in evict {
+        thumbnails.remove(&id);
+        attempted.remove(&id);
+    }
+}
+
+/// Drops the least recently shown textures past [`MAX_CACHED_ARTWORK_TEXTURES`]. Textures
+/// shown at or after `visible_from_tick` are on screen and stay, so a screen showing more
+/// cards than the cap grows the cache instead of evicting and reloading visible artwork.
 fn trim_artwork_textures(
     items: &mut [&mut MediaItem],
     access_ticks: &mut HashMap<(String, String), u64>,
     attempted: &mut HashSet<(String, String)>,
+    visible_from_tick: u64,
 ) {
     let loaded_count = items
         .iter()
@@ -7615,6 +8705,7 @@ fn trim_artwork_textures(
                 (tick, key)
             })
         })
+        .filter(|(tick, _)| visible_from_tick == 0 || *tick < visible_from_tick)
         .collect();
     least_recently_used.sort_unstable_by_key(|(tick, _)| *tick);
 
@@ -7801,9 +8892,81 @@ impl KattriApp {
         if let Some(url) = crate::ui::open_url::show(&ctx, &mut self.open_url) {
             self.pending_stream_url = Some(url);
         }
+        self.sync_home_sections();
+        crate::ui::item_menu::publish_playlists(&ctx, self.menu_playlists.clone());
+        crate::ui::item_menu::publish_admin(&ctx, self.user_is_admin);
+        crate::ui::item_menu::publish_collections(&ctx, self.menu_collections.clone());
         crate::ui::draw(root, self, width);
         if let Some((target, action)) = crate::ui::item_menu::take(&ctx) {
             self.apply_item_menu_action(target, action);
+        }
+        self.draw_delete_confirmation(&ctx);
+        self.draw_toast(&ctx);
+    }
+
+    fn submit_item_admin(
+        &mut self,
+        item_id: String,
+        title: String,
+        action: crate::worker::ItemAdminAction,
+        collection_id: Option<String>,
+    ) {
+        if !self.user_is_admin {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        if self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .item_admin(request_id, item_id, action, collection_id)
+                .is_ok()
+        }) {
+            self.admin_requests.insert(request_id, title);
+        }
+    }
+
+    /// Asks before a delete; the server removes the files, so there is no undo.
+    fn draw_delete_confirmation(&mut self, ctx: &egui::Context) {
+        let Some((item_id, title)) = self.pending_delete.clone() else {
+            return;
+        };
+        let mut choice = None;
+        let modal = egui::Modal::new(egui::Id::unique("kattri-confirm-delete")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.heading(ui_text_args(
+                ids::DELETE_CONFIRM_TITLE,
+                &[("title", title.as_str())],
+            ));
+            ui.label(ui_text(ids::DELETE_CONFIRM_BODY));
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let delete = egui::Button::new(
+                    egui::RichText::new(ui_text(ids::DELETE_CONFIRM_DELETE))
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(0xB0, 0x2A, 0x2A));
+                if ui.add(delete).clicked() {
+                    choice = Some(true);
+                }
+                if ui.button(ui_text(ids::DELETE_CONFIRM_CANCEL)).clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+        if modal.should_close() && choice.is_none() {
+            choice = Some(false);
+        }
+        match choice {
+            Some(true) => {
+                self.pending_delete = None;
+                self.submit_item_admin(
+                    item_id,
+                    title,
+                    crate::worker::ItemAdminAction::Delete,
+                    None,
+                );
+            }
+            Some(false) => self.pending_delete = None,
+            None => {}
         }
     }
 
@@ -7825,6 +8988,61 @@ impl KattriApp {
                 }
             }
             ItemMenuAction::Download => self.start_download(&target.item_id, &target.title),
+            ItemMenuAction::AddToQueue | ItemMenuAction::PlayNextInQueue => {
+                let queue_item = QueueItem::new(target.item_id.clone());
+                let result = if action == ItemMenuAction::PlayNextInQueue {
+                    self.music_queue.play_next(queue_item)
+                } else {
+                    self.music_queue.add(queue_item)
+                };
+                if result.is_ok() {
+                    self.show_toast(ui_text_args(
+                        ids::TOAST_ADDED_TO_QUEUE,
+                        &[("title", target.title.as_str())],
+                    ));
+                    self.music_track_names.insert(target.item_id, target.title);
+                }
+            }
+            ItemMenuAction::RefreshMetadata => {
+                self.submit_item_admin(
+                    target.item_id,
+                    target.title,
+                    crate::worker::ItemAdminAction::RefreshMetadata,
+                    None,
+                );
+            }
+            ItemMenuAction::AddToCollection => {
+                if let Some(collection_id) = target.list_id {
+                    self.submit_item_admin(
+                        target.item_id,
+                        target.title,
+                        crate::worker::ItemAdminAction::AddToCollection,
+                        Some(collection_id),
+                    );
+                }
+            }
+            ItemMenuAction::Delete => {
+                self.pending_delete = Some((target.item_id, target.title));
+            }
+            ItemMenuAction::AddToPlaylist => {
+                let Some(playlist_id) = target.list_id else {
+                    return;
+                };
+                let playlist_name = self
+                    .menu_playlists
+                    .iter()
+                    .find(|(id, _)| *id == playlist_id)
+                    .map_or_else(String::new, |(_, name)| name.clone());
+                let request_id = self.allocate_request_id();
+                let sent = self.worker.as_ref().is_some_and(|worker| {
+                    worker
+                        .add_playlist_items(request_id, playlist_id, vec![target.item_id])
+                        .is_ok()
+                });
+                if sent {
+                    self.menu_playlist_add = Some((request_id, target.title, playlist_name));
+                }
+            }
             ItemMenuAction::SetPlayed(played) => {
                 let request_id = self.allocate_request_id();
                 let sent = self.worker.as_ref().is_some_and(|worker| {
@@ -9456,7 +10674,10 @@ mod playback_report_feedback_tests {
 
 #[cfg(test)]
 mod artwork_cache_tests {
-    use super::{KattriApp, MAX_CACHED_ARTWORK_TEXTURES, trim_artwork_textures};
+    use super::{
+        MAX_CACHED_ARTWORK_TEXTURES, MAX_PHOTO_THUMBNAILS, evict_photo_thumbnails,
+        trim_artwork_textures,
+    };
     use crate::catalog::{ArtworkMotif, ArtworkPalette, MediaItem, MediaKind};
     use std::collections::{HashMap, HashSet};
 
@@ -9504,7 +10725,7 @@ mod artwork_cache_tests {
 
         {
             let mut refs: Vec<&mut MediaItem> = items.iter_mut().collect();
-            trim_artwork_textures(&mut refs, &mut access_ticks, &mut attempted);
+            trim_artwork_textures(&mut refs, &mut access_ticks, &mut attempted, 0);
         }
 
         assert_eq!(
@@ -9519,148 +10740,93 @@ mod artwork_cache_tests {
         assert!(!attempted.contains(&("item-0".into(), "tag-0".into())));
     }
 
-    fn catalog_item(id: &str, tag: &str) -> MediaItem {
-        MediaItem::from_api(
-            serde_json::from_value(serde_json::json!({
-                "Id": id,
-                "Name": format!("Title {id}"),
-                "Type": "Movie",
-                "ImageTags": { "Primary": tag },
-            }))
-            .expect("item fixture"),
-        )
-    }
-
     #[test]
-    fn an_unchanged_visible_set_is_not_rewalked_and_does_not_bump_ticks() {
-        let mut app = KattriApp::new(egui::Context::default());
-        let (worker, _events) = crate::worker::ApiWorker::with_event_sender_for_test();
-        app.worker = Some(worker);
-        app.items = vec![catalog_item("mov-1", "tag-1")];
-        let visible = vec![("mov-1".to_owned(), "tag-1".to_owned())];
-
-        app.request_visible_artwork(visible.clone());
-        let key = ("mov-1".to_owned(), "tag-1".to_owned());
-        let first = app.artwork_access_ticks[&key];
-
-        // An idle grid asks for the same artwork every frame; the tick must not move, or the
-        // LRU would treat every card as freshly seen and evict nothing useful.
-        app.request_visible_artwork(visible.clone());
-        assert_eq!(app.artwork_access_ticks[&key], first);
-        assert_eq!(app.visible_artwork, visible);
-
-        // Scrolling away and back is a change, so the poster becomes recently used again.
-        app.request_visible_artwork(Vec::new());
-        app.request_visible_artwork(visible.clone());
-        assert!(app.artwork_access_ticks[&key] > first);
-    }
-
-    #[test]
-    fn a_page_append_keeps_the_ticks_of_posters_that_stay_loaded() {
-        let mut app = KattriApp::new(egui::Context::default());
-        let (worker, _events) = crate::worker::ApiWorker::with_event_sender_for_test();
-        app.worker = Some(worker);
-        app.items = vec![catalog_item("mov-1", "tag-1")];
-        app.artwork_access_ticks
-            .insert(("mov-1".to_owned(), "tag-1".to_owned()), 7);
-        app.artwork_access_ticks
-            .insert(("gone".to_owned(), "old".to_owned()), 3);
-
-        app.prune_artwork_bookkeeping();
-
-        assert_eq!(
-            app.artwork_access_ticks
-                .get(&("mov-1".to_owned(), "tag-1".to_owned())),
-            Some(&7),
-            "a poster still in the catalog keeps its place in the LRU"
-        );
-        assert!(
-            !app.artwork_access_ticks
-                .contains_key(&("gone".to_owned(), "old".to_owned())),
-            "artwork that left the catalog is forgotten"
-        );
-    }
-
-    #[test]
-    fn artwork_completion_schedules_every_visible_poster_without_scrolling() {
-        let ctx = egui::Context::default();
-        let mut app = KattriApp::new(ctx.clone());
-        let (worker, events) = crate::worker::ApiWorker::with_event_sender_for_test();
-        app.worker = Some(worker);
-        app.items = (0..8)
-            .map(|index| catalog_item(&format!("movie-{index}"), &format!("tag-{index}")))
-            .collect();
-        let visible = app
-            .items
-            .iter()
-            .map(|item| {
-                (
-                    item.artwork_id.clone(),
-                    item.primary_image_tag.clone().expect("tag"),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        for _ in 0..3 {
-            app.request_visible_artwork(visible.clone());
-            let batch = app.pending_artwork_requests.clone();
-            assert!(
-                !batch.is_empty(),
-                "a stationary grid keeps scheduling its backlog"
+    fn textures_on_screen_are_kept_past_the_cap() {
+        let context = egui::Context::default();
+        let mut items = Vec::new();
+        let mut access_ticks = HashMap::new();
+        let mut attempted = HashSet::new();
+        let shown = MAX_CACHED_ARTWORK_TEXTURES + 10;
+        for index in 0..shown {
+            let id = format!("item-{index}");
+            let tag = format!("tag-{index}");
+            access_ticks.insert((id.clone(), tag.clone()), 100 + index as u64);
+            attempted.insert((id.clone(), tag.clone()));
+            let texture = context.load_texture(
+                id.clone(),
+                egui::ColorImage::filled([1, 1], egui::Color32::WHITE),
+                egui::TextureOptions::LINEAR,
             );
-            assert!(batch.len() <= super::MAX_PENDING_ARTWORK_REQUESTS);
-            for (request_id, (item_id, _)) in batch {
-                events
-                    .try_send(crate::worker::WorkerEvent::PrimaryArtworkLoaded {
-                        request_id,
-                        item_id,
-                        width: 1,
-                        height: 1,
-                        rgba: vec![255; 4],
-                    })
-                    .expect("fixture event");
-            }
-            app.receive_worker_events(&ctx);
+            items.push(MediaItem {
+                series_id: None,
+                played: false,
+                favorite: false,
+                resumable: false,
+                artwork_id: id.clone(),
+                backdrop_id: id.clone(),
+                id,
+                title: format!("Title {index}"),
+                remote_type: Some("Movie".into()),
+                overview: None,
+                kind: MediaKind::Movie,
+                artwork: ArtworkPalette {
+                    top: [10, 20, 30],
+                    bottom: [30, 20, 10],
+                    shape: [50, 60, 70],
+                    detail: [70, 60, 50],
+                    motif: ArtworkMotif::Orbit,
+                },
+                primary_image_tag: Some(tag),
+                artwork_texture: Some(texture),
+            });
         }
-        assert!(app.items.iter().all(|item| item.artwork_texture.is_some()));
-        assert!(app.pending_artwork_requests.is_empty());
+        {
+            let mut refs: Vec<&mut MediaItem> = items.iter_mut().collect();
+            trim_artwork_textures(&mut refs, &mut access_ticks, &mut attempted, 100);
+        }
+        assert!(items.iter().all(|item| item.artwork_texture.is_some()));
     }
 
     #[test]
-    fn failed_artwork_also_releases_a_slot_for_the_stationary_grid() {
-        let ctx = egui::Context::default();
-        let mut app = KattriApp::new(ctx.clone());
-        let (worker, events) = crate::worker::ApiWorker::with_event_sender_for_test();
-        app.worker = Some(worker);
-        app.items = (0..4)
-            .map(|index| catalog_item(&format!("movie-{index}"), &format!("tag-{index}")))
+    fn photo_thumbnail_eviction_spares_the_visible_window_and_allows_reloads() {
+        let context = egui::Context::default();
+        let mut thumbnails = HashMap::new();
+        let mut attempted = HashSet::new();
+        for index in 0..=MAX_PHOTO_THUMBNAILS {
+            let id = format!("photo-{index}");
+            thumbnails.insert(
+                id.clone(),
+                context.load_texture(
+                    id.clone(),
+                    egui::ColorImage::filled([1, 1], egui::Color32::WHITE),
+                    egui::TextureOptions::LINEAR,
+                ),
+            );
+            attempted.insert(id);
+        }
+        let visible: HashSet<String> = (1..=MAX_PHOTO_THUMBNAILS)
+            .map(|index| format!("photo-{index}"))
             .collect();
-        let visible = app
-            .items
-            .iter()
-            .map(|item| {
-                (
-                    item.artwork_id.clone(),
-                    item.primary_image_tag.clone().expect("tag"),
-                )
-            })
-            .collect::<Vec<_>>();
-        app.request_visible_artwork(visible.clone());
-        let failed = *app.pending_artwork_requests.keys().next().expect("pending");
-        events
-            .try_send(crate::worker::WorkerEvent::PrimaryArtworkFailed { request_id: failed })
-            .expect("fixture event");
-        app.receive_worker_events(&ctx);
-        app.request_visible_artwork(visible);
+        evict_photo_thumbnails(&mut thumbnails, &mut attempted, &visible, "photo-64");
+        assert_eq!(thumbnails.len(), MAX_PHOTO_THUMBNAILS);
+        assert!(!thumbnails.contains_key("photo-0"));
         assert!(
-            app.pending_artwork_requests
-                .values()
-                .any(|(id, _)| id == "movie-3")
+            !attempted.contains("photo-0"),
+            "an evicted photo can load again"
         );
-        assert_eq!(
-            app.pending_artwork_requests.len(),
-            super::MAX_PENDING_ARTWORK_REQUESTS
+
+        // Every thumbnail visible: the cache grows rather than dropping one on screen.
+        let all: HashSet<String> = thumbnails.keys().cloned().collect();
+        thumbnails.insert(
+            "photo-extra".into(),
+            context.load_texture(
+                "photo-extra",
+                egui::ColorImage::filled([1, 1], egui::Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            ),
         );
+        evict_photo_thumbnails(&mut thumbnails, &mut attempted, &all, "photo-extra");
+        assert_eq!(thumbnails.len(), MAX_PHOTO_THUMBNAILS + 1);
     }
 }
 
@@ -10376,6 +11542,478 @@ mod photo_decode_event_tests {
         });
         output.textures_delta.clear();
         assert_eq!(app.photo_thumbnails.len(), 1);
+    }
+
+    #[test]
+    fn episode_neighbors_drive_previous_next_and_auto_play() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.selected_details = Some(
+            serde_json::from_value(serde_json::json!({
+                "Id": "e2", "Name": "Two", "Type": "Episode", "SeriesId": "show"
+            }))
+            .expect("episode fixture"),
+        );
+        app.request_episode_neighbors();
+        let request_id = app
+            .episode_neighbors
+            .as_ref()
+            .expect("neighbours requested")
+            .request_id;
+        assert_eq!(app.episode_navigation("e2"), (false, false));
+
+        let dto = |id: &str| -> Option<Box<jellyfin_api::BaseItemDto>> {
+            Some(Box::new(
+                serde_json::from_value(serde_json::json!({"Id": id, "Name": id}))
+                    .expect("neighbour fixture"),
+            ))
+        };
+        // A reply for another request is ignored.
+        sender
+            .try_send(WorkerEvent::AdjacentEpisodesLoaded {
+                request_id: request_id + 100,
+                episode_id: "e2".into(),
+                previous: dto("x"),
+                next: dto("y"),
+            })
+            .expect("send stale neighbours");
+        sender
+            .try_send(WorkerEvent::AdjacentEpisodesLoaded {
+                request_id,
+                episode_id: "e2".into(),
+                previous: None,
+                next: dto("e3"),
+            })
+            .expect("send neighbours");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.episode_navigation("e2"), (false, true));
+        assert_eq!(app.episode_navigation("other"), (false, false));
+        assert!(!app.on_episode_previous("e2"));
+
+        assert_eq!(app.up_next_label("e2"), Some("e3"));
+        app.cancel_up_next("e2");
+        assert_eq!(app.up_next_label("e2"), None);
+        assert!(!app.on_episode_ended("e2"), "Up Next was dismissed");
+        app.episode_neighbors
+            .as_mut()
+            .expect("neighbours")
+            .up_next_cancelled = false;
+        app.settings.settings_mut().playback.auto_play_next_episode = false;
+        assert!(!app.on_episode_ended("e2"), "auto-play is off");
+        assert_eq!(app.up_next_label("e2"), None);
+
+        assert!(app.on_episode_next("e2"));
+        assert_eq!(app.selected_item_id.as_deref(), Some("e3"));
+        assert_eq!(
+            app.auto_play.as_ref().map(|auto| auto.item_id.as_str()),
+            Some("e3")
+        );
+    }
+
+    #[test]
+    fn series_next_up_is_kept_only_for_its_own_request_and_series() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.request_series_seasons("show".into());
+        let request_id = app
+            .series_next_up
+            .as_ref()
+            .expect("next up requested")
+            .request_id;
+        let episode = || -> Option<Box<jellyfin_api::BaseItemDto>> {
+            Some(Box::new(
+                serde_json::from_value(serde_json::json!({"Id": "e4", "Name": "Four"}))
+                    .expect("episode fixture"),
+            ))
+        };
+        for (id, series) in [(request_id + 1, "show"), (request_id, "other")] {
+            sender
+                .try_send(WorkerEvent::SeriesNextUpLoaded {
+                    request_id: id,
+                    series_id: series.into(),
+                    episode: episode(),
+                })
+                .expect("send stale next up");
+        }
+        sender
+            .try_send(WorkerEvent::SeriesNextUpLoaded {
+                request_id,
+                series_id: "show".into(),
+                episode: episode(),
+            })
+            .expect("send next up");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(
+            app.series_next_up_episode("show")
+                .map(|item| item.id.as_str()),
+            Some("e4")
+        );
+        assert!(app.series_next_up_episode("other").is_none());
+    }
+
+    #[test]
+    fn card_menu_queues_tracks_and_reports_playlist_additions() {
+        use crate::ui::item_menu::{ItemMenuAction, ItemMenuTarget};
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        let target = |playlist_id: Option<&str>| ItemMenuTarget {
+            item_id: "track".into(),
+            title: "Song".into(),
+            series_id: None,
+            list_id: playlist_id.map(str::to_owned),
+        };
+        app.apply_item_menu_action(target(None), ItemMenuAction::AddToQueue);
+        assert_eq!(
+            app.music_queue
+                .items()
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["track"]
+        );
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(text, _)| text.contains("Song"))
+        );
+
+        app.menu_playlists = std::sync::Arc::new(vec![("list".into(), "Road trip".into())]);
+        app.apply_item_menu_action(target(Some("list")), ItemMenuAction::AddToPlaylist);
+        let (request_id, _, playlist) = app.menu_playlist_add.clone().expect("addition submitted");
+        assert_eq!(playlist, "Road trip");
+        app.toast = None;
+        sender
+            .try_send(WorkerEvent::PlaylistMutationCompleted {
+                request_id,
+                playlist_id: "list".into(),
+                kind: crate::worker::PlaylistMutationKind::Added,
+            })
+            .expect("send completion");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert!(app.menu_playlist_add.is_none());
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(text, _)| text.contains("Road trip"))
+        );
+    }
+
+    #[test]
+    fn episode_rows_get_their_stills() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.series_episodes = vec![
+            serde_json::from_value(serde_json::json!({
+                "Id": "e1", "Name": "One", "ImageTags": {"Primary": "still-1"}
+            }))
+            .expect("episode fixture"),
+            serde_json::from_value(serde_json::json!({"Id": "e2", "Name": "Two"}))
+                .expect("episode without a still"),
+        ];
+        app.request_episode_thumbnails();
+        assert_eq!(app.episode_thumbnail_pending.len(), 1);
+        let (&request_id, _) = app
+            .episode_thumbnail_pending
+            .iter()
+            .next()
+            .expect("one still requested");
+        sender
+            .try_send(WorkerEvent::PrimaryArtworkLoaded {
+                request_id,
+                item_id: "e1".into(),
+                width: 2,
+                height: 2,
+                rgba: vec![255; 16],
+            })
+            .expect("send still");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert!(app.episode_thumbnails.contains_key("e1"));
+        assert!(app.episode_thumbnail_pending.is_empty());
+        app.reset_series_detail();
+        assert!(app.episode_thumbnails.is_empty());
+    }
+
+    #[test]
+    fn admin_actions_need_an_administrator_and_a_confirmed_delete_drops_the_item() {
+        use crate::ui::item_menu::{ItemMenuAction, ItemMenuTarget};
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        let target = || ItemMenuTarget {
+            item_id: "movie".into(),
+            title: "Film".into(),
+            series_id: None,
+            list_id: None,
+        };
+        app.apply_item_menu_action(target(), ItemMenuAction::RefreshMetadata);
+        assert!(app.admin_requests.is_empty(), "not an administrator");
+
+        app.user_is_admin = true;
+        app.apply_item_menu_action(target(), ItemMenuAction::Delete);
+        assert_eq!(app.pending_delete, Some(("movie".into(), "Film".into())));
+        assert!(
+            app.admin_requests.is_empty(),
+            "nothing is sent before the confirmation"
+        );
+        let (item_id, title) = app.pending_delete.take().expect("pending delete");
+        app.submit_item_admin(item_id, title, crate::worker::ItemAdminAction::Delete, None);
+        let (&request_id, _) = app.admin_requests.iter().next().expect("delete sent");
+
+        app.items.push(crate::catalog::MediaItem::from_api(
+            serde_json::from_value(
+                serde_json::json!({"Id": "movie", "Name": "Film", "Type": "Movie"}),
+            )
+            .expect("movie fixture"),
+        ));
+        sender
+            .try_send(WorkerEvent::ItemAdminFinished {
+                request_id,
+                item_id: "movie".into(),
+                action: crate::worker::ItemAdminAction::Delete,
+                result: Ok(()),
+            })
+            .expect("send result");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert!(app.items.is_empty());
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(text, _)| text.contains("Film"))
+        );
+    }
+
+    #[test]
+    fn shuffle_starts_a_random_run_that_previous_next_and_up_next_follow() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.shuffle_series("show".into());
+        let request_id = app.shuffle_request_id;
+        let episode = |id: &str, number: i32| -> jellyfin_api::BaseItemDto {
+            serde_json::from_value(serde_json::json!({
+                "Id": id, "Name": id, "ParentIndexNumber": 1, "IndexNumber": number
+            }))
+            .expect("episode fixture")
+        };
+        sender
+            .try_send(WorkerEvent::ShuffleLoaded {
+                request_id,
+                episodes: vec![episode("e7", 7), episode("e2", 2), episode("e5", 5)],
+            })
+            .expect("send shuffle");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(
+            app.selected_item_id.as_deref(),
+            Some("e7"),
+            "the run starts"
+        );
+        assert_eq!(app.episode_navigation("e7"), (false, true));
+        assert_eq!(app.episode_navigation("e2"), (true, true));
+        assert_eq!(app.episode_navigation("e5"), (true, false));
+        assert_eq!(app.up_next_label("e2"), Some("S1:E5 · e5"));
+        app.cancel_up_next("e2");
+        assert_eq!(app.up_next_label("e2"), None);
+        assert!(app.on_episode_next("e2"));
+        assert_eq!(app.selected_item_id.as_deref(), Some("e5"));
+        assert!(app.on_episode_previous("e5"));
+        assert_eq!(app.selected_item_id.as_deref(), Some("e2"));
+    }
+
+    #[test]
+    fn forgot_password_needs_a_username_and_explains_the_servers_answer() {
+        let mut app = KattriApp::new(Context::default());
+        app.worker = None;
+        app.username = "  ".into();
+        app.start_forgot_password();
+        assert!(
+            app.forgot_password_notice
+                .as_deref()
+                .is_some_and(|text| text.contains("username"))
+        );
+        let pin = super::forgot_password_message(&Ok(jellyfin_api::ForgotPasswordResult {
+            action: jellyfin_api::ForgotPasswordAction::PinCode,
+            pin_file: Some("/config/passwordreset1.json".into()),
+            pin_expiration_date: None,
+        }));
+        assert!(pin.contains("/config/passwordreset1.json"));
+        let network = super::forgot_password_message(&Ok(jellyfin_api::ForgotPasswordResult {
+            action: jellyfin_api::ForgotPasswordAction::InNetworkRequired,
+            pin_file: None,
+            pin_expiration_date: None,
+        }));
+        assert!(network.contains("network"));
+    }
+
+    #[test]
+    fn recordings_load_once_per_visit_and_reload_after_a_schedule_change() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.ensure_live_tv_recordings();
+        let first = app.live_tv_recordings_request_id;
+        app.ensure_live_tv_recordings();
+        assert_eq!(
+            app.live_tv_recordings_request_id, first,
+            "one load per visit"
+        );
+        sender
+            .try_send(WorkerEvent::RecordingsLoaded {
+                request_id: first,
+                result: Ok((
+                    vec![
+                        serde_json::from_value(serde_json::json!({"Id": "r1", "Name": "Match"}))
+                            .expect("recording"),
+                    ],
+                    Vec::new(),
+                )),
+            })
+            .expect("send recordings");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.live_tv_recordings_state, super::RecordingsState::Loaded);
+        assert_eq!(app.live_tv_recordings.len(), 1);
+
+        app.change_live_tv_timer(crate::worker::TimerChange::Record {
+            program_id: "p1".into(),
+        });
+        sender
+            .try_send(WorkerEvent::TimerChanged {
+                request_id: app.timer_change_request_id,
+                result: Ok(()),
+            })
+            .expect("send change");
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(
+            app.live_tv_recordings_state,
+            super::RecordingsState::Loading
+        );
+        assert_ne!(app.live_tv_recordings_request_id, first, "the lists reload");
+        assert!(app.toast.is_some());
+    }
+
+    #[test]
+    fn an_episode_page_lists_the_rest_of_its_season() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.selected_item_id = Some("e2".into());
+        app.selected_details = Some(
+            serde_json::from_value(serde_json::json!({
+                "Id": "e2", "Name": "Two", "Type": "Episode", "SeriesId": "show",
+                "ParentIndexNumber": 1
+            }))
+            .expect("episode"),
+        );
+        app.request_season_siblings();
+        let request_id = app.season_siblings_request_id;
+        let episode = |id: &str| -> jellyfin_api::BaseItemDto {
+            serde_json::from_value(serde_json::json!({"Id": id, "Name": id})).expect("episode")
+        };
+        sender
+            .try_send(WorkerEvent::SeasonSiblingsLoaded {
+                request_id,
+                episodes: vec![episode("e1"), episode("e2"), episode("e3")],
+            })
+            .expect("send season");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        let ids: Vec<&str> = app.season_siblings.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["e1", "e3"], "the episode on screen is left out");
+
+        app.detail_parent = Some("show".into());
+        app.open_sibling_item("e3".into());
+        assert_eq!(
+            app.detail_parent.as_deref(),
+            Some("show"),
+            "Back still returns to the series"
+        );
+    }
+
+    #[test]
+    fn a_picked_version_is_kept_for_its_item_only() {
+        let mut app = KattriApp::new(Context::default());
+        app.worker = None;
+        app.selected_item_id = Some("film".into());
+        assert_eq!(app.preferred_source_index(), None);
+        app.set_preferred_source(1);
+        assert_eq!(app.preferred_source_index(), Some(1));
+        app.selected_item_id = Some("other".into());
+        assert_eq!(
+            app.preferred_source_index(),
+            None,
+            "another item uses its default"
+        );
+    }
+
+    #[test]
+    fn movie_pages_load_extras_and_an_extra_returns_to_its_movie() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.selected_item_id = Some("movie".into());
+        app.selected_details = Some(
+            serde_json::from_value(
+                serde_json::json!({"Id": "movie", "Name": "Film", "Type": "Movie"}),
+            )
+            .expect("movie"),
+        );
+        app.request_item_extras();
+        sender
+            .try_send(WorkerEvent::ExtrasLoaded {
+                request_id: app.item_extras_request_id,
+                extras: vec![
+                    serde_json::from_value(serde_json::json!({"Id": "t1", "Name": "Trailer"}))
+                        .expect("trailer"),
+                ],
+            })
+            .expect("send extras");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.item_extras.len(), 1);
+        app.play_child_item("t1".into());
+        assert_eq!(app.selected_item_id.as_deref(), Some("t1"));
+        app.navigate_back();
+        assert_eq!(app.selected_item_id.as_deref(), Some("movie"));
     }
 
     #[test]

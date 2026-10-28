@@ -137,6 +137,9 @@ async fn existing_playlist_names(
                     limit: MAX_HOME_LIMIT,
                     include_item_types: Some(vec!["Playlist".to_owned()]),
                     enable_total_record_count: Some(true),
+                    name_starts_with: None,
+                    name_less_than: None,
+                    studio_ids: None,
                     ..ItemQuery::default()
                 },
             )

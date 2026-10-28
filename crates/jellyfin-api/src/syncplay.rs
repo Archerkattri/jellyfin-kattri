@@ -429,6 +429,7 @@ mod tests {
         Session {
             access_token: "fixture-token".into(),
             user: UserDto {
+                policy: None,
                 id: "user-id".into(),
                 name: "fixture".into(),
                 server_id: None,

@@ -21,7 +21,10 @@ pub struct SeriesPresentation {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SeriesPresentationResponse {
     pub selected_season_id: Option<String>,
+    /// The episode whose play button was pressed.
     pub activated_episode_id: Option<String>,
+    /// The episode whose title was pressed, to open its page.
+    pub opened_episode_id: Option<String>,
 }
 
 impl SeriesPresentation {
@@ -31,6 +34,7 @@ impl SeriesPresentation {
         ui: &mut Ui,
         seasons: &[BaseItemDto],
         episodes: &[BaseItemDto],
+        thumbnails: &std::collections::HashMap<String, egui::TextureHandle>,
     ) -> SeriesPresentationResponse {
         let ordered = ordered_seasons(seasons);
         if ordered.is_empty() {
@@ -67,6 +71,7 @@ impl SeriesPresentation {
             .iter()
             .find(|season| self.selected_season_id.as_deref() == Some(season.id.as_str()));
         let mut activated_episode_id = None;
+        let mut opened_episode_id = None;
         if let Some(season) = selected_season {
             let season_index = season.index_number;
             let matching_episodes = episodes
@@ -90,8 +95,14 @@ impl SeriesPresentation {
             } else {
                 ui.add_space(4.0);
                 for episode in matching_episodes {
-                    if episode_row(ui, episode).clicked() {
-                        activated_episode_id = Some(episode.id.clone());
+                    match episode_row(ui, episode, thumbnails.get(&episode.id)) {
+                        Some(EpisodeRowAction::Play) => {
+                            activated_episode_id = Some(episode.id.clone());
+                        }
+                        Some(EpisodeRowAction::Open) => {
+                            opened_episode_id = Some(episode.id.clone());
+                        }
+                        None => {}
                     }
                 }
             }
@@ -100,6 +111,7 @@ impl SeriesPresentation {
         SeriesPresentationResponse {
             selected_season_id: self.selected_season_id.clone(),
             activated_episode_id,
+            opened_episode_id,
         }
     }
 }
@@ -159,36 +171,108 @@ fn season_label(season: &BaseItemDto) -> String {
     }
 }
 
-fn episode_row(ui: &mut Ui, episode: &BaseItemDto) -> egui::Response {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EpisodeRowAction {
+    Play,
+    Open,
+}
+
+/// Size of the still shown at the start of an episode row (16:9).
+const EPISODE_THUMBNAIL: egui::Vec2 = egui::vec2(96.0, 54.0);
+
+fn episode_row(
+    ui: &mut Ui,
+    episode: &BaseItemDto,
+    thumbnail: Option<&egui::TextureHandle>,
+) -> Option<EpisodeRowAction> {
     ui.push_id(&episode.id, |ui| {
         egui::Frame::new()
             .fill(Color32::from_rgb(21, 21, 23))
             .corner_radius(egui::CornerRadius::same(12))
             .inner_margin(egui::Margin::symmetric(14, 10))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let response = ui.add_sized(
-                        egui::vec2((ui.available_width() - 190.0).max(140.0), 42.0),
-                        egui::Button::new(RichText::new(episode_label(episode)).strong()),
-                    );
-                    if let Some(runtime) = format_runtime(episode.run_time_ticks) {
-                        ui.label(RichText::new(runtime).color(Color32::from_gray(164)));
-                    }
-                    if let Some(progress) = progress_fraction(episode) {
-                        ui.add(
-                            ProgressBar::new(progress)
-                                .desired_width(ui.available_width().min(112.0))
-                                .desired_height(7.0)
-                                .show_percentage(),
+                let action = ui
+                    .horizontal(|ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(EPISODE_THUMBNAIL, egui::Sense::hover());
+                        match thumbnail {
+                            Some(texture) => {
+                                ui.painter().add(
+                                    egui::epaint::RectShape::filled(
+                                        rect,
+                                        egui::CornerRadius::same(6),
+                                        Color32::WHITE,
+                                    )
+                                    .with_texture(
+                                        texture.id(),
+                                        super::artwork::cover_uv(texture.size_vec2(), rect.size()),
+                                    ),
+                                );
+                            }
+                            None => {
+                                ui.painter().rect_filled(
+                                    rect,
+                                    egui::CornerRadius::same(6),
+                                    Color32::from_rgb(38, 38, 42),
+                                );
+                            }
+                        }
+                        let play = ui
+                            .add_sized(egui::vec2(42.0, 42.0), egui::Button::new("▶"))
+                            .on_hover_text(ui_text(ids::SERIES_EPISODE_PLAY));
+                        let open = ui.add_sized(
+                            egui::vec2((ui.available_width() - 190.0).max(140.0), 42.0),
+                            egui::Button::new(RichText::new(episode_label(episode)).strong()),
                         );
-                    }
-                    response
-                })
-                .inner
+                        let action = if play.clicked() {
+                            Some(EpisodeRowAction::Play)
+                        } else if open.clicked() {
+                            Some(EpisodeRowAction::Open)
+                        } else {
+                            None
+                        };
+                        if let Some(runtime) = format_runtime(episode.run_time_ticks) {
+                            ui.label(RichText::new(runtime).color(Color32::from_gray(164)));
+                        }
+                        if let Some(progress) = progress_fraction(episode) {
+                            ui.add(
+                                ProgressBar::new(progress)
+                                    .desired_width(ui.available_width().min(112.0))
+                                    .desired_height(7.0)
+                                    .show_percentage(),
+                            );
+                        } else if is_played(episode) {
+                            ui.label(
+                                RichText::new(ui_text(ids::SERIES_EPISODE_WATCHED))
+                                    .color(Color32::from_rgb(0x8F, 0xD1, 0x9E)),
+                            );
+                        }
+                        action
+                    })
+                    .inner;
+                if let Some(overview) = episode
+                    .overview
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|overview| !overview.is_empty())
+                {
+                    ui.add(
+                        egui::Label::new(RichText::new(overview).color(Color32::from_gray(176)))
+                            .truncate(),
+                    );
+                }
+                action
             })
             .inner
     })
     .inner
+}
+
+fn is_played(episode: &BaseItemDto) -> bool {
+    episode
+        .user_data
+        .as_ref()
+        .is_some_and(|user_data| user_data.played == Some(true))
 }
 
 fn episode_label(episode: &BaseItemDto) -> String {
@@ -366,14 +450,14 @@ mod tests {
         let mut component = SeriesPresentation::default();
         let context = egui::Context::default();
         let mut output = context.run_ui(RawInput::default(), |ui| {
-            component.show(ui, &seasons, &[]);
+            component.show(ui, &seasons, &[], &std::collections::HashMap::new());
         });
         output.textures_delta.clear();
         assert_eq!(component.selected_season_id.as_deref(), Some("s1"));
 
         component.selected_season_id = Some("s2".to_owned());
         let mut output = context.run_ui(RawInput::default(), |ui| {
-            component.show(ui, &seasons, &[]);
+            component.show(ui, &seasons, &[], &std::collections::HashMap::new());
         });
         output.textures_delta.clear();
         assert_eq!(component.selected_season_id.as_deref(), Some("s2"));
@@ -404,6 +488,7 @@ mod tests {
                     ui,
                     std::slice::from_ref(&season),
                     std::slice::from_ref(&episode),
+                    &std::collections::HashMap::new(),
                 );
             },
         );

@@ -207,6 +207,10 @@ pub(super) fn playback_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
                 .suffix(format!(" {}", ui_text(ids::SETTINGS_MEDIA_UNIT_MS)))
                 .text(ui_text(ids::SETTINGS_MEDIA_CREDITS_DELAY)),
         );
+        ui.checkbox(
+            &mut playback.auto_play_next_episode,
+            ui_text(ids::SETTINGS_MEDIA_AUTO_PLAY_NEXT_EPISODE),
+        );
         ui.add_enabled(
             false,
             egui::Checkbox::new(

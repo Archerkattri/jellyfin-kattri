@@ -46,8 +46,10 @@ pub struct PlayerControlsView<'a> {
     pub seek_enabled: bool,
     /// Whether there is a loaded item the Stop control can stop.
     pub stop_enabled: bool,
-    /// Whether the loaded item is the current item in the music queue.
+    /// Whether Previous has somewhere to go: the music queue, or an earlier episode.
     pub previous_track_enabled: bool,
+    /// Whether Next has somewhere to go: the music queue, or a later episode.
+    pub next_track_enabled: bool,
     /// Bounded-by-render chapter list. Only the first [`MAX_CHAPTER_CHOICES`] entries are shown.
     pub chapters: &'a [ChapterChoice],
     /// Secondary subtitle choices from `secondary_candidates`. Empty hides the selector.
@@ -407,7 +409,7 @@ fn draw_inner_with_skip(
                 if icon_button(
                     ui,
                     OsdIcon::PreviousItem,
-                    "Previous track (restarts after 3 seconds)",
+                    "Previous (a track restarts after 3 seconds)",
                     view.previous_track_enabled,
                     |rect| observe(ControlId::PreviousTrack, rect),
                 ) {
@@ -448,8 +450,8 @@ fn draw_inner_with_skip(
                 if icon_button(
                     ui,
                     OsdIcon::NextItem,
-                    "Next track",
-                    view.previous_track_enabled,
+                    "Next",
+                    view.next_track_enabled,
                     |rect| observe(ControlId::NextTrack, rect),
                 ) {
                     actions.push(PlayerControlAction::NextTrack);
@@ -1122,6 +1124,7 @@ mod tests {
             seek_enabled: true,
             stop_enabled: true,
             previous_track_enabled: true,
+            next_track_enabled: true,
             chapters,
             secondary_subtitles: &[],
             secondary_selected: None,

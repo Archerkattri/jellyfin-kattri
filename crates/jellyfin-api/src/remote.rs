@@ -107,6 +107,7 @@ mod tests {
         Session {
             access_token: MOCK_TOKEN.into(),
             user: UserDto {
+                policy: None,
                 id: "user-id".into(),
                 name: "Test user".into(),
                 server_id: None,

@@ -165,6 +165,29 @@ pub enum SyncPlayCommand {
     },
 }
 
+/// An administrator action from the card menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ItemAdminAction {
+    RefreshMetadata,
+    Delete,
+    AddToCollection,
+}
+
+/// A change to the Live TV recording schedule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TimerChange {
+    /// Record this program with the server's default timer.
+    Record { program_id: String },
+    /// Cancel this scheduled recording.
+    Cancel { timer_id: String },
+}
+
+/// Most episodes one shuffle queues.
+const MAX_SHUFFLE_EPISODES: u32 = 200;
+
+/// How many playlists the card menu lists under Add to playlist.
+const MAX_MENU_PLAYLISTS: u32 = 100;
+
 pub enum WorkerEvent {
     UpdateFinished {
         outcome: UpdateOutcome,
@@ -303,6 +326,77 @@ pub enum WorkerEvent {
         request_id: u64,
         season_id: String,
         message: String,
+    },
+    /// The server answered a forgot-password request.
+    ForgotPasswordFinished {
+        request_id: u64,
+        result: Result<jellyfin_api::ForgotPasswordResult, ErrorClass>,
+    },
+    /// An administrator action on one item finished.
+    ItemAdminFinished {
+        request_id: u64,
+        item_id: String,
+        action: ItemAdminAction,
+        result: Result<(), ErrorClass>,
+    },
+    /// Genre names and studios `(id, name)` for the library page's filters. Empty on failure.
+    GenresLoaded {
+        request_id: u64,
+        genres: Vec<String>,
+        studios: Vec<(String, String)>,
+    },
+    /// Lyrics of the track on screen. Empty when it has none or on failure.
+    LyricsLoaded {
+        request_id: u64,
+        lines: Vec<jellyfin_api::LyricLine>,
+    },
+    /// Trailers and special features of the item on screen. Empty on failure.
+    ExtrasLoaded {
+        request_id: u64,
+        extras: Vec<BaseItemDto>,
+    },
+    /// The episodes of the season an episode page belongs to. Empty on failure.
+    SeasonSiblingsLoaded {
+        request_id: u64,
+        episodes: Vec<BaseItemDto>,
+    },
+    /// Live TV recordings and scheduled timers.
+    RecordingsLoaded {
+        request_id: u64,
+        result: Result<(Vec<BaseItemDto>, Vec<jellyfin_api::LiveTvTimer>), ErrorClass>,
+    },
+    /// A recording was scheduled or cancelled, or the server refused.
+    TimerChanged {
+        request_id: u64,
+        result: Result<(), ErrorClass>,
+    },
+    /// A series' episodes in random order. Empty on failure.
+    ShuffleLoaded {
+        request_id: u64,
+        episodes: Vec<BaseItemDto>,
+    },
+    /// The server's collections as `(id, name)`, for the card menu. Empty on failure.
+    MenuCollectionsLoaded {
+        request_id: u64,
+        collections: Vec<(String, String)>,
+    },
+    /// The signed-in user's playlists as `(id, name)`, for the card menu. Empty on failure.
+    UserPlaylistsLoaded {
+        request_id: u64,
+        playlists: Vec<(String, String)>,
+    },
+    /// The episode to play next in `series_id`. `None` when there is none or the request failed.
+    SeriesNextUpLoaded {
+        request_id: u64,
+        series_id: String,
+        episode: Option<Box<BaseItemDto>>,
+    },
+    /// The episodes either side of `episode_id`. Both are `None` when the request failed.
+    AdjacentEpisodesLoaded {
+        request_id: u64,
+        episode_id: String,
+        previous: Option<Box<BaseItemDto>>,
+        next: Option<Box<BaseItemDto>>,
     },
     MusicAlbumTracksLoaded {
         request_id: u64,
@@ -717,6 +811,57 @@ enum WorkerCommand {
         series_id: String,
         season_id: String,
     },
+    GetAdjacentEpisodes {
+        request_id: u64,
+        series_id: String,
+        episode_id: String,
+    },
+    GetSeriesNextUp {
+        request_id: u64,
+        series_id: String,
+    },
+    ListUserPlaylists {
+        request_id: u64,
+    },
+    ListGenres {
+        request_id: u64,
+        parent_id: Option<String>,
+        item_types: Option<Vec<String>>,
+    },
+    ItemAdmin {
+        request_id: u64,
+        item_id: String,
+        action: ItemAdminAction,
+        /// The box set for [`ItemAdminAction::AddToCollection`].
+        collection_id: Option<String>,
+    },
+    ListMenuCollections {
+        request_id: u64,
+    },
+    ShuffleSeries {
+        request_id: u64,
+        series_id: String,
+    },
+    LoadRecordings {
+        request_id: u64,
+    },
+    ListSeasonSiblings {
+        request_id: u64,
+        series_id: String,
+        season: i32,
+    },
+    ListExtras {
+        request_id: u64,
+        item_id: String,
+    },
+    GetLyrics {
+        request_id: u64,
+        item_id: String,
+    },
+    ChangeTimer {
+        request_id: u64,
+        change: TimerChange,
+    },
     ListMusicAlbumTracks {
         request_id: u64,
         album_id: String,
@@ -826,6 +971,12 @@ enum WorkerCommand {
     },
     QuickConnectPoll {
         request_id: u64,
+    },
+    ForgotPassword {
+        request_id: u64,
+        server_url: String,
+        allow_insecure_remote_http: bool,
+        username: String,
     },
     QuickConnectAuthenticate {
         request_id: u64,
@@ -1191,6 +1342,128 @@ impl ApiWorker {
         })
     }
 
+    pub(crate) fn get_adjacent_episodes(
+        &self,
+        request_id: u64,
+        series_id: String,
+        episode_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::GetAdjacentEpisodes {
+            request_id,
+            series_id,
+            episode_id,
+        })
+    }
+
+    pub(crate) fn item_admin(
+        &self,
+        request_id: u64,
+        item_id: String,
+        action: ItemAdminAction,
+        collection_id: Option<String>,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ItemAdmin {
+            request_id,
+            item_id,
+            action,
+            collection_id,
+        })
+    }
+
+    pub(crate) fn get_lyrics(
+        &self,
+        request_id: u64,
+        item_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::GetLyrics {
+            request_id,
+            item_id,
+        })
+    }
+
+    pub(crate) fn list_extras(
+        &self,
+        request_id: u64,
+        item_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ListExtras {
+            request_id,
+            item_id,
+        })
+    }
+
+    pub(crate) fn list_season_siblings(
+        &self,
+        request_id: u64,
+        series_id: String,
+        season: i32,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ListSeasonSiblings {
+            request_id,
+            series_id,
+            season,
+        })
+    }
+
+    pub(crate) fn load_recordings(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::LoadRecordings { request_id })
+    }
+
+    pub(crate) fn change_timer(
+        &self,
+        request_id: u64,
+        change: TimerChange,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::ChangeTimer { request_id, change })
+    }
+
+    pub(crate) fn shuffle_series(
+        &self,
+        request_id: u64,
+        series_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ShuffleSeries {
+            request_id,
+            series_id,
+        })
+    }
+
+    pub(crate) fn list_menu_collections(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::ListMenuCollections { request_id })
+    }
+
+    pub(crate) fn list_genres(
+        &self,
+        request_id: u64,
+        parent_id: Option<String>,
+        item_types: Option<Vec<String>>,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ListGenres {
+            request_id,
+            parent_id,
+            item_types,
+        })
+    }
+
+    pub(crate) fn list_user_playlists(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::ListUserPlaylists { request_id })
+    }
+
+    pub(crate) fn get_series_next_up(
+        &self,
+        request_id: u64,
+        series_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::GetSeriesNextUp {
+            request_id,
+            series_id,
+        })
+    }
+
     pub(crate) fn list_music_album_tracks(
         &self,
         request_id: u64,
@@ -1518,6 +1791,21 @@ impl ApiWorker {
             request_id,
             server_url,
             allow_insecure_remote_http,
+        })
+    }
+
+    pub(crate) fn forgot_password(
+        &self,
+        request_id: u64,
+        server_url: String,
+        allow_insecure_remote_http: bool,
+        username: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ForgotPassword {
+            request_id,
+            server_url,
+            allow_insecure_remote_http,
+            username,
         })
     }
 
@@ -2992,6 +3280,317 @@ async fn execute_command(
                     }
                 }
             }
+            WorkerCommand::GetAdjacentEpisodes {
+                request_id,
+                series_id,
+                episode_id,
+            } => {
+                let adjacent = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .adjacent_episodes(session, &series_id, &episode_id)
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "adjacent episodes unavailable");
+                            jellyfin_api::AdjacentEpisodes::default()
+                        }),
+                    _ => jellyfin_api::AdjacentEpisodes::default(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::AdjacentEpisodesLoaded {
+                        request_id,
+                        episode_id,
+                        previous: adjacent.previous.map(Box::new),
+                        next: adjacent.next.map(Box::new),
+                    },
+                )
+                .await
+            }
+            WorkerCommand::ItemAdmin {
+                request_id,
+                item_id,
+                action,
+                collection_id,
+            } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => match action {
+                        ItemAdminAction::RefreshMetadata => {
+                            client.refresh_item_metadata(session, &item_id).await
+                        }
+                        ItemAdminAction::Delete => client.delete_item(session, &item_id).await,
+                        ItemAdminAction::AddToCollection => match collection_id.as_deref() {
+                            Some(collection_id) => {
+                                client
+                                    .add_to_collection(session, collection_id, &item_id)
+                                    .await
+                            }
+                            None => Err(ApiError::InvalidConfiguration),
+                        },
+                    },
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::ItemAdminFinished {
+                        request_id,
+                        item_id,
+                        action,
+                        result: result.map_err(|error| error.classify()),
+                    },
+                )
+                .await
+            }
+            WorkerCommand::ListGenres {
+                request_id,
+                parent_id,
+                item_types,
+            } => {
+                let (genres, studios) = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        let genres = client
+                            .list_genres(session, parent_id.as_deref(), item_types.as_deref())
+                            .await
+                            .unwrap_or_else(|error| {
+                                tracing::debug!(%error, "genres unavailable");
+                                Vec::new()
+                            });
+                        let studios = client
+                            .list_studios(session, parent_id.as_deref(), item_types.as_deref())
+                            .await
+                            .unwrap_or_else(|error| {
+                                tracing::debug!(%error, "studios unavailable");
+                                Vec::new()
+                            });
+                        (genres, studios)
+                    }
+                    _ => (Vec::new(), Vec::new()),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::GenresLoaded {
+                        request_id,
+                        genres,
+                        studios,
+                    },
+                )
+                .await
+            }
+            WorkerCommand::GetLyrics {
+                request_id,
+                item_id,
+            } => {
+                let lines = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .track_lyrics(session, &item_id)
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "lyrics unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(events, ctx, WorkerEvent::LyricsLoaded { request_id, lines }).await
+            }
+            WorkerCommand::ListExtras {
+                request_id,
+                item_id,
+            } => {
+                let extras = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .item_extras(session, &item_id)
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "extras unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::ExtrasLoaded { request_id, extras },
+                )
+                .await
+            }
+            WorkerCommand::ListSeasonSiblings {
+                request_id,
+                series_id,
+                season,
+            } => {
+                let episodes = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .season_episodes_by_number(session, &series_id, season)
+                        .await
+                        .map(|response| response.items)
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "season episodes unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::SeasonSiblingsLoaded {
+                        request_id,
+                        episodes,
+                    },
+                )
+                .await
+            }
+            WorkerCommand::LoadRecordings { request_id } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        match client.list_live_tv_recordings(session).await {
+                            Ok(recordings) => client
+                                .list_live_tv_timers(session)
+                                .await
+                                .map(|timers| (recordings, timers)),
+                            Err(error) => Err(error),
+                        }
+                        .map_err(|error| error.classify())
+                    }
+                    _ => Err(ErrorClass::Unexpected),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::RecordingsLoaded { request_id, result },
+                )
+                .await
+            }
+            WorkerCommand::ChangeTimer { request_id, change } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => match &change {
+                        TimerChange::Record { program_id } => {
+                            client.record_live_tv_program(session, program_id).await
+                        }
+                        TimerChange::Cancel { timer_id } => {
+                            client.cancel_live_tv_timer(session, timer_id).await
+                        }
+                    }
+                    .map_err(|error| error.classify()),
+                    _ => Err(ErrorClass::Unexpected),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::TimerChanged { request_id, result },
+                )
+                .await
+            }
+            WorkerCommand::ShuffleSeries {
+                request_id,
+                series_id,
+            } => {
+                let episodes = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .list_items(
+                            session,
+                            &ItemQuery {
+                                parent_id: Some(series_id),
+                                include_item_types: Some(vec!["Episode".to_owned()]),
+                                sort_by: Some(vec![jellyfin_api::ItemSortBy::Random]),
+                                limit: MAX_SHUFFLE_EPISODES,
+                                ..ItemQuery::default()
+                            },
+                        )
+                        .await
+                        .map(|response| response.items)
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "shuffle unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::ShuffleLoaded {
+                        request_id,
+                        episodes,
+                    },
+                )
+                .await
+            }
+            WorkerCommand::ListMenuCollections { request_id } => {
+                let collections = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .box_sets(session, MAX_MENU_PLAYLISTS)
+                        .await
+                        .map(|items| items.into_iter().map(|item| (item.id, item.name)).collect())
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "collections for the item menu unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::MenuCollectionsLoaded {
+                        request_id,
+                        collections,
+                    },
+                )
+                .await
+            }
+            WorkerCommand::ListUserPlaylists { request_id } => {
+                let playlists = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .list_playlists(session, MAX_MENU_PLAYLISTS)
+                        .await
+                        .map(|response| {
+                            response
+                                .items
+                                .into_iter()
+                                .map(|item| (item.id, item.name))
+                                .collect()
+                        })
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "playlists for the item menu unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::UserPlaylistsLoaded {
+                        request_id,
+                        playlists,
+                    },
+                )
+                .await
+            }
+            WorkerCommand::GetSeriesNextUp {
+                request_id,
+                series_id,
+            } => {
+                let episode = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .series_next_up(session, &series_id)
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "series next up unavailable");
+                            None
+                        }),
+                    _ => None,
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::SeriesNextUpLoaded {
+                        request_id,
+                        series_id,
+                        episode: episode.map(Box::new),
+                    },
+                )
+                .await
+            }
             WorkerCommand::ListMusicAlbumTracks {
                 request_id,
                 album_id,
@@ -3916,6 +4515,27 @@ async fn execute_command(
                         request_id,
                         enabled,
                     },
+                )
+                .await;
+            }
+            WorkerCommand::ForgotPassword {
+                request_id,
+                server_url,
+                allow_insecure_remote_http,
+                username,
+            } => {
+                let result = match build_client(&server_url, allow_insecure_remote_http, device_id)
+                {
+                    Ok(client) => client
+                        .forgot_password(&username)
+                        .await
+                        .map_err(|error| error.classify()),
+                    Err(_) => Err(ErrorClass::Unexpected),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::ForgotPasswordFinished { request_id, result },
                 )
                 .await;
             }
@@ -4866,6 +5486,9 @@ async fn list_music_album_tracks(
                     parent_id: Some(album_id.to_owned()),
                     include_item_types: Some(vec!["Audio".to_owned()]),
                     enable_total_record_count: Some(true),
+                    name_starts_with: None,
+                    name_less_than: None,
+                    studio_ids: None,
                     ..ItemQuery::default()
                 },
             )
@@ -5130,6 +5753,9 @@ fn item_query(
         person_ids: None,
         ids: None,
         enable_total_record_count: Some(true),
+        name_starts_with: None,
+        name_less_than: None,
+        studio_ids: None,
     }
 }
 
@@ -5498,6 +6124,9 @@ mod item_query_tests {
                 person_ids: None,
                 ids: None,
                 enable_total_record_count: Some(true),
+                name_starts_with: None,
+                name_less_than: None,
+                studio_ids: None,
             }
         );
     }

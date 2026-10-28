@@ -247,19 +247,15 @@ impl PosterRow {
             ctx.request_repaint();
         }
         let focused_title = &cards[self.focus].title;
-        // Only read by a screen reader, so the formatting waits for one to be attached.
-        response.widget_info(|| {
-            let count = count.to_string();
-            let label = ui_text_args(
-                ids::ROW_LABEL_COUNT_FOCUSED,
-                &[
-                    ("title", title),
-                    ("count", count.as_str()),
-                    ("focused_title", focused_title),
-                ],
-            );
-            WidgetInfo::labeled(Role::Label, true, label)
-        });
+        let label = ui_text_args(
+            ids::ROW_LABEL_COUNT_FOCUSED,
+            &[
+                ("title", title),
+                ("count", &count.to_string()),
+                ("focused_title", focused_title),
+            ],
+        );
+        response.widget_info(move || WidgetInfo::labeled(Role::Label, true, label.clone()));
 
         let card_centers = (0..count)
             .map(|index| {

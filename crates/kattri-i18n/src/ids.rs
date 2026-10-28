@@ -123,6 +123,11 @@ pub const MUSIC_QUEUE_PLAY_NEXT: &str = "music.queue.play_next";
 pub const MUSIC_ALBUM_PLAY_FIRST: &str = "music.album.play_first";
 pub const MUSIC_ALBUM_LOADING_TRACKS: &str = "music.album.loading_tracks";
 pub const SERIES_HEADING_SEASONS: &str = "series.heading.seasons";
+pub const SERIES_BUTTON_PLAY_NEXT_UP: &str = "series.button.play_next_up";
+pub const SERIES_BUTTON_SHUFFLE: &str = "series.button.shuffle";
+pub const SERIES_EPISODE_WATCHED: &str = "series.episode.watched";
+pub const SERIES_EPISODE_PLAY: &str = "series.episode.play";
+pub const SERIES_BUTTON_RESUME_NEXT_UP: &str = "series.button.resume_next_up";
 pub const SERIES_STATUS_LOADING_SEASONS: &str = "series.status.loading_seasons";
 pub const SERIES_EMPTY_SEASONS: &str = "series.empty.seasons";
 pub const SERIES_STATUS_LOADING_EPISODES: &str = "series.status.loading_episodes";
@@ -604,6 +609,7 @@ pub const SETTINGS_MEDIA_INTRO_SHOW_BUTTON: &str = "settings.media.intro.show_bu
 pub const SETTINGS_MEDIA_INTRO_AUTO: &str = "settings.media.intro.auto";
 pub const SETTINGS_MEDIA_CREDITS_SHOW_BUTTON: &str = "settings.media.credits.show_button";
 pub const SETTINGS_MEDIA_CREDITS_AUTO: &str = "settings.media.credits.auto";
+pub const SETTINGS_MEDIA_AUTO_PLAY_NEXT_EPISODE: &str = "settings.media.auto_play_next_episode";
 pub const SETTINGS_MEDIA_CREDITS_DELAY: &str = "settings.media.credits.delay";
 pub const SETTINGS_MEDIA_EXTERNAL_PLAYER: &str = "settings.media.external_player";
 pub const SETTINGS_MEDIA_BITRATE: &str = "settings.media.bitrate";
@@ -753,6 +759,59 @@ pub const ITEM_MENU_MARK_UNPLAYED: &str = "item_menu.mark_unplayed";
 pub const ITEM_MENU_ADD_FAVORITE: &str = "item_menu.add_favorite";
 pub const ITEM_MENU_REMOVE_FAVORITE: &str = "item_menu.remove_favorite";
 pub const ITEM_MENU_DOWNLOAD: &str = "item_menu.download";
+pub const BROWSE_ALPHABET_ALL: &str = "browse.alphabet.all";
+pub const BROWSE_GENRE_LABEL: &str = "browse.genre.label";
+pub const BROWSE_GENRE_ALL: &str = "browse.genre.all";
+pub const BROWSE_STUDIO_LABEL: &str = "browse.studio.label";
+pub const BROWSE_STUDIO_ALL: &str = "browse.studio.all";
+pub const BROWSE_ALPHABET_SYMBOLS: &str = "browse.alphabet.symbols";
+pub const BROWSE_ALPHABET_LETTER: &str = "browse.alphabet.letter";
+pub const ITEM_MENU_ADD_TO_QUEUE: &str = "item_menu.add_to_queue";
+pub const ITEM_MENU_PLAY_NEXT: &str = "item_menu.play_next";
+pub const ITEM_MENU_ADD_TO_PLAYLIST: &str = "item_menu.add_to_playlist";
+pub const ITEM_MENU_REFRESH_METADATA: &str = "item_menu.refresh_metadata";
+pub const ITEM_MENU_DELETE: &str = "item_menu.delete";
+pub const DETAIL_MORE_FROM_SEASON: &str = "detail.more_from_season";
+pub const DETAIL_EXTRAS: &str = "detail.extras";
+pub const DETAIL_LYRICS: &str = "detail.lyrics";
+pub const DETAIL_VERSION_LABEL: &str = "detail.version_label";
+pub const MUSIC_VIEW_ALL: &str = "music.view.all";
+pub const MUSIC_VIEW_ALBUMS: &str = "music.view.albums";
+pub const MUSIC_VIEW_SONGS: &str = "music.view.songs";
+pub const LIVE_TV_BUTTON_RECORD: &str = "live_tv.button.record";
+pub const LIVE_TV_BUTTON_RECORD_PROGRAM: &str = "live_tv.button.record_program";
+pub const LIVE_TV_BUTTON_CANCEL_RECORDING: &str = "live_tv.button.cancel_recording";
+pub const LIVE_TV_HEADING_RECORDINGS: &str = "live_tv.heading.recordings";
+pub const LIVE_TV_HEADING_SCHEDULED: &str = "live_tv.heading.scheduled";
+pub const LIVE_TV_STATUS_LOADING_RECORDINGS: &str = "live_tv.status.loading_recordings";
+pub const LIVE_TV_EMPTY_RECORDINGS: &str = "live_tv.empty.recordings";
+pub const LIVE_TV_EMPTY_SCHEDULED: &str = "live_tv.empty.scheduled";
+pub const LIVE_TV_EMPTY_RECORDINGS_UNAVAILABLE: &str = "live_tv.empty.recordings_unavailable";
+pub const TOAST_SCHEDULE_UPDATED: &str = "toast.schedule_updated";
+pub const TOAST_SCHEDULE_FAILED: &str = "toast.schedule_failed";
+pub const FORGOT_PASSWORD_BUTTON: &str = "forgot_password.button";
+pub const FORGOT_PASSWORD_NEED_USERNAME: &str = "forgot_password.need_username";
+pub const FORGOT_PASSWORD_SENDING: &str = "forgot_password.sending";
+pub const FORGOT_PASSWORD_PIN_WRITTEN: &str = "forgot_password.pin_written";
+pub const FORGOT_PASSWORD_IN_NETWORK: &str = "forgot_password.in_network";
+pub const FORGOT_PASSWORD_CONTACT_ADMIN: &str = "forgot_password.contact_admin";
+pub const FORGOT_PASSWORD_FAILED: &str = "forgot_password.failed";
+pub const SETTINGS_GENERAL_HOME_SECTIONS: &str = "settings.general.home_sections";
+pub const PHOTOS_BUTTON_SLIDESHOW: &str = "photos.button.slideshow";
+pub const PHOTOS_BUTTON_STOP_SLIDESHOW: &str = "photos.button.stop_slideshow";
+pub const DETAIL_MEDIA_INFO: &str = "detail.media_info";
+pub const ITEM_MENU_ADD_TO_COLLECTION: &str = "item_menu.add_to_collection";
+pub const TOAST_ADDED_TO_COLLECTION: &str = "toast.added_to_collection";
+pub const DELETE_CONFIRM_TITLE: &str = "delete.confirm.title";
+pub const DELETE_CONFIRM_BODY: &str = "delete.confirm.body";
+pub const DELETE_CONFIRM_DELETE: &str = "delete.confirm.delete";
+pub const DELETE_CONFIRM_CANCEL: &str = "delete.confirm.cancel";
+pub const TOAST_REFRESH_QUEUED: &str = "toast.refresh_queued";
+pub const TOAST_DELETED: &str = "toast.deleted";
+pub const TOAST_ADMIN_FAILED: &str = "toast.admin_failed";
+pub const TOAST_ADDED_TO_QUEUE: &str = "toast.added_to_queue";
+pub const TOAST_ADDED_TO_PLAYLIST: &str = "toast.added_to_playlist";
+pub const TOAST_ADD_TO_PLAYLIST_FAILED: &str = "toast.add_to_playlist_failed";
 
 pub const ALL: &[&str] = &[
     CONNECT_WORKER_UNAVAILABLE,
@@ -877,6 +936,11 @@ pub const ALL: &[&str] = &[
     MUSIC_ALBUM_PLAY_FIRST,
     MUSIC_ALBUM_LOADING_TRACKS,
     SERIES_HEADING_SEASONS,
+    SERIES_BUTTON_PLAY_NEXT_UP,
+    SERIES_BUTTON_SHUFFLE,
+    SERIES_EPISODE_WATCHED,
+    SERIES_EPISODE_PLAY,
+    SERIES_BUTTON_RESUME_NEXT_UP,
     SERIES_STATUS_LOADING_SEASONS,
     SERIES_EMPTY_SEASONS,
     SERIES_STATUS_LOADING_EPISODES,
@@ -892,6 +956,59 @@ pub const ALL: &[&str] = &[
     ITEM_MENU_ADD_FAVORITE,
     ITEM_MENU_REMOVE_FAVORITE,
     ITEM_MENU_DOWNLOAD,
+    BROWSE_ALPHABET_ALL,
+    BROWSE_GENRE_LABEL,
+    BROWSE_GENRE_ALL,
+    BROWSE_STUDIO_LABEL,
+    BROWSE_STUDIO_ALL,
+    BROWSE_ALPHABET_SYMBOLS,
+    BROWSE_ALPHABET_LETTER,
+    ITEM_MENU_ADD_TO_QUEUE,
+    ITEM_MENU_PLAY_NEXT,
+    ITEM_MENU_ADD_TO_PLAYLIST,
+    ITEM_MENU_REFRESH_METADATA,
+    ITEM_MENU_DELETE,
+    DETAIL_MORE_FROM_SEASON,
+    DETAIL_EXTRAS,
+    DETAIL_LYRICS,
+    DETAIL_VERSION_LABEL,
+    MUSIC_VIEW_ALL,
+    MUSIC_VIEW_ALBUMS,
+    MUSIC_VIEW_SONGS,
+    LIVE_TV_BUTTON_RECORD,
+    LIVE_TV_BUTTON_RECORD_PROGRAM,
+    LIVE_TV_BUTTON_CANCEL_RECORDING,
+    LIVE_TV_HEADING_RECORDINGS,
+    LIVE_TV_HEADING_SCHEDULED,
+    LIVE_TV_STATUS_LOADING_RECORDINGS,
+    LIVE_TV_EMPTY_RECORDINGS,
+    LIVE_TV_EMPTY_SCHEDULED,
+    LIVE_TV_EMPTY_RECORDINGS_UNAVAILABLE,
+    TOAST_SCHEDULE_UPDATED,
+    TOAST_SCHEDULE_FAILED,
+    FORGOT_PASSWORD_BUTTON,
+    FORGOT_PASSWORD_NEED_USERNAME,
+    FORGOT_PASSWORD_SENDING,
+    FORGOT_PASSWORD_PIN_WRITTEN,
+    FORGOT_PASSWORD_IN_NETWORK,
+    FORGOT_PASSWORD_CONTACT_ADMIN,
+    FORGOT_PASSWORD_FAILED,
+    SETTINGS_GENERAL_HOME_SECTIONS,
+    PHOTOS_BUTTON_SLIDESHOW,
+    PHOTOS_BUTTON_STOP_SLIDESHOW,
+    DETAIL_MEDIA_INFO,
+    ITEM_MENU_ADD_TO_COLLECTION,
+    TOAST_ADDED_TO_COLLECTION,
+    DELETE_CONFIRM_TITLE,
+    DELETE_CONFIRM_BODY,
+    DELETE_CONFIRM_DELETE,
+    DELETE_CONFIRM_CANCEL,
+    TOAST_REFRESH_QUEUED,
+    TOAST_DELETED,
+    TOAST_ADMIN_FAILED,
+    TOAST_ADDED_TO_QUEUE,
+    TOAST_ADDED_TO_PLAYLIST,
+    TOAST_ADD_TO_PLAYLIST_FAILED,
     DETAIL_BUTTON_DOWNLOAD,
     PLAYBACK_STATUS_REQUESTING,
     DETAIL_BUTTON_REMOVE_FAVORITE,
@@ -1364,6 +1481,7 @@ pub const ALL: &[&str] = &[
     SETTINGS_MEDIA_INTRO_AUTO,
     SETTINGS_MEDIA_CREDITS_SHOW_BUTTON,
     SETTINGS_MEDIA_CREDITS_AUTO,
+    SETTINGS_MEDIA_AUTO_PLAY_NEXT_EPISODE,
     SETTINGS_MEDIA_CREDITS_DELAY,
     SETTINGS_MEDIA_EXTERNAL_PLAYER,
     SETTINGS_MEDIA_BITRATE,

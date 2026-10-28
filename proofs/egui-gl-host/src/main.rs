@@ -397,7 +397,11 @@ impl<'session> GlHost<'session> {
             } else {
                 match reason {
                     mpv_render_proof::EndFileReason::Eof => {
-                        self.kattri_app.on_music_track_ended(&item_id, false);
+                        if self.kattri_app.music_queue_current_item_id() == Some(item_id.as_str()) {
+                            self.kattri_app.on_music_track_ended(&item_id, false);
+                        } else {
+                            self.kattri_app.on_episode_ended(&item_id);
+                        }
                     }
                     mpv_render_proof::EndFileReason::Error => {
                         if self.kattri_app.music_queue_current_item_id() == Some(item_id.as_str()) {
@@ -513,9 +517,16 @@ impl<'session> GlHost<'session> {
             .and_then(duration_from_seconds);
         let controls_paused = controls_snapshot.paused;
         let controls_speed_multiplier = controls_snapshot.speed_multiplier;
-        let previous_track_enabled = self.mpv.playing_item_id().is_some_and(|playing_id| {
-            self.kattri_app.music_queue_current_item_id() == Some(playing_id)
-        });
+        let (previous_track_enabled, next_track_enabled) =
+            self.mpv
+                .playing_item_id()
+                .map_or((false, false), |playing_id| {
+                    if self.kattri_app.music_queue_current_item_id() == Some(playing_id) {
+                        (true, true)
+                    } else {
+                        self.kattri_app.episode_navigation(playing_id)
+                    }
+                });
         let controls_chapters = controls_snapshot
             .chapters
             .iter()
@@ -590,6 +601,7 @@ impl<'session> GlHost<'session> {
             speed_multiplier: controls_speed_multiplier,
             media_active,
             previous_track_enabled,
+            next_track_enabled,
             chapters: &controls_chapters,
             secondary_subtitles: &secondary_choices,
             secondary_selected,
@@ -707,6 +719,7 @@ impl<'session> GlHost<'session> {
                                     );
                                 });
                         }
+                        up_next_card(ui.ctx(), mpv, kattri_app, &osd);
                         if let Some(info) = &media_info
                             && media_info_panel::show(ui.ctx(), info).close
                         {
@@ -1444,6 +1457,7 @@ struct OsdState<'a> {
     speed_multiplier: Option<f64>,
     media_active: bool,
     previous_track_enabled: bool,
+    next_track_enabled: bool,
     chapters: &'a [ChapterChoice],
     secondary_subtitles: &'a [SecondarySubtitleChoice],
     secondary_selected: Option<i64>,
@@ -1461,6 +1475,70 @@ struct OsdState<'a> {
     audio_tracks: Option<&'a [mpv_host::TrackMenuOption]>,
     subtitle_tracks: Option<&'a [mpv_host::TrackMenuOption]>,
     track_feedback: Option<&'a str>,
+}
+
+/// How long before the end of an episode the Up Next card appears.
+const UP_NEXT_LEAD: Duration = Duration::from_secs(30);
+
+/// Whether the Up Next card is due at `position`. Short videos never show it.
+fn up_next_due(position: Duration, duration: Duration) -> bool {
+    duration > UP_NEXT_LEAD * 4 && position + UP_NEXT_LEAD >= duration
+}
+
+/// Near the end of an episode with a next one set to auto-play: names it, counts down, and
+/// offers Play now and Cancel.
+fn up_next_card(
+    ctx: &egui::Context,
+    mpv: &mut MpvHost<'_>,
+    kattri_app: &mut KattriApp,
+    osd: &OsdState<'_>,
+) {
+    let (Some(duration), Some(playing)) = (osd.duration, mpv.playing_item_id().map(str::to_owned))
+    else {
+        return;
+    };
+    if !up_next_due(osd.position, duration) {
+        return;
+    }
+    let Some(label) = kattri_app.up_next_label(&playing).map(str::to_owned) else {
+        return;
+    };
+    let remaining = duration.saturating_sub(osd.position).as_secs();
+    egui::Area::new(egui::Id::unique("up_next_card"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-28.0, -150.0))
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(egui::Color32::from_black_alpha(200))
+                .corner_radius(egui::CornerRadius::same(14))
+                .inner_margin(egui::Margin::same(16))
+                .show(ui, |ui| {
+                    ui.set_max_width(340.0);
+                    ui.label(
+                        egui::RichText::new("Up next")
+                            .size(13.0)
+                            .color(egui::Color32::from_gray(190)),
+                    );
+                    ui.label(
+                        egui::RichText::new(&label)
+                            .size(17.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("Starts in {remaining} s"))
+                            .color(egui::Color32::from_gray(190)),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Play now").clicked() {
+                            kattri_app.on_episode_next(&playing);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            kattri_app.cancel_up_next(&playing);
+                        }
+                    });
+                });
+        });
 }
 
 /// Draws the playback controls and performs the actions they return.
@@ -1496,6 +1574,7 @@ fn osd_controls(
             seek_enabled: true,
             stop_enabled: osd.media_active,
             previous_track_enabled: osd.previous_track_enabled,
+            next_track_enabled: osd.next_track_enabled,
             chapters: osd.chapters,
             secondary_subtitles: osd.secondary_subtitles,
             secondary_selected: osd.secondary_selected,
@@ -1563,15 +1642,23 @@ fn osd_controls(
             PlayerControlAction::TogglePause if live_stream_active => mpv.stop_playback(),
             PlayerControlAction::TogglePause => mpv.toggle_paused(),
             PlayerControlAction::PreviousTrack => {
-                if let Some(playing_item_id) = mpv.playing_item_id().map(str::to_owned)
-                    && kattri_app.on_music_previous(&playing_item_id, osd.position)
-                {
-                    mpv.seek_absolute(Duration::ZERO);
+                if let Some(playing_item_id) = mpv.playing_item_id().map(str::to_owned) {
+                    if kattri_app.music_queue_current_item_id() == Some(playing_item_id.as_str()) {
+                        if kattri_app.on_music_previous(&playing_item_id, osd.position) {
+                            mpv.seek_absolute(Duration::ZERO);
+                        }
+                    } else {
+                        kattri_app.on_episode_previous(&playing_item_id);
+                    }
                 }
             }
             PlayerControlAction::NextTrack => {
                 if let Some(playing_item_id) = mpv.playing_item_id().map(str::to_owned) {
-                    kattri_app.on_music_next(&playing_item_id);
+                    if kattri_app.music_queue_current_item_id() == Some(playing_item_id.as_str()) {
+                        kattri_app.on_music_next(&playing_item_id);
+                    } else {
+                        kattri_app.on_episode_next(&playing_item_id);
+                    }
                 }
             }
             PlayerControlAction::Stop => mpv.stop_playback(),
@@ -2189,5 +2276,24 @@ mod tests {
         );
         assert_eq!(duration_from_seconds(f64::NAN), None);
         assert_eq!(duration_from_seconds(-1.0), None);
+    }
+}
+
+#[cfg(test)]
+mod up_next_tests {
+    use super::{UP_NEXT_LEAD, up_next_due};
+    use std::time::Duration;
+
+    #[test]
+    fn up_next_appears_in_the_last_half_minute_of_a_long_video_only() {
+        let episode = Duration::from_secs(45 * 60);
+        assert!(!up_next_due(
+            episode - UP_NEXT_LEAD - Duration::from_secs(1),
+            episode
+        ));
+        assert!(up_next_due(episode - UP_NEXT_LEAD, episode));
+        assert!(up_next_due(episode, episode));
+        let clip = Duration::from_secs(90);
+        assert!(!up_next_due(clip, clip), "a short clip has no Up Next card");
     }
 }

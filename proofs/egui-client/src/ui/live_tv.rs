@@ -41,6 +41,8 @@ pub struct LiveTvInput<'a> {
 pub enum LiveTvAction {
     SelectChannel(String),
     TuneChannel(String),
+    /// Record the program now on a channel.
+    RecordProgram(String),
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -195,6 +197,26 @@ fn channel_row(
         tune.widget_info(|| egui::WidgetInfo::labeled(Role::Button, true, tune_label.clone()));
         if tune.clicked() {
             output.actions.push(LiveTvAction::TuneChannel(id));
+        }
+        if let Some(program) = channel.current_program.as_ref() {
+            let record_label = ui_text_args(
+                ids::LIVE_TV_BUTTON_RECORD_PROGRAM,
+                &[("title", program.item.name.as_str())],
+            );
+            let record = ui
+                .add_sized(
+                    [76.0, ROW_HEIGHT],
+                    egui::Button::new(ui_text(ids::LIVE_TV_BUTTON_RECORD)),
+                )
+                .on_hover_text(&record_label);
+            record.widget_info(|| {
+                egui::WidgetInfo::labeled(Role::Button, true, record_label.clone())
+            });
+            if record.clicked() {
+                output
+                    .actions
+                    .push(LiveTvAction::RecordProgram(program.item.id.clone()));
+            }
         }
     });
 }

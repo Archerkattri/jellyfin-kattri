@@ -7,6 +7,7 @@ pub mod hero;
 pub mod home;
 pub(crate) mod item_menu;
 pub mod live_tv;
+mod media_source;
 pub mod music;
 pub(crate) mod open_url;
 mod people;
@@ -40,7 +41,7 @@ use crate::worker::HomeRowKind;
 use egui::{self, Align, Align2, Color32, CornerRadius, FontId, RichText, Stroke};
 use jellyfin_api::{ItemFilter, ItemSortOrder};
 use kattri_client_core::focus::{FocusGraph, FocusId, FocusNode, NavAction};
-use kattri_client_core::playback_plan::{PlaybackMethod, select_playback_info_source_for_profile};
+use kattri_client_core::playback_plan::PlaybackMethod;
 use kattri_i18n::ids;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -196,8 +197,7 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
     // Keep each destination's scroll position independent; opening details starts at its title.
     let content_scroll_id = egui::Id::unique((
         "library_content_scroll",
-        app.view,
-        app.page,
+        format!("{:?}:{:?}", app.view, app.page),
         app.selected_item_id.as_deref(),
     ));
 
@@ -1042,6 +1042,10 @@ fn sign_in_form(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: 
                 ui.add_space(14.0);
                 ui.label(RichText::new(error).color(Color32::from_rgb(0xF0, 0xA0, 0x99)));
             }
+            if let Some(notice) = app.forgot_password_notice.as_deref() {
+                ui.add_space(10.0);
+                ui.label(RichText::new(notice).color(colors.muted));
+            }
             ui.add_space(18.0);
             if app.visible_server_preview().is_some()
                 && with_access_name(
@@ -1067,6 +1071,11 @@ fn sign_in_form(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: 
                         .clicked()
                 {
                     app.start_quick_connect();
+                }
+                if !quick_connect_active
+                    && ui.button(ui_text(ids::FORGOT_PASSWORD_BUTTON)).clicked()
+                {
+                    app.start_forgot_password();
                 }
                 if !quick_connect_active
                     && !app.quick_connect_available()
@@ -1188,8 +1197,12 @@ fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
             live_tv::LiveTvAction::TuneChannel(channel_id) => {
                 app.tune_live_tv_channel(channel_id);
             }
+            live_tv::LiveTvAction::RecordProgram(program_id) => {
+                app.change_live_tv_timer(crate::worker::TimerChange::Record { program_id });
+            }
         }
     }
+    live_tv_recordings(ui, app, colors);
     if let Some(notice) = app.live_tv_notice.as_deref() {
         ui.label(RichText::new(notice).color(colors.muted));
     }
@@ -1212,6 +1225,88 @@ fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     {
         let start_index = u32::try_from(app.live_tv_channels.len()).unwrap_or(u32::MAX);
         app.request_live_tv_channels(start_index);
+    }
+}
+
+/// The Live TV page's Recordings and Scheduled lists.
+fn live_tv_recordings(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
+    use crate::app::RecordingsState;
+    app.ensure_live_tv_recordings();
+    ui.add_space(16.0);
+    ui.label(
+        RichText::new(ui_text(ids::LIVE_TV_HEADING_RECORDINGS))
+            .strong()
+            .size(18.0),
+    );
+    match app.live_tv_recordings_state {
+        RecordingsState::NotLoaded | RecordingsState::Loading => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    RichText::new(ui_text(ids::LIVE_TV_STATUS_LOADING_RECORDINGS))
+                        .color(colors.muted),
+                );
+            });
+            return;
+        }
+        RecordingsState::Unavailable => {
+            ui.label(
+                RichText::new(ui_text(ids::LIVE_TV_EMPTY_RECORDINGS_UNAVAILABLE))
+                    .color(colors.muted),
+            );
+            return;
+        }
+        RecordingsState::Loaded => {}
+    }
+    let mut play = None;
+    let mut cancel = None;
+    if app.live_tv_recordings.is_empty() {
+        ui.label(RichText::new(ui_text(ids::LIVE_TV_EMPTY_RECORDINGS)).color(colors.muted));
+    }
+    for recording in &app.live_tv_recordings {
+        ui.horizontal(|ui| {
+            if ui.button(ui_text(ids::PLAYBACK_BUTTON_PLAY)).clicked() {
+                play = Some(recording.id.clone());
+            }
+            ui.label(RichText::new(&recording.name).color(colors.text));
+            if let Some(date) = recording.premiere_date.as_deref() {
+                ui.label(RichText::new(date.get(..10).unwrap_or(date)).color(colors.muted));
+            }
+        });
+    }
+    ui.add_space(10.0);
+    ui.label(
+        RichText::new(ui_text(ids::LIVE_TV_HEADING_SCHEDULED))
+            .strong()
+            .size(16.0),
+    );
+    if app.live_tv_timers.is_empty() {
+        ui.label(RichText::new(ui_text(ids::LIVE_TV_EMPTY_SCHEDULED)).color(colors.muted));
+    }
+    for timer in &app.live_tv_timers {
+        ui.horizontal(|ui| {
+            if ui
+                .button(ui_text(ids::LIVE_TV_BUTTON_CANCEL_RECORDING))
+                .clicked()
+            {
+                cancel = Some(timer.id.clone());
+            }
+            let name = timer.name.as_deref().unwrap_or_default();
+            ui.label(RichText::new(name).color(colors.text));
+            let when = timer
+                .start_date
+                .as_deref()
+                .map(|date| date.get(..16).unwrap_or(date).replace('T', " "))
+                .unwrap_or_default();
+            let channel = timer.channel_name.as_deref().unwrap_or_default();
+            ui.label(RichText::new(format!("{channel} {when} UTC")).color(colors.muted));
+        });
+    }
+    if let Some(item_id) = play {
+        app.play_item(item_id, false);
+    }
+    if let Some(timer_id) = cancel {
+        app.change_live_tv_timer(crate::worker::TimerChange::Cancel { timer_id });
     }
 }
 
@@ -1506,7 +1601,16 @@ fn render_connected(
             ui.label(RichText::new(ui_text(ids::SEARCH_NOTICE_STALE)).color(colors.muted));
         }
         let query = app.submitted_search.clone();
-        if app.search_results.is_empty() && app.live_tv_search_results.is_empty() {
+        // Borrowed in the usual case; copied only when channel results must be appended.
+        let grouped_results: std::borrow::Cow<'_, [jellyfin_api::BaseItemDto]> =
+            if app.live_tv_search_results.is_empty() {
+                std::borrow::Cow::Borrowed(&app.search_results)
+            } else {
+                let mut merged = app.search_results.clone();
+                merged.extend(app.live_tv_search_results.iter().cloned());
+                std::borrow::Cow::Owned(merged)
+            };
+        if grouped_results.is_empty() {
             if let Some(query) = query {
                 if !app.catalog_loading
                     && !app.live_tv_search_loading
@@ -1537,8 +1641,7 @@ fn render_connected(
             let mut show_all_responses = Vec::new();
             let action = search::draw_with_focus_targets(
                 ui,
-                &app.search_results,
-                &app.live_tv_search_results,
+                &grouped_results,
                 app.live_tv_search_total,
                 |row, item, response| {
                     push_search_focus(entries, row, &item.id, response);
@@ -2144,10 +2247,116 @@ fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
             );
         }
     });
+    if app.page == Page::Music && app.browse_context.is_none() {
+        let mut view = app.music_view;
+        ui.horizontal(|ui| {
+            for option in crate::app::MusicView::ALL {
+                let label = match option {
+                    crate::app::MusicView::All => ui_text(ids::MUSIC_VIEW_ALL),
+                    crate::app::MusicView::Albums => ui_text(ids::MUSIC_VIEW_ALBUMS),
+                    crate::app::MusicView::Songs => ui_text(ids::MUSIC_VIEW_SONGS),
+                };
+                ui.selectable_value(&mut view, option, label);
+            }
+        });
+        app.set_music_view(view);
+    }
+    let mut genre = app.catalog_genre.clone();
+    if !app.catalog_genres.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(ui_text(ids::BROWSE_GENRE_LABEL)).color(colors.muted));
+            egui::ComboBox::from_id_salt("catalog_genre")
+                .selected_text(
+                    genre
+                        .clone()
+                        .unwrap_or_else(|| ui_text(ids::BROWSE_GENRE_ALL).to_owned()),
+                )
+                .height(360.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut genre, None, ui_text(ids::BROWSE_GENRE_ALL));
+                    for name in &app.catalog_genres {
+                        ui.selectable_value(&mut genre, Some(name.clone()), name);
+                    }
+                });
+        });
+    }
+    let mut studio = app.catalog_studio.clone();
+    if !app.catalog_studios.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(ui_text(ids::BROWSE_STUDIO_LABEL)).color(colors.muted));
+            let selected = studio
+                .as_ref()
+                .and_then(|id| {
+                    app.catalog_studios
+                        .iter()
+                        .find(|(studio_id, _)| studio_id == id)
+                })
+                .map_or_else(
+                    || ui_text(ids::BROWSE_STUDIO_ALL).to_owned(),
+                    |(_, name)| name.clone(),
+                );
+            egui::ComboBox::from_id_salt("catalog_studio")
+                .selected_text(selected)
+                .height(360.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut studio, None, ui_text(ids::BROWSE_STUDIO_ALL));
+                    for (id, name) in &app.catalog_studios {
+                        ui.selectable_value(&mut studio, Some(id.clone()), name);
+                    }
+                });
+        });
+    }
+    let mut name_prefix = app.catalog_name_prefix;
+    alphabet_picker(ui, &mut name_prefix, colors);
+    app.set_catalog_genre(genre);
+    app.set_catalog_studio(studio);
     app.set_catalog_sort(sort);
     app.set_catalog_sort_order(order);
     app.set_catalog_played_filter(played_filter);
     app.set_catalog_favorites_only(favorites_only);
+    app.set_catalog_name_prefix(name_prefix);
+}
+
+/// The letters the alphabet picker offers after "All": `#` for digits and symbols, then A-Z.
+const ALPHABET_PICKER_LETTERS: [char; 27] = [
+    '#', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
+    'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+];
+
+/// A row of letters that narrows the library to names starting with one of them.
+fn alphabet_picker(ui: &mut egui::Ui, prefix: &mut Option<char>, colors: Palette) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let all = ui.add(egui::Button::selectable(
+            prefix.is_none(),
+            RichText::new(ui_text(ids::BROWSE_ALPHABET_ALL)).color(colors.text),
+        ));
+        if all.clicked() {
+            *prefix = None;
+        }
+        for letter in ALPHABET_PICKER_LETTERS {
+            let selected = *prefix == Some(letter);
+            let response = ui
+                .add(
+                    egui::Button::selectable(
+                        selected,
+                        RichText::new(letter.to_string()).monospace(),
+                    )
+                    .min_size(egui::vec2(22.0, 22.0)),
+                )
+                .on_hover_text(if letter == '#' {
+                    ui_text(ids::BROWSE_ALPHABET_SYMBOLS).to_owned()
+                } else {
+                    ui_text_args(
+                        ids::BROWSE_ALPHABET_LETTER,
+                        &[("letter", &letter.to_string())],
+                    )
+                });
+            if response.clicked() {
+                *prefix = if selected { None } else { Some(letter) };
+            }
+        }
+    });
 }
 
 /// Only a movie or an episode is one file the server can return from `/Items/{id}/Download`.
@@ -2191,6 +2400,11 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     let mut detail_error_action = None;
     let mut season_to_load = None;
     let mut episode_to_open = None;
+    let mut episode_page_to_open = None;
+    let mut shuffle_series = None;
+    let mut sibling_to_open = None;
+    let mut version_picked = None;
+    let mut extra_to_play = None;
     let mut person_to_open = None;
     let mut similar_item_to_open = None;
     let mut download_target: Option<(String, String)> = None;
@@ -2267,7 +2481,84 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                         );
                     }
                 }
+                if !app.track_lyrics.is_empty() {
+                    ui.add_space(14.0);
+                    egui::CollapsingHeader::new(ui_text(ids::DETAIL_LYRICS))
+                        .id_salt("detail_lyrics")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("detail_lyrics_scroll")
+                                .max_height(320.0)
+                                .show(ui, |ui| {
+                                    for line in &app.track_lyrics {
+                                        ui.label(RichText::new(&line.text).color(colors.text));
+                                    }
+                                });
+                        });
+                }
+                if !app.item_extras.is_empty() {
+                    ui.add_space(14.0);
+                    ui.heading(ui_text(ids::DETAIL_EXTRAS));
+                    egui::ScrollArea::horizontal()
+                        .id_salt("detail_extras")
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for extra in &app.item_extras {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(format!("▶  {}", extra.name))
+                                                .min_size(egui::vec2(0.0, 36.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        extra_to_play = Some(extra.id.clone());
+                                    }
+                                }
+                            });
+                        });
+                }
+                if item.item_type.as_deref() == Some("Episode") && !app.season_siblings.is_empty() {
+                    ui.add_space(14.0);
+                    ui.heading(ui_text(ids::DETAIL_MORE_FROM_SEASON));
+                    egui::ScrollArea::horizontal()
+                        .id_salt("detail_season_siblings")
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for sibling in &app.season_siblings {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(episode_display_label(sibling))
+                                                .min_size(egui::vec2(0.0, 36.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        sibling_to_open = Some(sibling.id.clone());
+                                    }
+                                }
+                            });
+                        });
+                }
                 if item.item_type.as_deref() == Some("Series") {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if let Some(episode) = app.series_next_up_episode(&item.id)
+                            && series_next_up_button(ui, episode, colors).clicked()
+                        {
+                            episode_to_open = Some(episode.id.clone());
+                        }
+                        let shuffle = egui::Button::new(
+                            RichText::new(ui_text(ids::SERIES_BUTTON_SHUFFLE)).size(16.0),
+                        )
+                        .fill(Color32::from_white_alpha(46))
+                        .corner_radius(CornerRadius::same(24))
+                        .min_size(egui::vec2(120.0, 48.0));
+                        if ui.add(shuffle).clicked() {
+                            shuffle_series = Some(item.id.clone());
+                        }
+                    });
                     ui.add_space(14.0);
                     ui.heading(ui_text(ids::SERIES_HEADING_SEASONS));
                     if app.series_seasons_loading {
@@ -2303,6 +2594,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                     ui,
                                     &app.series_seasons,
                                     &app.series_episodes,
+                                    &app.episode_thumbnails,
                                 );
                                 if response.selected_season_id.as_deref()
                                     != app.series_selected_season_id.as_deref()
@@ -2310,6 +2602,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                     season_to_load = response.selected_season_id.clone();
                                 }
                                 episode_to_open = response.activated_episode_id.clone();
+                                episode_page_to_open = response.opened_episode_id.clone();
                             }
                         });
                         if app.series_episodes_loading {
@@ -2469,9 +2762,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                 .color(colors.muted),
                         );
                     } else {
-                        if let Some(selection) =
-                            select_playback_info_source_for_profile(info, app.device_profile())
-                        {
+                        if let Some(selection) = app.chosen_playback_selection(info) {
                             let label = match selection.method {
                                 PlaybackMethod::DirectPlay => {
                                     ui_text(ids::PLAYBACK_METHOD_DIRECT_PLAY)
@@ -2497,6 +2788,48 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                     .color(colors.muted),
                             );
                         }
+                    }
+                }
+                if let Some(info) = app.playback_info.as_ref()
+                    && info.error_code.is_none()
+                {
+                    let index = app
+                        .chosen_playback_selection(info)
+                        .map_or(0, |selection| selection.source_index);
+                    if info.media_sources.len() > 1 {
+                        let mut picked = index;
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(ui_text(ids::DETAIL_VERSION_LABEL))
+                                    .color(colors.muted),
+                            );
+                            egui::ComboBox::from_id_salt("detail_version")
+                                .selected_text(media_source::version_label(
+                                    &info.media_sources[index],
+                                    index,
+                                ))
+                                .show_ui(ui, |ui| {
+                                    for (option, source) in info.media_sources.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut picked,
+                                            option,
+                                            media_source::version_label(source, option),
+                                        );
+                                    }
+                                });
+                        });
+                        if picked != index {
+                            version_picked = Some(picked);
+                        }
+                    }
+                    if let Some(source) = info.media_sources.get(index) {
+                        egui::CollapsingHeader::new(ui_text(ids::DETAIL_MEDIA_INFO))
+                            .id_salt("detail_media_info")
+                            .show(ui, |ui| {
+                                for line in media_source::summary_lines(source) {
+                                    ui.label(RichText::new(line).size(12.0).color(colors.muted));
+                                }
+                            });
                     }
                 }
                 if app.playback_start_loading {
@@ -2553,8 +2886,27 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
         ui.ctx().request_repaint();
     }
     if let Some(episode_id) = episode_to_open {
-        // Choosing an episode plays it, resuming where it was left.
+        // The play button plays the episode, resuming where it was left.
         app.play_item(episode_id, false);
+        ui.ctx().request_repaint();
+    }
+    if let Some(extra_id) = extra_to_play {
+        app.play_child_item(extra_id);
+        ui.ctx().request_repaint();
+    }
+    if let Some(index) = version_picked {
+        app.set_preferred_source(index);
+    }
+    if let Some(episode_id) = sibling_to_open {
+        app.open_sibling_item(episode_id);
+        ui.ctx().request_repaint();
+    }
+    if let Some(series_id) = shuffle_series {
+        app.shuffle_series(series_id);
+        ui.ctx().request_repaint();
+    }
+    if let Some(episode_id) = episode_page_to_open {
+        app.open_child_item(episode_id);
         ui.ctx().request_repaint();
     }
     if let Some(person_id) = person_to_open {
@@ -2601,6 +2953,79 @@ fn is_playable_item_type(item_type: Option<&str>) -> bool {
 
 /// The buttons on the details header: a white Play (or Resume) pill, Start over when there is a
 /// saved position, and Download.
+/// "Play S1:E3 · Title", or "Resume …" when the episode was left part way.
+fn series_next_up_button(
+    ui: &mut egui::Ui,
+    episode: &jellyfin_api::BaseItemDto,
+    colors: Palette,
+) -> egui::Response {
+    let label = episode_display_label(episode);
+    let resumable = episode.user_data.as_ref().is_some_and(|user_data| {
+        resumable_position_ticks(
+            user_data.playback_position_ticks,
+            user_data.played,
+            episode.run_time_ticks,
+        )
+        .is_some()
+    });
+    let text = ui_text_args(
+        if resumable {
+            ids::SERIES_BUTTON_RESUME_NEXT_UP
+        } else {
+            ids::SERIES_BUTTON_PLAY_NEXT_UP
+        },
+        &[("episode", label.as_str())],
+    );
+    ui.add(
+        egui::Button::new(
+            RichText::new(text)
+                .size(17.0)
+                .strong()
+                .color(colors.background),
+        )
+        .fill(colors.accent)
+        .corner_radius(CornerRadius::same(24))
+        .min_size(egui::vec2(150.0, 48.0)),
+    )
+}
+
+/// "S1:E3 · Title" for an episode with season and episode numbers, else its name.
+pub(crate) fn episode_display_label(episode: &jellyfin_api::BaseItemDto) -> String {
+    match (episode.parent_index_number, episode.index_number) {
+        (Some(season), Some(number)) => format!("S{season}:E{number} · {}", episode.name),
+        (None, Some(number)) => format!("E{number} · {}", episode.name),
+        _ => episode.name.clone(),
+    }
+}
+
+#[cfg(test)]
+mod next_up_label_tests {
+    use super::episode_display_label;
+
+    #[test]
+    fn episode_labels_carry_season_and_number_when_known() {
+        let episode = |json: serde_json::Value| -> jellyfin_api::BaseItemDto {
+            serde_json::from_value(json).expect("episode fixture")
+        };
+        assert_eq!(
+            episode_display_label(&episode(serde_json::json!({
+                "Id": "e", "Name": "Pilot", "ParentIndexNumber": 1, "IndexNumber": 3
+            }))),
+            "S1:E3 · Pilot"
+        );
+        assert_eq!(
+            episode_display_label(&episode(serde_json::json!({
+                "Id": "e", "Name": "Pilot", "IndexNumber": 3
+            }))),
+            "E3 · Pilot"
+        );
+        assert_eq!(
+            episode_display_label(&episode(serde_json::json!({"Id": "e", "Name": "Pilot"}))),
+            "Pilot"
+        );
+    }
+}
+
 fn detail_play_buttons(
     ui: &mut egui::Ui,
     app: &KattriApp,

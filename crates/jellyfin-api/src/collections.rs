@@ -40,6 +40,9 @@ impl JellyfinClient {
                 limit: limit.clamp(1, MAX_HOME_LIMIT),
                 parent_id: Some(box_set_id.to_owned()),
                 enable_total_record_count: Some(true),
+                name_starts_with: None,
+                name_less_than: None,
+                studio_ids: None,
                 ..ItemQuery::default()
             },
         )

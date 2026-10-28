@@ -118,6 +118,79 @@ impl JellyfinClient {
         }
     }
 
+    /// The episodes before and after `episode_id` in series order, using
+    /// `GET /Shows/{seriesId}/Episodes?adjacentTo={episodeId}`. Crosses season boundaries;
+    /// specials are left out, as in Jellyfin Web's previous/next episode buttons.
+    pub async fn adjacent_episodes(
+        &self,
+        session: &Session,
+        series_id: &str,
+        episode_id: &str,
+    ) -> Result<AdjacentEpisodes, ApiError> {
+        validate_id(series_id)?;
+        validate_id(episode_id)?;
+        let response = self
+            .get_series_items(
+                session,
+                &["Shows", series_id, "Episodes"],
+                &[
+                    ("adjacentTo", episode_id.to_owned()),
+                    ("userId", session.user.id.clone()),
+                    ("enableUserData", "true".to_owned()),
+                    ("fields", "Overview,PrimaryImageAspectRatio".to_owned()),
+                ],
+            )
+            .await?;
+        Ok(AdjacentEpisodes::from_items(response.items, episode_id))
+    }
+
+    /// The episodes of season number `season` of a series, using
+    /// `GET /Shows/{seriesId}/Episodes?season=N`, for an episode page's "More from this season".
+    pub async fn season_episodes_by_number(
+        &self,
+        session: &Session,
+        series_id: &str,
+        season: i32,
+    ) -> Result<ItemsResponse, ApiError> {
+        validate_id(series_id)?;
+        self.get_series_items(
+            session,
+            &["Shows", series_id, "Episodes"],
+            &[
+                ("season", season.to_string()),
+                ("userId", session.user.id.clone()),
+                ("enableUserData", "true".to_owned()),
+                ("fields", "Overview,PrimaryImageAspectRatio".to_owned()),
+            ],
+        )
+        .await
+    }
+
+    /// The episode to play next in one series, using
+    /// `GET /Shows/NextUp?seriesId={seriesId}`: the episode in progress, else the first
+    /// unplayed one after the last played. `None` when the server has none to offer.
+    pub async fn series_next_up(
+        &self,
+        session: &Session,
+        series_id: &str,
+    ) -> Result<Option<crate::BaseItemDto>, ApiError> {
+        validate_id(series_id)?;
+        let response = self
+            .get_series_items(
+                session,
+                &["Shows", "NextUp"],
+                &[
+                    ("seriesId", series_id.to_owned()),
+                    ("userId", session.user.id.clone()),
+                    ("limit", "1".to_owned()),
+                    ("enableUserData", "true".to_owned()),
+                    ("fields", "Overview".to_owned()),
+                ],
+            )
+            .await?;
+        Ok(response.items.into_iter().next())
+    }
+
     async fn get_series_items(
         &self,
         session: &Session,
@@ -131,6 +204,29 @@ impl JellyfinClient {
         let request = self.add_metadata(request, Some(&session.access_token));
         let response = request.send().await.map_err(crate::transport_error)?;
         decode_response(response).await
+    }
+}
+
+/// The neighbours of one episode. Either side is `None` at the start or end of the series.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AdjacentEpisodes {
+    pub previous: Option<crate::BaseItemDto>,
+    pub next: Option<crate::BaseItemDto>,
+}
+
+impl AdjacentEpisodes {
+    /// Splits the server's `[previous, current, next]` window around `episode_id`. A response
+    /// that does not contain the episode has no neighbours.
+    pub fn from_items(mut items: Vec<crate::BaseItemDto>, episode_id: &str) -> Self {
+        let Some(index) = items.iter().position(|item| item.id == episode_id) else {
+            return Self::default();
+        };
+        let next = items.get(index + 1).cloned();
+        items.truncate(index);
+        Self {
+            previous: items.pop(),
+            next,
+        }
     }
 }
 
@@ -169,6 +265,7 @@ mod tests {
         Session {
             access_token: "unit-test-token".into(),
             user: UserDto {
+                policy: None,
                 id: "user-id".into(),
                 name: "Test user".into(),
                 server_id: None,
@@ -285,6 +382,107 @@ mod tests {
                 .as_ref()
                 .and_then(|data| data.played_percentage),
             Some(42.5)
+        );
+    }
+
+    #[tokio::test]
+    async fn adjacent_episodes_asks_for_the_window_and_splits_it() {
+        let body = r#"{"Items":[{"Id":"e1","Name":"One","Type":"Episode"},{"Id":"e2","Name":"Two","Type":"Episode"},{"Id":"e3","Name":"Three","Type":"Episode"}]}"#;
+        let (base, task) = mock_server(vec![(200, body)]).await;
+        let adjacent = client(&base)
+            .adjacent_episodes(&session(), "series-1", "e2")
+            .await
+            .expect("adjacent episodes");
+        let requests = task.await.expect("server task");
+        let url = request_uri(&requests[0]);
+        assert_eq!(url.path(), "/jellyfin/Shows/series-1/Episodes");
+        assert_eq!(
+            params(&url).get("adjacentTo").map(String::as_str),
+            Some("e2")
+        );
+        assert_eq!(
+            params(&url).get("userId").map(String::as_str),
+            Some("user-id")
+        );
+        assert_eq!(adjacent.previous.map(|item| item.id).as_deref(), Some("e1"));
+        assert_eq!(adjacent.next.map(|item| item.id).as_deref(), Some("e3"));
+    }
+
+    #[tokio::test]
+    async fn season_episodes_are_asked_for_by_season_number() {
+        let body = r#"{"Items":[{"Id":"e1","Name":"One"}]}"#;
+        let (base, task) = mock_server(vec![(200, body)]).await;
+        let episodes = client(&base)
+            .season_episodes_by_number(&session(), "series-1", 2)
+            .await
+            .expect("season");
+        assert_eq!(episodes.items[0].id, "e1");
+        let requests = task.await.expect("server task");
+        let url = request_uri(&requests[0]);
+        assert_eq!(url.path(), "/jellyfin/Shows/series-1/Episodes");
+        assert_eq!(params(&url).get("season").map(String::as_str), Some("2"));
+    }
+
+    #[tokio::test]
+    async fn series_next_up_asks_for_one_episode_of_the_series() {
+        let body =
+            r#"{"Items":[{"Id":"e5","Name":"Five","Type":"Episode","SeriesId":"series-1"}]}"#;
+        let (base, task) = mock_server(vec![(200, body), (200, r#"{"Items":[]}"#)]).await;
+        let client = client(&base);
+        let next = client
+            .series_next_up(&session(), "series-1")
+            .await
+            .expect("next up");
+        assert_eq!(next.map(|item| item.id).as_deref(), Some("e5"));
+        let none = client
+            .series_next_up(&session(), "series-1")
+            .await
+            .expect("empty next up");
+        assert!(none.is_none());
+        let requests = task.await.expect("server task");
+        let url = request_uri(&requests[0]);
+        assert_eq!(url.path(), "/jellyfin/Shows/NextUp");
+        let query = params(&url);
+        assert_eq!(query.get("seriesId").map(String::as_str), Some("series-1"));
+        assert_eq!(query.get("limit").map(String::as_str), Some("1"));
+        assert_eq!(query.get("userId").map(String::as_str), Some("user-id"));
+    }
+
+    #[tokio::test]
+    async fn genres_are_listed_by_name_for_one_library() {
+        let body = r#"{"Items":[{"Id":"g1","Name":"Action"},{"Id":"g2","Name":" "},{"Id":"g3","Name":"Drama"}]}"#;
+        let (base, task) = mock_server(vec![(200, body)]).await;
+        let genres = client(&base)
+            .list_genres(&session(), Some("library-1"), Some(&["Movie".to_owned()]))
+            .await
+            .expect("genres");
+        assert_eq!(genres, ["Action", "Drama"]);
+        let requests = task.await.expect("server task");
+        let url = request_uri(&requests[0]);
+        assert_eq!(url.path(), "/jellyfin/Genres");
+        let query = params(&url);
+        assert_eq!(query.get("parentId").map(String::as_str), Some("library-1"));
+        assert_eq!(
+            query.get("includeItemTypes").map(String::as_str),
+            Some("Movie")
+        );
+        assert_eq!(query.get("userId").map(String::as_str), Some("user-id"));
+    }
+
+    #[test]
+    fn adjacent_window_edges_and_a_missing_episode() {
+        let item = |id: &str| -> crate::BaseItemDto {
+            serde_json::from_value(serde_json::json!({"Id": id, "Name": id})).expect("dto")
+        };
+        let first = super::AdjacentEpisodes::from_items(vec![item("e1"), item("e2")], "e1");
+        assert!(first.previous.is_none());
+        assert_eq!(first.next.map(|item| item.id).as_deref(), Some("e2"));
+        let last = super::AdjacentEpisodes::from_items(vec![item("e1"), item("e2")], "e2");
+        assert_eq!(last.previous.map(|item| item.id).as_deref(), Some("e1"));
+        assert!(last.next.is_none());
+        assert_eq!(
+            super::AdjacentEpisodes::from_items(vec![item("e1")], "other"),
+            super::AdjacentEpisodes::default()
         );
     }
 

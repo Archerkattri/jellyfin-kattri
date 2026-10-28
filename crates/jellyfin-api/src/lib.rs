@@ -6,12 +6,16 @@ pub mod capabilities;
 mod collections;
 pub mod connectivity;
 mod device_profile;
+mod extras;
 mod favorites;
 mod home;
+mod item_admin;
 pub mod item_images;
 mod json_response;
 mod live_tv;
+mod live_tv_recordings;
 mod mpv_profile;
+mod password_reset;
 mod playback;
 mod playback_source;
 mod played_state;
@@ -33,6 +37,7 @@ pub use device_profile::{
     CodecProfile, ContainerProfile, DeviceProfile, DirectPlayProfile, ProfileCondition,
     SubtitleProfile, TranscodingProfile,
 };
+pub use extras::LyricLine;
 pub use favorites::FavoriteToggle;
 pub use home::{MAX_HOME_LIMIT, UserView};
 pub use item_images::BackdropImageError;
@@ -41,12 +46,14 @@ pub use live_tv::{
     LiveTvProgramPage, MAX_GUIDE_CHANNEL_IDS, MAX_GUIDE_CHANNELS_PER_WINDOW,
     MAX_GUIDE_PROGRAMS_PER_WINDOW, MAX_GUIDE_WINDOW_SECONDS,
 };
+pub use live_tv_recordings::{LiveTvTimer, MAX_RECORDINGS};
 pub use mpv_profile::{
     BaselineError, BaselineSubtitleProfile, EffectiveMpvProfile, MpvEntryResult, MpvProfile,
     MpvProfileEntry, MpvProfileError, MpvSoftwareBaseline, ProfileProvenance, RuntimeCapabilities,
     SoftwareCapabilities, baseline_device_profile, device_profile_from_runtime_inventory,
     load_device_profile, load_mpv_profile,
 };
+pub use password_reset::{ForgotPasswordAction, ForgotPasswordResult};
 pub use playback::{
     MediaSourceInfo, MediaStreamInfo, PlaybackErrorCode, PlaybackInfoRequest, PlaybackInfoResponse,
     PlaybackRequestOverrides, SensitiveString,
@@ -62,6 +69,7 @@ pub use playlists::{
 pub use quick_connect::{QuickConnectRequest, QuickConnectSecret, QuickConnectStatus};
 pub use search::{SEARCH_ITEM_TYPES, SearchError, SearchGroup, SearchResultGroup, group_by_type};
 pub use segments::{MediaSegment, MediaSegmentType, MediaSegmentsResponse};
+pub use series::AdjacentEpisodes;
 pub use session_reporting::{
     JellyfinTicks, PlayMethod, PlaybackOrder, PlaybackProgressInfo, PlaybackStartInfo,
     PlaybackStopInfo, QueueItem, RepeatMode, TICKS_PER_SECOND,
@@ -92,6 +100,8 @@ pub const PHOTO_FULL_SIZE_MAX_DIMENSION: u32 = 8_000;
 const MAX_ITEMS_ERROR_RESPONSE_BYTES: usize = 16 * 1024;
 /// Upper bound for `/Items?ids=...` requests used when restoring saved queues.
 pub const MAX_ITEM_IDS_PER_QUERY: usize = 50;
+/// Most genres [`JellyfinClient::list_genres`] returns.
+pub const MAX_GENRES: usize = 500;
 
 /// Stable client metadata sent in Jellyfin's `Authorization` header.
 #[derive(Clone, PartialEq, Eq)]
@@ -296,6 +306,78 @@ impl JellyfinClient {
         decode_response(response).await
     }
 
+    /// Studios used in one library or item type (`GET /Studios`) as `(id, name)`, sorted by
+    /// name, for a studio filter. At most [`MAX_GENRES`] are returned.
+    pub async fn list_studios(
+        &self,
+        session: &Session,
+        parent_id: Option<&str>,
+        include_item_types: Option<&[String]>,
+    ) -> Result<Vec<(String, String)>, ApiError> {
+        let response = self
+            .list_named_values(session, "Studios", parent_id, include_item_types)
+            .await?;
+        Ok(response
+            .items
+            .into_iter()
+            .filter(|studio| !studio.name.trim().is_empty())
+            .map(|studio| (studio.id, studio.name))
+            .take(MAX_GENRES)
+            .collect())
+    }
+
+    async fn list_named_values(
+        &self,
+        session: &Session,
+        kind: &str,
+        parent_id: Option<&str>,
+        include_item_types: Option<&[String]>,
+    ) -> Result<ItemsResponse, ApiError> {
+        let mut query = vec![
+            ("userId", session.user.id.clone()),
+            ("recursive", "true".to_owned()),
+            ("sortBy", "SortName".to_owned()),
+            ("limit", MAX_GENRES.to_string()),
+            ("enableImages", "false".to_owned()),
+        ];
+        if let Some(parent_id) = parent_id {
+            home::validate_id(parent_id)?;
+            query.push(("parentId", parent_id.to_owned()));
+        }
+        if let Some(types) = include_item_types.filter(|types| !types.is_empty()) {
+            query.push(("includeItemTypes", types.join(",")));
+        }
+        let request = self
+            .http
+            .request(Method::GET, self.endpoint(&[kind]))
+            .query(&query);
+        let request = self.add_metadata(request, Some(&session.access_token));
+        let response = request.send().await.map_err(transport_error)?;
+        decode_response(response).await
+    }
+
+    /// Genre names used in one library or item type (`GET /Genres`), sorted by name, for
+    /// a genre filter. At most [`MAX_GENRES`] are returned.
+    pub async fn list_genres(
+        &self,
+        session: &Session,
+        parent_id: Option<&str>,
+        include_item_types: Option<&[String]>,
+    ) -> Result<Vec<String>, ApiError> {
+        let genres = self
+            .list_named_values(session, "Genres", parent_id, include_item_types)
+            .await?;
+        let mut names: Vec<String> = genres
+            .items
+            .into_iter()
+            .map(|genre| genre.name)
+            .filter(|name| !name.trim().is_empty())
+            .collect();
+        names.dedup();
+        names.truncate(MAX_GENRES);
+        Ok(names)
+    }
+
     /// Fetch saved queue items in bounded batches and return them in the
     /// caller's order. IDs the server no longer has are omitted; duplicates in
     /// the requested queue remain duplicated in the result.
@@ -313,6 +395,9 @@ impl JellyfinClient {
                         ids: Some(batch.to_vec()),
                         limit: u32::try_from(batch.len()).map_err(|_| ApiError::InvalidResponse)?,
                         enable_total_record_count: Some(false),
+                        name_starts_with: None,
+                        name_less_than: None,
+                        studio_ids: None,
                         ..ItemQuery::default()
                     },
                 )
@@ -1451,6 +1536,26 @@ pub struct UserDto {
     pub name: String,
     #[serde(default)]
     pub server_id: Option<String>,
+    /// The user's server policy, when the server sent it (sign-in and `/Users/Me` do).
+    #[serde(default)]
+    pub policy: Option<UserPolicy>,
+}
+
+impl UserDto {
+    /// Whether the server marks this user an administrator. False when no policy was sent.
+    pub fn is_administrator(&self) -> bool {
+        self.policy
+            .as_ref()
+            .is_some_and(|policy| policy.is_administrator)
+    }
+}
+
+/// The part of Jellyfin's `UserPolicy` the client reads.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct UserPolicy {
+    #[serde(default)]
+    pub is_administrator: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -1500,6 +1605,14 @@ pub struct ItemQuery {
     /// list; the typed client caps a single request at 50 IDs.
     pub ids: Option<Vec<String>>,
     pub enable_total_record_count: Option<bool>,
+    /// Only items whose sort name starts with this text (`NameStartsWith`), for an
+    /// alphabet picker.
+    pub name_starts_with: Option<String>,
+    /// Only items whose sort name sorts before this text (`NameLessThan`); `"A"` selects
+    /// names starting with a digit or symbol.
+    pub name_less_than: Option<String>,
+    /// Only items from these studios (`studioIds`).
+    pub studio_ids: Option<Vec<String>>,
 }
 
 /// Jellyfin's `/Items` `sortBy` values used by the library browser.
@@ -1509,6 +1622,8 @@ pub enum ItemSortBy {
     DateCreated,
     PremiereDate,
     CommunityRating,
+    /// A new random order on every request (shuffle).
+    Random,
 }
 
 impl ItemSortBy {
@@ -1518,6 +1633,7 @@ impl ItemSortBy {
             Self::DateCreated => "DateCreated",
             Self::PremiereDate => "PremiereDate",
             Self::CommunityRating => "CommunityRating",
+            Self::Random => "Random",
         }
     }
 }
@@ -1634,6 +1750,15 @@ impl ItemQuery {
                 enable_total_record_count.to_string(),
             ));
         }
+        if let Some(prefix) = &self.name_starts_with {
+            params.push(("nameStartsWith".into(), prefix.clone()));
+        }
+        if let Some(bound) = &self.name_less_than {
+            params.push(("nameLessThan".into(), bound.clone()));
+        }
+        if let Some(studios) = self.studio_ids.as_ref().filter(|ids| !ids.is_empty()) {
+            params.push(("studioIds".into(), studios.join("|")));
+        }
         params
     }
 }
@@ -1655,6 +1780,9 @@ impl Default for ItemQuery {
             person_ids: None,
             ids: None,
             enable_total_record_count: None,
+            name_starts_with: None,
+            name_less_than: None,
+            studio_ids: None,
         }
     }
 }
@@ -1853,6 +1981,7 @@ mod primary_image_tests {
         Session {
             access_token: "secret-token".into(),
             user: UserDto {
+                policy: None,
                 id: "user-id".into(),
                 name: "Test user".into(),
                 server_id: None,
@@ -2353,6 +2482,9 @@ mod item_query_serialization_tests {
             person_ids: Some(vec!["person-1".into(), "person-2".into()]),
             ids: Some(vec!["item-1".into(), "item-2".into()]),
             enable_total_record_count: Some(false),
+            name_starts_with: None,
+            name_less_than: None,
+            studio_ids: None,
             start_index: 100,
             limit: 50,
             ..ItemQuery::default()
@@ -2387,6 +2519,9 @@ mod item_query_serialization_tests {
             genres: Some(vec![]),
             years: Some(vec![]),
             enable_total_record_count: Some(true),
+            name_starts_with: None,
+            name_less_than: None,
+            studio_ids: None,
             ..ItemQuery::default()
         };
         let actual = params(&query);
@@ -2399,5 +2534,31 @@ mod item_query_serialization_tests {
         assert!(!actual.contains_key("parentId"));
         assert!(!actual.contains_key("sortOrder"));
         assert!(!actual.contains_key("searchTerm"));
+        assert!(!actual.contains_key("nameStartsWith"));
+        assert!(!actual.contains_key("nameLessThan"));
+    }
+
+    #[test]
+    fn serializes_studio_ids_pipe_separated() {
+        let query = params(&ItemQuery {
+            studio_ids: Some(vec!["s1".into(), "s2".into()]),
+            ..ItemQuery::default()
+        });
+        assert_values(&query, "studioIds", &["s1|s2"]);
+    }
+
+    #[test]
+    fn serializes_the_alphabet_picker_bounds() {
+        let letter = params(&ItemQuery {
+            name_starts_with: Some("K".into()),
+            ..ItemQuery::default()
+        });
+        assert_values(&letter, "nameStartsWith", &["K"]);
+        let symbols = params(&ItemQuery {
+            name_less_than: Some("A".into()),
+            studio_ids: None,
+            ..ItemQuery::default()
+        });
+        assert_values(&symbols, "nameLessThan", &["A"]);
     }
 }
