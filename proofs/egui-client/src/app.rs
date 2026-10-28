@@ -664,6 +664,14 @@ pub struct KattriApp {
     episode_neighbors: Option<EpisodeNeighbors>,
     /// The episode to play next in the series on screen.
     series_next_up: Option<SeriesNextUp>,
+    /// The user's playlists for the card menu's Add to playlist.
+    menu_playlists: crate::ui::item_menu::MenuPlaylists,
+    menu_playlists_request_id: u64,
+    /// A card-menu playlist addition in flight: request, item title, playlist name.
+    menu_playlist_add: Option<(u64, String, String)>,
+    /// A short confirmation shown over the page, with the time it disappears (set when first
+    /// drawn).
+    toast: Option<(String, Option<f64>)>,
     pub(crate) music_track_names: HashMap<String, String>,
     pub(crate) music_album_tracks_loading: bool,
     pub(crate) music_album_tracks_error: Option<ErrorClass>,
@@ -1096,6 +1104,10 @@ impl KattriApp {
             music_queue: Queue::new(),
             episode_neighbors: None,
             series_next_up: None,
+            menu_playlists: Default::default(),
+            menu_playlists_request_id: 0,
+            menu_playlist_add: None,
+            toast: None,
             music_track_names: HashMap::new(),
             music_album_tracks_loading: false,
             music_album_tracks_error: None,
@@ -2649,12 +2661,57 @@ impl KattriApp {
     /// Reloads the home rows and library/collection tiles. Previous content stays visible while
     /// each request is pending.
     pub(crate) fn refresh_home(&mut self) {
+        self.request_menu_playlists();
         for kind in HomeRowKind::ALL {
             self.request_home_row(kind);
         }
         for kind in HomeCatalogKind::ALL {
             self.request_home_catalog(kind);
         }
+    }
+
+    /// Refreshes the playlists the card menu offers under Add to playlist.
+    fn request_menu_playlists(&mut self) {
+        let request_id = self.allocate_request_id();
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.list_user_playlists(request_id).is_ok())
+        {
+            self.menu_playlists_request_id = request_id;
+        }
+    }
+
+    fn show_toast(&mut self, text: String) {
+        self.toast = Some((text, None));
+    }
+
+    /// Draws the toast at the bottom of the window until it expires.
+    fn draw_toast(&mut self, ctx: &egui::Context) {
+        const TOAST_SECONDS: f64 = 3.0;
+        let now = ctx.input(|input| input.time);
+        let Some((text, until)) = self.toast.as_mut() else {
+            return;
+        };
+        let until = *until.get_or_insert(now + TOAST_SECONDS);
+        if now >= until {
+            self.toast = None;
+            return;
+        }
+        egui::Area::new(egui::Id::unique("kattri-toast"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -32.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_unmultiplied(20, 20, 24, 235))
+                    .corner_radius(egui::CornerRadius::same(12))
+                    .inner_margin(egui::Margin::symmetric(18, 12))
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(text.as_str()).color(egui::Color32::WHITE));
+                    });
+            });
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(until - now));
     }
 
     pub(crate) fn request_home_row(&mut self, kind: HomeRowKind) {
@@ -6118,6 +6175,36 @@ impl KattriApp {
                     self.series_episodes_loading = false;
                     self.series_episodes_error = Some(message);
                 }
+                WorkerEvent::UserPlaylistsLoaded {
+                    request_id,
+                    playlists,
+                } => {
+                    if request_id == self.menu_playlists_request_id {
+                        self.menu_playlists = std::sync::Arc::new(playlists);
+                    }
+                }
+                WorkerEvent::PlaylistMutationCompleted { request_id, .. }
+                | WorkerEvent::PlaylistMutationFailed { request_id, .. }
+                    if self
+                        .menu_playlist_add
+                        .as_ref()
+                        .is_some_and(|(pending, _, _)| *pending == request_id) =>
+                {
+                    let added = matches!(event, WorkerEvent::PlaylistMutationCompleted { .. });
+                    if let Some((_, title, playlist)) = self.menu_playlist_add.take() {
+                        let args = [("title", title.as_str()), ("playlist", playlist.as_str())];
+                        self.show_toast(if added {
+                            ui_text_args(ids::TOAST_ADDED_TO_PLAYLIST, &args)
+                        } else {
+                            ui_text_args(ids::TOAST_ADD_TO_PLAYLIST_FAILED, &args)
+                        });
+                    }
+                    if let WorkerEvent::PlaylistMutationCompleted { playlist_id, .. } = &event
+                        && self.opened_playlist_id.as_deref() == Some(playlist_id.as_str())
+                    {
+                        self.request_playlist_items(playlist_id.clone());
+                    }
+                }
                 WorkerEvent::SeriesNextUpLoaded {
                     request_id,
                     series_id,
@@ -6258,6 +6345,7 @@ impl KattriApp {
                     }
                     self.playlist_mutation_notice =
                         Some(ui_text(ids::PLAYLISTS_NOTICE_CREATED).into());
+                    self.request_menu_playlists();
                     self.request_catalog(0, None);
                     self.select_item(playlist_id);
                 }
@@ -7947,10 +8035,12 @@ impl KattriApp {
         if let Some(url) = crate::ui::open_url::show(&ctx, &mut self.open_url) {
             self.pending_stream_url = Some(url);
         }
+        crate::ui::item_menu::publish_playlists(&ctx, self.menu_playlists.clone());
         crate::ui::draw(root, self, width);
         if let Some((target, action)) = crate::ui::item_menu::take(&ctx) {
             self.apply_item_menu_action(target, action);
         }
+        self.draw_toast(&ctx);
     }
 
     /// Runs an entry chosen from a card's context menu. Played and favorite changes are sent
@@ -7971,6 +8061,40 @@ impl KattriApp {
                 }
             }
             ItemMenuAction::Download => self.start_download(&target.item_id, &target.title),
+            ItemMenuAction::AddToQueue | ItemMenuAction::PlayNextInQueue => {
+                let queue_item = QueueItem::new(target.item_id.clone());
+                let result = if action == ItemMenuAction::PlayNextInQueue {
+                    self.music_queue.play_next(queue_item)
+                } else {
+                    self.music_queue.add(queue_item)
+                };
+                if result.is_ok() {
+                    self.show_toast(ui_text_args(
+                        ids::TOAST_ADDED_TO_QUEUE,
+                        &[("title", target.title.as_str())],
+                    ));
+                    self.music_track_names.insert(target.item_id, target.title);
+                }
+            }
+            ItemMenuAction::AddToPlaylist => {
+                let Some(playlist_id) = target.playlist_id else {
+                    return;
+                };
+                let playlist_name = self
+                    .menu_playlists
+                    .iter()
+                    .find(|(id, _)| *id == playlist_id)
+                    .map_or_else(String::new, |(_, name)| name.clone());
+                let request_id = self.allocate_request_id();
+                let sent = self.worker.as_ref().is_some_and(|worker| {
+                    worker
+                        .add_playlist_items(request_id, playlist_id, vec![target.item_id])
+                        .is_ok()
+                });
+                if sent {
+                    self.menu_playlist_add = Some((request_id, target.title, playlist_name));
+                }
+            }
             ItemMenuAction::SetPlayed(played) => {
                 let request_id = self.allocate_request_id();
                 let sent = self.worker.as_ref().is_some_and(|worker| {
@@ -10578,6 +10702,58 @@ mod photo_decode_event_tests {
             Some("e4")
         );
         assert!(app.series_next_up_episode("other").is_none());
+    }
+
+    #[test]
+    fn card_menu_queues_tracks_and_reports_playlist_additions() {
+        use crate::ui::item_menu::{ItemMenuAction, ItemMenuTarget};
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        let target = |playlist_id: Option<&str>| ItemMenuTarget {
+            item_id: "track".into(),
+            title: "Song".into(),
+            series_id: None,
+            playlist_id: playlist_id.map(str::to_owned),
+        };
+        app.apply_item_menu_action(target(None), ItemMenuAction::AddToQueue);
+        assert_eq!(
+            app.music_queue
+                .items()
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["track"]
+        );
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(text, _)| text.contains("Song"))
+        );
+
+        app.menu_playlists = std::sync::Arc::new(vec![("list".into(), "Road trip".into())]);
+        app.apply_item_menu_action(target(Some("list")), ItemMenuAction::AddToPlaylist);
+        let (request_id, _, playlist) = app.menu_playlist_add.clone().expect("addition submitted");
+        assert_eq!(playlist, "Road trip");
+        app.toast = None;
+        sender
+            .try_send(WorkerEvent::PlaylistMutationCompleted {
+                request_id,
+                playlist_id: "list".into(),
+                kind: crate::worker::PlaylistMutationKind::Added,
+            })
+            .expect("send completion");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert!(app.menu_playlist_add.is_none());
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(text, _)| text.contains("Road trip"))
+        );
     }
 
     #[test]

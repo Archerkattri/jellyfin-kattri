@@ -165,6 +165,9 @@ pub enum SyncPlayCommand {
     },
 }
 
+/// How many playlists the card menu lists under Add to playlist.
+const MAX_MENU_PLAYLISTS: u32 = 100;
+
 pub enum WorkerEvent {
     UpdateFinished {
         outcome: UpdateOutcome,
@@ -303,6 +306,11 @@ pub enum WorkerEvent {
         request_id: u64,
         season_id: String,
         message: String,
+    },
+    /// The signed-in user's playlists as `(id, name)`, for the card menu. Empty on failure.
+    UserPlaylistsLoaded {
+        request_id: u64,
+        playlists: Vec<(String, String)>,
     },
     /// The episode to play next in `series_id`. `None` when there is none or the request failed.
     SeriesNextUpLoaded {
@@ -738,6 +746,9 @@ enum WorkerCommand {
     GetSeriesNextUp {
         request_id: u64,
         series_id: String,
+    },
+    ListUserPlaylists {
+        request_id: u64,
     },
     ListMusicAlbumTracks {
         request_id: u64,
@@ -1224,6 +1235,11 @@ impl ApiWorker {
             series_id,
             episode_id,
         })
+    }
+
+    pub(crate) fn list_user_playlists(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::ListUserPlaylists { request_id })
     }
 
     pub(crate) fn get_series_next_up(
@@ -3061,6 +3077,34 @@ async fn execute_command(
                         episode_id,
                         previous: adjacent.previous.map(Box::new),
                         next: adjacent.next.map(Box::new),
+                    },
+                )
+                .await
+            }
+            WorkerCommand::ListUserPlaylists { request_id } => {
+                let playlists = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .list_playlists(session, MAX_MENU_PLAYLISTS)
+                        .await
+                        .map(|response| {
+                            response
+                                .items
+                                .into_iter()
+                                .map(|item| (item.id, item.name))
+                                .collect()
+                        })
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "playlists for the item menu unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::UserPlaylistsLoaded {
+                        request_id,
+                        playlists,
                     },
                 )
                 .await

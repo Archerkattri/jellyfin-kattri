@@ -114,11 +114,12 @@ page lists shows instead of episodes.
 A source-level audit against jellyfin-web (2026-10-27) found large gaps. Kattri is not
 yet a replacement for the official clients. The main missing pieces:
 
-- **Item context menu:** right-click on library cards and home rows now offers Play,
-  Play from beginning, Open details, Go to series, Mark played/unplayed, Add/remove
-  favorite and Download. Still missing: play next / add to queue, shuffle, add to
-  playlist or collection, media info, multi-select and, for administrators, edit
-  metadata, identify, refresh metadata, edit images, edit subtitles and delete.
+- **Item context menu:** right-click on library cards, home rows and search results
+  offers Play, Play from beginning, Open details, Go to series, Mark played/unplayed,
+  Add/remove favorite, Download, Add to playlist and, for music tracks, Play next and Add
+  to queue. Still missing: shuffle, add to collection, media info, multi-select and, for
+  administrators, edit metadata, identify, refresh metadata, edit images, edit subtitles
+  and delete.
 - **Episodes and series:** the series page offers the server's Next Up episode (Play or
   Resume), and episode rows show the overview, runtime, progress and a watched mark.
   Still missing: an episode details page (clicking an episode plays it), episode

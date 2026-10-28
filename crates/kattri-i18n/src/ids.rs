@@ -757,6 +757,12 @@ pub const ITEM_MENU_MARK_UNPLAYED: &str = "item_menu.mark_unplayed";
 pub const ITEM_MENU_ADD_FAVORITE: &str = "item_menu.add_favorite";
 pub const ITEM_MENU_REMOVE_FAVORITE: &str = "item_menu.remove_favorite";
 pub const ITEM_MENU_DOWNLOAD: &str = "item_menu.download";
+pub const ITEM_MENU_ADD_TO_QUEUE: &str = "item_menu.add_to_queue";
+pub const ITEM_MENU_PLAY_NEXT: &str = "item_menu.play_next";
+pub const ITEM_MENU_ADD_TO_PLAYLIST: &str = "item_menu.add_to_playlist";
+pub const TOAST_ADDED_TO_QUEUE: &str = "toast.added_to_queue";
+pub const TOAST_ADDED_TO_PLAYLIST: &str = "toast.added_to_playlist";
+pub const TOAST_ADD_TO_PLAYLIST_FAILED: &str = "toast.add_to_playlist_failed";
 
 pub const ALL: &[&str] = &[
     CONNECT_WORKER_UNAVAILABLE,
@@ -899,6 +905,12 @@ pub const ALL: &[&str] = &[
     ITEM_MENU_ADD_FAVORITE,
     ITEM_MENU_REMOVE_FAVORITE,
     ITEM_MENU_DOWNLOAD,
+    ITEM_MENU_ADD_TO_QUEUE,
+    ITEM_MENU_PLAY_NEXT,
+    ITEM_MENU_ADD_TO_PLAYLIST,
+    TOAST_ADDED_TO_QUEUE,
+    TOAST_ADDED_TO_PLAYLIST,
+    TOAST_ADD_TO_PLAYLIST_FAILED,
     DETAIL_BUTTON_DOWNLOAD,
     PLAYBACK_STATUS_REQUESTING,
     DETAIL_BUTTON_REMOVE_FAVORITE,
