@@ -790,3 +790,46 @@ async fn bind_uses_loopback_and_requested_port() {
     assert_eq!(server.addr.port(), port);
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn extra_libraries_expose_views_and_typed_items() {
+    let server = spawn(MockConfig {
+        extra_libraries: true,
+        ..MockConfig::default()
+    })
+    .await
+    .expect("spawn mock server");
+    let views = get_json(&server, "/UserViews").await;
+    let types: Vec<&str> = views["Items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|view| view["CollectionType"].as_str().expect("type"))
+        .collect();
+    assert_eq!(
+        types,
+        [
+            "movies",
+            "tvshows",
+            "music",
+            "boxsets",
+            "books",
+            "homevideos",
+            "musicvideos",
+            "livetv"
+        ]
+    );
+    let books = get_json(&server, "/Items?recursive=true&includeItemTypes=Book").await;
+    let mut names = item_names(&books);
+    names.sort();
+    assert_eq!(names, ["Field Notes", "The Harbor Almanac"]);
+    assert_eq!(books["Items"][0]["IsFolder"], false);
+    let videos = get_json(&server, "/Items?recursive=true&includeItemTypes=Video").await;
+    assert_eq!(videos["TotalRecordCount"], 2);
+    assert_eq!(videos["Items"][0]["MediaType"], "Video");
+    let music_videos = get_json(&server, "/Items?recursive=true&includeItemTypes=MusicVideo").await;
+    assert_eq!(music_videos["TotalRecordCount"], 2);
+    let box_sets = get_json(&server, "/Items?recursive=true&includeItemTypes=BoxSet").await;
+    assert_eq!(box_sets["TotalRecordCount"], 2);
+    server.shutdown().await;
+}

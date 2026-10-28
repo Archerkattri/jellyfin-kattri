@@ -13,6 +13,7 @@ mod playlists;
 mod png;
 mod remote;
 mod seed;
+mod subtitles;
 mod syncplay;
 mod system;
 
@@ -84,6 +85,8 @@ pub struct MockConfig {
     /// cannot be direct played or direct streamed, and the master playlist leads to a media
     /// playlist with segments, as a Jellyfin server does when it must transcode.
     pub transcode_only_mkv: bool,
+    /// Add collections, books, home videos, music videos and Live TV libraries to the seed.
+    pub extra_libraries: bool,
 }
 
 /// Handle to a running mock server. Dropping it requests shutdown; call
@@ -134,6 +137,7 @@ pub async fn spawn(config: MockConfig) -> std::io::Result<RunningServer> {
             match config.item_count {
                 Some(count) => seed::catalog_with_item_count(count),
                 None if config.collection_children => seed::catalog_with_collection_children(),
+                None if config.extra_libraries => seed::catalog_with_extra_libraries(),
                 None => seed::catalog(),
             }
         },
@@ -159,6 +163,7 @@ pub async fn spawn(config: MockConfig) -> std::io::Result<RunningServer> {
         quick_connect_counter: AtomicUsize::new(0),
         playlist_store: Arc::new(playlists::PlaylistStore::default()),
         metadata: metadata::MetadataStore::default(),
+        subtitle_store: subtitles::SubtitleStore::default(),
     });
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let app = router(state);
@@ -202,6 +207,8 @@ struct AppState {
     playlist_store: Arc<playlists::PlaylistStore>,
     /// Metadata edits and image lists changed by the administrator routes.
     metadata: metadata::MetadataStore,
+    /// Subtitles "downloaded" through the remote subtitle routes, listed by `GET /Items/{id}`.
+    subtitle_store: subtitles::SubtitleStore,
     /// Playback reports in arrival order, served at `GET /__mock/sessions`.
     sessions: Mutex<Vec<Value>>,
     /// Sanitized capability advertisements, served at `GET /__mock/capabilities`.
@@ -260,6 +267,7 @@ fn router(state: Arc<AppState>) -> Router {
         .merge(system::router())
         .merge(syncplay::router())
         .merge(remote::router())
+        .merge(subtitles::router())
         .fallback(not_found)
         .with_state(state)
 }
@@ -1134,6 +1142,19 @@ async fn get_item(
                 user_data.insert("IsFavorite".into(), json!(favorite));
             }
             metadata::apply_edits(&state, &id, &mut body);
+            if item.kind.media_type() == Some("Video")
+                && let Some(object) = body.as_object_mut()
+            {
+                if let Some(trickplay) = subtitles::trickplay_manifest(item) {
+                    object.insert("Trickplay".into(), trickplay);
+                }
+                let mut streams = media_streams(true).as_array().cloned().unwrap_or_default();
+                streams.extend(state.subtitle_store.streams(&id));
+                object.insert(
+                    "MediaSources".into(),
+                    json!([{ "Id": id, "Name": item.name, "MediaStreams": streams }]),
+                );
+            }
             json_ok(body)
         }
         None => StatusCode::NOT_FOUND.into_response(),

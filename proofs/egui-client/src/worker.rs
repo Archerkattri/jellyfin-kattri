@@ -1,6 +1,6 @@
 use std::io::Cursor;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Semaphore, mpsc};
 
@@ -119,6 +119,11 @@ impl PreparedPlayback {
 
     pub fn series_id(&self) -> Option<&str> {
         self.series_id.as_deref()
+    }
+
+    /// The media source the server chose for this playback, when it named one.
+    pub(crate) fn media_source_id(&self) -> Option<&str> {
+        self.report_metadata.media_source_id.as_deref()
     }
 
     pub(crate) fn set_series_id(&mut self, series_id: Option<String>) {
@@ -410,6 +415,36 @@ pub enum WorkerEvent {
         request_id: u64,
         genres: Vec<String>,
         studios: Vec<(String, String)>,
+    },
+    /// Trickplay resolutions of the playing item's media source. Empty when it has none or on
+    /// failure.
+    TrickplayResolutionsLoaded {
+        request_id: u64,
+        item_id: String,
+        resolutions: Vec<jellyfin_api::trickplay::TrickplayInfo>,
+    },
+    /// One decoded trickplay sheet as `(width, height, rgba)`, or `None` on failure.
+    TrickplayTileLoaded {
+        request_id: u64,
+        item_id: String,
+        image: Option<(u32, u32, Vec<u8>)>,
+    },
+    /// Remote subtitle search results for the subtitle search dialog.
+    RemoteSubtitlesLoaded {
+        request_id: u64,
+        result: Result<Vec<jellyfin_api::RemoteSubtitleInfo>, SubtitleRequestError>,
+    },
+    /// The server's languages for the subtitle search dialog. Empty on failure.
+    SubtitleCulturesLoaded {
+        request_id: u64,
+        cultures: Vec<jellyfin_api::CultureDto>,
+    },
+    /// A remote subtitle was downloaded to the server. `files` are the new external text
+    /// subtitles the worker copied to local files for the player (only when asked).
+    RemoteSubtitleDownloaded {
+        request_id: u64,
+        item_id: String,
+        result: Result<Vec<DownloadedSubtitle>, SubtitleRequestError>,
     },
     /// Lyrics of the track on screen. Empty when it has none or on failure.
     LyricsLoaded {
@@ -932,6 +967,33 @@ enum WorkerCommand {
     GetLyrics {
         request_id: u64,
         item_id: String,
+    },
+    GetTrickplayResolutions {
+        request_id: u64,
+        item_id: String,
+        media_source_id: Option<String>,
+    },
+    GetTrickplayTile {
+        request_id: u64,
+        item_id: String,
+        media_source_id: Option<String>,
+        width: u32,
+        sheet: u32,
+    },
+    SearchRemoteSubtitles {
+        request_id: u64,
+        item_id: String,
+        language: String,
+    },
+    ListSubtitleCultures {
+        request_id: u64,
+    },
+    DownloadRemoteSubtitle {
+        request_id: u64,
+        item_id: String,
+        subtitle_id: String,
+        /// Copy the new subtitle to a local file so the playing video can load it.
+        for_player: bool,
     },
     ChangeTimer {
         request_id: u64,
@@ -1465,6 +1527,69 @@ impl ApiWorker {
     ) -> Result<(), WorkerSubmitError> {
         self.commands
             .send(WorkerCommand::MetadataThumbnail { request_id, source })
+    }
+
+    pub(crate) fn get_trickplay_resolutions(
+        &self,
+        request_id: u64,
+        item_id: String,
+        media_source_id: Option<String>,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::GetTrickplayResolutions {
+            request_id,
+            item_id,
+            media_source_id,
+        })
+    }
+
+    pub(crate) fn get_trickplay_tile(
+        &self,
+        request_id: u64,
+        item_id: String,
+        media_source_id: Option<String>,
+        width: u32,
+        sheet: u32,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::GetTrickplayTile {
+            request_id,
+            item_id,
+            media_source_id,
+            width,
+            sheet,
+        })
+    }
+
+    pub(crate) fn search_remote_subtitles(
+        &self,
+        request_id: u64,
+        item_id: String,
+        language: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::SearchRemoteSubtitles {
+            request_id,
+            item_id,
+            language,
+        })
+    }
+
+    pub(crate) fn list_subtitle_cultures(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::ListSubtitleCultures { request_id })
+    }
+
+    pub(crate) fn download_remote_subtitle(
+        &self,
+        request_id: u64,
+        item_id: String,
+        subtitle_id: String,
+        for_player: bool,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::DownloadRemoteSubtitle {
+            request_id,
+            item_id,
+            subtitle_id,
+            for_player,
+        })
     }
 
     pub(crate) fn get_lyrics(
@@ -3528,6 +3653,131 @@ async fn execute_command(
                 )
                 .await
             }
+            WorkerCommand::GetTrickplayResolutions {
+                request_id,
+                item_id,
+                media_source_id,
+            } => {
+                let resolutions = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .trickplay_resolutions(session, &item_id, media_source_id.as_deref())
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "trickplay unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::TrickplayResolutionsLoaded {
+                        request_id,
+                        item_id,
+                        resolutions,
+                    },
+                )
+                .await
+            }
+            WorkerCommand::GetTrickplayTile {
+                request_id,
+                item_id,
+                media_source_id,
+                width,
+                sheet,
+            } => {
+                let bytes = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .trickplay_tile(session, &item_id, media_source_id.as_deref(), width, sheet)
+                        .await
+                        .map_err(|error| tracing::debug!(%error, "trickplay sheet unavailable"))
+                        .ok(),
+                    _ => None,
+                };
+                let image = match bytes {
+                    Some(bytes) => decode_trickplay_sheet(bytes, events).await.ok(),
+                    None => None,
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::TrickplayTileLoaded {
+                        request_id,
+                        item_id,
+                        image,
+                    },
+                )
+                .await
+            }
+            WorkerCommand::SearchRemoteSubtitles {
+                request_id,
+                item_id,
+                language,
+            } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .search_remote_subtitles(session, &item_id, &language)
+                        .await
+                        .map_err(SubtitleRequestError::from_api),
+                    _ => Err(SubtitleRequestError::Failed),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::RemoteSubtitlesLoaded { request_id, result },
+                )
+                .await
+            }
+            WorkerCommand::ListSubtitleCultures { request_id } => {
+                let cultures = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        client.cultures(session).await.unwrap_or_else(|error| {
+                            tracing::debug!(%error, "cultures unavailable");
+                            Vec::new()
+                        })
+                    }
+                    _ => Vec::new(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::SubtitleCulturesLoaded {
+                        request_id,
+                        cultures,
+                    },
+                )
+                .await
+            }
+            WorkerCommand::DownloadRemoteSubtitle {
+                request_id,
+                item_id,
+                subtitle_id,
+                for_player,
+            } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        download_remote_subtitle(
+                            client,
+                            session,
+                            &item_id,
+                            &subtitle_id,
+                            for_player,
+                        )
+                        .await
+                    }
+                    _ => Err(SubtitleRequestError::Failed),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::RemoteSubtitleDownloaded {
+                        request_id,
+                        item_id,
+                        result,
+                    },
+                )
+                .await
+            }
             WorkerCommand::GetLyrics {
                 request_id,
                 item_id,
@@ -5041,6 +5291,194 @@ fn decode_metadata_thumbnail_bytes(bytes: Vec<u8>) -> Result<(u32, u32, Vec<u8>)
     Ok((width, height, image.into_raw()))
 }
 
+/// Why a subtitle search or download did not complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SubtitleRequestError {
+    /// The user may not manage subtitles on this server (HTTP 403).
+    Forbidden,
+    /// Anything else: the server, the network or the provider failed.
+    Failed,
+}
+
+impl SubtitleRequestError {
+    fn from_api(error: ApiError) -> Self {
+        tracing::debug!(%error, "subtitle request failed");
+        if matches!(error, ApiError::Forbidden) {
+            Self::Forbidden
+        } else {
+            Self::Failed
+        }
+    }
+}
+
+/// An external subtitle copied from the server to a local file the player can open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadedSubtitle {
+    pub path: PathBuf,
+    pub title: Option<String>,
+    pub language: Option<String>,
+}
+
+/// How often the stream list is read again while the server is still saving a download.
+const SUBTITLE_STREAM_RETRIES: u32 = 3;
+
+/// Downloads `subtitle_id` to the server, then, for the player, copies the external text
+/// subtitles that appeared on the item to local files.
+async fn download_remote_subtitle(
+    client: &JellyfinClient,
+    session: &Session,
+    item_id: &str,
+    subtitle_id: &str,
+    for_player: bool,
+) -> Result<Vec<DownloadedSubtitle>, SubtitleRequestError> {
+    let before = if for_player {
+        client
+            .item_subtitle_streams(session, item_id)
+            .await
+            .map_err(SubtitleRequestError::from_api)?
+    } else {
+        Vec::new()
+    };
+    client
+        .download_remote_subtitle(session, item_id, subtitle_id)
+        .await
+        .map_err(SubtitleRequestError::from_api)?;
+    if !for_player {
+        return Ok(Vec::new());
+    }
+    // The server saves the file and rescans the item; the new stream can take a moment to
+    // appear, so the list is read a few times before giving up on loading it now.
+    let mut added = Vec::new();
+    for attempt in 0..SUBTITLE_STREAM_RETRIES {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        }
+        let Ok(after) = client.item_subtitle_streams(session, item_id).await else {
+            continue;
+        };
+        added = after
+            .into_iter()
+            .filter(|stream| stream.is_external && stream.is_text && !stream.codec.is_empty())
+            .filter(|stream| !before.contains(stream))
+            .collect::<Vec<_>>();
+        if !added.is_empty() {
+            break;
+        }
+    }
+    let mut files = Vec::new();
+    for stream in added.into_iter().take(4) {
+        let bytes = match client.subtitle_stream_file(session, item_id, &stream).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::debug!(%error, "downloaded subtitle could not be read back");
+                continue;
+            }
+        };
+        let name = format!(
+            "{}-{}-{}.{}",
+            safe_file_part(item_id),
+            safe_file_part(&stream.media_source_id),
+            stream.index,
+            stream.codec
+        );
+        let written = tokio::task::spawn_blocking(move || write_subtitle_file(&name, &bytes))
+            .await
+            .ok()
+            .flatten();
+        if let Some(path) = written {
+            files.push(DownloadedSubtitle {
+                path,
+                title: stream.title,
+                language: stream.language,
+            });
+        }
+    }
+    Ok(files)
+}
+
+/// Letters, digits and `-` only, at most 64 characters, so the name cannot leave its folder.
+fn safe_file_part(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(64)
+        .collect()
+}
+
+/// Writes one subtitle file into the app's cache folder, replacing an older copy.
+fn write_subtitle_file(name: &str, bytes: &[u8]) -> Option<PathBuf> {
+    let folder = directories::ProjectDirs::from("org", "Jellyfin", "Kattri")?
+        .cache_dir()
+        .join("subtitles");
+    write_subtitle_file_in(&folder, name, bytes)
+}
+
+fn write_subtitle_file_in(folder: &Path, name: &str, bytes: &[u8]) -> Option<PathBuf> {
+    std::fs::create_dir_all(folder).ok()?;
+    let path = folder.join(name);
+    static TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
+    let temp_path = folder.join(format!(
+        ".subtitle-{}-{}.part",
+        std::process::id(),
+        TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    if std::fs::write(&temp_path, bytes).is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        return None;
+    }
+    #[cfg(windows)]
+    if path.exists() && std::fs::remove_file(&path).is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        return None;
+    }
+    if std::fs::rename(&temp_path, &path).is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        return None;
+    }
+    Some(path)
+}
+
+/// Trickplay sheets are larger than card artwork (a 10x10 sheet of 320 px thumbnails is
+/// 3200x1800), so they get their own bounds.
+async fn decode_trickplay_sheet(
+    bytes: Vec<u8>,
+    events: &WorkerSink,
+) -> Result<(u32, u32, Vec<u8>), ()> {
+    let permit = events
+        .decoders
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| ())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        decode_trickplay_sheet_bytes(bytes)
+    })
+    .await
+    .map_err(|_| ())?
+}
+
+fn decode_trickplay_sheet_bytes(bytes: Vec<u8>) -> Result<(u32, u32, Vec<u8>), ()> {
+    const MAX_DIMENSION: u32 = 6_400;
+    const MAX_ALLOC: u64 = 96 * 1024 * 1024;
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| ())?;
+    if !matches!(reader.format(), Some(ImageFormat::Jpeg | ImageFormat::Png)) {
+        return Err(());
+    }
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_DIMENSION);
+    limits.max_image_height = Some(MAX_DIMENSION);
+    limits.max_alloc = Some(MAX_ALLOC);
+    reader.limits(limits);
+    let image = reader.decode().map_err(|_| ())?.to_rgba8();
+    let (width, height) = (image.width(), image.height());
+    if width == 0 || height == 0 {
+        return Err(());
+    }
+    Ok((width, height, image.into_raw()))
+}
 async fn decode_artwork(
     bytes: Vec<u8>,
     person: bool,
@@ -6009,6 +6447,7 @@ fn item_query(
         name_starts_with: None,
         name_less_than: None,
         studio_ids: None,
+        ..ItemQuery::default()
     }
 }
 
@@ -6380,6 +6819,7 @@ mod item_query_tests {
                 name_starts_with: None,
                 name_less_than: None,
                 studio_ids: None,
+                ..ItemQuery::default()
             }
         );
     }
@@ -8639,6 +9079,7 @@ mod saved_sign_in_worker_tests {
     use kattri_platform::memory::MemoryCredentialStore;
     use kattri_platform::{CredentialKey, CredentialStore, Secret};
     use mock_jellyfin::{MockConfig, spawn};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
@@ -8980,5 +9421,113 @@ mod saved_sign_in_worker_tests {
         .await
         .expect("the saved token is deleted after sign-out");
         server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn subtitle_and_trickplay_commands_return_worker_events_and_local_files() {
+        const VIDEO_ID: &str = "00000000000000000000000000000100";
+        let server = spawn(MockConfig::default()).await.expect("mock");
+        let backing: Backing = Arc::default();
+        let worker = worker_on(&backing);
+        sign_in(&worker, &server.base_url(), request("default", false)).await;
+
+        worker
+            .search_remote_subtitles(20, VIDEO_ID.into(), "eng".into())
+            .expect("queue subtitle search");
+        let event = wait_for(&worker, |event| {
+            matches!(
+                event,
+                WorkerEvent::RemoteSubtitlesLoaded { request_id: 20, .. }
+            )
+        })
+        .await;
+        assert!(
+            matches!(event, WorkerEvent::RemoteSubtitlesLoaded { result: Ok(results), .. } if results.len() == 2)
+        );
+
+        worker
+            .list_subtitle_cultures(21)
+            .expect("queue subtitle cultures");
+        let event = wait_for(&worker, |event| {
+            matches!(
+                event,
+                WorkerEvent::SubtitleCulturesLoaded { request_id: 21, .. }
+            )
+        })
+        .await;
+        assert!(
+            matches!(event, WorkerEvent::SubtitleCulturesLoaded { cultures, .. } if !cultures.is_empty())
+        );
+
+        worker
+            .get_trickplay_resolutions(22, VIDEO_ID.into(), None)
+            .expect("queue trickplay manifest");
+        let event = wait_for(&worker, |event| {
+            matches!(
+                event,
+                WorkerEvent::TrickplayResolutionsLoaded { request_id: 22, .. }
+            )
+        })
+        .await;
+        assert!(
+            matches!(event, WorkerEvent::TrickplayResolutionsLoaded { resolutions, .. } if !resolutions.is_empty())
+        );
+
+        worker
+            .get_trickplay_tile(23, VIDEO_ID.into(), None, 64, 0)
+            .expect("queue trickplay tile");
+        let event = wait_for(&worker, |event| {
+            matches!(
+                event,
+                WorkerEvent::TrickplayTileLoaded { request_id: 23, .. }
+            )
+        })
+        .await;
+        assert!(
+            matches!(event, WorkerEvent::TrickplayTileLoaded { image: Some((640, 360, rgba)), .. } if rgba.len() == 640 * 360 * 4)
+        );
+
+        worker
+            .download_remote_subtitle(24, VIDEO_ID.into(), "mock-eng-1".into(), true)
+            .expect("queue subtitle download");
+        let event = wait_for(&worker, |event| {
+            matches!(
+                event,
+                WorkerEvent::RemoteSubtitleDownloaded { request_id: 24, .. }
+            )
+        })
+        .await;
+        let paths = match event {
+            WorkerEvent::RemoteSubtitleDownloaded {
+                result: Ok(files), ..
+            } => files.into_iter().map(|file| file.path).collect::<Vec<_>>(),
+            _ => panic!("expected subtitle files"),
+        };
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].is_file());
+        for path in paths {
+            std::fs::remove_file(&path).expect("remove downloaded subtitle test artifact");
+            assert!(!path.exists());
+        }
+        server.shutdown().await;
+    }
+
+    #[test]
+    fn failed_subtitle_file_publish_removes_its_temporary_file() {
+        static TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+        let folder = std::env::temp_dir().join(format!(
+            "kattri-subtitle-cleanup-{}-{}",
+            std::process::id(),
+            TEST_DIR_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(folder.join("blocked.srt")).expect("create blocking directory");
+
+        assert!(super::write_subtitle_file_in(&folder, "blocked.srt", b"subtitle").is_none());
+        let remaining = std::fs::read_dir(&folder)
+            .expect("read temporary folder")
+            .map(|entry| entry.expect("folder entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, [std::ffi::OsString::from("blocked.srt")]);
+        std::fs::remove_dir_all(folder).expect("remove subtitle test folder");
     }
 }

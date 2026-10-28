@@ -158,9 +158,6 @@ pub const PERSON_EMPTY: &str = "person.empty";
 pub const DETAIL_ERROR_UNAVAILABLE: &str = "detail.error.unavailable";
 pub const DETAIL_BUTTON_BACK: &str = "detail.button.back";
 pub const DETAIL_BUTTON_RETRY: &str = "detail.button.retry";
-pub const SHELL_USER_DEFAULT: &str = "shell.user.default";
-pub const SHELL_EYEBROW_CONNECTED: &str = "shell.eyebrow.connected";
-pub const SHELL_SERVER_VERSION_MISSING: &str = "shell.server.version_missing";
 pub const BROWSE_HINT_KEYBOARD: &str = "browse.hint.keyboard";
 pub const BROWSE_ERROR_REQUEST_FAILED: &str = "browse.error.request_failed";
 pub const CONNECT_SUMMARY_SERVER: &str = "connect.summary.server";
@@ -185,7 +182,6 @@ pub const PLAYBACK_BUTTON_RESUME_AT: &str = "playback.button.resume_at";
 pub const PLAYBACK_ERROR_SERVER_START: &str = "playback.error.server_start";
 pub const PERSON_ERROR_LOAD: &str = "person.error.load";
 pub const DETAIL_ERROR_LOAD: &str = "detail.error.load";
-pub const SHELL_SUMMARY_USER_SERVER: &str = "shell.summary.user_server";
 pub const BROWSE_RANGE_SHOWING: &str = "browse.range.showing";
 pub const BROWSE_COUNT_TOTAL_REPORTED: &str = "browse.count.total_reported";
 pub const STATUS_ACTION_SIGN_IN_AGAIN: &str = "status.action.sign_in_again";
@@ -345,7 +341,6 @@ pub const PHOTOS_BUTTON_PREVIOUS_PAGE: &str = "photos.button.previous_page";
 pub const PHOTOS_BUTTON_NEXT_PAGE: &str = "photos.button.next_page";
 pub const PHOTOS_STATUS_LOADING: &str = "photos.status.loading";
 pub const PHOTOS_EMPTY_NO_PHOTOS: &str = "photos.empty.no_photos";
-pub const PHOTOS_KIND_FOLDER: &str = "photos.kind.folder";
 pub const PHOTOS_KIND_PHOTO: &str = "photos.kind.photo";
 pub const PHOTOS_ERROR_DISPLAY: &str = "photos.error.display";
 pub const PHOTOS_STATUS_LOADING_PHOTO: &str = "photos.status.loading_photo";
@@ -748,6 +743,19 @@ pub const PLAYLISTS_ERROR_REORDER_FAILED: &str = "playlists.error.reorder_failed
 pub const DETAIL_ERROR_WATCHED_FAILED: &str = "detail.error.watched_failed";
 pub const DETAIL_ERROR_FAVORITE_FAILED: &str = "detail.error.favorite_failed";
 pub const PLAYBACK_ERROR_SESSION_UPDATE: &str = "playback.error.session_update";
+pub const SHELL_NAV_MORE: &str = "shell.nav.more";
+pub const SHELL_NAV_COLLECTIONS: &str = "shell.nav.collections";
+pub const SHELL_NAV_BOOKS: &str = "shell.nav.books";
+pub const SHELL_NAV_HOME_VIDEOS: &str = "shell.nav.home_videos";
+pub const SHELL_NAV_MUSIC_VIDEOS: &str = "shell.nav.music_videos";
+pub const SHELL_NAV_WATCH_TOGETHER: &str = "shell.nav.watch_together";
+pub const SHELL_RAIL_COLLECTIONS: &str = "shell.rail.collections";
+pub const SHELL_RAIL_BOOKS: &str = "shell.rail.books";
+pub const SHELL_RAIL_HOME_VIDEOS: &str = "shell.rail.home_videos";
+pub const SHELL_RAIL_MUSIC_VIDEOS: &str = "shell.rail.music_videos";
+pub const SHELL_RAIL_WATCH_TOGETHER: &str = "shell.rail.watch_together";
+pub const DETAIL_BOOK_NOT_PLAYABLE: &str = "detail.book.not_playable";
+pub const LIVE_TV_EMPTY_NOT_SET_UP_HINT: &str = "live_tv.empty.not_set_up_hint";
 
 /// Every id in this module, for the en-US coverage test.
 pub const ITEM_MENU_PLAY: &str = "item_menu.play";
@@ -801,6 +809,28 @@ pub const PHOTOS_BUTTON_SLIDESHOW: &str = "photos.button.slideshow";
 pub const PHOTOS_BUTTON_STOP_SLIDESHOW: &str = "photos.button.stop_slideshow";
 pub const DETAIL_MEDIA_INFO: &str = "detail.media_info";
 pub const ITEM_MENU_ADD_TO_COLLECTION: &str = "item_menu.add_to_collection";
+pub const ITEM_MENU_SEARCH_SUBTITLES: &str = "item_menu.search_subtitles";
+pub const SUBTITLE_SEARCH_TITLE: &str = "subtitle_search.title";
+pub const SUBTITLE_SEARCH_LANGUAGE: &str = "subtitle_search.language";
+pub const SUBTITLE_SEARCH_SEARCH: &str = "subtitle_search.search";
+pub const SUBTITLE_SEARCH_SEARCHING: &str = "subtitle_search.searching";
+pub const SUBTITLE_SEARCH_NO_RESULTS: &str = "subtitle_search.no_results";
+pub const SUBTITLE_SEARCH_FAILED: &str = "subtitle_search.failed";
+pub const SUBTITLE_SEARCH_FORBIDDEN: &str = "subtitle_search.forbidden";
+pub const SUBTITLE_SEARCH_DOWNLOAD: &str = "subtitle_search.download";
+pub const SUBTITLE_SEARCH_DOWNLOADING: &str = "subtitle_search.downloading";
+pub const SUBTITLE_SEARCH_DOWNLOADED_PLAYER: &str = "subtitle_search.downloaded_player";
+pub const SUBTITLE_SEARCH_DOWNLOADED_SERVER: &str = "subtitle_search.downloaded_server";
+pub const SUBTITLE_SEARCH_DOWNLOAD_FAILED: &str = "subtitle_search.download_failed";
+pub const SUBTITLE_SEARCH_FORMAT: &str = "subtitle_search.format";
+pub const SUBTITLE_SEARCH_DOWNLOADS: &str = "subtitle_search.downloads";
+pub const SUBTITLE_SEARCH_RATING: &str = "subtitle_search.rating";
+pub const SUBTITLE_SEARCH_HASH_MATCH: &str = "subtitle_search.hash_match";
+pub const SUBTITLE_SEARCH_HEARING_IMPAIRED: &str = "subtitle_search.hearing_impaired";
+pub const SUBTITLE_SEARCH_FORCED: &str = "subtitle_search.forced";
+pub const SUBTITLE_SEARCH_MACHINE_TRANSLATED: &str = "subtitle_search.machine_translated";
+pub const SUBTITLE_SEARCH_UNKNOWN_PROVIDER: &str = "subtitle_search.unknown_provider";
+pub const SUBTITLE_SEARCH_CLOSE: &str = "subtitle_search.close";
 pub const TOAST_ADDED_TO_COLLECTION: &str = "toast.added_to_collection";
 pub const DELETE_CONFIRM_TITLE: &str = "delete.confirm.title";
 pub const DELETE_CONFIRM_BODY: &str = "delete.confirm.body";
@@ -1049,6 +1079,28 @@ pub const ALL: &[&str] = &[
     PHOTOS_BUTTON_STOP_SLIDESHOW,
     DETAIL_MEDIA_INFO,
     ITEM_MENU_ADD_TO_COLLECTION,
+    ITEM_MENU_SEARCH_SUBTITLES,
+    SUBTITLE_SEARCH_TITLE,
+    SUBTITLE_SEARCH_LANGUAGE,
+    SUBTITLE_SEARCH_SEARCH,
+    SUBTITLE_SEARCH_SEARCHING,
+    SUBTITLE_SEARCH_NO_RESULTS,
+    SUBTITLE_SEARCH_FAILED,
+    SUBTITLE_SEARCH_FORBIDDEN,
+    SUBTITLE_SEARCH_DOWNLOAD,
+    SUBTITLE_SEARCH_DOWNLOADING,
+    SUBTITLE_SEARCH_DOWNLOADED_PLAYER,
+    SUBTITLE_SEARCH_DOWNLOADED_SERVER,
+    SUBTITLE_SEARCH_DOWNLOAD_FAILED,
+    SUBTITLE_SEARCH_FORMAT,
+    SUBTITLE_SEARCH_DOWNLOADS,
+    SUBTITLE_SEARCH_RATING,
+    SUBTITLE_SEARCH_HASH_MATCH,
+    SUBTITLE_SEARCH_HEARING_IMPAIRED,
+    SUBTITLE_SEARCH_FORCED,
+    SUBTITLE_SEARCH_MACHINE_TRANSLATED,
+    SUBTITLE_SEARCH_UNKNOWN_PROVIDER,
+    SUBTITLE_SEARCH_CLOSE,
     TOAST_ADDED_TO_COLLECTION,
     DELETE_CONFIRM_TITLE,
     DELETE_CONFIRM_BODY,
@@ -1084,9 +1136,6 @@ pub const ALL: &[&str] = &[
     DETAIL_ERROR_UNAVAILABLE,
     DETAIL_BUTTON_BACK,
     DETAIL_BUTTON_RETRY,
-    SHELL_USER_DEFAULT,
-    SHELL_EYEBROW_CONNECTED,
-    SHELL_SERVER_VERSION_MISSING,
     BROWSE_HINT_KEYBOARD,
     BROWSE_ERROR_REQUEST_FAILED,
     CONNECT_SUMMARY_SERVER,
@@ -1110,7 +1159,6 @@ pub const ALL: &[&str] = &[
     PLAYBACK_ERROR_SERVER_START,
     PERSON_ERROR_LOAD,
     DETAIL_ERROR_LOAD,
-    SHELL_SUMMARY_USER_SERVER,
     BROWSE_RANGE_SHOWING,
     BROWSE_COUNT_TOTAL_REPORTED,
     STATUS_ACTION_SIGN_IN_AGAIN,
@@ -1270,7 +1318,6 @@ pub const ALL: &[&str] = &[
     PHOTOS_BUTTON_NEXT_PAGE,
     PHOTOS_STATUS_LOADING,
     PHOTOS_EMPTY_NO_PHOTOS,
-    PHOTOS_KIND_FOLDER,
     PHOTOS_KIND_PHOTO,
     PHOTOS_ERROR_DISPLAY,
     PHOTOS_STATUS_LOADING_PHOTO,
@@ -1719,4 +1766,17 @@ pub const ALL: &[&str] = &[
     METADATA_DOWNLOAD,
     TOAST_METADATA_SAVED,
     TOAST_IDENTIFY_APPLIED,
+    SHELL_NAV_MORE,
+    SHELL_NAV_COLLECTIONS,
+    SHELL_NAV_BOOKS,
+    SHELL_NAV_HOME_VIDEOS,
+    SHELL_NAV_MUSIC_VIDEOS,
+    SHELL_NAV_WATCH_TOGETHER,
+    SHELL_RAIL_COLLECTIONS,
+    SHELL_RAIL_BOOKS,
+    SHELL_RAIL_HOME_VIDEOS,
+    SHELL_RAIL_MUSIC_VIDEOS,
+    SHELL_RAIL_WATCH_TOGETHER,
+    DETAIL_BOOK_NOT_PLAYABLE,
+    LIVE_TV_EMPTY_NOT_SET_UP_HINT,
 ];

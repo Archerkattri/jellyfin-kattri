@@ -143,6 +143,45 @@ impl WorkerCommand {
                 request_id: *request_id,
                 outcome: kattri_client_core::quick_connect_poll::PollOutcome::Error,
             }),
+            Self::GetTrickplayResolutions {
+                request_id,
+                item_id,
+                ..
+            } => Some(WorkerEvent::TrickplayResolutionsLoaded {
+                request_id: *request_id,
+                item_id: item_id.clone(),
+                resolutions: Vec::new(),
+            }),
+            Self::GetTrickplayTile {
+                request_id,
+                item_id,
+                ..
+            } => Some(WorkerEvent::TrickplayTileLoaded {
+                request_id: *request_id,
+                item_id: item_id.clone(),
+                image: None,
+            }),
+            Self::SearchRemoteSubtitles { request_id, .. } => {
+                Some(WorkerEvent::RemoteSubtitlesLoaded {
+                    request_id: *request_id,
+                    result: Err(super::SubtitleRequestError::Failed),
+                })
+            }
+            Self::ListSubtitleCultures { request_id } => {
+                Some(WorkerEvent::SubtitleCulturesLoaded {
+                    request_id: *request_id,
+                    cultures: Vec::new(),
+                })
+            }
+            Self::DownloadRemoteSubtitle {
+                request_id,
+                item_id,
+                ..
+            } => Some(WorkerEvent::RemoteSubtitleDownloaded {
+                request_id: *request_id,
+                item_id: item_id.clone(),
+                result: Err(super::SubtitleRequestError::Failed),
+            }),
             // These are local idempotent barriers; disconnect also clears their secret.
             Self::QuickConnectCancel { .. } | Self::Disconnect | Self::Shutdown => None,
             _ => None,
@@ -169,6 +208,9 @@ impl WorkerCommand {
             Self::ListSimilar { .. } => Some(10),
             Self::ListPersonItems { .. } => Some(11),
             Self::CheckQuickConnect { .. } => Some(12),
+            Self::GetTrickplayResolutions { .. } => Some(13),
+            Self::SearchRemoteSubtitles { .. } => Some(14),
+            Self::ListSubtitleCultures { .. } => Some(15),
             _ => None,
         }
     }
@@ -181,7 +223,9 @@ impl WorkerCommand {
             | Self::LoadPhotoFullSize { .. }
             | Self::GetBackdropArtwork { .. }
             | Self::GetLiveTvLogo { .. }
-            | Self::MetadataThumbnail { .. } => Lane::Artwork,
+            | Self::MetadataThumbnail { .. }
+            | Self::GetTrickplayTile { .. } => Lane::Artwork,
+
             command if command.read_key().is_some() => Lane::Read,
             _ => Lane::Control,
         }
@@ -756,6 +800,65 @@ mod photo_cancellation_tests {
         let state = queue.state.lock().expect("queue lock");
         assert_eq!(state.active_photo_requests, HashSet::from([20, 21]));
         assert!(state.cancelled_photo_requests.is_empty());
+    }
+
+    #[test]
+    fn subtitle_and_trickplay_reads_are_invalidated_and_download_disconnect_is_reported() {
+        let queue = CommandQueue::default();
+        queue
+            .send(WorkerCommand::SearchRemoteSubtitles {
+                request_id: 30,
+                item_id: "video".into(),
+                language: "eng".into(),
+            })
+            .expect("queue subtitle search");
+        let active_search = queue.pop(Lane::Read).expect("start subtitle search");
+        queue
+            .send(WorkerCommand::SearchRemoteSubtitles {
+                request_id: 31,
+                item_id: "video".into(),
+                language: "fra".into(),
+            })
+            .expect("queue newer subtitle search");
+        assert!(!queue.current(active_search.ticket));
+
+        let cancelled = WorkerCommand::DownloadRemoteSubtitle {
+            request_id: 32,
+            item_id: "video".into(),
+            subtitle_id: "mock-eng-1".into(),
+            for_player: true,
+        }
+        .cancellation_event(true);
+        assert!(matches!(
+            cancelled,
+            Some(WorkerEvent::RemoteSubtitleDownloaded {
+                request_id: 32,
+                item_id,
+                result: Err(super::super::SubtitleRequestError::Failed),
+            }) if item_id == "video"
+        ));
+
+        let mut tile = WorkerCommand::GetTrickplayTile {
+            request_id: 33,
+            item_id: "video".into(),
+            media_source_id: None,
+            width: 64,
+            sheet: 0,
+        };
+        assert_eq!(tile.lane(), Lane::Artwork);
+        queue.send(tile).expect("queue trickplay tile");
+        let active_tile = queue.pop(Lane::Artwork).expect("start trickplay tile");
+        queue.cancel_reads();
+        assert!(!queue.current(active_tile.ticket));
+        tile = active_tile.command;
+        assert!(matches!(
+            tile.cancellation_event(true),
+            Some(WorkerEvent::TrickplayTileLoaded {
+                request_id: 33,
+                image: None,
+                ..
+            })
+        ));
     }
 
     struct RequestGate {

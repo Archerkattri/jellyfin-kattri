@@ -10,6 +10,10 @@ use kattri_client_core::segments::{
 use kattri_settings::PlaybackSettings;
 
 use crate::player_icons::{self, OsdIcon};
+use jellyfin_egui_client::SeekThumbnail;
+
+/// Width of the seek preview thumbnail in points.
+const SEEK_PREVIEW_WIDTH: f32 = 240.0;
 
 /// Size of one icon button in points. Compact enough for a row of transports without the
 /// control bar dwarfing the video.
@@ -236,13 +240,17 @@ pub fn draw_with_skip(
 /// Draw the controls, then let the caller place one widget inside the panel. The host puts the
 /// audio and subtitle menu there, so it moves and hides with the bar instead of floating below
 /// the panel, and the menu is reachable by pointer and keyboard from the first control.
+///
+/// `preview` gives the trickplay thumbnail for a position; while the pointer is over the seek
+/// bar (or drags it) the time there is shown above the bar, with the thumbnail when there is one.
 pub fn draw_with_skip_and_extra(
     ui: &mut egui::Ui,
     view: PlayerControlsView<'_>,
     skip: Option<SkipControls<'_>>,
     extra: impl FnOnce(&mut egui::Ui),
+    preview: impl FnMut(Duration) -> Option<SeekThumbnail>,
 ) -> Vec<PlayerControlAction> {
-    draw_inner_with_skip(ui, view, skip, |_, _| {}, extra)
+    draw_controls(ui, view, skip, |_, _| {}, extra, preview)
 }
 
 // The host always goes through `draw_with_skip`. The plain draw and the observer hook exist for
@@ -279,12 +287,87 @@ pub fn auto_skip_action(
     )))
 }
 
+#[cfg(test)]
 fn draw_inner_with_skip(
+    ui: &mut egui::Ui,
+    view: PlayerControlsView<'_>,
+    skip: Option<SkipControls<'_>>,
+    observe: impl FnMut(ControlId, egui::Rect),
+    extra: impl FnOnce(&mut egui::Ui),
+) -> Vec<PlayerControlAction> {
+    draw_controls(ui, view, skip, observe, extra, |_| None)
+}
+
+/// The seek position under `x` on a bar spanning `rect`, for a bar ending at `seek_end`.
+fn seek_position_at(rect: egui::Rect, x: f32, seek_end: Duration) -> Option<Duration> {
+    let width = rect.width();
+    (width > 0.0).then(|| {
+        let fraction = ((x - rect.left()) / width).clamp(0.0, 1.0);
+        Duration::from_secs_f64(f64::from(fraction) * seek_end.as_secs_f64())
+    })
+}
+
+/// Paints the time at the pointer above the seek bar, and the trickplay thumbnail above it when
+/// there is one. Drawn on the tooltip layer so the video and other controls never cover it.
+fn paint_seek_preview(
+    ui: &egui::Ui,
+    bar: egui::Rect,
+    x: f32,
+    time: Duration,
+    thumbnail: Option<SeekThumbnail>,
+) {
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::unique("kattri-seek-preview"),
+    ));
+    let label = painter.layout_no_wrap(format_time(time), egui::FontId::monospace(13.0), OSD_TEXT);
+    let image_size = thumbnail.map(|thumbnail| {
+        egui::vec2(
+            SEEK_PREVIEW_WIDTH,
+            SEEK_PREVIEW_WIDTH / thumbnail.aspect.clamp(0.5, 4.0),
+        )
+    });
+    let padding = 4.0;
+    let content_width = image_size.map_or(label.size().x, |size| size.x.max(label.size().x));
+    let content_height = image_size.map_or(0.0, |size| size.y + padding) + label.size().y;
+    let size = egui::vec2(
+        content_width + 2.0 * padding,
+        content_height + 2.0 * padding,
+    );
+    let screen = ui.ctx().content_rect();
+    let left = (x - size.x / 2.0)
+        .min(screen.right() - size.x - 4.0)
+        .max(screen.left() + 4.0);
+    let top = (bar.top() - 8.0 - size.y).max(screen.top() + 4.0);
+    let frame = egui::Rect::from_min_size(egui::pos2(left, top), size);
+    painter.rect_filled(
+        frame,
+        egui::CornerRadius::same(8),
+        THEATER_BG.gamma_multiply(0.95),
+    );
+    painter.rect_stroke(
+        frame,
+        egui::CornerRadius::same(8),
+        egui::Stroke::new(1.0, Color32::from_white_alpha(40)),
+        egui::StrokeKind::Inside,
+    );
+    let mut cursor = frame.min + egui::vec2(padding, padding);
+    if let (Some(thumbnail), Some(image_size)) = (thumbnail, image_size) {
+        let image = egui::Rect::from_min_size(cursor, image_size);
+        painter.image(thumbnail.texture, image, thumbnail.uv, Color32::WHITE);
+        cursor.y += image_size.y + padding;
+    }
+    let label_left = frame.center().x - label.size().x / 2.0;
+    painter.galley(egui::pos2(label_left, cursor.y), label, OSD_TEXT);
+}
+
+fn draw_controls(
     ui: &mut egui::Ui,
     view: PlayerControlsView<'_>,
     mut skip: Option<SkipControls<'_>>,
     mut observe: impl FnMut(ControlId, egui::Rect),
     extra: impl FnOnce(&mut egui::Ui),
+    mut preview: impl FnMut(Duration) -> Option<SeekThumbnail>,
 ) -> Vec<PlayerControlAction> {
     let seek_available = view.seek_enabled && view.duration.is_some_and(|d| !d.is_zero());
     let mut actions = keyboard_seek_actions(ui.ctx(), seek_available);
@@ -362,12 +445,21 @@ fn draw_inner_with_skip(
                 });
                 let seek_to_pointer = || {
                     let pointer = response.interact_pointer_pos()?;
-                    let width = response.rect.width();
-                    (width > 0.0).then(|| {
-                        let fraction = ((pointer.x - response.rect.left()) / width).clamp(0.0, 1.0);
-                        Duration::from_secs_f64(fraction as f64 * seek_end.as_secs_f64())
-                    })
+                    seek_position_at(response.rect, pointer.x, seek_end)
                 };
+                // Jellyfin Web's seek bubble: the time (and trickplay thumbnail) under the
+                // pointer while it hovers or drags the bar.
+                let preview_x = if response.dragged() {
+                    response.interact_pointer_pos()
+                } else {
+                    response.hover_pos()
+                }
+                .map(|pointer| pointer.x);
+                if let Some(x) = preview_x
+                    && let Some(time) = seek_position_at(response.rect, x, seek_end)
+                {
+                    paint_seek_preview(ui, response.rect, x, time, preview(time));
+                }
                 let displayed_position = if response.changed() {
                     let seek_target = Duration::from_secs_f64(position);
                     actions.push(PlayerControlAction::SeekAbsolute(seek_target));
@@ -1288,6 +1380,78 @@ mod tests {
                 "{id:?} ends inside viewport: {rect:?}"
             );
         }
+    }
+
+    #[test]
+    fn hovering_the_timeline_asks_for_the_preview_at_the_pointer() {
+        let context = Context::default();
+        let mut seek_bar = None;
+        run_ui(&context, RawInput::default(), |ui| {
+            CentralPanel::default().show(ui, |ui| {
+                let _ = draw_inner(ui, view(&[]), |id, rect| {
+                    if id == ControlId::SeekBar {
+                        seek_bar = Some(rect);
+                    }
+                });
+            });
+        });
+        let bar = seek_bar.expect("seek bar is rendered");
+        let mut asked = Vec::new();
+        for _ in 0..2 {
+            run_ui(
+                &context,
+                RawInput {
+                    events: vec![egui::Event::PointerMoved(bar.center())],
+                    ..RawInput::default()
+                },
+                |ui| {
+                    CentralPanel::default().show(ui, |ui| {
+                        let _ = super::draw_controls(
+                            ui,
+                            view(&[]),
+                            None,
+                            |_, _| {},
+                            |_| {},
+                            |time| {
+                                asked.push(time);
+                                None
+                            },
+                        );
+                    });
+                },
+            );
+        }
+        let time = asked.last().copied().expect("preview asked while hovering");
+        assert!(
+            time.abs_diff(Duration::from_secs(59)) < Duration::from_secs(2),
+            "{time:?}"
+        );
+        // Without a thumbnail the bubble still shows the time; nothing is asked once the
+        // pointer leaves the bar.
+        asked.clear();
+        run_ui(
+            &context,
+            RawInput {
+                events: vec![egui::Event::PointerGone],
+                ..RawInput::default()
+            },
+            |ui| {
+                CentralPanel::default().show(ui, |ui| {
+                    let _ = super::draw_controls(
+                        ui,
+                        view(&[]),
+                        None,
+                        |_, _| {},
+                        |_| {},
+                        |time| {
+                            asked.push(time);
+                            None
+                        },
+                    );
+                });
+            },
+        );
+        assert!(asked.is_empty());
     }
 
     #[test]

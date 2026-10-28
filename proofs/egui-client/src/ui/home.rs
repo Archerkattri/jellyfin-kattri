@@ -54,6 +54,12 @@ pub enum HomeViewTarget {
     Series,
     Music,
     Playlists,
+    Collections,
+    Books,
+    HomeVideos,
+    MusicVideos,
+    Photos,
+    LiveTv,
     AllItems,
 }
 
@@ -70,6 +76,12 @@ pub fn route_for_collection_type(collection_type: Option<&str>) -> HomeViewTarge
         Some("tvshows") => HomeViewTarget::Series,
         Some("music") => HomeViewTarget::Music,
         Some("playlists") => HomeViewTarget::Playlists,
+        Some("boxsets") => HomeViewTarget::Collections,
+        Some("books") => HomeViewTarget::Books,
+        Some("homevideos") => HomeViewTarget::HomeVideos,
+        Some("musicvideos") => HomeViewTarget::MusicVideos,
+        Some("photos") => HomeViewTarget::Photos,
+        Some("livetv") => HomeViewTarget::LiveTv,
         _ => HomeViewTarget::AllItems,
     }
 }
@@ -317,6 +329,11 @@ impl HomeState {
             HomeCatalogKind::Collections => self.collections_status = RowStatus::Failed(message),
         }
         true
+    }
+
+    /// The user's libraries once `GET /UserViews` has answered; `None` while unknown or failed.
+    pub fn library_views(&self) -> Option<&[UserView]> {
+        (self.libraries_status == RowStatus::Ready).then_some(self.libraries.as_slice())
     }
 
     pub fn my_media_tiles(&self) -> Vec<MyMediaTile> {
@@ -968,6 +985,12 @@ mod tests {
             (Some("tvshows"), HomeViewTarget::Series),
             (Some("music"), HomeViewTarget::Music),
             (Some("playlists"), HomeViewTarget::Playlists),
+            (Some("boxsets"), HomeViewTarget::Collections),
+            (Some("books"), HomeViewTarget::Books),
+            (Some("homevideos"), HomeViewTarget::HomeVideos),
+            (Some("musicvideos"), HomeViewTarget::MusicVideos),
+            (Some("photos"), HomeViewTarget::Photos),
+            (Some("livetv"), HomeViewTarget::LiveTv),
             (Some("unknown"), HomeViewTarget::AllItems),
             (None, HomeViewTarget::AllItems),
         ] {
@@ -985,6 +1008,49 @@ mod tests {
         let tile = my_media_tile(&view);
         assert_eq!(tile.name, "Untitled library");
         assert_eq!(tile.target, HomeViewTarget::AllItems);
+    }
+
+    #[test]
+    fn mock_extra_libraries_route_to_their_own_pages() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let server = spawn(MockConfig {
+                extra_libraries: true,
+                ..MockConfig::default()
+            })
+            .await
+            .expect("spawn mock server");
+            let client = client_for(&server.base_url());
+            let session = client.authenticate("demo", "demo").await.expect("sign in");
+            let mut state = HomeState::default();
+            assert!(state.library_views().is_none());
+            state.begin_catalog_load(HomeCatalogKind::Libraries, 1);
+            let views = client.user_views(&session).await.expect("load views");
+            assert!(state.apply_libraries(1, views));
+            assert_eq!(state.library_views().map(<[UserView]>::len), Some(8));
+            let targets: Vec<HomeViewTarget> = state
+                .my_media_tiles()
+                .into_iter()
+                .map(|tile| tile.target)
+                .collect();
+            assert_eq!(
+                targets,
+                [
+                    HomeViewTarget::Movies,
+                    HomeViewTarget::Series,
+                    HomeViewTarget::Music,
+                    HomeViewTarget::Collections,
+                    HomeViewTarget::Books,
+                    HomeViewTarget::HomeVideos,
+                    HomeViewTarget::MusicVideos,
+                    HomeViewTarget::LiveTv,
+                ]
+            );
+            server.shutdown().await;
+        });
     }
 
     #[test]

@@ -29,6 +29,9 @@ pub(crate) enum Kind {
     MusicAlbum,
     Audio,
     Photo,
+    Book,
+    Video,
+    MusicVideo,
 }
 
 impl Kind {
@@ -42,20 +45,29 @@ impl Kind {
             Kind::MusicAlbum => "MusicAlbum",
             Kind::Audio => "Audio",
             Kind::Photo => "Photo",
+            Kind::Book => "Book",
+            Kind::Video => "Video",
+            Kind::MusicVideo => "MusicVideo",
         }
     }
 
     /// `Video` or `Audio` for playable leaves, `None` for containers.
     pub(crate) fn media_type(self) -> Option<&'static str> {
         match self {
-            Kind::Movie | Kind::Episode => Some("Video"),
+            Kind::Movie | Kind::Episode | Kind::Video | Kind::MusicVideo => Some("Video"),
             Kind::Audio => Some("Audio"),
-            Kind::BoxSet | Kind::Series | Kind::Season | Kind::MusicAlbum | Kind::Photo => None,
+            Kind::BoxSet
+            | Kind::Series
+            | Kind::Season
+            | Kind::MusicAlbum
+            | Kind::Photo
+            | Kind::Book => None,
         }
     }
 
     pub(crate) fn is_leaf(self) -> bool {
-        self.media_type().is_some()
+        // A book is a leaf that clients open or download rather than stream.
+        self.media_type().is_some() || self == Kind::Book
     }
 
     pub(crate) fn is_folder(self) -> bool {
@@ -710,6 +722,66 @@ pub(crate) fn catalog_with_collection_children() -> Catalog {
     catalog
 }
 
+/// Standard catalogue plus the library types Jellyfin Web has views for beyond movies, shows
+/// and music: collections, books, home videos, music videos and Live TV.
+pub(crate) fn catalog_with_extra_libraries() -> Catalog {
+    let mut catalog = catalog();
+    let extra = [
+        (hex_id(4), "Collections", "boxsets"),
+        (hex_id(5), "Books", "books"),
+        (hex_id(6), "Home Videos", "homevideos"),
+        (hex_id(7), "Music Videos", "musicvideos"),
+        (hex_id(8), "Live TV", "livetv"),
+    ];
+    for (id, name, collection_type) in extra {
+        catalog.libraries.push(Library {
+            id,
+            name,
+            collection_type,
+        });
+    }
+    let Some(template) = catalog
+        .items
+        .iter()
+        .find(|item| item.kind == Kind::Movie)
+        .cloned()
+    else {
+        return catalog;
+    };
+    let leaves: [(u128, &str, Kind, u128, Option<i64>); 6] = [
+        (0xB000, "Field Notes", Kind::Book, 5, None),
+        (0xB001, "The Harbor Almanac", Kind::Book, 5, None),
+        (0xB100, "Summer at the Lake", Kind::Video, 6, Some(4)),
+        (0xB101, "First Steps", Kind::Video, 6, Some(2)),
+        (0xB200, "Undertow (Live)", Kind::MusicVideo, 7, Some(5)),
+        (
+            0xB201,
+            "Afterimage (Official Video)",
+            Kind::MusicVideo,
+            7,
+            Some(4),
+        ),
+    ];
+    for (id, name, kind, library, minutes) in leaves {
+        let mut item = template.clone();
+        item.id = hex_id(id);
+        item.name = name.to_owned();
+        item.kind = kind;
+        item.parent_id = Some(hex_id(library));
+        item.overview = format!("{name} is a fixture for the {} library.", kind.as_str());
+        item.genres = vec!["Fixture"];
+        item.run_time_ticks = minutes.map(|m| m * TICKS_PER_MINUTE);
+        item.has_backdrop = false;
+        item.favorite = false;
+        item.played = false;
+        item.position_ticks = 0;
+        item.last_played = None;
+        catalog.items.push(item);
+    }
+    catalog.rebuild_index();
+    catalog
+}
+
 /// Render an item as Jellyfin's `BaseItemDto` (PascalCase; absent when unknown).
 pub(crate) fn item_json(item: &Item) -> Value {
     let mut map = Map::new();
@@ -827,7 +899,41 @@ pub(crate) fn user_json() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, catalog, catalog_with_audio_track_count};
+    use super::{Kind, catalog, catalog_with_audio_track_count, catalog_with_extra_libraries};
+
+    #[test]
+    fn extra_libraries_add_views_and_one_kind_of_leaf_each() {
+        let catalog = catalog_with_extra_libraries();
+        let types: Vec<&str> = catalog
+            .libraries
+            .iter()
+            .map(|library| library.collection_type)
+            .collect();
+        assert_eq!(
+            types,
+            [
+                "movies",
+                "tvshows",
+                "music",
+                "boxsets",
+                "books",
+                "homevideos",
+                "musicvideos",
+                "livetv"
+            ]
+        );
+        for kind in [Kind::Book, Kind::Video, Kind::MusicVideo] {
+            let items: Vec<_> = catalog
+                .items
+                .iter()
+                .filter(|item| item.kind == kind)
+                .collect();
+            assert_eq!(items.len(), 2, "{kind:?}");
+            assert!(items.iter().all(|item| catalog.get(&item.id).is_some()));
+        }
+        assert!(Kind::Book.is_leaf() && Kind::Book.media_type().is_none());
+        assert_eq!(Kind::MusicVideo.media_type(), Some("Video"));
+    }
 
     #[test]
     fn seed_counts_match_documentation() {

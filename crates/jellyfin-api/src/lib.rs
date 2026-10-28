@@ -12,6 +12,7 @@ mod home;
 mod item_admin;
 pub mod item_images;
 mod json_response;
+mod library_views;
 mod live_tv;
 mod live_tv_recordings;
 mod metadata_editor;
@@ -24,12 +25,14 @@ mod playlists;
 mod quick_connect;
 pub mod remote;
 pub mod remote_command;
+mod remote_subtitles;
 mod search;
 pub mod segments;
 mod series;
 pub mod session_reporting;
 mod syncplay;
 pub mod system_time;
+pub mod trickplay;
 pub mod websocket;
 
 pub use admin::{MAX_SCHEDULED_TASKS, ScheduledTask, ServerInfo, UserCounts, VirtualFolder};
@@ -42,6 +45,7 @@ pub use extras::LyricLine;
 pub use favorites::FavoriteToggle;
 pub use home::{MAX_HOME_LIMIT, UserView};
 pub use item_images::BackdropImageError;
+pub use library_views::{ItemsEndpoint, Recommendation, RecommendationKind};
 pub use live_tv::{
     GuideWindow, GuideWindowError, LiveTvChannel, LiveTvChannelPage, LiveTvProgram,
     LiveTvProgramPage, MAX_GUIDE_CHANNEL_IDS, MAX_GUIDE_CHANNELS_PER_WINDOW,
@@ -73,6 +77,10 @@ pub use playlists::{
     PlaylistUserPermissions,
 };
 pub use quick_connect::{QuickConnectRequest, QuickConnectSecret, QuickConnectStatus};
+pub use remote_subtitles::{
+    CultureDto, ItemSubtitleStream, MAX_REMOTE_SUBTITLES, MAX_SUBTITLE_FILE_BYTES,
+    RemoteSubtitleInfo,
+};
 pub use search::{SEARCH_ITEM_TYPES, SearchError, SearchGroup, SearchResultGroup, group_by_type};
 pub use segments::{MediaSegment, MediaSegmentType, MediaSegmentsResponse};
 pub use series::AdjacentEpisodes;
@@ -282,6 +290,20 @@ impl JellyfinClient {
         session: &Session,
         query: &ItemQuery,
     ) -> Result<ItemsResponse, ApiError> {
+        self.list_items_at(session, ItemsEndpoint::Items, query)
+            .await
+    }
+
+    /// Run an item query against `/Items` or one of Jellyfin's other paged
+    /// item lists (genres, studios, artists, upcoming episodes). Those
+    /// endpoints take the same paging and name parameters and ignore the
+    /// ones they do not use.
+    pub async fn list_items_at(
+        &self,
+        session: &Session,
+        endpoint: ItemsEndpoint,
+        query: &ItemQuery,
+    ) -> Result<ItemsResponse, ApiError> {
         if let Some(ids) = query.ids.as_deref() {
             if ids.is_empty() {
                 return Ok(ItemsResponse::default());
@@ -293,15 +315,23 @@ impl JellyfinClient {
                 home::validate_id(id)?;
             }
         }
-        let url = self.endpoint(&["Items"]);
+        let url = self.endpoint(endpoint.path_segments());
         let mut request = self.http.request(Method::GET, url);
         request = self.add_metadata(request, Some(&session.access_token));
         if let Some(parent_id) = query.parent_id.as_deref() {
             home::validate_id(parent_id)?;
         }
-        if let Some(person_ids) = query.person_ids.as_deref() {
-            for person_id in person_ids {
-                home::validate_id(person_id)?;
+        for ids in [
+            &query.person_ids,
+            &query.genre_ids,
+            &query.studio_ids,
+            &query.artist_ids,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for id in ids {
+                home::validate_id(id)?;
             }
         }
         request = request.query(&query.to_query_params(&session.user.id));
@@ -1554,6 +1584,14 @@ impl UserDto {
             .as_ref()
             .is_some_and(|policy| policy.is_administrator)
     }
+
+    /// Whether the user may search for and download subtitles: administrators, and users whose
+    /// policy has `EnableSubtitleManagement` (as Jellyfin Web's `canEditSubtitles`).
+    pub fn can_manage_subtitles(&self) -> bool {
+        self.policy
+            .as_ref()
+            .is_some_and(|policy| policy.is_administrator || policy.enable_subtitle_management)
+    }
 }
 
 /// The part of Jellyfin's `UserPolicy` the client reads.
@@ -1562,6 +1600,8 @@ impl UserDto {
 pub struct UserPolicy {
     #[serde(default)]
     pub is_administrator: bool,
+    #[serde(default)]
+    pub enable_subtitle_management: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -1607,18 +1647,20 @@ pub struct ItemQuery {
     pub genres: Option<Vec<String>>,
     pub years: Option<Vec<i32>>,
     pub person_ids: Option<Vec<String>>,
+    /// Genre item IDs (`genreIds`), as listed by `GET /Genres`.
+    pub genre_ids: Option<Vec<String>>,
+    /// Studio item IDs (`studioIds`), as listed by `GET /Studios`.
+    pub studio_ids: Option<Vec<String>>,
+    /// Artist item IDs (`artistIds`), matching track or album artists.
+    pub artist_ids: Option<Vec<String>>,
+    /// Names starting with this text (`nameStartsWith`), compared on the sort name.
+    pub name_starts_with: Option<String>,
+    /// Names sorting before this text (`nameLessThan`); `"A"` selects the `#` group.
+    pub name_less_than: Option<String>,
     /// Specific item IDs. Jellyfin documents this query as a comma-delimited
     /// list; the typed client caps a single request at 50 IDs.
     pub ids: Option<Vec<String>>,
     pub enable_total_record_count: Option<bool>,
-    /// Only items whose sort name starts with this text (`NameStartsWith`), for an
-    /// alphabet picker.
-    pub name_starts_with: Option<String>,
-    /// Only items whose sort name sorts before this text (`NameLessThan`); `"A"` selects
-    /// names starting with a digit or symbol.
-    pub name_less_than: Option<String>,
-    /// Only items from these studios (`studioIds`).
-    pub studio_ids: Option<Vec<String>>,
 }
 
 /// Jellyfin's `/Items` `sortBy` values used by the library browser.
@@ -1745,6 +1787,23 @@ impl ItemQuery {
                     .map(|value| ("personIds".into(), value.clone())),
             );
         }
+        for (key, ids) in [
+            ("genreIds", &self.genre_ids),
+            ("studioIds", &self.studio_ids),
+            ("artistIds", &self.artist_ids),
+        ] {
+            if let Some(ids) = ids
+                && !ids.is_empty()
+            {
+                params.push((key.into(), ids.join(",")));
+            }
+        }
+        if let Some(prefix) = &self.name_starts_with {
+            params.push(("nameStartsWith".into(), prefix.clone()));
+        }
+        if let Some(bound) = &self.name_less_than {
+            params.push(("nameLessThan".into(), bound.clone()));
+        }
         if let Some(ids) = &self.ids
             && !ids.is_empty()
         {
@@ -1755,15 +1814,6 @@ impl ItemQuery {
                 "enableTotalRecordCount".into(),
                 enable_total_record_count.to_string(),
             ));
-        }
-        if let Some(prefix) = &self.name_starts_with {
-            params.push(("nameStartsWith".into(), prefix.clone()));
-        }
-        if let Some(bound) = &self.name_less_than {
-            params.push(("nameLessThan".into(), bound.clone()));
-        }
-        if let Some(studios) = self.studio_ids.as_ref().filter(|ids| !ids.is_empty()) {
-            params.push(("studioIds".into(), studios.join("|")));
         }
         params
     }
@@ -1784,11 +1834,13 @@ impl Default for ItemQuery {
             genres: None,
             years: None,
             person_ids: None,
-            ids: None,
-            enable_total_record_count: None,
+            genre_ids: None,
+            studio_ids: None,
+            artist_ids: None,
             name_starts_with: None,
             name_less_than: None,
-            studio_ids: None,
+            ids: None,
+            enable_total_record_count: None,
         }
     }
 }
@@ -2517,6 +2569,39 @@ mod item_query_serialization_tests {
     }
 
     #[test]
+    fn serializes_library_tab_filters_with_comma_delimited_ids() {
+        let query = ItemQuery {
+            genre_ids: Some(vec!["g1".into(), "g2".into()]),
+            studio_ids: Some(vec!["s1".into()]),
+            artist_ids: Some(vec!["a1".into(), "a2".into()]),
+            name_starts_with: Some("M".into()),
+            name_less_than: Some("A".into()),
+            ..ItemQuery::default()
+        };
+        let actual = params(&query);
+
+        assert_values(&actual, "genreIds", &["g1,g2"]);
+        assert_values(&actual, "studioIds", &["s1"]);
+        assert_values(&actual, "artistIds", &["a1,a2"]);
+        assert_values(&actual, "nameStartsWith", &["M"]);
+        assert_values(&actual, "nameLessThan", &["A"]);
+
+        let empty = params(&ItemQuery {
+            genre_ids: Some(vec![]),
+            ..ItemQuery::default()
+        });
+        for absent in [
+            "genreIds",
+            "studioIds",
+            "artistIds",
+            "nameStartsWith",
+            "nameLessThan",
+        ] {
+            assert!(!empty.contains_key(absent), "unexpected {absent}");
+        }
+    }
+
+    #[test]
     fn serializes_explicit_false_and_empty_lists_but_omits_unset_values() {
         let query = ItemQuery {
             recursive: false,
@@ -2545,12 +2630,12 @@ mod item_query_serialization_tests {
     }
 
     #[test]
-    fn serializes_studio_ids_pipe_separated() {
+    fn serializes_studio_ids_comma_separated() {
         let query = params(&ItemQuery {
             studio_ids: Some(vec!["s1".into(), "s2".into()]),
             ..ItemQuery::default()
         });
-        assert_values(&query, "studioIds", &["s1|s2"]);
+        assert_values(&query, "studioIds", &["s1,s2"]);
     }
 
     #[test]

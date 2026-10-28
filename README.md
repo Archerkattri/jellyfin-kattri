@@ -118,8 +118,9 @@ yet a replacement for the official clients. The main missing pieces:
   library cards, home rows and search results offers Play, Play from beginning, Open details, Go to series, Mark played/unplayed,
   Add/remove favorite, Download, Add to playlist and, for music tracks, Play next and Add
   to queue. Administrators also get Add to collection, Refresh metadata and Delete (with
-  a confirmation). Still missing: shuffle from the menu, multi-select and, for
-  administrators, edit metadata, identify, edit images and edit subtitles.
+  a confirmation), Edit metadata, Identify and Edit images. Administrators and users
+  allowed to manage subtitles get Search
+  subtitles for movies and episodes. Still missing: shuffle from the menu and multi-select.
 - **Episodes and series:** the series page offers the server's Next Up episode (Play or
   Resume), and episode rows show the still, overview, runtime, progress and a watched
   mark.
@@ -131,14 +132,18 @@ yet a replacement for the official clients. The main missing pieces:
   setting, on by default).
 - **Player OSD:** title, elapsed/total time, transport, chapter stepping, volume with
   mute, frame stepping, A-B loop, speed, PiP and a fullscreen toggle, as a compact
-  icon bar, with previous/next for music tracks and episodes and an Up Next card. Still
-  missing: trickplay thumbnails on the seek bar and quality/source selection inside the
-  player.
+  icon bar, with previous/next for music tracks and episodes and an Up Next card. Hovering
+  or dragging the seek bar shows the time there and, when available, the server's
+  trickplay thumbnail.
+  The audio and subtitle menu can search the server's subtitle providers by language and
+  download a result, which joins the track list. Still missing: quality/source selection
+  inside the player.
 - **Library views:** one grid per type with sort, played/favorite, genre and studio
   filters and an alphabet picker. Missing Suggestions, Collections, Upcoming and Episodes
   tabs and view modes; music can list everything, albums only or songs only, but has no
-  artist view; books, home videos and
-  music videos have no views.
+  artist view. Collections, books, home videos and music videos have dedicated pages;
+  books can be downloaded for an external reader. Narrow windows move extra navigation
+  destinations into a More menu, and photo folders show their names.
 - **Details pages:** a Media info section lists the source's container, size, bitrate
   and streams; an episode page lists the rest of its season; an item with several
   versions offers a Version picker that playback follows; movie and series pages list

@@ -9,6 +9,10 @@ pub enum MediaKind {
     Photo,
     Playlist,
     Folder,
+    /// Home videos and music videos: played like a movie.
+    Video,
+    /// A book the client opens or downloads instead of playing.
+    Book,
     Other,
 }
 
@@ -18,7 +22,9 @@ impl MediaKind {
             Some("Movie") => Self::Movie,
             Some("Series") => Self::Series,
             Some("Episode") => Self::Episode,
-            Some("Audio" | "MusicAlbum") => Self::Audio,
+            Some("Audio" | "MusicAlbum" | "AudioBook") => Self::Audio,
+            Some("Video" | "MusicVideo") => Self::Video,
+            Some("Book") => Self::Book,
             Some("Photo") => Self::Photo,
             Some("Playlist") => Self::Playlist,
             Some("Folder" | "CollectionFolder" | "BoxSet") => Self::Folder,
@@ -35,6 +41,8 @@ impl MediaKind {
             Self::Photo => "Photo",
             Self::Playlist => "Playlist",
             Self::Folder => "Folder",
+            Self::Video => "Video",
+            Self::Book => "Book",
             Self::Other => "Jellyfin item",
         }
     }
@@ -133,6 +141,28 @@ impl MediaItem {
         }
     }
 
+    /// An entry for a portrait poster grid. An episode's own image is a 16:9 still that a poster
+    /// crops badly, so the grid shows its series poster when the server sent one.
+    pub fn poster_from_api(item: BaseItemDto) -> Self {
+        let series_poster = (item.item_type.as_deref() == Some("Episode"))
+            .then(|| {
+                item.series_id.clone().zip(
+                    item.series_primary_image_tag
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|tag| !tag.is_empty())
+                        .map(str::to_owned),
+                )
+            })
+            .flatten();
+        let mut media = Self::from_api(item);
+        if let Some((series_id, tag)) = series_poster {
+            media.artwork_id = series_id;
+            media.primary_image_tag = Some(tag);
+        }
+        media
+    }
+
     pub fn subtitle(&self) -> &str {
         self.remote_type
             .as_deref()
@@ -189,7 +219,7 @@ fn placeholder_artwork(id: &str) -> ArtworkPalette {
 
 #[cfg(test)]
 mod tests {
-    use super::MediaItem;
+    use super::{MediaItem, MediaKind};
 
     fn item(json: serde_json::Value) -> MediaItem {
         MediaItem::from_api(serde_json::from_value(json).expect("item fixture"))
@@ -214,9 +244,45 @@ mod tests {
         }));
         assert_eq!(episode.artwork_id, "ep");
         assert_eq!(episode.primary_image_tag.as_deref(), Some("still"));
+        let poster = MediaItem::poster_from_api(
+            serde_json::from_value(serde_json::json!({
+                "Id": "ep", "Name": "Pilot", "Type": "Episode", "ImageTags": {"Primary": "still"},
+                "SeriesId": "show", "SeriesPrimaryImageTag": "poster"
+            }))
+            .expect("item fixture"),
+        );
+        assert_eq!(poster.artwork_id, "show");
+        assert_eq!(poster.primary_image_tag.as_deref(), Some("poster"));
+        let still_only = MediaItem::poster_from_api(
+            serde_json::from_value(serde_json::json!({
+                "Id": "ep", "Name": "Pilot", "Type": "Episode", "ImageTags": {"Primary": "still"},
+                "SeriesId": "show"
+            }))
+            .expect("item fixture"),
+        );
+        assert_eq!(still_only.artwork_id, "ep");
         let movie = item(serde_json::json!({"Id": "film", "Name": "Film", "Type": "Movie"}));
         assert_eq!(movie.artwork_id, "film");
         assert_eq!(movie.backdrop_id, "film");
         assert!(movie.primary_image_tag.is_none());
+    }
+
+    #[test]
+    fn new_library_item_types_map_to_their_display_kinds() {
+        assert_eq!(
+            item(serde_json::json!({"Id": "book", "Name": "Novel", "Type": "Book"})).kind,
+            MediaKind::Book
+        );
+        assert_eq!(
+            item(serde_json::json!({"Id": "audio", "Name": "Audiobook", "Type": "AudioBook"})).kind,
+            MediaKind::Audio
+        );
+        for item_type in ["Video", "MusicVideo"] {
+            assert_eq!(
+                item(serde_json::json!({"Id": "video", "Name": "Clip", "Type": item_type})).kind,
+                MediaKind::Video,
+                "{item_type}"
+            );
+        }
     }
 }

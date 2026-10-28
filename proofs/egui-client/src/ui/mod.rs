@@ -27,6 +27,7 @@ mod settings_input;
 mod settings_media;
 mod settings_parental;
 pub(crate) mod status;
+pub(crate) mod subtitle_search;
 pub(crate) mod syncplay;
 mod update;
 
@@ -334,7 +335,7 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
         }
     }
     let allow_key_repeat = app.settings.settings().input.key_repeat;
-    let top_bar_index = active_topbar_index(app);
+    let top_bar_index = active_topbar_index(app, &nav_focus);
     if let Some(target_id) = move_media_focus(
         &ctx,
         &card_focus,
@@ -344,7 +345,7 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
         MediaFocusOptions {
             allow_key_repeat,
             enter_content,
-            top_bar_tab: nav_focus.get(top_bar_index),
+            top_bar_tab: nav_focus.responses.get(top_bar_index),
         },
     ) && let Some(action) =
         resolve_focus_activation(&target_id, &card_focus, &search_show_all_targets)
@@ -416,17 +417,92 @@ mod catalog_prefetch_tests {
         ));
     }
 }
+/// What a top-bar tab opens: the Home view, a library page, or the More menu that holds the
+/// pages without room in the strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TopbarTarget {
+    Home,
+    Page(Page),
+    More,
+}
 
-/// Apple TV style top bar: brand at the left, centred text tabs, search and profile at the
-/// right. Returns the tab responses in order (Home first, then the pages of
-/// `navigation_pages`) for keyboard and gamepad focus.
-fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> Vec<egui::Response> {
-    let mut responses = Vec::new();
+/// The top bar's focusable tabs, in strip order, with what each one opens.
+pub(crate) struct TopbarTabs {
+    responses: Vec<egui::Response>,
+    targets: Vec<TopbarTarget>,
+}
+
+const TAB_GAP: f32 = 4.0;
+
+/// How many leading tabs fit in `available` points. When they do not all fit, room is kept for
+/// a More button of `more_width`, so a tab is never drawn partly hidden.
+fn visible_tab_count(widths: &[f32], available: f32, more_width: f32) -> usize {
+    let total: f32 = widths.iter().map(|width| width + TAB_GAP).sum();
+    if total <= available {
+        return widths.len();
+    }
+    let mut used = more_width + TAB_GAP;
+    let mut count = 0;
+    for width in widths {
+        if used + width + TAB_GAP > available {
+            break;
+        }
+        used += width + TAB_GAP;
+        count += 1;
+    }
+    count
+}
+
+/// Draws one text tab and returns its response.
+fn topbar_tab(
+    ui: &mut egui::Ui,
+    label: &str,
+    width: f32,
+    font: &FontId,
+    active: bool,
+    colors: Palette,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 36.0), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    if active {
+        painter.rect_filled(rect, CornerRadius::same(10), Color32::from_white_alpha(30));
+    } else if response.hovered() {
+        painter.rect_filled(rect, CornerRadius::same(10), Color32::from_white_alpha(14));
+    }
+    if response.has_focus() {
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            CornerRadius::same(10),
+            Stroke::new(2.0, colors.focus),
+            egui::StrokeKind::Inside,
+        );
+    }
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        font.clone(),
+        if active { colors.text } else { colors.muted },
+    );
+    let name = label.to_owned();
+    response.widget_info(move || {
+        egui::WidgetInfo::selected(egui::Role::Button, true, active, name.clone())
+    });
+    response
+}
+
+/// Apple TV style top bar: brand at the left, text tabs, search and profile at the right. The
+/// same bar, search included, shows on every page. Tabs that do not fit move into a More menu.
+/// Returns the strip's tabs in order (Home first) for keyboard and gamepad focus.
+fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs {
+    let mut tabs_out = TopbarTabs {
+        responses: Vec::new(),
+        targets: Vec::new(),
+    };
     let mut submit_search = false;
     let mut clear_search = false;
     let mut search_changed = false;
     let connected = has_server(&app.connection);
-    let font = FontId::proportional(16.0);
     ui.horizontal_centered(|ui| {
         ui.add_space(20.0);
         ui.label(
@@ -435,30 +511,62 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> Vec<egui::
                 .strong()
                 .color(colors.text),
         );
+        let profile = app
+            .user_name
+            .clone()
+            .unwrap_or_else(|| ui_text(ids::SHELL_PROFILE_MAIN).to_owned());
+        let profile_label = format!("{profile}  ▾");
+        // The right side holds the search field, its Clear button while a search is open, and
+        // the profile menu; the tabs get what is left.
+        let search_width = (ui.available_width() * 0.28).clamp(140.0, 300.0);
+        let searching =
+            !app.search_query.is_empty() || app.submitted_search.is_some() || app.search_active;
+        let clear_width = if searching {
+            ui.painter()
+                .layout_no_wrap(
+                    ui_text(ids::BROWSE_BUTTON_CLEAR_SEARCH).to_owned(),
+                    FontId::proportional(14.0),
+                    colors.text,
+                )
+                .size()
+                .x
+                + 24.0
+        } else {
+            0.0
+        };
+        let profile_width = ui
+            .painter()
+            .layout_no_wrap(
+                profile_label.clone(),
+                FontId::proportional(14.0),
+                colors.text,
+            )
+            .size()
+            .x
+            + 24.0;
         if connected {
-            let mut tabs: Vec<(String, Option<Page>)> =
-                vec![(ui_text(ids::SHELL_NAV_HOME).to_owned(), None)];
-            for page in navigation_pages(app.dashboard_enabled()) {
-                tabs.push((page.label().to_owned(), Some(page)));
+            let mut tabs: Vec<(String, TopbarTarget)> =
+                vec![(ui_text(ids::SHELL_NAV_HOME).to_owned(), TopbarTarget::Home)];
+            for page in navigation_pages(app) {
+                tabs.push((page.label().to_owned(), TopbarTarget::Page(page)));
             }
-            // Reserve room for Search and the account menu even when every library tab is shown.
-            let nav_width = (ui.available_width() - 340.0).max(100.0);
+            let reserved = 20.0 + profile_width + 12.0 + search_width + 12.0 + clear_width + 16.0;
+            let nav_width = (ui.available_width() - reserved).max(0.0);
+            let measure = |label: &str, font: &FontId| {
+                ui.painter()
+                    .layout_no_wrap(label.to_owned(), font.clone(), colors.text)
+                    .size()
+                    .x
+            };
             // Pick the roomiest size at which every tab fits; the tightest is the floor.
-            let mut font = font.clone();
+            let mut font = FontId::proportional(16.0);
             let mut padding = 28.0;
             for (size, pad) in [(16.0, 28.0), (15.0, 20.0), (14.0, 14.0), (13.0, 10.0)] {
                 font = FontId::proportional(size);
                 padding = pad;
                 let total: f32 = tabs
                     .iter()
-                    .map(|(label, _)| {
-                        ui.painter()
-                            .layout_no_wrap(label.clone(), font.clone(), colors.text)
-                            .size()
-                            .x
-                            + pad
-                            + 4.0
-                    })
+                    .map(|(label, _)| measure(label, &font) + pad + TAB_GAP)
                     .sum();
                 if total <= nav_width {
                     break;
@@ -466,136 +574,100 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> Vec<egui::
             }
             let widths: Vec<f32> = tabs
                 .iter()
-                .map(|(label, _)| {
-                    ui.painter()
-                        .layout_no_wrap(label.clone(), font.clone(), colors.text)
-                        .size()
-                        .x
-                        + padding
-                })
+                .map(|(label, _)| measure(label, &font) + padding)
                 .collect();
+            let more_label = format!("{}  ▾", ui_text(ids::SHELL_NAV_MORE));
+            let more_width = measure(&more_label, &font) + padding;
+            let shown = visible_tab_count(&widths, nav_width, more_width);
+            let is_active = |target: TopbarTarget| match target {
+                TopbarTarget::Home => app.view == AppView::Home,
+                TopbarTarget::Page(page) => app.view == AppView::Library && app.page == page,
+                TopbarTarget::More => false,
+            };
+            let mut clicked = None;
             ui.allocate_ui_with_layout(
                 egui::vec2(nav_width, 44.0),
                 egui::Layout::left_to_right(Align::Center),
                 |ui| {
-                    egui::ScrollArea::horizontal()
-                        .id_salt("topbar_tabs")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                for ((label, page), width) in tabs.into_iter().zip(widths) {
-                                    let active = match page {
-                                        None => app.view == AppView::Home,
-                                        Some(page) => {
-                                            app.view == AppView::Library && app.page == page
-                                        }
-                                    };
-                                    let (rect, response) = ui.allocate_exact_size(
-                                        egui::vec2(width, 36.0),
-                                        egui::Sense::click(),
-                                    );
-                                    let painter = ui.painter_at(rect);
-                                    if active {
-                                        painter.rect_filled(
-                                            rect,
-                                            CornerRadius::same(10),
-                                            Color32::from_white_alpha(30),
-                                        );
-                                    } else if response.hovered() {
-                                        painter.rect_filled(
-                                            rect,
-                                            CornerRadius::same(10),
-                                            Color32::from_white_alpha(14),
-                                        );
-                                    }
-                                    if response.has_focus() {
-                                        painter.rect_stroke(
-                                            rect.shrink(1.0),
-                                            CornerRadius::same(10),
-                                            Stroke::new(2.0, colors.focus),
-                                            egui::StrokeKind::Inside,
-                                        );
-                                    }
-                                    painter.text(
-                                        rect.center(),
-                                        Align2::CENTER_CENTER,
-                                        &label,
-                                        font.clone(),
-                                        if active { colors.text } else { colors.muted },
-                                    );
-                                    let name = label.clone();
-                                    response.widget_info(move || {
-                                        egui::WidgetInfo::selected(
-                                            egui::Role::Button,
-                                            true,
-                                            active,
-                                            name.clone(),
-                                        )
-                                    });
-                                    if response.clicked() {
-                                        match page {
-                                            None => app.set_view(AppView::Home),
-                                            Some(page) => app.navigate_to(page),
-                                        }
-                                    }
-                                    if response.has_focus() {
-                                        response.scroll_to_me(Some(Align::Center));
-                                    }
-                                    responses.push(response);
-                                }
-                            });
-                        });
+                    ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+                    ui.spacing_mut().item_spacing.x = TAB_GAP;
+                    for ((label, target), width) in tabs.iter().zip(&widths).take(shown) {
+                        let response =
+                            topbar_tab(ui, label, *width, &font, is_active(*target), colors);
+                        if response.clicked() {
+                            clicked = Some(*target);
+                        }
+                        tabs_out.responses.push(response);
+                        tabs_out.targets.push(*target);
+                    }
+                    let overflow = &tabs[shown..];
+                    if overflow.is_empty() {
+                        return;
+                    }
+                    let overflow_active = overflow.iter().any(|(_, target)| is_active(*target));
+                    let more =
+                        topbar_tab(ui, &more_label, more_width, &font, overflow_active, colors);
+                    egui::Popup::menu(&more).show(|ui| {
+                        for (label, target) in overflow {
+                            if ui
+                                .selectable_label(is_active(*target), label.as_str())
+                                .clicked()
+                            {
+                                clicked = Some(*target);
+                                ui.close();
+                            }
+                        }
+                    });
+                    tabs_out.responses.push(more);
+                    tabs_out.targets.push(TopbarTarget::More);
                 },
             );
+            match clicked {
+                Some(TopbarTarget::Home) => app.set_view(AppView::Home),
+                Some(TopbarTarget::Page(page)) => app.navigate_to(page),
+                Some(TopbarTarget::More) | None => {}
+            }
         }
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(20.0);
             if connected {
-                let profile = app
-                    .user_name
-                    .clone()
-                    .unwrap_or_else(|| ui_text(ids::SHELL_PROFILE_MAIN).to_owned());
                 let server_name = app.server.as_ref().map(|server| server.name.clone());
-                ui.menu_button(
-                    RichText::new(format!("{profile}  ▾")).color(colors.text),
-                    |ui| {
-                        if let Some(name) = server_name {
-                            ui.label(RichText::new(name).color(colors.muted));
-                        }
-                        // All destinations remain directly reachable when the tab strip scrolls.
-                        for page in navigation_pages(app.dashboard_enabled()) {
-                            if ui.button(page.label()).clicked() {
-                                app.navigate_to(page);
-                                ui.close();
-                            }
-                        }
-                        ui.separator();
-                        if ui.button(ui_text(ids::OPEN_URL_MENU)).clicked() {
-                            app.open_stream_address_dialog();
+                ui.menu_button(RichText::new(profile_label).color(colors.text), |ui| {
+                    if let Some(name) = server_name {
+                        ui.label(RichText::new(name).color(colors.muted));
+                    }
+                    // Every destination stays reachable here, whatever fits in the tab strip.
+                    for page in navigation_pages(app) {
+                        if ui.button(page.label()).clicked() {
+                            app.navigate_to(page);
                             ui.close();
                         }
-                        let high_contrast = ui.checkbox(
-                            &mut app.high_contrast,
-                            ui_text(ids::ACCESS_NAV_HIGH_CONTRAST),
-                        );
-                        if high_contrast.changed() {
-                            let before = app.settings.settings().clone();
-                            app.settings.settings_mut().general.high_contrast = app.high_contrast;
-                            app.commit_settings(&before);
-                        }
-                        if app.view == AppView::Home
-                            && ui.button(ui_text(ids::HOME_BUTTON_REFRESH)).clicked()
-                        {
-                            app.apply_home_action(home::HomeAction::Refresh);
-                            ui.close();
-                        }
-                        if ui.button(ui_text(ids::ACCESS_NAV_DISCONNECT)).clicked() {
-                            app.disconnect();
-                            ui.close();
-                        }
-                    },
-                );
+                    }
+                    ui.separator();
+                    if ui.button(ui_text(ids::OPEN_URL_MENU)).clicked() {
+                        app.open_stream_address_dialog();
+                        ui.close();
+                    }
+                    let high_contrast = ui.checkbox(
+                        &mut app.high_contrast,
+                        ui_text(ids::ACCESS_NAV_HIGH_CONTRAST),
+                    );
+                    if high_contrast.changed() {
+                        let before = app.settings.settings().clone();
+                        app.settings.settings_mut().general.high_contrast = app.high_contrast;
+                        app.commit_settings(&before);
+                    }
+                    if app.view == AppView::Home
+                        && ui.button(ui_text(ids::HOME_BUTTON_REFRESH)).clicked()
+                    {
+                        app.apply_home_action(home::HomeAction::Refresh);
+                        ui.close();
+                    }
+                    if ui.button(ui_text(ids::ACCESS_NAV_DISCONNECT)).clicked() {
+                        app.disconnect();
+                        ui.close();
+                    }
+                });
             } else {
                 let high_contrast = ui.checkbox(
                     &mut app.high_contrast,
@@ -607,18 +679,8 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> Vec<egui::
                     app.commit_settings(&before);
                 }
             }
-            if connected
-                && (app.view == AppView::Home
-                    || !matches!(
-                        app.page,
-                        Page::Settings
-                            | Page::Downloads
-                            | Page::LiveTv
-                            | Page::Dashboard
-                            | Page::SyncPlay
-                    ))
-            {
-                let search_width = (ui.available_width() - 12.0).clamp(140.0, 300.0);
+            if connected {
+                let search_width = search_width.min((ui.available_width() - 12.0).max(80.0));
                 let search = ui.add_sized(
                     [search_width, 36.0],
                     egui::TextEdit::singleline(&mut app.search_query)
@@ -641,9 +703,7 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> Vec<egui::
                 });
                 submit_search |=
                     search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                if (!app.search_query.is_empty()
-                    || app.submitted_search.is_some()
-                    || app.search_active)
+                if searching
                     && with_access_name(
                         ui.button(ui_text(ids::BROWSE_BUTTON_CLEAR_SEARCH)),
                         egui::Role::Button,
@@ -663,23 +723,42 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> Vec<egui::
         if app.view == AppView::Home {
             app.set_view(AppView::Library);
             app.page = Page::Home;
+        } else if !shows_search_results(app.page) {
+            // Pages that are not item grids have no place for results, so the search opens the
+            // full catalog. Keep the typed text, which leaving the page clears.
+            let query = std::mem::take(&mut app.search_query);
+            app.navigate_to(Page::Home);
+            app.search_query = query;
         }
         app.submit_search(search_now);
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(300));
     }
-    responses
+    tabs_out
 }
 
-/// Index in the `topbar` responses of the tab for the current view, so focus can return to it.
-fn active_topbar_index(app: &KattriApp) -> usize {
-    if app.view == AppView::Home {
-        return 0;
-    }
-    navigation_pages(app.dashboard_enabled())
+/// Whether `page` draws search results in place of its own content.
+fn shows_search_results(page: Page) -> bool {
+    page.is_catalog() && !matches!(page, Page::Photos | Page::Playlists)
+}
+
+/// Index in the top bar's tabs of the tab for the current view, so focus can return to it: the
+/// More button when the current page is in its menu.
+fn active_topbar_index(app: &KattriApp, tabs: &TopbarTabs) -> usize {
+    let current = if app.view == AppView::Home {
+        TopbarTarget::Home
+    } else {
+        TopbarTarget::Page(app.page)
+    };
+    tabs.targets
         .iter()
-        .position(|page| *page == app.page)
-        .map_or(0, |index| index + 1)
+        .position(|target| *target == current)
+        .or_else(|| {
+            tabs.targets
+                .iter()
+                .position(|target| *target == TopbarTarget::More)
+        })
+        .unwrap_or(0)
 }
 
 /// A magnifier drawn inside the left padding of the search field.
@@ -737,6 +816,28 @@ fn navigation_icon(painter: &egui::Painter, center: egui::Pos2, page: Page, colo
             line([7.0, -8.0], [7.0, 3.0]);
             painter.circle_filled(point(-5.0, 6.0), 3.0, color);
             painter.circle_filled(point(5.0, 4.0), 3.0, color);
+        }
+        Page::Collections => {
+            outline([-9.0, -4.0], [5.0, 8.0]);
+            line([-6.0, -7.0], [8.0, -7.0]);
+            line([8.0, -7.0], [8.0, 5.0]);
+        }
+        Page::MusicVideos => {
+            outline([-9.0, -7.0], [9.0, 7.0]);
+            line([1.0, 3.0], [1.0, -4.0]);
+            line([1.0, -4.0], [5.0, -3.0]);
+            painter.circle_filled(point(-1.0, 3.0), 2.0, color);
+        }
+        Page::HomeVideos => {
+            outline([-9.0, -5.0], [3.0, 6.0]);
+            line([3.0, -1.0], [9.0, -5.0]);
+            line([9.0, -5.0], [9.0, 6.0]);
+            line([9.0, 6.0], [3.0, 2.0]);
+        }
+        Page::Books => {
+            outline([-8.0, -8.0], [7.0, 8.0]);
+            line([-5.0, -8.0], [-5.0, 8.0]);
+            line([-2.0, -4.0], [4.0, -4.0]);
         }
         Page::Photos => {
             outline([-9.0, -6.0], [9.0, 7.0]);
@@ -1203,6 +1304,7 @@ fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
             }
         }
     }
+    // Existing recordings can remain available after a tuner or channel endpoint is removed.
     live_tv_recordings(ui, app, colors);
     if let Some(notice) = app.live_tv_notice.as_deref() {
         ui.label(RichText::new(notice).color(colors.muted));
@@ -1838,12 +1940,21 @@ fn render_connected(
         return;
     }
 
+    let open_collection = app
+        .browse_context
+        .as_ref()
+        .is_some_and(|context| context.is_collection);
     let matches_item: fn(MediaKind) -> bool = match app.page {
         Page::Movies => |kind| kind == MediaKind::Movie,
         Page::Series => |kind| kind == MediaKind::Series,
         Page::Music => |kind| kind == MediaKind::Audio,
         Page::Photos => |kind| kind == MediaKind::Photo,
         Page::Playlists => |kind| kind == MediaKind::Playlist,
+        // A collection holds any kind of item.
+        Page::Collections if open_collection => |_| true,
+        Page::Collections => |kind| kind == MediaKind::Folder,
+        Page::MusicVideos | Page::HomeVideos => |kind| kind == MediaKind::Video,
+        Page::Books => |kind| matches!(kind, MediaKind::Book | MediaKind::Audio),
         Page::Home
         | Page::Downloads
         | Page::LiveTv
@@ -1888,16 +1999,26 @@ fn render_connected(
     }
     let items: Vec<&MediaItem> = items.collect();
     let selected_item_id = app.selected_item_id.clone();
+    // An open collection's grid holds its items, not more collections.
+    let grid_title = match app.browse_context.as_ref() {
+        Some(context) if open_collection => context.title.clone(),
+        _ => app.page.label().to_owned(),
+    };
     if let Some(item_id) = poster_grid(
         ui,
-        app.page.label(),
+        &grid_title,
         &items,
         colors,
         entries,
         selected_item_id.as_deref(),
         visible_artwork,
     ) {
-        app.select_item(item_id);
+        if app.page == Page::Collections {
+            // A collection opens as its own page of items.
+            app.activate_catalog_item(item_id);
+        } else {
+            app.select_item(item_id);
+        }
     }
 }
 
@@ -2363,7 +2484,10 @@ fn alphabet_picker(ui: &mut egui::Ui, prefix: &mut Option<char>, colors: Palette
 /// Only a movie or an episode is one file the server can return from `/Items/{id}/Download`.
 /// Series, seasons, folders, and collections have no single file, so they get no button.
 fn is_downloadable_item_type(item_type: Option<&str>) -> bool {
-    matches!(item_type, Some("Movie" | "Episode"))
+    matches!(
+        item_type,
+        Some("Movie" | "Episode" | "Video" | "MusicVideo" | "Book" | "AudioBook")
+    )
 }
 
 #[cfg(test)]
@@ -2371,9 +2495,19 @@ mod download_button_tests {
     use super::is_downloadable_item_type;
 
     #[test]
-    fn only_movies_and_episodes_get_a_download_button() {
-        assert!(is_downloadable_item_type(Some("Movie")));
-        assert!(is_downloadable_item_type(Some("Episode")));
+    fn only_single_files_get_a_download_button() {
+        for item_type in [
+            "Movie",
+            "Episode",
+            "Video",
+            "MusicVideo",
+            "Book",
+            "AudioBook",
+        ] {
+            assert!(is_downloadable_item_type(Some(item_type)), "{item_type}");
+        }
+        assert!(!super::is_playable_item_type(Some("Book")));
+        assert!(super::is_playable_item_type(Some("MusicVideo")));
         for item_type in ["Series", "Season", "Folder", "BoxSet", "Audio", "Playlist"] {
             assert!(!is_downloadable_item_type(Some(item_type)), "{item_type}");
         }
@@ -2948,6 +3082,7 @@ fn is_playable_item_type(item_type: Option<&str>) -> bool {
                 | "Playlist"
                 | "Genre"
                 | "Studio"
+                | "Book"
         )
     )
 }
@@ -3048,6 +3183,10 @@ fn detail_play_buttons(
         )
     });
     let busy = app.playback_loading || app.playback_start_loading || app.auto_play.is_some();
+    if item.item_type.as_deref() == Some("Book") {
+        ui.label(RichText::new(ui_text(ids::DETAIL_BOOK_NOT_PLAYABLE)).color(colors.muted));
+        ui.add_space(6.0);
+    }
     ui.horizontal(|ui| {
         if playable {
             let primary_label = match resume_ticks {
@@ -3436,13 +3575,7 @@ mod collection_detail_tests {
 }
 
 fn home_header(ui: &mut egui::Ui, app: &KattriApp, colors: Palette) {
-    let Some(server) = app.server.as_ref() else {
-        return;
-    };
-    let user_name = app
-        .user_name
-        .as_deref()
-        .unwrap_or(ui_text(ids::SHELL_USER_DEFAULT));
+    // A page title and the loaded range; the server and account are in the profile menu.
     let item_count = app.total_record_count.unwrap_or(app.items.len() as u32);
     let first = if app.items.is_empty() {
         0
@@ -3453,68 +3586,43 @@ fn home_header(ui: &mut egui::Ui, app: &KattriApp, colors: Palette) {
         .start_index
         .saturating_add(app.items.len() as u32)
         .min(item_count);
-    egui::Frame::new()
-        .fill(colors.panel)
-        .stroke(Stroke::new(1.0, colors.divider))
-        .corner_radius(CornerRadius::same(12))
-        .inner_margin(egui::Margin::same(24))
-        .show(ui, |ui| {
-            ui.set_min_height(150.0);
+    let range = ui_text_args(
+        ids::BROWSE_RANGE_SHOWING,
+        &[
+            (
+                "range",
+                &app.total_record_count.map_or_else(
+                    || {
+                        ui_text_args(
+                            ids::BROWSE_COUNT_LOADED,
+                            &[("count", &item_count.to_string())],
+                        )
+                    },
+                    |total| {
+                        ui_text_args(
+                            ids::BROWSE_COUNT_TOTAL_REPORTED,
+                            &[("total", &total.to_string())],
+                        )
+                    },
+                ),
+            ),
+            ("first", &first.to_string()),
+            ("last", &last.to_string()),
+        ],
+    );
+    ui.horizontal_wrapped(|ui| {
+        // An opened library or collection already shows its own title.
+        if app.browse_context.is_none() {
             ui.label(
-                RichText::new(ui_text(ids::SHELL_EYEBROW_CONNECTED))
-                    .size(11.0)
-                    .strong()
-                    .color(colors.accent),
-            );
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(&server.name)
-                    .size(28.0)
+                RichText::new(Page::Home.label())
+                    .size(24.0)
                     .strong()
                     .color(colors.text),
             );
-            let version = server
-                .version
-                .as_deref()
-                .unwrap_or(ui_text(ids::SHELL_SERVER_VERSION_MISSING));
-            ui.label(
-                RichText::new(ui_text_args(
-                    ids::SHELL_SUMMARY_USER_SERVER,
-                    &[("user_name", user_name), ("version", version)],
-                ))
-                .size(14.0)
-                .color(colors.muted),
-            );
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new(ui_text_args(
-                    ids::BROWSE_RANGE_SHOWING,
-                    &[
-                        (
-                            "range",
-                            &app.total_record_count.map_or_else(
-                                || {
-                                    ui_text_args(
-                                        ids::BROWSE_COUNT_LOADED,
-                                        &[("count", &item_count.to_string())],
-                                    )
-                                },
-                                |total| {
-                                    ui_text_args(
-                                        ids::BROWSE_COUNT_TOTAL_REPORTED,
-                                        &[("total", &total.to_string())],
-                                    )
-                                },
-                            ),
-                        ),
-                        ("first", &first.to_string()),
-                        ("last", &last.to_string()),
-                    ],
-                ))
-                .size(12.0)
-                .color(colors.muted),
-            );
-        });
+            ui.add_space(8.0);
+        }
+        ui.label(RichText::new(range).size(13.0).color(colors.muted));
+    });
 }
 
 fn shelf<'a, I>(
@@ -3785,10 +3893,11 @@ fn has_server(status: &ConnectionStatus) -> bool {
 
 fn move_navigation_focus(
     ctx: &egui::Context,
-    responses: &[egui::Response],
+    tabs: &TopbarTabs,
     app: &mut KattriApp,
     gamepad_actions: &mut Vec<NavAction>,
 ) -> bool {
+    let responses = &tabs.responses;
     let Some(index) = responses.iter().position(egui::Response::has_focus) else {
         return false;
     };
@@ -3809,14 +3918,13 @@ fn move_navigation_focus(
         Some(NavAction::Right) if index + 1 < responses.len() => {
             responses[index + 1].request_focus();
         }
-        Some(NavAction::Select) => match index.checked_sub(1) {
-            None => app.set_view(AppView::Home),
-            Some(page_index) => {
-                let pages = navigation_pages(app.dashboard_enabled());
-                if let Some(page) = pages.get(page_index) {
-                    app.navigate_to(*page);
-                }
+        Some(NavAction::Select) => match tabs.targets.get(index) {
+            Some(TopbarTarget::Home) => app.set_view(AppView::Home),
+            Some(TopbarTarget::Page(page)) => app.navigate_to(*page),
+            Some(TopbarTarget::More) => {
+                egui::Popup::open_id(ctx, egui::Popup::default_response_id(&responses[index]));
             }
+            None => {}
         },
         Some(NavAction::Down) => return true,
         _ => {}
@@ -4023,32 +4131,138 @@ fn handle_shell_action(
 
 #[cfg(test)]
 mod dashboard_gate_tests {
-    use super::{Page, navigation_pages};
+    use super::{Page, navigation_pages_for};
 
     #[test]
     fn dashboard_entry_is_absent_until_the_gate_is_on() {
-        assert!(!navigation_pages(false).contains(&Page::Dashboard));
-        assert!(navigation_pages(false).contains(&Page::SyncPlay));
-        let enabled = navigation_pages(true);
+        assert!(!navigation_pages_for(false, None).contains(&Page::Dashboard));
+        assert!(navigation_pages_for(false, None).contains(&Page::SyncPlay));
+        let enabled = navigation_pages_for(true, None);
         assert!(enabled.contains(&Page::Dashboard));
         assert_eq!(enabled.last(), Some(&Page::Settings));
     }
+
+    #[test]
+    fn library_tabs_follow_the_users_views() {
+        // Before the views arrive the long-standing tabs stay, and new library types wait.
+        let unknown = navigation_pages_for(false, None);
+        for page in [
+            Page::Movies,
+            Page::Series,
+            Page::Music,
+            Page::Photos,
+            Page::LiveTv,
+        ] {
+            assert!(unknown.contains(&page), "{page:?}");
+        }
+        for page in [
+            Page::Collections,
+            Page::Books,
+            Page::HomeVideos,
+            Page::MusicVideos,
+        ] {
+            assert!(!unknown.contains(&page), "{page:?}");
+        }
+
+        let movies_only = navigation_pages_for(false, Some(&[Some("movies")]));
+        assert!(movies_only.contains(&Page::Movies));
+        for page in [Page::Series, Page::Music, Page::Photos, Page::LiveTv] {
+            assert!(!movies_only.contains(&page), "{page:?}");
+        }
+        for page in [
+            Page::Home,
+            Page::Playlists,
+            Page::Downloads,
+            Page::SyncPlay,
+            Page::Settings,
+        ] {
+            assert!(movies_only.contains(&page), "{page:?}");
+        }
+
+        let everything = navigation_pages_for(
+            false,
+            Some(&[
+                Some("boxsets"),
+                Some("books"),
+                Some("homevideos"),
+                Some("musicvideos"),
+                Some("livetv"),
+            ]),
+        );
+        for page in [
+            Page::Collections,
+            Page::Books,
+            Page::HomeVideos,
+            Page::MusicVideos,
+            Page::LiveTv,
+            // Jellyfin's home videos library also holds photos.
+            Page::Photos,
+        ] {
+            assert!(everything.contains(&page), "{page:?}");
+        }
+        assert!(!everything.contains(&Page::Movies));
+
+        // A mixed library can hold movies and shows.
+        let mixed = navigation_pages_for(false, Some(&[None]));
+        assert!(mixed.contains(&Page::Movies) && mixed.contains(&Page::Series));
+    }
 }
 
-/// Pages in navigation order. The dashboard entry appears only when its gate is on, so a
-/// disabled dashboard is not reachable by keyboard or by the menu.
-fn navigation_pages(dashboard_enabled: bool) -> Vec<Page> {
-    let mut pages = navigation_pages_without_settings(dashboard_enabled);
-    pages.push(Page::Settings);
-    pages
+/// Pages in navigation order for this session: library tabs follow the user's views, and the
+/// dashboard entry appears only when its gate is on, so a disabled dashboard is not reachable by
+/// keyboard or by the menu.
+fn navigation_pages(app: &KattriApp) -> Vec<Page> {
+    let collection_types: Option<Vec<Option<&str>>> = app.home.library_views().map(|views| {
+        views
+            .iter()
+            .map(|view| view.collection_type.as_deref())
+            .collect()
+    });
+    navigation_pages_for(app.dashboard_enabled(), collection_types.as_deref())
 }
 
-fn navigation_pages_without_settings(dashboard_enabled: bool) -> Vec<Page> {
+/// `collection_types` holds each user view's `CollectionType`, or `None` while the views are
+/// unknown; then the long-standing tabs show and the newer library types wait for the views.
+fn navigation_pages_for(
+    dashboard_enabled: bool,
+    collection_types: Option<&[Option<&str>]>,
+) -> Vec<Page> {
     Page::ALL
         .into_iter()
-        .filter(|page| *page != Page::Settings)
         .filter(|page| *page != Page::Dashboard || dashboard_enabled)
+        .filter(|page| library_page_shown(*page, collection_types))
         .collect()
+}
+
+fn library_page_shown(page: Page, collection_types: Option<&[Option<&str>]>) -> bool {
+    let Some(types) = collection_types else {
+        return !matches!(
+            page,
+            Page::Collections | Page::Books | Page::HomeVideos | Page::MusicVideos
+        );
+    };
+    let has = |wanted: &str| types.contains(&Some(wanted));
+    // Views without a collection type, or "mixed" ones, can hold movies and shows.
+    let mixed = types
+        .iter()
+        .any(|kind| kind.is_none_or(|kind| kind == "mixed"));
+    match page {
+        Page::Movies => has("movies") || mixed,
+        Page::Series => has("tvshows") || mixed,
+        Page::Music => has("music"),
+        Page::Collections => has("boxsets"),
+        Page::MusicVideos => has("musicvideos"),
+        Page::HomeVideos => has("homevideos"),
+        Page::Photos => has("photos") || has("homevideos"),
+        Page::Books => has("books"),
+        Page::LiveTv => has("livetv"),
+        Page::Home
+        | Page::Playlists
+        | Page::Downloads
+        | Page::Dashboard
+        | Page::SyncPlay
+        | Page::Settings => true,
+    }
 }
 
 #[cfg(test)]
@@ -4093,6 +4307,101 @@ mod accessible_name_tests {
             assert!(
                 bounds.x0 >= 0.0 && bounds.x1 <= f64::from(width),
                 "search outside {width}: {bounds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tabs_that_do_not_fit_leave_room_for_the_more_button() {
+        assert_eq!(visible_tab_count(&[50.0, 50.0], 200.0, 60.0), 2);
+        // 60 + 4 for More, then 54 per tab: two tabs fit in 180.
+        assert_eq!(visible_tab_count(&[50.0, 50.0, 50.0, 50.0], 180.0, 60.0), 2);
+        assert_eq!(visible_tab_count(&[50.0], 10.0, 60.0), 0);
+    }
+
+    fn topbar_nodes(width: f32, page: Option<Page>) -> Vec<(Role, String, egui::Rect)> {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut app = KattriApp::new(context.clone());
+        app.connection = ConnectionStatus::Connected;
+        match page {
+            Some(page) => {
+                app.view = AppView::Library;
+                app.page = page;
+            }
+            None => app.view = AppView::Home,
+        }
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 720.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                topbar(ui, &mut app, theme::palette(false));
+            },
+        );
+        output.textures_delta.clear();
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("navigation tree");
+        update
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| {
+                let bounds = node.bounds()?;
+                Some((
+                    node.role(),
+                    node.label().unwrap_or_default().to_owned(),
+                    egui::Rect::from_min_max(
+                        egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                        egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                    ),
+                ))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn narrow_top_bar_moves_tabs_into_more_instead_of_clipping_them() {
+        for width in [640.0, 960.0, 1600.0] {
+            let nodes = topbar_nodes(width, None);
+            let search = nodes
+                .iter()
+                .find(|(role, label, _)| {
+                    *role == Role::TextInput && label == ui_text(ids::ACCESS_BROWSE_SEARCH_FIELD)
+                })
+                .expect("search field")
+                .2;
+            let tabs: Vec<_> = nodes
+                .iter()
+                .filter(|(role, label, _)| *role == Role::Button && !label.contains('▾'))
+                .collect();
+            assert!(!tabs.is_empty(), "no tabs at {width}");
+            for (_, label, rect) in &tabs {
+                assert!(
+                    rect.right() <= search.left(),
+                    "{label} overlaps search at {width}: {rect:?} vs {search:?}"
+                );
+            }
+            let more = nodes
+                .iter()
+                .any(|(_, label, _)| label.starts_with(ui_text(ids::SHELL_NAV_MORE)));
+            assert_eq!(more, width < 1000.0, "More button at {width}");
+        }
+    }
+
+    #[test]
+    fn every_page_keeps_the_search_field() {
+        for page in Page::ALL {
+            let nodes = topbar_nodes(1280.0, Some(page));
+            assert!(
+                nodes.iter().any(|(role, label, _)| *role == Role::TextInput
+                    && label == ui_text(ids::ACCESS_BROWSE_SEARCH_FIELD)),
+                "no search on {page:?}"
             );
         }
     }

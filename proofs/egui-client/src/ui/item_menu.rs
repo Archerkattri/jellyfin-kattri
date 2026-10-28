@@ -50,6 +50,8 @@ pub(crate) enum ItemMenuAction {
     Identify,
     /// Administrators: open the image editor.
     EditImages,
+    /// Users allowed to manage subtitles: search and download subtitles for a video.
+    SearchSubtitles,
 }
 
 /// Entries offered for `item`, in menu order. Folders and playlists only open; series and
@@ -60,6 +62,15 @@ pub(crate) fn entries(item: &MediaItem) -> Vec<ItemMenuAction> {
         MediaKind::Folder | MediaKind::Playlist | MediaKind::Other
     ) {
         return vec![ItemMenuAction::Open];
+    }
+    if item.kind == MediaKind::Book {
+        // Books are not played; their file can be downloaded to read elsewhere.
+        return vec![
+            ItemMenuAction::Open,
+            ItemMenuAction::SetPlayed(!item.played),
+            ItemMenuAction::SetFavorite(!item.favorite),
+            ItemMenuAction::Download,
+        ];
     }
     let mut entries = vec![ItemMenuAction::Play];
     if item.resumable {
@@ -77,7 +88,7 @@ pub(crate) fn entries(item: &MediaItem) -> Vec<ItemMenuAction> {
     }
     if matches!(
         item.kind,
-        MediaKind::Movie | MediaKind::Episode | MediaKind::Audio
+        MediaKind::Movie | MediaKind::Episode | MediaKind::Audio | MediaKind::Video
     ) {
         entries.push(ItemMenuAction::Download);
     }
@@ -117,6 +128,7 @@ fn label(action: ItemMenuAction) -> &'static str {
         ItemMenuAction::EditMetadata => ids::ITEM_MENU_EDIT_METADATA,
         ItemMenuAction::Identify => ids::ITEM_MENU_IDENTIFY,
         ItemMenuAction::EditImages => ids::ITEM_MENU_EDIT_IMAGES,
+        ItemMenuAction::SearchSubtitles => ids::ITEM_MENU_SEARCH_SUBTITLES,
     })
 }
 
@@ -144,6 +156,20 @@ fn admin_id() -> egui::Id {
 /// Whether card menus drawn after this call offer the administrator entries.
 pub(crate) fn publish_admin(ctx: &egui::Context, admin: bool) {
     ctx.data_mut(|data| data.insert_temp(admin_id(), admin));
+}
+
+fn subtitles_id() -> egui::Id {
+    egui::Id::unique("kattri-item-menu-subtitles")
+}
+
+/// Makes subtitle management available only to authorized users.
+pub(crate) fn publish_subtitle_management(ctx: &egui::Context, allowed: bool) {
+    ctx.data_mut(|data| data.insert_temp(subtitles_id(), allowed));
+}
+
+/// Only movies and episodes can be searched for remote subtitles.
+pub(crate) fn can_search_subtitles(item: &MediaItem) -> bool {
+    matches!(item.kind, MediaKind::Movie | MediaKind::Episode)
 }
 
 /// Administrator entries for `item`, as Jellyfin Web offers them: edit metadata and images
@@ -246,6 +272,17 @@ fn show(ui: &mut egui::Ui, item: &MediaItem) {
     {
         list_submenu(ui, item, ItemMenuAction::AddToPlaylist, &playlists);
     }
+    let subtitles: bool = ui
+        .ctx()
+        .data(|data| data.get_temp(subtitles_id()))
+        .unwrap_or(false);
+    if subtitles && can_search_subtitles(item) {
+        let action = ItemMenuAction::SearchSubtitles;
+        if ui.button(label(action)).clicked() {
+            choose(ui, item, action, None);
+            ui.close();
+        }
+    }
     let admin: bool = ui
         .ctx()
         .data(|data| data.get_temp(admin_id()))
@@ -330,6 +367,20 @@ mod tests {
                 ItemMenuAction::Download,
             ]
         );
+    }
+
+    #[test]
+    fn books_offer_download_instead_of_play_and_videos_play() {
+        let book = item(serde_json::json!({"Id": "b", "Name": "Notes", "Type": "Book"}));
+        let actions = entries(&book);
+        assert!(!actions.contains(&ItemMenuAction::Play));
+        assert!(actions.contains(&ItemMenuAction::Download));
+        for item_type in ["Video", "MusicVideo"] {
+            let video = item(serde_json::json!({"Id": "v", "Name": "Clip", "Type": item_type}));
+            let actions = entries(&video);
+            assert_eq!(actions.first(), Some(&ItemMenuAction::Play), "{item_type}");
+            assert!(actions.contains(&ItemMenuAction::Download), "{item_type}");
+        }
     }
 
     #[test]

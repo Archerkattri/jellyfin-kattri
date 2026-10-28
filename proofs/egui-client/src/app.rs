@@ -321,7 +321,12 @@ pub enum Page {
     Movies,
     Series,
     Music,
+    /// Grid of the server's collections (BoxSets); opening one lists its items.
+    Collections,
+    MusicVideos,
+    HomeVideos,
     Photos,
+    Books,
     Playlists,
     Downloads,
     LiveTv,
@@ -409,12 +414,16 @@ impl PlaybackReportKind {
 }
 
 impl Page {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 15] = [
         Self::Home,
         Self::Movies,
         Self::Series,
         Self::Music,
+        Self::Collections,
+        Self::MusicVideos,
+        Self::HomeVideos,
         Self::Photos,
+        Self::Books,
         Self::Playlists,
         Self::Downloads,
         Self::LiveTv,
@@ -434,7 +443,11 @@ impl Page {
             Self::Downloads => ui_text(ids::SHELL_NAV_DOWNLOADS),
             Self::LiveTv => ui_text(ids::SHELL_NAV_LIVE_TV),
             Self::Dashboard => ui_text(ids::SHELL_NAV_DASHBOARD),
-            Self::SyncPlay => "Watch Together",
+            Self::Collections => ui_text(ids::SHELL_NAV_COLLECTIONS),
+            Self::MusicVideos => ui_text(ids::SHELL_NAV_MUSIC_VIDEOS),
+            Self::HomeVideos => ui_text(ids::SHELL_NAV_HOME_VIDEOS),
+            Self::Books => ui_text(ids::SHELL_NAV_BOOKS),
+            Self::SyncPlay => ui_text(ids::SHELL_NAV_WATCH_TOGETHER),
             Self::Settings => ui_text(ids::SHELL_NAV_SETTINGS),
         }
     }
@@ -450,7 +463,11 @@ impl Page {
             Self::Downloads => ui_text(ids::SHELL_RAIL_DOWNLOADS),
             Self::LiveTv => ui_text(ids::SHELL_RAIL_LIVE_TV),
             Self::Dashboard => ui_text(ids::SHELL_RAIL_DASHBOARD),
-            Self::SyncPlay => "SyncPlay",
+            Self::Collections => ui_text(ids::SHELL_RAIL_COLLECTIONS),
+            Self::MusicVideos => ui_text(ids::SHELL_RAIL_MUSIC_VIDEOS),
+            Self::HomeVideos => ui_text(ids::SHELL_RAIL_HOME_VIDEOS),
+            Self::Books => ui_text(ids::SHELL_RAIL_BOOKS),
+            Self::SyncPlay => ui_text(ids::SHELL_RAIL_WATCH_TOGETHER),
             Self::Settings => ui_text(ids::SHELL_RAIL_SETTINGS),
         }
     }
@@ -466,6 +483,11 @@ impl Page {
             Self::Music => Some(&["Audio", "MusicAlbum"]),
             Self::Photos => Some(&["Photo", "Folder", "CollectionFolder"]),
             Self::Playlists => Some(&["Playlist"]),
+            Self::Collections => Some(&["BoxSet"]),
+            Self::MusicVideos => Some(&["MusicVideo"]),
+            Self::HomeVideos => Some(&["Video"]),
+            // Audiobooks play like other audio; books are opened or downloaded instead.
+            Self::Books => Some(&["Book", "AudioBook"]),
             Self::Home
             | Self::Downloads
             | Self::LiveTv
@@ -478,7 +500,16 @@ impl Page {
     pub(crate) const fn is_catalog(self) -> bool {
         matches!(
             self,
-            Self::Home | Self::Movies | Self::Series | Self::Music | Self::Photos | Self::Playlists
+            Self::Home
+                | Self::Movies
+                | Self::Series
+                | Self::Music
+                | Self::Collections
+                | Self::MusicVideos
+                | Self::HomeVideos
+                | Self::Photos
+                | Self::Books
+                | Self::Playlists
         )
     }
 }
@@ -566,6 +597,20 @@ pub struct KattriApp {
     pub(crate) user_name: Option<String>,
     /// The signed-in user is a server administrator: the card menu offers admin actions.
     pub(crate) user_is_admin: bool,
+    /// The signed-in user may search and download subtitles (administrator, or the policy's
+    /// `EnableSubtitleManagement`).
+    pub(crate) user_can_manage_subtitles: bool,
+    /// Seek-bar preview thumbnails of the item now playing.
+    trickplay: crate::trickplay::TrickplayState,
+    /// The remote subtitle search dialog, while open.
+    subtitle_search: Option<crate::ui::subtitle_search::SubtitleSearch>,
+    /// The server's languages for the subtitle search, loaded once per sign-in.
+    subtitle_cultures: Vec<jellyfin_api::CultureDto>,
+    subtitle_cultures_request: Option<u64>,
+    /// Language last searched this session.
+    subtitle_search_language: String,
+    /// Downloaded subtitles for the player host to load: `(item id, file)`.
+    player_subtitles: Vec<(String, crate::worker::DownloadedSubtitle)>,
     /// An item the viewer asked to delete, waiting for confirmation: `(id, title)`.
     pub(crate) pending_delete: Option<(String, String)>,
     /// Admin actions in flight: request id to item title.
@@ -1071,6 +1116,13 @@ impl KattriApp {
             server: None,
             user_name: None,
             user_is_admin: false,
+            user_can_manage_subtitles: false,
+            trickplay: crate::trickplay::TrickplayState::default(),
+            subtitle_search: None,
+            subtitle_cultures: Vec::new(),
+            subtitle_cultures_request: None,
+            subtitle_search_language: crate::ui::subtitle_search::DEFAULT_LANGUAGE.to_owned(),
+            player_subtitles: Vec::new(),
             pending_delete: None,
             admin_requests: HashMap::new(),
             metadata_editor: None,
@@ -2382,6 +2434,7 @@ impl KattriApp {
         self.server = None;
         self.user_name = None;
         self.user_is_admin = false;
+        self.clear_subtitle_management();
         self.items.clear();
         self.selected_item_id = None;
         self.selected_details = None;
@@ -2729,7 +2782,13 @@ impl KattriApp {
             .filter(|item| item.remote_type.as_deref() == Some("BoxSet"))
             .map(|item| (item.id.clone(), item.title.clone()));
         if let Some((id, title)) = nested_collection {
-            self.navigate_to_parent(Page::Home, id, title, true);
+            // Collections opened from the Collections page stay under its tab.
+            let page = if self.page == Page::Collections {
+                Page::Collections
+            } else {
+                Page::Home
+            };
+            self.navigate_to_parent(page, id, title, true);
         } else {
             self.select_item(item_id);
         }
@@ -2794,6 +2853,13 @@ impl KattriApp {
             self.playback_start_error = None;
             self.playback_start_status = None;
             self.pending_playback = None;
+        } else if self.page == Page::Collections
+            && self
+                .browse_context
+                .as_ref()
+                .is_some_and(|context| context.is_collection)
+        {
+            self.navigate_to(Page::Collections);
         } else if self.view == AppView::Library {
             self.view = AppView::Home;
         }
@@ -2810,7 +2876,8 @@ impl KattriApp {
             }
         }
         for kind in HomeCatalogKind::ALL {
-            if sections.shows_catalog(kind) {
+            // The library list also decides which navigation tabs exist, so it always loads.
+            if sections.shows_catalog(kind) || kind == HomeCatalogKind::Libraries {
                 self.request_home_catalog(kind);
             }
         }
@@ -3548,12 +3615,22 @@ impl KattriApp {
                         self.request_catalog(0, None);
                     }
                 }
+                // These pages show the whole library type rather than one folder of it.
+                HomeViewTarget::Collections => self.navigate_to(Page::Collections),
+                HomeViewTarget::LiveTv => self.navigate_to(Page::LiveTv),
                 target => {
                     let page = match target {
                         HomeViewTarget::Movies => Page::Movies,
                         HomeViewTarget::Series => Page::Series,
                         HomeViewTarget::Music => Page::Music,
-                        HomeViewTarget::AllItems | HomeViewTarget::Playlists => Page::Home,
+                        HomeViewTarget::Books => Page::Books,
+                        HomeViewTarget::HomeVideos => Page::HomeVideos,
+                        HomeViewTarget::MusicVideos => Page::MusicVideos,
+                        HomeViewTarget::Photos => Page::Photos,
+                        HomeViewTarget::AllItems
+                        | HomeViewTarget::Playlists
+                        | HomeViewTarget::Collections
+                        | HomeViewTarget::LiveTv => Page::Home,
                     };
                     self.navigate_to_parent(page, tile.id, tile.name, false);
                 }
@@ -3800,7 +3877,7 @@ impl KattriApp {
                 if is_collection_browse {
                     collection_page_items.push(item.clone());
                 }
-                Some(crate::catalog::MediaItem::from_api(item))
+                Some(crate::catalog::MediaItem::poster_from_api(item))
             } else {
                 duplicate_count += 1;
                 None
@@ -3862,7 +3939,31 @@ impl KattriApp {
         if self.page == Page::Music {
             return Some(self.music_view.item_types());
         }
+        // An open collection lists whatever it holds.
+        if self.page == Page::Collections
+            && self
+                .browse_context
+                .as_ref()
+                .is_some_and(|context| context.is_collection)
+        {
+            return None;
+        }
         self.page.item_types()
+    }
+
+    /// The library a typed page reads from when no library tile chose one: the first user view
+    /// of that page's collection type. Home videos share the `Video` type with other libraries,
+    /// so that page needs it; the others are already distinct by item type.
+    fn page_library_parent(&self) -> Option<String> {
+        let collection_type = match self.page {
+            Page::HomeVideos => "homevideos",
+            _ => return None,
+        };
+        self.home
+            .library_views()?
+            .iter()
+            .find(|view| view.collection_type.as_deref() == Some(collection_type))
+            .map(|view| view.id.clone())
     }
 
     pub(crate) fn set_music_view(&mut self, view: MusicView) {
@@ -4233,6 +4334,7 @@ impl KattriApp {
                         self.browse_context
                             .as_ref()
                             .map(|context| context.parent_id.clone())
+                            .or_else(|| self.page_library_parent())
                     };
                     worker.fetch_items(
                         request_id,
@@ -4264,6 +4366,7 @@ impl KattriApp {
                             name_starts_with: name_bounds.0,
                             name_less_than: name_bounds.1,
                             studio_ids,
+                            ..ItemQuery::default()
                         },
                     )
                 });
@@ -5812,6 +5915,7 @@ impl KattriApp {
         if playback.live_stream_id().is_none() {
             self.request_media_segments(&item_id);
         }
+        self.request_trickplay(&item_id, &playback);
         self.pending_playback = Some(*playback);
         self.playback_start_loading = false;
         self.playback_start_error = None;
@@ -6061,6 +6165,7 @@ impl KattriApp {
         self.server = None;
         self.user_name = None;
         self.user_is_admin = false;
+        self.clear_subtitle_management();
         self.items.clear();
         self.total_record_count = None;
         self.start_index = 0;
@@ -6321,6 +6426,7 @@ impl KattriApp {
                     }
                     self.server = Some(server);
                     self.user_is_admin = user.is_administrator();
+                    self.user_can_manage_subtitles = user.can_manage_subtitles();
                     self.user_name = Some(user.name);
                     self.catalog_loading = true;
                     if !self.catalog_loaded {
@@ -6588,6 +6694,7 @@ impl KattriApp {
                     if self.apply_catalog_response(request_id, page, ceiling) {
                         self.server = Some(server);
                         self.user_is_admin = user.is_administrator();
+                        self.user_can_manage_subtitles = user.can_manage_subtitles();
                         self.user_name = Some(user.name);
                     }
                 }
@@ -6783,6 +6890,54 @@ impl KattriApp {
                         self.catalog_genres = genres;
                         self.catalog_studios = studios;
                     }
+                }
+                WorkerEvent::TrickplayResolutionsLoaded {
+                    request_id,
+                    item_id,
+                    resolutions,
+                } => {
+                    // Jellyfin Web sizes thumbnails from the screen, not the window.
+                    let screen_width = ctx
+                        .input(|input| input.viewport().monitor_size)
+                        .map_or(1920.0, |size| size.x * ctx.pixels_per_point());
+                    self.trickplay.resolutions_loaded(
+                        request_id,
+                        &item_id,
+                        &resolutions,
+                        screen_width,
+                    );
+                }
+                WorkerEvent::TrickplayTileLoaded {
+                    request_id,
+                    item_id,
+                    image,
+                } => {
+                    self.trickplay
+                        .sheet_loaded(ctx, request_id, &item_id, image);
+                }
+                WorkerEvent::SubtitleCulturesLoaded {
+                    request_id,
+                    cultures,
+                } => {
+                    if self.subtitle_cultures_request == Some(request_id) {
+                        self.subtitle_cultures_request = None;
+                        self.subtitle_cultures = cultures;
+                    }
+                }
+                WorkerEvent::RemoteSubtitlesLoaded { request_id, result } => {
+                    if let Some(search) = self.subtitle_search.as_mut()
+                        && search.search_request == Some(request_id)
+                    {
+                        search.search_request = None;
+                        search.results = Some(result);
+                    }
+                }
+                WorkerEvent::RemoteSubtitleDownloaded {
+                    request_id,
+                    item_id,
+                    result,
+                } => {
+                    self.remote_subtitle_downloaded(request_id, item_id, result);
                 }
                 WorkerEvent::LyricsLoaded { request_id, lines } => {
                     if request_id == self.track_lyrics_request_id {
@@ -7337,11 +7492,17 @@ impl KattriApp {
                                 .iter()
                                 .position(|item| item.id == item_id)
                                 .into_iter()
-                                .flat_map(|index| [index.checked_sub(1), index.checked_add(1)])
+                                .flat_map(|index| {
+                                    [false, true].map(|next| {
+                                        crate::ui::photos::adjacent_photo_id(
+                                            &self.photo_items,
+                                            index,
+                                            next,
+                                        )
+                                    })
+                                })
                                 .flatten()
-                                .filter_map(|index| self.photo_items.get(index))
-                                .filter(|item| item.item_type.as_deref() == Some("Photo"))
-                                .map(|item| item.id.clone())
+                                .map(str::to_owned)
                                 .collect::<Vec<_>>();
                             for neighbor in neighbors {
                                 self.request_photo_full_size(&neighbor);
@@ -8405,6 +8566,7 @@ mod catalog_query_tests {
                 name_starts_with: None,
                 name_less_than: None,
                 studio_ids: None,
+                ..ItemQuery::default()
             };
             let old_page = client
                 .list_items(
@@ -8929,6 +9091,7 @@ impl KattriApp {
         self.sync_home_sections();
         crate::ui::item_menu::publish_playlists(&ctx, self.menu_playlists.clone());
         crate::ui::item_menu::publish_admin(&ctx, self.user_is_admin);
+        crate::ui::item_menu::publish_subtitle_management(&ctx, self.user_can_manage_subtitles);
         crate::ui::item_menu::publish_collections(&ctx, self.menu_collections.clone());
         crate::ui::draw(root, self, width);
         if let Some((target, action)) = crate::ui::item_menu::take(&ctx) {
@@ -8936,7 +9099,196 @@ impl KattriApp {
         }
         self.draw_delete_confirmation(&ctx);
         self.draw_metadata_editor(&ctx);
+        self.show_subtitle_search(&ctx);
         self.draw_toast(&ctx);
+    }
+
+    fn clear_subtitle_management(&mut self) {
+        self.user_can_manage_subtitles = false;
+        self.subtitle_search = None;
+        self.subtitle_cultures.clear();
+        self.subtitle_cultures_request = None;
+        self.player_subtitles.clear();
+        self.trickplay.clear();
+    }
+
+    /// Ask for the trickplay manifest of a video that is about to play. Live TV and music have
+    /// none, so they are not asked for.
+    fn request_trickplay(&mut self, item_id: &str, playback: &PreparedPlayback) {
+        self.trickplay.clear();
+        if playback.live_stream_id().is_some() || !self.selected_is_video() {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        let media_source_id = playback.media_source_id().map(str::to_owned);
+        let sent = self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .get_trickplay_resolutions(request_id, item_id.to_owned(), media_source_id.clone())
+                .is_ok()
+        });
+        if sent {
+            self.trickplay
+                .start(item_id.to_owned(), media_source_id, request_id);
+        }
+    }
+
+    /// The seek-bar preview thumbnail of `item_id` at `position`, once its sheet has loaded.
+    /// Fetches the sheet on first use; `None` when the item has no trickplay data.
+    pub fn trickplay_thumbnail(
+        &mut self,
+        item_id: &str,
+        position: std::time::Duration,
+    ) -> Option<crate::trickplay::SeekThumbnail> {
+        if self.trickplay.item_id() != Some(item_id) {
+            return None;
+        }
+        let (thumbnail, request) = self.trickplay.thumbnail(position);
+        if let Some(request) = request {
+            let request_id = self.allocate_request_id();
+            let media_source_id = self.trickplay.media_source_id().map(str::to_owned);
+            let sent = self.worker.as_ref().is_some_and(|worker| {
+                worker
+                    .get_trickplay_tile(
+                        request_id,
+                        item_id.to_owned(),
+                        media_source_id,
+                        request.width,
+                        request.sheet,
+                    )
+                    .is_ok()
+            });
+            if sent {
+                self.trickplay.sheet_requested(request_id, request.sheet);
+            }
+        }
+        thumbnail
+    }
+
+    /// Whether the signed-in user may search and download subtitles.
+    pub fn can_manage_subtitles(&self) -> bool {
+        self.user_can_manage_subtitles
+    }
+
+    /// Open the subtitle search for `item_id`. From the player (`for_player`), a downloaded
+    /// subtitle is also handed to the playing video.
+    pub fn open_subtitle_search(&mut self, item_id: &str, for_player: bool) {
+        if !self.user_can_manage_subtitles {
+            return;
+        }
+        let title = self
+            .item_title(item_id)
+            .map_or_else(|| item_id.to_owned(), str::to_owned);
+        self.subtitle_search = Some(crate::ui::subtitle_search::SubtitleSearch::new(
+            item_id.to_owned(),
+            title,
+            for_player,
+            self.subtitle_search_language.clone(),
+        ));
+        if self.subtitle_cultures.is_empty() && self.subtitle_cultures_request.is_none() {
+            let request_id = self.allocate_request_id();
+            if self
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.list_subtitle_cultures(request_id).is_ok())
+            {
+                self.subtitle_cultures_request = Some(request_id);
+            }
+        }
+        self.search_remote_subtitles();
+    }
+
+    fn search_remote_subtitles(&mut self) {
+        let request_id = self.allocate_request_id();
+        let Some(search) = self.subtitle_search.as_mut() else {
+            return;
+        };
+        self.subtitle_search_language.clone_from(&search.language);
+        let sent = self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .search_remote_subtitles(
+                    request_id,
+                    search.item_id.clone(),
+                    search.language.clone(),
+                )
+                .is_ok()
+        });
+        search.results = None;
+        if sent {
+            search.search_request = Some(request_id);
+        } else {
+            search.search_request = None;
+            search.results = Some(Err(crate::worker::SubtitleRequestError::Failed));
+        }
+    }
+
+    /// Draws the subtitle search dialog while it is open. The player host calls this while a
+    /// video fills the window, when the catalog is not drawn.
+    pub fn show_subtitle_search(&mut self, ctx: &egui::Context) {
+        use crate::ui::subtitle_search::{DownloadNotice, SubtitleSearchAction};
+        let Some(search) = self.subtitle_search.as_mut() else {
+            return;
+        };
+        match crate::ui::subtitle_search::show(ctx, search, &self.subtitle_cultures) {
+            Some(SubtitleSearchAction::Search) => self.search_remote_subtitles(),
+            Some(SubtitleSearchAction::Download(subtitle_id)) => {
+                let request_id = self.allocate_request_id();
+                let Some(search) = self.subtitle_search.as_mut() else {
+                    return;
+                };
+                let sent = self.worker.as_ref().is_some_and(|worker| {
+                    worker
+                        .download_remote_subtitle(
+                            request_id,
+                            search.item_id.clone(),
+                            subtitle_id,
+                            search.for_player,
+                        )
+                        .is_ok()
+                });
+                if sent {
+                    search.download_request = Some(request_id);
+                    search.notice = Some(DownloadNotice::Running);
+                } else {
+                    search.notice = Some(DownloadNotice::Failed(
+                        crate::worker::SubtitleRequestError::Failed,
+                    ));
+                }
+            }
+            Some(SubtitleSearchAction::Close) => self.subtitle_search = None,
+            None => {}
+        }
+    }
+
+    fn remote_subtitle_downloaded(
+        &mut self,
+        request_id: u64,
+        item_id: String,
+        result: Result<Vec<crate::worker::DownloadedSubtitle>, crate::worker::SubtitleRequestError>,
+    ) {
+        use crate::ui::subtitle_search::DownloadNotice;
+        let files = match &result {
+            Ok(files) => files.clone(),
+            Err(_) => Vec::new(),
+        };
+        let added = !files.is_empty();
+        self.player_subtitles
+            .extend(files.into_iter().map(|file| (item_id.clone(), file)));
+        if let Some(search) = self.subtitle_search.as_mut()
+            && search.download_request == Some(request_id)
+        {
+            search.download_request = None;
+            search.notice = Some(match result {
+                Ok(_) if added => DownloadNotice::AddedToPlayer,
+                Ok(_) => DownloadNotice::OnServer,
+                Err(error) => DownloadNotice::Failed(error),
+            });
+        }
+    }
+
+    /// Subtitles downloaded from the player's search, as `(item id, file)`, for the host to load
+    /// into the playing video. The host takes them once.
+    pub fn take_player_subtitles(&mut self) -> Vec<(String, crate::worker::DownloadedSubtitle)> {
+        std::mem::take(&mut self.player_subtitles)
     }
 
     fn submit_item_admin(
@@ -9129,6 +9481,12 @@ impl KattriApp {
             }
             ItemMenuAction::EditImages => {
                 self.open_metadata_editor(target, crate::ui::metadata_editor::EditorMode::Images)
+            }
+            ItemMenuAction::SearchSubtitles => {
+                self.open_subtitle_search(&target.item_id, false);
+                if let Some(search) = self.subtitle_search.as_mut() {
+                    search.title = target.title;
+                }
             }
             ItemMenuAction::AddToPlaylist => {
                 let Some(playlist_id) = target.list_id else {
@@ -9349,6 +9707,24 @@ mod page_query_tests {
             Some(["Photo", "Folder", "CollectionFolder"].as_slice())
         );
         assert_eq!(Page::Playlists.item_types(), Some(["Playlist"].as_slice()));
+        assert_eq!(Page::Collections.item_types(), Some(["BoxSet"].as_slice()));
+        assert_eq!(
+            Page::MusicVideos.item_types(),
+            Some(["MusicVideo"].as_slice())
+        );
+        assert_eq!(Page::HomeVideos.item_types(), Some(["Video"].as_slice()));
+        assert_eq!(
+            Page::Books.item_types(),
+            Some(["Book", "AudioBook"].as_slice())
+        );
+        for page in [
+            Page::Collections,
+            Page::MusicVideos,
+            Page::HomeVideos,
+            Page::Books,
+        ] {
+            assert!(page.is_catalog(), "{page:?}");
+        }
     }
 
     #[test]
@@ -9456,6 +9832,26 @@ mod home_navigation_tests {
                 is_collection: true,
             })
         );
+    }
+
+    #[test]
+    fn collections_page_opens_a_collection_in_place_and_back_returns_to_the_grid() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.navigate_to(Page::Collections);
+        assert_eq!(app.page_item_types(), Some(["BoxSet"].as_slice()));
+        app.items = vec![MediaItem::from_api(catalog_item("set", "BoxSet"))];
+
+        app.activate_catalog_item("set".into());
+
+        assert_eq!(app.page, Page::Collections);
+        assert!(app.browse_context.as_ref().is_some_and(|c| c.is_collection));
+        // An open collection lists every kind of item it holds.
+        assert_eq!(app.page_item_types(), None);
+
+        app.navigate_back();
+        assert_eq!(app.view, AppView::Library);
+        assert_eq!(app.page, Page::Collections);
+        assert_eq!(app.browse_context, None);
     }
 
     #[test]
@@ -12458,5 +12854,79 @@ mod playback_recovery_tests {
         app.playback_failed_mid_stream("movie", generation, Some(10));
         assert_eq!(app.playback_start_request_id, generation);
         assert!(app.playback_start_error.is_some());
+    }
+}
+
+#[cfg(test)]
+mod subtitle_management_integration_tests {
+    use super::KattriApp;
+    use crate::worker::{ApiWorker, WorkerEvent};
+
+    #[test]
+    fn subtitle_search_requires_permission_and_logout_clears_it() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.open_subtitle_search("movie", false);
+        assert!(app.subtitle_search.is_none());
+        app.user_can_manage_subtitles = true;
+        app.open_subtitle_search("movie", false);
+        let search = app.subtitle_search.as_ref().expect("dialog");
+        assert!(search.search_request.is_some());
+        assert!(search.results.is_none());
+        app.clear_subtitle_management();
+        assert!(!app.can_manage_subtitles());
+        assert!(app.subtitle_search.is_none());
+        assert!(app.player_subtitles.is_empty());
+    }
+
+    #[test]
+    fn old_subtitle_search_replies_cannot_replace_a_newer_query() {
+        let ctx = egui::Context::default();
+        let mut app = KattriApp::new(ctx.clone());
+        let (worker, events) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.user_can_manage_subtitles = true;
+        app.open_subtitle_search("movie", false);
+        let old = app
+            .subtitle_search
+            .as_ref()
+            .expect("dialog")
+            .search_request
+            .expect("old request");
+        app.search_remote_subtitles();
+        let current = app
+            .subtitle_search
+            .as_ref()
+            .expect("dialog")
+            .search_request
+            .expect("current request");
+        assert_ne!(old, current);
+        events
+            .try_send(WorkerEvent::RemoteSubtitlesLoaded {
+                request_id: old,
+                result: Ok(Vec::new()),
+            })
+            .expect("event");
+        app.receive_worker_events(&ctx);
+        let dialog = app.subtitle_search.as_ref().expect("dialog");
+        assert_eq!(dialog.search_request, Some(current));
+        assert!(dialog.results.is_none());
+        events
+            .try_send(WorkerEvent::RemoteSubtitlesLoaded {
+                request_id: current,
+                result: Ok(Vec::new()),
+            })
+            .expect("event");
+        app.receive_worker_events(&ctx);
+        let dialog = app.subtitle_search.as_ref().expect("dialog");
+        assert!(dialog.search_request.is_none());
+        assert!(
+            dialog
+                .results
+                .as_ref()
+                .expect("result")
+                .as_ref()
+                .expect("success")
+                .is_empty()
+        );
     }
 }

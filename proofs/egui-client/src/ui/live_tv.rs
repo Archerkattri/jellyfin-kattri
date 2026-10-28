@@ -59,7 +59,12 @@ pub fn show(ui: &mut egui::Ui, input: LiveTvInput<'_>) -> LiveTvResponse {
     let state = channel_list_state(input.channels, input.endpoint_available);
     if state == ChannelListState::NotSetUp {
         ui.add_space(8.0);
-        ui.label(ui_text(ids::LIVE_TV_EMPTY_NOT_SET_UP));
+        ui.label(
+            RichText::new(ui_text(ids::LIVE_TV_EMPTY_NOT_SET_UP))
+                .size(18.0)
+                .strong(),
+        );
+        ui.label(RichText::new(ui_text(ids::LIVE_TV_EMPTY_NOT_SET_UP_HINT)).weak());
         return output;
     }
 

@@ -659,6 +659,7 @@ impl<'session> GlHost<'session> {
                 // Service the worker without laying out a hidden catalog, changing its focus,
                 // or running catalog actions against player input.
                 kattri_app.update_background(root.ctx());
+                kattri_app.show_subtitle_search(root.ctx());
                 let typing = root.egui_wants_keyboard_input();
                 if !typing && root.input(|input| input.key_pressed(egui::Key::Escape)) {
                     // Escape closes the media info panel before it leaves the video.
@@ -1034,6 +1035,17 @@ impl<'session> GlHost<'session> {
         // item; stage that item first so its segments have a matching owner.
         if let Some((item_id, segments)) = self.kattri_app.take_media_segments() {
             self.mpv.load_media_segments(&item_id, segments);
+        }
+
+        // A subtitle downloaded from the player's search joins the video it was found for.
+        for (item_id, subtitle) in self.kattri_app.take_player_subtitles() {
+            if self.mpv.playing_item_id() == Some(item_id.as_str()) {
+                self.mpv.add_external_subtitle(
+                    &subtitle.path,
+                    subtitle.title.as_deref(),
+                    subtitle.language.as_deref(),
+                );
+            }
         }
 
         if let Some(stream_url) = self.kattri_app.take_stream_url() {
@@ -1554,6 +1566,7 @@ fn osd_controls(
     // Both reads happen before the skipper takes a mutable borrow of the host for the draw.
     let subtitle_selected = mpv.subtitle_track_selected();
     let sync_feedback = mpv.sync_feedback().display().0.to_owned();
+    let playing_item_id = mpv.playing_item_id().map(str::to_owned);
     let skip = osd.skip_settings.map(|settings| SkipControls {
         skipper: mpv.segment_skipper_mut(),
         settings,
@@ -1564,6 +1577,10 @@ fn osd_controls(
     let mut subtitle_pick = None;
     let mut sync_marker = None;
     let mut reset_subtitle_delay = false;
+    let mut search_subtitles = false;
+    // Live TV has no item subtitles to search for.
+    let subtitle_search_available =
+        kattri_app.can_manage_subtitles() && playing_item_id.is_some() && !live_stream_active;
     let actions = player_controls::draw_with_skip_and_extra(
         ui,
         PlayerControlsView {
@@ -1617,9 +1634,27 @@ fn osd_controls(
                     }
                 });
                 ui.label(&sync_feedback);
+                if subtitle_search_available {
+                    ui.separator();
+                    if ui
+                        .button(jellyfin_egui_client::search_subtitles_label())
+                        .clicked()
+                    {
+                        search_subtitles = true;
+                        ui.close();
+                    }
+                }
             });
         },
+        |time| {
+            playing_item_id
+                .as_deref()
+                .and_then(|item_id| kattri_app.trickplay_thumbnail(item_id, time))
+        },
     );
+    if search_subtitles && let Some(item_id) = playing_item_id.as_deref() {
+        kattri_app.open_subtitle_search(item_id, true);
+    }
     if let Some(selection) = audio_pick {
         mpv.select_audio_track(selection);
     }

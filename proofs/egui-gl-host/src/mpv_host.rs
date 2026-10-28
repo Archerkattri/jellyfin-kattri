@@ -881,6 +881,8 @@ pub(crate) struct MpvHost<'session> {
     track_inventory_attempts: u8,
     track_feedback: Option<String>,
     pending_track_selection: Option<(u64, TrackMenuKind)>,
+    /// A `sub-add` of a downloaded subtitle; its reply refreshes the track list.
+    pending_subtitle_add: Option<u64>,
     /// Set only at launch by the debug QA host; normal product sessions report as usual.
     reporting_enabled: bool,
     pending_report_metadata: Option<PlaybackReportMetadata>,
@@ -991,6 +993,7 @@ impl<'session> MpvHost<'session> {
                 track_inventory_attempts: 0,
                 track_feedback: None,
                 pending_track_selection: None,
+                pending_subtitle_add: None,
                 reporting_enabled: true,
                 pending_report_metadata: None,
                 report_metadata: None,
@@ -1089,6 +1092,7 @@ impl<'session> MpvHost<'session> {
                     track_inventory_attempts: 0,
                     track_feedback: None,
                     pending_track_selection: None,
+                    pending_subtitle_add: None,
                     reporting_enabled: true,
                     pending_report_metadata: None,
                     report_metadata: None,
@@ -1157,6 +1161,7 @@ impl<'session> MpvHost<'session> {
             track_inventory_attempts: 0,
             track_feedback: None,
             pending_track_selection: None,
+            pending_subtitle_add: None,
             reporting_enabled: true,
             pending_report_metadata: None,
             report_metadata: None,
@@ -1603,6 +1608,15 @@ impl<'session> MpvHost<'session> {
                         .is_some_and(|(request_id, _)| request_id == event.request_id) =>
                 {
                     self.complete_track_selection(event.request_id, event.error, true);
+                }
+                EventKind::CommandReply | EventKind::CommandSubmissionFailed
+                    if self.pending_subtitle_add == Some(event.request_id) =>
+                {
+                    self.pending_subtitle_add = None;
+                    if matches!(event.kind, EventKind::CommandSubmissionFailed) || event.error < 0 {
+                        tracing::warn!(error = event.error, "downloaded subtitle was not loaded");
+                    }
+                    self.request_track_inventory();
                 }
                 EventKind::TrackInventoryReady => {
                     self.complete_track_inventory(event.request_id, session);
@@ -2642,6 +2656,40 @@ impl<'session> MpvHost<'session> {
 
     pub(crate) fn select_audio_track(&mut self, selection: TrackSelection) {
         self.select_track(TrackMenuKind::Audio, selection);
+    }
+
+    /// Load a subtitle file downloaded for the playing item and select it, then refresh the
+    /// track list. The file is local, so libmpv still sees no server address or credential.
+    pub(crate) fn add_external_subtitle(
+        &mut self,
+        path: &std::path::Path,
+        title: Option<&str>,
+        language: Option<&str>,
+    ) {
+        let (Some(session), Some(path)) = (self.session, path.to_str()) else {
+            return;
+        };
+        // `sub-add <file> select [<title> [<lang>]]`; an empty title is still sent when only the
+        // language is known, since the arguments are positional.
+        let mut arguments = vec!["sub-add", path, "select"];
+        match (
+            title.filter(|t| !t.is_empty()),
+            language.filter(|l| !l.is_empty()),
+        ) {
+            (Some(title), Some(language)) => arguments.extend([title, language]),
+            (Some(title), None) => arguments.push(title),
+            (None, Some(language)) => arguments.extend(["", language]),
+            (None, None) => {}
+        }
+        match session.command(&arguments) {
+            Ok(command_id) => {
+                self.pending_subtitle_add = Some(command_id.get());
+                // The viewer chose this subtitle; a remembered choice must not replace it.
+                self.policy.subtitle_user_choice = true;
+                self.policy.pending_sid_restore = None;
+            }
+            Err(error) => tracing::warn!(%error, "downloaded subtitle was not queued"),
+        }
     }
 
     pub(crate) fn select_subtitle_track(&mut self, selection: TrackSelection) {

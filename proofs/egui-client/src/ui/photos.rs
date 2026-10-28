@@ -102,97 +102,128 @@ pub fn draw(ui: &mut Ui, view: &mut PhotosView<'_>) -> Option<PhotosAction> {
     let columns = grid_columns(ui.available_width());
     let rows = items.len().div_ceil(columns);
 
-    egui::ScrollArea::vertical()
-        .id_salt("photo_browser_grid")
-        .auto_shrink([false, false])
-        .show_rows(ui, CARD_HEIGHT, rows, |ui, row_range| {
-            let overscan_rows = row_range.len().max(1);
-            let first_near_row = row_range.start.saturating_sub(overscan_rows);
-            let last_near_row = row_range.end.saturating_add(overscan_rows).min(rows);
-            for row in first_near_row..last_near_row {
-                let visible = row >= row_range.start && row < row_range.end;
-                let start = row.saturating_mul(columns);
-                let end = start.saturating_add(columns).min(items.len());
-                for (index, item) in items.iter().enumerate().take(end).skip(start) {
-                    if is_folder(item) {
-                        continue;
-                    }
-                    if let Some(tag) = item
-                        .image_tags
-                        .as_ref()
-                        .and_then(|tags| tags.get("Primary"))
-                        .and_then(Option::as_deref)
-                    {
-                        view.visible_thumbnails.push((
-                            item.id.clone(),
-                            encode_decode_request(
-                                tag,
-                                view.page_start.saturating_add(index),
-                                visible,
-                            ),
-                        ));
-                    }
-                }
+    // The page already scrolls. Reserve the off-screen rows in that layout, but only build
+    // widgets for rows near the clip; a nested scroll area here was squeezed to a sliver.
+    for row in 0..rows {
+        let row_top = ui.cursor().top();
+        let row_rect = egui::Rect::from_min_size(
+            egui::pos2(ui.min_rect().left(), row_top),
+            Vec2::new(ui.available_width(), CARD_HEIGHT),
+        );
+        let visible = ui.is_rect_visible(row_rect);
+        // Rows within a screen's height of the view are decoded early, at lower priority.
+        let clip = ui.clip_rect();
+        let near = row_rect.intersects(clip.expand2(Vec2::new(0.0, clip.height())));
+        let start = row.saturating_mul(columns);
+        let end = start.saturating_add(columns).min(items.len());
+        if !near {
+            ui.add_space(CARD_HEIGHT);
+            continue;
+        }
+        for (index, item) in items.iter().enumerate().take(end).skip(start) {
+            if let Some(tag) = item
+                .image_tags
+                .as_ref()
+                .and_then(|tags| tags.get("Primary"))
+                .and_then(Option::as_deref)
+            {
+                view.visible_thumbnails.push((
+                    item.id.clone(),
+                    encode_decode_request(tag, view.page_start.saturating_add(index), visible),
+                ));
             }
-            for row in row_range {
-                ui.horizontal(|ui| {
-                    for column in 0..columns {
-                        let index = row.saturating_mul(columns).saturating_add(column);
-                        let Some(item) = items.get(index) else {
-                            break;
-                        };
-                        ui.push_id(&item.id, |ui| {
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(CARD_WIDTH, CARD_HEIGHT),
-                                egui::Layout::top_down(egui::Align::Center),
-                                |ui| {
-                                    if let Some(texture) = view.thumbnails.get(&item.id) {
-                                        ui.add(
-                                            egui::Image::new(texture)
-                                                .fit_to_exact_size(THUMBNAIL_SIZE),
-                                        );
-                                    } else {
-                                        ui.allocate_ui_with_layout(
-                                            THUMBNAIL_SIZE,
-                                            egui::Layout::centered_and_justified(
-                                                egui::Direction::TopDown,
-                                            ),
-                                            |ui| {
-                                                ui.label(if is_folder(item) {
-                                                    ui_text(ids::PHOTOS_KIND_FOLDER)
-                                                } else {
-                                                    ui_text(ids::PHOTOS_KIND_PHOTO)
-                                                });
-                                            },
-                                        );
-                                    }
-
-                                    let label = if is_folder(item) {
-                                        ui_text_args(
-                                            ids::PHOTOS_A11Y_OPEN_FOLDER,
-                                            &[("name", item.name.as_str())],
-                                        )
-                                    } else {
-                                        ui_text_args(
-                                            ids::PHOTOS_A11Y_OPEN_PHOTO,
-                                            &[("name", item.name.as_str())],
-                                        )
-                                    };
-                                    if ui
-                                        .add_sized([CARD_WIDTH, 44.0], egui::Button::new(label))
-                                        .clicked()
-                                    {
-                                        action = Some(item_action(item));
-                                    }
-                                },
-                            );
-                        });
+        }
+        ui.horizontal(|ui| {
+            for item in items.iter().take(end).skip(start) {
+                ui.push_id(&item.id, |ui| {
+                    if photo_card(ui, item, view.thumbnails.get(&item.id)).clicked() {
+                        action = Some(item_action(item));
                     }
                 });
             }
         });
+    }
 
     action
+}
+
+/// One grid card: the thumbnail (or a folder or photo placeholder) with the item's name under
+/// it. The whole card opens the folder or photo.
+fn photo_card(ui: &mut Ui, item: &BaseItemDto, texture: Option<&TextureHandle>) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(CARD_WIDTH, CARD_HEIGHT), egui::Sense::click());
+    let folder = is_folder(item);
+    let visuals = ui.visuals().clone();
+    let thumb = egui::Rect::from_center_size(
+        egui::pos2(rect.center().x, rect.top() + 6.0 + THUMBNAIL_SIZE.y / 2.0),
+        THUMBNAIL_SIZE,
+    );
+    let painter = ui.painter_at(rect);
+    if response.hovered() || response.has_focus() {
+        painter.rect_filled(rect, 10.0, visuals.widgets.hovered.weak_bg_fill);
+    }
+    if let Some(texture) = texture {
+        egui::Image::new(texture)
+            .fit_to_exact_size(THUMBNAIL_SIZE)
+            .corner_radius(8.0)
+            .paint_at(ui, thumb);
+    } else {
+        painter.rect_filled(thumb, 8.0, visuals.extreme_bg_color);
+        let color = visuals.weak_text_color();
+        if folder {
+            folder_icon(&painter, thumb.center(), color);
+        } else {
+            painter.text(
+                thumb.center(),
+                egui::Align2::CENTER_CENTER,
+                ui_text(ids::PHOTOS_KIND_PHOTO),
+                egui::FontId::proportional(13.0),
+                color,
+            );
+        }
+    }
+    let name_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 6.0, thumb.bottom() + 6.0),
+        egui::pos2(rect.right() - 6.0, rect.bottom()),
+    );
+    let mut name_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(name_rect)
+            .layout(egui::Layout::top_down(egui::Align::Center)),
+    );
+    name_ui.add(
+        egui::Label::new(egui::RichText::new(&item.name).color(visuals.text_color()))
+            .truncate()
+            .selectable(false),
+    );
+    if response.has_focus() {
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            10.0,
+            egui::Stroke::new(2.0, visuals.selection.stroke.color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let label = if folder {
+        ui_text_args(
+            ids::PHOTOS_A11Y_OPEN_FOLDER,
+            &[("name", item.name.as_str())],
+        )
+    } else {
+        ui_text_args(ids::PHOTOS_A11Y_OPEN_PHOTO, &[("name", item.name.as_str())])
+    };
+    response.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+    response.on_hover_text(item.name.as_str())
+}
+
+/// A folder outline: a tab on top of a body, centred on `center`.
+fn folder_icon(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32) {
+    let stroke = egui::Stroke::new(2.0, color);
+    let body = egui::Rect::from_center_size(center + Vec2::new(0.0, 4.0), Vec2::new(52.0, 36.0));
+    painter.rect_stroke(body, 4.0, stroke, egui::StrokeKind::Middle);
+    let tab =
+        egui::Rect::from_min_size(body.left_top() - Vec2::new(0.0, 7.0), Vec2::new(20.0, 7.0));
+    painter.rect_stroke(tab, 2.0, stroke, egui::StrokeKind::Middle);
 }
 
 /// How long the slideshow shows each photo once it has loaded.
@@ -340,19 +371,33 @@ fn adjacent_photo_action(
     current_index: usize,
     next: bool,
 ) -> Option<PhotosAction> {
-    let adjacent = if next {
-        current_index
-            .checked_add(1)
-            .filter(|&index| index < items.len())?
-    } else {
-        current_index.checked_sub(1)?
-    };
-    let id = items.get(adjacent)?.id.clone();
+    let id = adjacent_photo_id(items, current_index, next)?.to_owned();
     Some(if next {
         PhotosAction::NextPhoto(id)
     } else {
         PhotosAction::PreviousPhoto(id)
     })
+}
+
+/// Share navigation's folder-skipping order with the full-size image prefetcher.
+pub(crate) fn adjacent_photo_id(
+    items: &[BaseItemDto],
+    current_index: usize,
+    next: bool,
+) -> Option<&str> {
+    let adjacent = if next {
+        items
+            .iter()
+            .skip(current_index.saturating_add(1))
+            .find(|item| item.item_type.as_deref() == Some("Photo"))
+    } else {
+        items
+            .get(..current_index)?
+            .iter()
+            .rev()
+            .find(|item| item.item_type.as_deref() == Some("Photo"))
+    };
+    Some(adjacent?.id.as_str())
 }
 
 fn is_folder(item: &BaseItemDto) -> bool {
@@ -380,8 +425,8 @@ fn item_action(item: &BaseItemDto) -> PhotosAction {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_COLUMNS, MAX_PAGE_ITEMS, PhotosAction, PhotosView, adjacent_photo_action, draw,
-        grid_columns, item_action, normalized_page_size, page_request,
+        CARD_HEIGHT, MAX_COLUMNS, MAX_PAGE_ITEMS, PhotosAction, PhotosView, adjacent_photo_action,
+        draw, grid_columns, ids, item_action, normalized_page_size, page_request, ui_text_args,
     };
     use egui::{Context, RawInput};
     use jellyfin_api::BaseItemDto;
@@ -419,6 +464,64 @@ mod tests {
         assert_eq!(
             item_action(&item("photo", "Sunset", "Photo")),
             PhotosAction::OpenPhoto("photo".to_owned())
+        );
+    }
+
+    #[test]
+    fn folder_cards_are_named_and_whole_inside_a_scrolling_page() {
+        let items = vec![
+            item("a", "Summer 2024", "Folder"),
+            item("b", "Grandparents' 50th anniversary party", "Folder"),
+            item("c", "Beach", "Photo"),
+        ];
+        let thumbnails = HashMap::new();
+        let full = HashMap::new();
+        let mut visible = Vec::new();
+        let context = Context::default();
+        context.enable_accesskit();
+        let mut output = context.run_ui(RawInput::default(), |ui| {
+            // The app draws this page inside its own vertical scroll area.
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let _ = draw(
+                    ui,
+                    &mut PhotosView {
+                        folder_title: "Photos",
+                        items: &items,
+                        thumbnails: &thumbnails,
+                        full_size_images: &full,
+                        loading: false,
+                        error: None,
+                        page_start: 0,
+                        page_size: 100,
+                        total_count: Some(3),
+                        selected_photo_id: None,
+                        full_size_error: false,
+                        visible_thumbnails: &mut visible,
+                    },
+                );
+            });
+        });
+        output.textures_delta.clear();
+        let update = output.platform_output.accesskit_update.expect("tree");
+        for name in ["Summer 2024", "Grandparents' 50th anniversary party"] {
+            let label = ui_text_args(ids::PHOTOS_A11Y_OPEN_FOLDER, &[("name", name)]);
+            let (_, card) = update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.label() == Some(label.as_str()))
+                .unwrap_or_else(|| panic!("card for {name}"));
+            let bounds = card.bounds().expect("bounds");
+            assert!(
+                bounds.y1 - bounds.y0 >= f64::from(CARD_HEIGHT) - 1.0,
+                "{name}"
+            );
+        }
+        // The visible name is drawn as text too, truncated to the card width when long.
+        assert!(
+            update
+                .nodes
+                .iter()
+                .any(|(_, node)| node.value().or(node.label()) == Some("Summer 2024"))
         );
     }
 
@@ -488,6 +591,34 @@ mod tests {
         );
         assert_eq!(adjacent_photo_action(&items, 0, false), None);
         assert_eq!(adjacent_photo_action(&items, 1, true), None);
+    }
+
+    #[test]
+    fn full_size_navigation_skips_folders_between_photos() {
+        let items = [
+            item("a", "First", "Photo"),
+            item("folder", "Album", "Folder"),
+            item("b", "Second", "Photo"),
+            item("collection", "Collection", "CollectionFolder"),
+            item("c", "Third", "Photo"),
+        ];
+
+        assert_eq!(
+            adjacent_photo_action(&items, 0, true),
+            Some(PhotosAction::NextPhoto("b".to_owned()))
+        );
+        assert_eq!(
+            adjacent_photo_action(&items, 2, true),
+            Some(PhotosAction::NextPhoto("c".to_owned()))
+        );
+        assert_eq!(
+            adjacent_photo_action(&items, 4, false),
+            Some(PhotosAction::PreviousPhoto("b".to_owned()))
+        );
+        assert_eq!(
+            adjacent_photo_action(&items, 1, true),
+            Some(PhotosAction::NextPhoto("b".to_owned()))
+        );
     }
 
     #[test]
