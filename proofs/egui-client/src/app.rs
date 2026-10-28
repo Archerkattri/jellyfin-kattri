@@ -662,6 +662,8 @@ pub struct KattriApp {
     pub(crate) music_queue: Queue,
     /// Neighbours of the episode last started, for previous/next and auto-play.
     episode_neighbors: Option<EpisodeNeighbors>,
+    /// The episode to play next in the series on screen.
+    series_next_up: Option<SeriesNextUp>,
     pub(crate) music_track_names: HashMap<String, String>,
     pub(crate) music_album_tracks_loading: bool,
     pub(crate) music_album_tracks_error: Option<ErrorClass>,
@@ -1093,6 +1095,7 @@ impl KattriApp {
             photo_full_size_failed: HashSet::new(),
             music_queue: Queue::new(),
             episode_neighbors: None,
+            series_next_up: None,
             music_track_names: HashMap::new(),
             music_album_tracks_loading: false,
             music_album_tracks_error: None,
@@ -4350,6 +4353,20 @@ impl KattriApp {
         self.series_episodes_error = None;
         self.series_seasons_loading = true;
         self.series_episodes_loading = false;
+        let next_up_request_id = self.allocate_request_id();
+        self.series_next_up = self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| {
+                worker
+                    .get_series_next_up(next_up_request_id, series_id.clone())
+                    .is_ok()
+            })
+            .then(|| SeriesNextUp {
+                series_id: series_id.clone(),
+                request_id: next_up_request_id,
+                episode: None,
+            });
         let request_id = self.allocate_request_id();
         self.series_seasons_request_id = request_id;
         if self
@@ -4360,6 +4377,14 @@ impl KattriApp {
             self.series_seasons_loading = false;
             self.series_seasons_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into());
         }
+    }
+
+    /// The episode the series page offers to play, once the server has named one.
+    pub(crate) fn series_next_up_episode(&self, series_id: &str) -> Option<&BaseItemDto> {
+        self.series_next_up
+            .as_ref()
+            .filter(|next_up| next_up.series_id == series_id)
+            .and_then(|next_up| next_up.episode.as_ref())
     }
 
     pub(crate) fn select_series_season(&mut self, season_id: String) {
@@ -6093,6 +6118,18 @@ impl KattriApp {
                     self.series_episodes_loading = false;
                     self.series_episodes_error = Some(message);
                 }
+                WorkerEvent::SeriesNextUpLoaded {
+                    request_id,
+                    series_id,
+                    episode,
+                } => {
+                    if let Some(next_up) = self.series_next_up.as_mut()
+                        && next_up.request_id == request_id
+                        && next_up.series_id == series_id
+                    {
+                        next_up.episode = episode.map(|episode| *episode);
+                    }
+                }
                 WorkerEvent::AdjacentEpisodesLoaded {
                     request_id,
                     episode_id,
@@ -7660,6 +7697,14 @@ struct EpisodeNeighbors {
     request_id: u64,
     previous: Option<String>,
     next: Option<String>,
+}
+
+/// The server's Next Up episode for one series.
+#[derive(Clone, Debug, PartialEq)]
+struct SeriesNextUp {
+    series_id: String,
+    request_id: u64,
+    episode: Option<BaseItemDto>,
 }
 
 const MAX_PHOTO_THUMBNAILS: usize = 64;
@@ -10487,6 +10532,52 @@ mod photo_decode_event_tests {
             app.auto_play.as_ref().map(|auto| auto.item_id.as_str()),
             Some("e3")
         );
+    }
+
+    #[test]
+    fn series_next_up_is_kept_only_for_its_own_request_and_series() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.request_series_seasons("show".into());
+        let request_id = app
+            .series_next_up
+            .as_ref()
+            .expect("next up requested")
+            .request_id;
+        let episode = || -> Option<Box<jellyfin_api::BaseItemDto>> {
+            Some(Box::new(
+                serde_json::from_value(serde_json::json!({"Id": "e4", "Name": "Four"}))
+                    .expect("episode fixture"),
+            ))
+        };
+        for (id, series) in [(request_id + 1, "show"), (request_id, "other")] {
+            sender
+                .try_send(WorkerEvent::SeriesNextUpLoaded {
+                    request_id: id,
+                    series_id: series.into(),
+                    episode: episode(),
+                })
+                .expect("send stale next up");
+        }
+        sender
+            .try_send(WorkerEvent::SeriesNextUpLoaded {
+                request_id,
+                series_id: "show".into(),
+                episode: episode(),
+            })
+            .expect("send next up");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(
+            app.series_next_up_episode("show")
+                .map(|item| item.id.as_str()),
+            Some("e4")
+        );
+        assert!(app.series_next_up_episode("other").is_none());
     }
 
     #[test]

@@ -144,6 +144,31 @@ impl JellyfinClient {
         Ok(AdjacentEpisodes::from_items(response.items, episode_id))
     }
 
+    /// The episode to play next in one series, using
+    /// `GET /Shows/NextUp?seriesId={seriesId}`: the episode in progress, else the first
+    /// unplayed one after the last played. `None` when the server has none to offer.
+    pub async fn series_next_up(
+        &self,
+        session: &Session,
+        series_id: &str,
+    ) -> Result<Option<crate::BaseItemDto>, ApiError> {
+        validate_id(series_id)?;
+        let response = self
+            .get_series_items(
+                session,
+                &["Shows", "NextUp"],
+                &[
+                    ("seriesId", series_id.to_owned()),
+                    ("userId", session.user.id.clone()),
+                    ("limit", "1".to_owned()),
+                    ("enableUserData", "true".to_owned()),
+                    ("fields", "Overview".to_owned()),
+                ],
+            )
+            .await?;
+        Ok(response.items.into_iter().next())
+    }
+
     async fn get_series_items(
         &self,
         session: &Session,
@@ -358,6 +383,31 @@ mod tests {
         );
         assert_eq!(adjacent.previous.map(|item| item.id).as_deref(), Some("e1"));
         assert_eq!(adjacent.next.map(|item| item.id).as_deref(), Some("e3"));
+    }
+
+    #[tokio::test]
+    async fn series_next_up_asks_for_one_episode_of_the_series() {
+        let body =
+            r#"{"Items":[{"Id":"e5","Name":"Five","Type":"Episode","SeriesId":"series-1"}]}"#;
+        let (base, task) = mock_server(vec![(200, body), (200, r#"{"Items":[]}"#)]).await;
+        let client = client(&base);
+        let next = client
+            .series_next_up(&session(), "series-1")
+            .await
+            .expect("next up");
+        assert_eq!(next.map(|item| item.id).as_deref(), Some("e5"));
+        let none = client
+            .series_next_up(&session(), "series-1")
+            .await
+            .expect("empty next up");
+        assert!(none.is_none());
+        let requests = task.await.expect("server task");
+        let url = request_uri(&requests[0]);
+        assert_eq!(url.path(), "/jellyfin/Shows/NextUp");
+        let query = params(&url);
+        assert_eq!(query.get("seriesId").map(String::as_str), Some("series-1"));
+        assert_eq!(query.get("limit").map(String::as_str), Some("1"));
+        assert_eq!(query.get("userId").map(String::as_str), Some("user-id"));
     }
 
     #[test]

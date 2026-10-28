@@ -166,29 +166,54 @@ fn episode_row(ui: &mut Ui, episode: &BaseItemDto) -> egui::Response {
             .corner_radius(egui::CornerRadius::same(12))
             .inner_margin(egui::Margin::symmetric(14, 10))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let response = ui.add_sized(
-                        egui::vec2((ui.available_width() - 190.0).max(140.0), 42.0),
-                        egui::Button::new(RichText::new(episode_label(episode)).strong()),
-                    );
-                    if let Some(runtime) = format_runtime(episode.run_time_ticks) {
-                        ui.label(RichText::new(runtime).color(Color32::from_gray(164)));
-                    }
-                    if let Some(progress) = progress_fraction(episode) {
-                        ui.add(
-                            ProgressBar::new(progress)
-                                .desired_width(ui.available_width().min(112.0))
-                                .desired_height(7.0)
-                                .show_percentage(),
+                let response = ui
+                    .horizontal(|ui| {
+                        let response = ui.add_sized(
+                            egui::vec2((ui.available_width() - 190.0).max(140.0), 42.0),
+                            egui::Button::new(RichText::new(episode_label(episode)).strong()),
                         );
-                    }
-                    response
-                })
-                .inner
+                        if let Some(runtime) = format_runtime(episode.run_time_ticks) {
+                            ui.label(RichText::new(runtime).color(Color32::from_gray(164)));
+                        }
+                        if let Some(progress) = progress_fraction(episode) {
+                            ui.add(
+                                ProgressBar::new(progress)
+                                    .desired_width(ui.available_width().min(112.0))
+                                    .desired_height(7.0)
+                                    .show_percentage(),
+                            );
+                        } else if is_played(episode) {
+                            ui.label(
+                                RichText::new(ui_text(ids::SERIES_EPISODE_WATCHED))
+                                    .color(Color32::from_rgb(0x8F, 0xD1, 0x9E)),
+                            );
+                        }
+                        response
+                    })
+                    .inner;
+                if let Some(overview) = episode
+                    .overview
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|overview| !overview.is_empty())
+                {
+                    ui.add(
+                        egui::Label::new(RichText::new(overview).color(Color32::from_gray(176)))
+                            .truncate(),
+                    );
+                }
+                response
             })
             .inner
     })
     .inner
+}
+
+fn is_played(episode: &BaseItemDto) -> bool {
+    episode
+        .user_data
+        .as_ref()
+        .is_some_and(|user_data| user_data.played == Some(true))
 }
 
 fn episode_label(episode: &BaseItemDto) -> String {

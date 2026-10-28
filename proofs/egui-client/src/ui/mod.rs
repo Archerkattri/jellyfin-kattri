@@ -2268,6 +2268,12 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                     }
                 }
                 if item.item_type.as_deref() == Some("Series") {
+                    if let Some(episode) = app.series_next_up_episode(&item.id) {
+                        ui.add_space(10.0);
+                        if series_next_up_button(ui, episode, colors).clicked() {
+                            episode_to_open = Some(episode.id.clone());
+                        }
+                    }
                     ui.add_space(14.0);
                     ui.heading(ui_text(ids::SERIES_HEADING_SEASONS));
                     if app.series_seasons_loading {
@@ -2601,6 +2607,79 @@ fn is_playable_item_type(item_type: Option<&str>) -> bool {
 
 /// The buttons on the details header: a white Play (or Resume) pill, Start over when there is a
 /// saved position, and Download.
+/// "Play S1:E3 · Title", or "Resume …" when the episode was left part way.
+fn series_next_up_button(
+    ui: &mut egui::Ui,
+    episode: &jellyfin_api::BaseItemDto,
+    colors: Palette,
+) -> egui::Response {
+    let label = episode_display_label(episode);
+    let resumable = episode.user_data.as_ref().is_some_and(|user_data| {
+        resumable_position_ticks(
+            user_data.playback_position_ticks,
+            user_data.played,
+            episode.run_time_ticks,
+        )
+        .is_some()
+    });
+    let text = ui_text_args(
+        if resumable {
+            ids::SERIES_BUTTON_RESUME_NEXT_UP
+        } else {
+            ids::SERIES_BUTTON_PLAY_NEXT_UP
+        },
+        &[("episode", label.as_str())],
+    );
+    ui.add(
+        egui::Button::new(
+            RichText::new(text)
+                .size(17.0)
+                .strong()
+                .color(colors.background),
+        )
+        .fill(colors.accent)
+        .corner_radius(CornerRadius::same(24))
+        .min_size(egui::vec2(150.0, 48.0)),
+    )
+}
+
+/// "S1:E3 · Title" for an episode with season and episode numbers, else its name.
+fn episode_display_label(episode: &jellyfin_api::BaseItemDto) -> String {
+    match (episode.parent_index_number, episode.index_number) {
+        (Some(season), Some(number)) => format!("S{season}:E{number} · {}", episode.name),
+        (None, Some(number)) => format!("E{number} · {}", episode.name),
+        _ => episode.name.clone(),
+    }
+}
+
+#[cfg(test)]
+mod next_up_label_tests {
+    use super::episode_display_label;
+
+    #[test]
+    fn episode_labels_carry_season_and_number_when_known() {
+        let episode = |json: serde_json::Value| -> jellyfin_api::BaseItemDto {
+            serde_json::from_value(json).expect("episode fixture")
+        };
+        assert_eq!(
+            episode_display_label(&episode(serde_json::json!({
+                "Id": "e", "Name": "Pilot", "ParentIndexNumber": 1, "IndexNumber": 3
+            }))),
+            "S1:E3 · Pilot"
+        );
+        assert_eq!(
+            episode_display_label(&episode(serde_json::json!({
+                "Id": "e", "Name": "Pilot", "IndexNumber": 3
+            }))),
+            "E3 · Pilot"
+        );
+        assert_eq!(
+            episode_display_label(&episode(serde_json::json!({"Id": "e", "Name": "Pilot"}))),
+            "Pilot"
+        );
+    }
+}
+
 fn detail_play_buttons(
     ui: &mut egui::Ui,
     app: &KattriApp,

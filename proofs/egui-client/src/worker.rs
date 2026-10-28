@@ -304,6 +304,12 @@ pub enum WorkerEvent {
         season_id: String,
         message: String,
     },
+    /// The episode to play next in `series_id`. `None` when there is none or the request failed.
+    SeriesNextUpLoaded {
+        request_id: u64,
+        series_id: String,
+        episode: Option<Box<BaseItemDto>>,
+    },
     /// The episodes either side of `episode_id`. Both are `None` when the request failed.
     AdjacentEpisodesLoaded {
         request_id: u64,
@@ -728,6 +734,10 @@ enum WorkerCommand {
         request_id: u64,
         series_id: String,
         episode_id: String,
+    },
+    GetSeriesNextUp {
+        request_id: u64,
+        series_id: String,
     },
     ListMusicAlbumTracks {
         request_id: u64,
@@ -1213,6 +1223,17 @@ impl ApiWorker {
             request_id,
             series_id,
             episode_id,
+        })
+    }
+
+    pub(crate) fn get_series_next_up(
+        &self,
+        request_id: u64,
+        series_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::GetSeriesNextUp {
+            request_id,
+            series_id,
         })
     }
 
@@ -3040,6 +3061,31 @@ async fn execute_command(
                         episode_id,
                         previous: adjacent.previous.map(Box::new),
                         next: adjacent.next.map(Box::new),
+                    },
+                )
+                .await
+            }
+            WorkerCommand::GetSeriesNextUp {
+                request_id,
+                series_id,
+            } => {
+                let episode = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .series_next_up(session, &series_id)
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "series next up unavailable");
+                            None
+                        }),
+                    _ => None,
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::SeriesNextUpLoaded {
+                        request_id,
+                        series_id,
+                        episode: episode.map(Box::new),
                     },
                 )
                 .await

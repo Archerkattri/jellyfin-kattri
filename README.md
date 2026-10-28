@@ -119,9 +119,10 @@ yet a replacement for the official clients. The main missing pieces:
   favorite and Download. Still missing: play next / add to queue, shuffle, add to
   playlist or collection, media info, multi-select and, for administrators, edit
   metadata, identify, refresh metadata, edit images, edit subtitles and delete.
-- **Episodes and series:** no episode details page (clicking an episode plays it), episode
-  rows have no thumbnail, overview or progress, the series page has no Play / Next Up /
-  Shuffle, and the player has no Up Next countdown. The player's previous and next
+- **Episodes and series:** the series page offers the server's Next Up episode (Play or
+  Resume), and episode rows show the overview, runtime, progress and a watched mark.
+  Still missing: an episode details page (clicking an episode plays it), episode
+  thumbnails, Shuffle, and an Up Next countdown in the player. The player's previous and next
   buttons move between episodes, and the next episode starts when one ends (a Playback
   setting, on by default).
 - **Player OSD:** title, elapsed/total time, transport, chapter stepping, volume with
