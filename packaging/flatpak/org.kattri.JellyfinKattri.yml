@@ -6,14 +6,13 @@
 #
 # Runtime choice. The app is egui and winit, with no GNOME libraries, so the
 # org.freedesktop.Platform runtime is used. Its GNOME runtime pin is not applicable.
-# Runtime, SDK, Rust extension and ffmpeg extension are all pinned to branch 25.08,
-# which must match each other. The branch was not checked against the current Flathub
+# Runtime, SDK and Rust extension are pinned to branch 25.08, which must match each other. The branch was not checked against the current Flathub
 # listing; check it before the first build.
 #
-# libmpv is built as a module in this manifest from the mpv v0.41.0 tag (the latest
-# GitHub release at the time of writing), pinned to its commit below. libass, libplacebo
-# and Vulkan are disabled, so ASS subtitle rendering is not in this build. Those need their own
-# modules before the Flatpak is a full playback build.
+# libmpv is the pinned LGPL linux-x64 archive from packaging/libmpv/manifest.toml (same URL
+# and SHA-256), not a source build: FFmpeg, libplacebo and dav1d are linked into it
+# statically. Its remaining shared dependencies come from the runtime, except libass and
+# uchardet, which the runtime does not ship and are built below from checksummed releases.
 #
 # Offline build: flatpak-builder runs cargo with --offline. Every crate comes from
 # cargo-sources.json, generated from Cargo.lock with the flatpak-cargo-generator tool
@@ -29,7 +28,6 @@ runtime-version: "25.08"
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
-  - org.freedesktop.Sdk.Extension.ffmpeg-full
 command: kattri
 
 finish-args:
@@ -44,35 +42,38 @@ build-options:
   env:
     CARGO_HOME: /run/build/kattri/cargo
   append-path: /usr/lib/sdk/rust-stable/bin
-  prepend-pkgconfig-path: /usr/lib/sdk/ffmpeg-full/lib/pkgconfig
 
 modules:
-  # This libmpv is built from source, not from a packaging/libmpv archive, so the SHA-256
-  # check does not apply. The tag is pinned to the same mpv commit as the linux-x64 archive
-  # in packaging/libmpv/manifest.toml; flatpak-builder refuses a tag that has moved.
-  # -Dgpl=false is the LGPL build flag (legal item L2).
-  - name: mpv
-    buildsystem: meson
+  - name: uchardet
+    buildsystem: cmake-ninja
     config-opts:
-      - -Dlibmpv=true
-      - -Dcplayer=false
-      - -Dgpl=false
-      - -Dtests=false
-      - -Dmanpage-build=disabled
-      - -Dlua=disabled
-      - -Djavascript=disabled
-      - -Dlibass=disabled
-      - -Dlibplacebo=disabled
-      - -Dvulkan=disabled
-      - -Dlcms2=disabled
-      - -Dlibarchive=disabled
-      - -Drubberband=disabled
-      - -Dgl=enabled
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_BINARY=OFF
+      - -DBUILD_STATIC=OFF
     sources:
-      - type: git
-        url: https://github.com/mpv-player/mpv.git
-        tag: v0.41.0
-        commit: 41f6a645068483470267271e1d09966ca3b9f413
+      - type: archive
+        url: https://www.freedesktop.org/software/uchardet/releases/uchardet-0.0.8.tar.xz
+        sha256: e97a60cfc00a1c147a674b097bb1422abd9fa78a2d9ce3f3fdcc2e78a34ac5f0
+
+  - name: libass
+    config-opts:
+      - --disable-static
+    sources:
+      - type: archive
+        url: https://github.com/libass/libass/releases/download/0.17.4/libass-0.17.4.tar.xz
+        sha256: 78f1179b838d025e9c26e8fef33f8092f65611444ffa1bfc0cfac6a33511a05a
+
+  # Keep the URL and SHA-256 equal to [platforms.linux-x64] in packaging/libmpv/manifest.toml.
+  - name: libmpv
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 libmpv.so.2 /app/lib/libmpv.so.2
+      - install -d /app/share/licenses/libmpv
+      - install -m644 LICENSE.* BUILD-INFO.txt /app/share/licenses/libmpv/
+    sources:
+      - type: archive
+        url: https://github.com/Archerkattri/jellyfin-kattri/releases/download/libmpv-v0.41.0-abe7469/kattri-libmpv-linux-x64-v0.41.0.tar.gz
+        sha256: cc4217e1caf6d1c1d99285e375a4ea598313a0a183b93ba0deb9032773f12fb0
 
   - name: kattri
     buildsystem: simple
