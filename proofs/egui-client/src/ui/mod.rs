@@ -1197,8 +1197,12 @@ fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
             live_tv::LiveTvAction::TuneChannel(channel_id) => {
                 app.tune_live_tv_channel(channel_id);
             }
+            live_tv::LiveTvAction::RecordProgram(program_id) => {
+                app.change_live_tv_timer(crate::worker::TimerChange::Record { program_id });
+            }
         }
     }
+    live_tv_recordings(ui, app, colors);
     if let Some(notice) = app.live_tv_notice.as_deref() {
         ui.label(RichText::new(notice).color(colors.muted));
     }
@@ -1221,6 +1225,88 @@ fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     {
         let start_index = u32::try_from(app.live_tv_channels.len()).unwrap_or(u32::MAX);
         app.request_live_tv_channels(start_index);
+    }
+}
+
+/// The Live TV page's Recordings and Scheduled lists.
+fn live_tv_recordings(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
+    use crate::app::RecordingsState;
+    app.ensure_live_tv_recordings();
+    ui.add_space(16.0);
+    ui.label(
+        RichText::new(ui_text(ids::LIVE_TV_HEADING_RECORDINGS))
+            .strong()
+            .size(18.0),
+    );
+    match app.live_tv_recordings_state {
+        RecordingsState::NotLoaded | RecordingsState::Loading => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    RichText::new(ui_text(ids::LIVE_TV_STATUS_LOADING_RECORDINGS))
+                        .color(colors.muted),
+                );
+            });
+            return;
+        }
+        RecordingsState::Unavailable => {
+            ui.label(
+                RichText::new(ui_text(ids::LIVE_TV_EMPTY_RECORDINGS_UNAVAILABLE))
+                    .color(colors.muted),
+            );
+            return;
+        }
+        RecordingsState::Loaded => {}
+    }
+    let mut play = None;
+    let mut cancel = None;
+    if app.live_tv_recordings.is_empty() {
+        ui.label(RichText::new(ui_text(ids::LIVE_TV_EMPTY_RECORDINGS)).color(colors.muted));
+    }
+    for recording in &app.live_tv_recordings {
+        ui.horizontal(|ui| {
+            if ui.button(ui_text(ids::PLAYBACK_BUTTON_PLAY)).clicked() {
+                play = Some(recording.id.clone());
+            }
+            ui.label(RichText::new(&recording.name).color(colors.text));
+            if let Some(date) = recording.premiere_date.as_deref() {
+                ui.label(RichText::new(date.get(..10).unwrap_or(date)).color(colors.muted));
+            }
+        });
+    }
+    ui.add_space(10.0);
+    ui.label(
+        RichText::new(ui_text(ids::LIVE_TV_HEADING_SCHEDULED))
+            .strong()
+            .size(16.0),
+    );
+    if app.live_tv_timers.is_empty() {
+        ui.label(RichText::new(ui_text(ids::LIVE_TV_EMPTY_SCHEDULED)).color(colors.muted));
+    }
+    for timer in &app.live_tv_timers {
+        ui.horizontal(|ui| {
+            if ui
+                .button(ui_text(ids::LIVE_TV_BUTTON_CANCEL_RECORDING))
+                .clicked()
+            {
+                cancel = Some(timer.id.clone());
+            }
+            let name = timer.name.as_deref().unwrap_or_default();
+            ui.label(RichText::new(name).color(colors.text));
+            let when = timer
+                .start_date
+                .as_deref()
+                .map(|date| date.get(..16).unwrap_or(date).replace('T', " "))
+                .unwrap_or_default();
+            let channel = timer.channel_name.as_deref().unwrap_or_default();
+            ui.label(RichText::new(format!("{channel} {when} UTC")).color(colors.muted));
+        });
+    }
+    if let Some(item_id) = play {
+        app.play_item(item_id, false);
+    }
+    if let Some(timer_id) = cancel {
+        app.change_live_tv_timer(crate::worker::TimerChange::Cancel { timer_id });
     }
 }
 

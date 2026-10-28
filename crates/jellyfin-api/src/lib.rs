@@ -12,6 +12,7 @@ mod item_admin;
 pub mod item_images;
 mod json_response;
 mod live_tv;
+mod live_tv_recordings;
 mod mpv_profile;
 mod password_reset;
 mod playback;
@@ -43,6 +44,7 @@ pub use live_tv::{
     LiveTvProgramPage, MAX_GUIDE_CHANNEL_IDS, MAX_GUIDE_CHANNELS_PER_WINDOW,
     MAX_GUIDE_PROGRAMS_PER_WINDOW, MAX_GUIDE_WINDOW_SECONDS,
 };
+pub use live_tv_recordings::{LiveTvTimer, MAX_RECORDINGS};
 pub use mpv_profile::{
     BaselineError, BaselineSubtitleProfile, EffectiveMpvProfile, MpvEntryResult, MpvProfile,
     MpvProfileEntry, MpvProfileError, MpvSoftwareBaseline, ProfileProvenance, RuntimeCapabilities,

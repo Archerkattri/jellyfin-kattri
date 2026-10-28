@@ -769,6 +769,17 @@ pub const ITEM_MENU_PLAY_NEXT: &str = "item_menu.play_next";
 pub const ITEM_MENU_ADD_TO_PLAYLIST: &str = "item_menu.add_to_playlist";
 pub const ITEM_MENU_REFRESH_METADATA: &str = "item_menu.refresh_metadata";
 pub const ITEM_MENU_DELETE: &str = "item_menu.delete";
+pub const LIVE_TV_BUTTON_RECORD: &str = "live_tv.button.record";
+pub const LIVE_TV_BUTTON_RECORD_PROGRAM: &str = "live_tv.button.record_program";
+pub const LIVE_TV_BUTTON_CANCEL_RECORDING: &str = "live_tv.button.cancel_recording";
+pub const LIVE_TV_HEADING_RECORDINGS: &str = "live_tv.heading.recordings";
+pub const LIVE_TV_HEADING_SCHEDULED: &str = "live_tv.heading.scheduled";
+pub const LIVE_TV_STATUS_LOADING_RECORDINGS: &str = "live_tv.status.loading_recordings";
+pub const LIVE_TV_EMPTY_RECORDINGS: &str = "live_tv.empty.recordings";
+pub const LIVE_TV_EMPTY_SCHEDULED: &str = "live_tv.empty.scheduled";
+pub const LIVE_TV_EMPTY_RECORDINGS_UNAVAILABLE: &str = "live_tv.empty.recordings_unavailable";
+pub const TOAST_SCHEDULE_UPDATED: &str = "toast.schedule_updated";
+pub const TOAST_SCHEDULE_FAILED: &str = "toast.schedule_failed";
 pub const FORGOT_PASSWORD_BUTTON: &str = "forgot_password.button";
 pub const FORGOT_PASSWORD_NEED_USERNAME: &str = "forgot_password.need_username";
 pub const FORGOT_PASSWORD_SENDING: &str = "forgot_password.sending";
@@ -946,6 +957,17 @@ pub const ALL: &[&str] = &[
     ITEM_MENU_ADD_TO_PLAYLIST,
     ITEM_MENU_REFRESH_METADATA,
     ITEM_MENU_DELETE,
+    LIVE_TV_BUTTON_RECORD,
+    LIVE_TV_BUTTON_RECORD_PROGRAM,
+    LIVE_TV_BUTTON_CANCEL_RECORDING,
+    LIVE_TV_HEADING_RECORDINGS,
+    LIVE_TV_HEADING_SCHEDULED,
+    LIVE_TV_STATUS_LOADING_RECORDINGS,
+    LIVE_TV_EMPTY_RECORDINGS,
+    LIVE_TV_EMPTY_SCHEDULED,
+    LIVE_TV_EMPTY_RECORDINGS_UNAVAILABLE,
+    TOAST_SCHEDULE_UPDATED,
+    TOAST_SCHEDULE_FAILED,
     FORGOT_PASSWORD_BUTTON,
     FORGOT_PASSWORD_NEED_USERNAME,
     FORGOT_PASSWORD_SENDING,

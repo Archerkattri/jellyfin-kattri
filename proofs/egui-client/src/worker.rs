@@ -173,6 +173,15 @@ pub(crate) enum ItemAdminAction {
     AddToCollection,
 }
 
+/// A change to the Live TV recording schedule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TimerChange {
+    /// Record this program with the server's default timer.
+    Record { program_id: String },
+    /// Cancel this scheduled recording.
+    Cancel { timer_id: String },
+}
+
 /// Most episodes one shuffle queues.
 const MAX_SHUFFLE_EPISODES: u32 = 200;
 
@@ -334,6 +343,16 @@ pub enum WorkerEvent {
     GenresLoaded {
         request_id: u64,
         genres: Vec<String>,
+    },
+    /// Live TV recordings and scheduled timers.
+    RecordingsLoaded {
+        request_id: u64,
+        result: Result<(Vec<BaseItemDto>, Vec<jellyfin_api::LiveTvTimer>), ErrorClass>,
+    },
+    /// A recording was scheduled or cancelled, or the server refused.
+    TimerChanged {
+        request_id: u64,
+        result: Result<(), ErrorClass>,
     },
     /// A series' episodes in random order. Empty on failure.
     ShuffleLoaded {
@@ -806,6 +825,13 @@ enum WorkerCommand {
     ShuffleSeries {
         request_id: u64,
         series_id: String,
+    },
+    LoadRecordings {
+        request_id: u64,
+    },
+    ChangeTimer {
+        request_id: u64,
+        change: TimerChange,
     },
     ListMusicAlbumTracks {
         request_id: u64,
@@ -1313,6 +1339,20 @@ impl ApiWorker {
             action,
             collection_id,
         })
+    }
+
+    pub(crate) fn load_recordings(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::LoadRecordings { request_id })
+    }
+
+    pub(crate) fn change_timer(
+        &self,
+        request_id: u64,
+        change: TimerChange,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::ChangeTimer { request_id, change })
     }
 
     pub(crate) fn shuffle_series(
@@ -3257,6 +3297,47 @@ async fn execute_command(
                     events,
                     ctx,
                     WorkerEvent::GenresLoaded { request_id, genres },
+                )
+                .await
+            }
+            WorkerCommand::LoadRecordings { request_id } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        match client.list_live_tv_recordings(session).await {
+                            Ok(recordings) => client
+                                .list_live_tv_timers(session)
+                                .await
+                                .map(|timers| (recordings, timers)),
+                            Err(error) => Err(error),
+                        }
+                        .map_err(|error| error.classify())
+                    }
+                    _ => Err(ErrorClass::Unexpected),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::RecordingsLoaded { request_id, result },
+                )
+                .await
+            }
+            WorkerCommand::ChangeTimer { request_id, change } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => match &change {
+                        TimerChange::Record { program_id } => {
+                            client.record_live_tv_program(session, program_id).await
+                        }
+                        TimerChange::Cancel { timer_id } => {
+                            client.cancel_live_tv_timer(session, timer_id).await
+                        }
+                    }
+                    .map_err(|error| error.classify()),
+                    _ => Err(ErrorClass::Unexpected),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::TimerChanged { request_id, result },
                 )
                 .await
             }

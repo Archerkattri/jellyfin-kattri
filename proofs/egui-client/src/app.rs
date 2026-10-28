@@ -673,6 +673,12 @@ pub struct KattriApp {
     episode_neighbors: Option<EpisodeNeighbors>,
     /// The episode to play next in the series on screen.
     series_next_up: Option<SeriesNextUp>,
+    /// Live TV recordings and scheduled timers, loaded when the Live TV page opens.
+    pub(crate) live_tv_recordings: Vec<BaseItemDto>,
+    pub(crate) live_tv_timers: Vec<jellyfin_api::LiveTvTimer>,
+    live_tv_recordings_request_id: u64,
+    pub(crate) live_tv_recordings_state: RecordingsState,
+    timer_change_request_id: u64,
     /// A shuffled run of episodes; previous, next and auto-play follow it while one of its
     /// episodes plays.
     shuffle_queue: Option<ShuffleQueue>,
@@ -1140,6 +1146,11 @@ impl KattriApp {
             episode_neighbors: None,
             series_next_up: None,
             shuffle_queue: None,
+            live_tv_recordings: Vec::new(),
+            live_tv_timers: Vec::new(),
+            live_tv_recordings_request_id: 0,
+            live_tv_recordings_state: RecordingsState::NotLoaded,
+            timer_change_request_id: 0,
             shuffle_request_id: 0,
             detail_parent: None,
             episode_thumbnails: HashMap::new(),
@@ -2556,6 +2567,9 @@ impl KattriApp {
         }
         self.cancel_navigation_requests();
         self.page = page;
+        if page == Page::LiveTv {
+            self.live_tv_recordings_state = RecordingsState::NotLoaded;
+        }
         self.catalog_name_prefix = None;
         self.catalog_genre = None;
         self.detail_parent = None;
@@ -5269,6 +5283,38 @@ impl KattriApp {
         true
     }
 
+    /// Loads recordings and timers once per visit to the Live TV page.
+    pub(crate) fn ensure_live_tv_recordings(&mut self) {
+        if self.live_tv_recordings_state != RecordingsState::NotLoaded {
+            return;
+        }
+        self.reload_live_tv_recordings();
+    }
+
+    fn reload_live_tv_recordings(&mut self) {
+        let request_id = self.allocate_request_id();
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.load_recordings(request_id).is_ok())
+        {
+            self.live_tv_recordings_request_id = request_id;
+            self.live_tv_recordings_state = RecordingsState::Loading;
+        }
+    }
+
+    /// Schedules or cancels a recording; the lists reload when the server answers.
+    pub(crate) fn change_live_tv_timer(&mut self, change: crate::worker::TimerChange) {
+        let request_id = self.allocate_request_id();
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.change_timer(request_id, change).is_ok())
+        {
+            self.timer_change_request_id = request_id;
+        }
+    }
+
     /// Starts a shuffled run of `series_id`'s episodes.
     pub(crate) fn shuffle_series(&mut self, series_id: String) {
         let request_id = self.allocate_request_id();
@@ -6541,6 +6587,35 @@ impl KattriApp {
                 WorkerEvent::GenresLoaded { request_id, genres } => {
                     if request_id == self.catalog_genres_request_id {
                         self.catalog_genres = genres;
+                    }
+                }
+                WorkerEvent::RecordingsLoaded { request_id, result } => {
+                    if request_id == self.live_tv_recordings_request_id {
+                        match result {
+                            Ok((recordings, timers)) => {
+                                self.live_tv_recordings = recordings;
+                                self.live_tv_timers = timers;
+                                self.live_tv_recordings_state = RecordingsState::Loaded;
+                            }
+                            Err(_) => {
+                                self.live_tv_recordings.clear();
+                                self.live_tv_timers.clear();
+                                self.live_tv_recordings_state = RecordingsState::Unavailable;
+                            }
+                        }
+                    }
+                }
+                WorkerEvent::TimerChanged { request_id, result } => {
+                    if request_id == self.timer_change_request_id {
+                        self.show_toast(
+                            ui_text(if result.is_ok() {
+                                ids::TOAST_SCHEDULE_UPDATED
+                            } else {
+                                ids::TOAST_SCHEDULE_FAILED
+                            })
+                            .to_owned(),
+                        );
+                        self.reload_live_tv_recordings();
                     }
                 }
                 WorkerEvent::ShuffleLoaded {
@@ -8311,6 +8386,16 @@ struct EpisodeNeighbors {
     next_label: Option<String>,
     /// The viewer dismissed Up Next for this episode: it ends without starting the next.
     up_next_cancelled: bool,
+}
+
+/// Where the Live TV page's recordings list stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecordingsState {
+    NotLoaded,
+    Loading,
+    Loaded,
+    /// The server has no recording support set up, or refused.
+    Unavailable,
 }
 
 /// Episodes in shuffled order as `(id, label)`.
@@ -11557,6 +11642,59 @@ mod photo_decode_event_tests {
             pin_expiration_date: None,
         }));
         assert!(network.contains("network"));
+    }
+
+    #[test]
+    fn recordings_load_once_per_visit_and_reload_after_a_schedule_change() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.ensure_live_tv_recordings();
+        let first = app.live_tv_recordings_request_id;
+        app.ensure_live_tv_recordings();
+        assert_eq!(
+            app.live_tv_recordings_request_id, first,
+            "one load per visit"
+        );
+        sender
+            .try_send(WorkerEvent::RecordingsLoaded {
+                request_id: first,
+                result: Ok((
+                    vec![
+                        serde_json::from_value(serde_json::json!({"Id": "r1", "Name": "Match"}))
+                            .expect("recording"),
+                    ],
+                    Vec::new(),
+                )),
+            })
+            .expect("send recordings");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.live_tv_recordings_state, super::RecordingsState::Loaded);
+        assert_eq!(app.live_tv_recordings.len(), 1);
+
+        app.change_live_tv_timer(crate::worker::TimerChange::Record {
+            program_id: "p1".into(),
+        });
+        sender
+            .try_send(WorkerEvent::TimerChanged {
+                request_id: app.timer_change_request_id,
+                result: Ok(()),
+            })
+            .expect("send change");
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(
+            app.live_tv_recordings_state,
+            super::RecordingsState::Loading
+        );
+        assert_ne!(app.live_tv_recordings_request_id, first, "the lists reload");
+        assert!(app.toast.is_some());
     }
 
     #[test]

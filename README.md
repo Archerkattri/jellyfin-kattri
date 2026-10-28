@@ -34,7 +34,7 @@ desktop window.
 | Playback | Direct play, direct stream and transcode through the relay, resume, playback reporting, audio and subtitle tracks, subtitle delay, chapters, speed control, segment skip |
 | Player | Icon control bar with title, time, volume and chapters; previous/next for tracks and episodes, an Up Next card and auto-play of the next episode; media info panel (`I`), equalizer and loudness filters, A-B loop and frame stepping, HDR to SDR tone mapping, refresh-rate matching on Windows, open a stream address |
 | Music | Album and playlist browsing, queue with shuffle and repeat, queue restore after restart |
-| Live TV | Channel list, 24-hour guide, tune through the relay |
+| Live TV | Channel list, 24-hour guide, tune through the relay, record the current program, recordings and scheduled recordings |
 | Offline | Download manager with pause, resume, range fallback, checksum verification and external subtitles |
 | Extras | Right-click item menu (play, mark watched, favorite, download, add to playlist or queue), playlists, collections, favorites, photos, admin-lite dashboard, parental PIN |
 | Settings | General, playback, audio, subtitles, video, input, server, About; versioned TOML per profile |
@@ -142,8 +142,10 @@ yet a replacement for the official clients. The main missing pieces:
   and streams. Missing: version picker, extras/special features, trailers, theme media,
   "more from this season" and lyrics.
 - **Other:** photos have a slideshow, and the home sections can be turned off one by one
-  in General settings, and sign-in has a Forgot password flow. Missing: Live TV recordings
-  and timers, and library management; the dashboard is admin-lite.
+  in General settings, and sign-in has a Forgot password flow. Live TV lists recordings
+  (playable) and scheduled recordings (cancellable), and records a channel's current
+  program. Missing: series recordings and library management; the dashboard is
+  admin-lite.
 
 ### Work still required for a production release
 
