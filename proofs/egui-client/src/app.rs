@@ -2716,10 +2716,31 @@ impl KattriApp {
     /// each request is pending.
     pub(crate) fn refresh_home(&mut self) {
         self.request_menu_playlists();
+        let sections = self.home.sections;
         for kind in HomeRowKind::ALL {
-            self.request_home_row(kind);
+            if sections.shows_row(kind) {
+                self.request_home_row(kind);
+            }
         }
         for kind in HomeCatalogKind::ALL {
+            if sections.shows_catalog(kind) {
+                self.request_home_catalog(kind);
+            }
+        }
+    }
+
+    /// Applies the home section settings, and loads a section the viewer just turned on.
+    fn sync_home_sections(&mut self) {
+        self.home.sections =
+            crate::ui::home::HomeSections::from_settings(&self.settings.settings().general);
+        if self.user_name.is_none() {
+            return;
+        }
+        let (rows, catalogs) = self.home.idle_sections();
+        for kind in rows {
+            self.request_home_row(kind);
+        }
+        for kind in catalogs {
             self.request_home_catalog(kind);
         }
     }
@@ -8496,6 +8517,7 @@ impl KattriApp {
         if let Some(url) = crate::ui::open_url::show(&ctx, &mut self.open_url) {
             self.pending_stream_url = Some(url);
         }
+        self.sync_home_sections();
         crate::ui::item_menu::publish_playlists(&ctx, self.menu_playlists.clone());
         crate::ui::item_menu::publish_admin(&ctx, self.user_is_admin);
         crate::ui::item_menu::publish_collections(&ctx, self.menu_collections.clone());

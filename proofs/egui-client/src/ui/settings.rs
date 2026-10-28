@@ -638,6 +638,20 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             ui_text(ids::SETTINGS_GENERAL_INTERFACE_SIZE_HELP),
             12.0,
         );
+        ui.add_space(8.0);
+        ui.label(ui_text(ids::SETTINGS_GENERAL_HOME_SECTIONS));
+        for (value, label) in [
+            (
+                &mut general.home_continue_watching,
+                ids::HOME_ROW_CONTINUE_WATCHING,
+            ),
+            (&mut general.home_next_up, ids::HOME_ROW_NEXT_UP),
+            (&mut general.home_latest, ids::HOME_ROW_LATEST),
+            (&mut general.home_my_media, ids::HOME_HEADING_MY_MEDIA),
+            (&mut general.home_collections, ids::HOME_HEADING_COLLECTIONS),
+        ] {
+            ui.checkbox(value, ui_text(label));
+        }
     });
     ui.add_space(12.0);
     settings_card(ui, |ui| {

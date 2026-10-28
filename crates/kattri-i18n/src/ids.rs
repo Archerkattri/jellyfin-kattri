@@ -769,6 +769,7 @@ pub const ITEM_MENU_PLAY_NEXT: &str = "item_menu.play_next";
 pub const ITEM_MENU_ADD_TO_PLAYLIST: &str = "item_menu.add_to_playlist";
 pub const ITEM_MENU_REFRESH_METADATA: &str = "item_menu.refresh_metadata";
 pub const ITEM_MENU_DELETE: &str = "item_menu.delete";
+pub const SETTINGS_GENERAL_HOME_SECTIONS: &str = "settings.general.home_sections";
 pub const PHOTOS_BUTTON_SLIDESHOW: &str = "photos.button.slideshow";
 pub const PHOTOS_BUTTON_STOP_SLIDESHOW: &str = "photos.button.stop_slideshow";
 pub const DETAIL_MEDIA_INFO: &str = "detail.media_info";
@@ -938,6 +939,7 @@ pub const ALL: &[&str] = &[
     ITEM_MENU_ADD_TO_PLAYLIST,
     ITEM_MENU_REFRESH_METADATA,
     ITEM_MENU_DELETE,
+    SETTINGS_GENERAL_HOME_SECTIONS,
     PHOTOS_BUTTON_SLIDESHOW,
     PHOTOS_BUTTON_STOP_SLIDESHOW,
     DETAIL_MEDIA_INFO,

@@ -39,7 +39,7 @@ desktop window.
 | Extras | Right-click item menu (play, mark watched, favorite, download, add to playlist or queue), playlists, collections, favorites, photos, admin-lite dashboard, parental PIN |
 | Settings | General, playback, audio, subtitles, video, input, server, About; versioned TOML per profile |
 | Input | Keyboard map, gamepad support (in menus and during playback), full focus navigation, rebindable actions |
-| Interface | Standard, Large and TV (10-foot) sizes |
+| Interface | Standard, Large and TV (10-foot) sizes; choose which home sections appear |
 
 ### Library browsing
 
@@ -141,8 +141,9 @@ yet a replacement for the official clients. The main missing pieces:
 - **Details pages:** a Media info section lists the source's container, size, bitrate
   and streams. Missing: version picker, extras/special features, trailers, theme media,
   "more from this season" and lyrics.
-- **Other:** photos have a slideshow. Missing: Live TV recordings and timers, forgot-password flow,
-  home-screen section preferences or library management; the dashboard is admin-lite.
+- **Other:** photos have a slideshow, and the home sections can be turned off one by one
+  in General settings. Missing: Live TV recordings and timers, forgot-password flow and
+  library management; the dashboard is admin-lite.
 
 ### Work still required for a production release
 
@@ -205,9 +206,10 @@ yet a replacement for the official clients. The main missing pieces:
 
 - Play with the bundled libmpv on clean Linux and macOS machines. All four platforms
   are now pinned with checksums (Linux x64 and macOS universal from release
-  `libmpv-v0.41.0-abe7469`); the AppImage now bundles the pinned build.
-- Build and test Windows x64/ARM64, macOS universal, Linux packages, AppImage, and
-  Flatpak on clean systems.
+  `libmpv-v0.41.0-abe7469`); the AppImage and the Flatpak bundle the pinned build.
+- Test Windows x64/ARM64, macOS universal, Linux packages, AppImage, and Flatpak on clean
+  systems. All of them now build in CI from the release workflows (2026-10-28: Windows
+  MSI and zip for x64 and ARM64, macOS universal, AppImage, deb, rpm and Flatpak).
 - 1.0 ships unsigned on Windows (owner decision); complete macOS signing/notarization
   and verify each artifact. The Windows MSI is dual-purpose (per user by default,
   per machine with `ALLUSERS=1`).

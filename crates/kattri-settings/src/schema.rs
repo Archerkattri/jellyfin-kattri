@@ -154,6 +154,12 @@ pub struct GeneralSettings {
     pub reduce_motion: bool,
     /// How large the interface is drawn (M6-17).
     pub interface_size: InterfaceSize,
+    /// Home screen sections. Each is shown, and loaded, only when on.
+    pub home_continue_watching: bool,
+    pub home_next_up: bool,
+    pub home_latest: bool,
+    pub home_my_media: bool,
+    pub home_collections: bool,
     #[serde(rename = "_unknown", skip_serializing_if = "toml::Table::is_empty")]
     pub unknown: toml::Table,
 }
@@ -164,6 +170,11 @@ impl Default for GeneralSettings {
             high_contrast: false,
             reduce_motion: true,
             interface_size: InterfaceSize::Standard,
+            home_continue_watching: true,
+            home_next_up: true,
+            home_latest: true,
+            home_my_media: true,
+            home_collections: true,
             unknown: toml::Table::new(),
         }
     }
