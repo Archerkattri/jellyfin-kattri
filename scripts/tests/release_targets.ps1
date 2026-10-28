@@ -19,6 +19,13 @@ try {
     if ($releaseBinary.Count -ne 1) {
         throw 'egui-gl-host-proof must define one binary target named jellyfin-kattri.'
     }
+    $workspaceManifest = Get-Content 'Cargo.toml' -Raw
+    if ($workspaceManifest -notmatch '(?m)^version = "([^"]+)"') {
+        throw 'Could not read the workspace release version.'
+    }
+    if ($hostPackage[0].version -ne $Matches[1]) {
+        throw "Release host version $($hostPackage[0].version) must match workspace version $($Matches[1]) for deb/rpm metadata."
+    }
     if (-not $releaseBinary[0].src_path.EndsWith('/src/main.rs') -and
         -not $releaseBinary[0].src_path.EndsWith('\src\main.rs')) {
         throw "jellyfin-kattri must use the existing src/main.rs host; got $($releaseBinary[0].src_path)."
