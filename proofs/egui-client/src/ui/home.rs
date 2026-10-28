@@ -897,11 +897,13 @@ mod tests {
 
     #[test]
     fn hidden_home_sections_are_not_loaded() {
-        let mut state = HomeState::default();
-        state.sections = HomeSections {
-            next_up: false,
-            collections: false,
-            ..HomeSections::default()
+        let mut state = HomeState {
+            sections: HomeSections {
+                next_up: false,
+                collections: false,
+                ..HomeSections::default()
+            },
+            ..HomeState::default()
         };
         let (rows, catalogs) = state.idle_sections();
         assert_eq!(rows, [HomeRowKind::ContinueWatching, HomeRowKind::Latest]);
