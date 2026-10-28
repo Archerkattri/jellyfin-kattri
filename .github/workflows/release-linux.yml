@@ -211,12 +211,11 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # Flatpak bundle (M5-10). Unverified: this job has not run yet. It builds offline from
-  # Cargo.lock: flatpak-cargo-generator writes cargo-sources.json next to the manifest, then
-  # flatpak-builder installs the pinned runtime, SDK and Rust extension from Flathub.
+  # Flatpak bundle (M5-10). It builds offline from Cargo.lock: flatpak-cargo-generator writes
+  # cargo-sources.json next to the manifest, then flatpak-builder installs the pinned runtime
+  # and SDK from Flathub and builds with the Rust release pinned in the manifest.
   # flatpak-builder-tools is taken at its default branch and its commit is logged; pin it
-  # before a release. If the Flathub Rust extension is older than rust-toolchain.toml, the
-  # cargo build fails here and the extension branch in the manifest must move.
+  # before a release.
   flatpak:
     name: Flatpak (x64)
     runs-on: ubuntu-24.04

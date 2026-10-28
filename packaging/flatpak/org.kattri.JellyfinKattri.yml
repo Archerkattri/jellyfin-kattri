@@ -6,7 +6,9 @@
 #
 # Runtime choice. The app is egui and winit, with no GNOME libraries, so the
 # org.freedesktop.Platform runtime is used. Its GNOME runtime pin is not applicable.
-# Runtime, SDK and Rust extension are pinned to branch 25.08, which must match each other. The branch was not checked against the current Flathub
+# Runtime and SDK are pinned to branch 25.08, which must match each other. The Flathub Rust
+# extension for 25.08 is older than rust-toolchain.toml, so the pinned Rust release is
+# installed from its checksummed archive for the build and removed from the app. The branch was not checked against the current Flathub
 # listing; check it before the first build.
 #
 # libmpv is the pinned LGPL linux-x64 archive from packaging/libmpv/manifest.toml (same URL
@@ -26,8 +28,6 @@ id: org.kattri.JellyfinKattri
 runtime: org.freedesktop.Platform
 runtime-version: "25.08"
 sdk: org.freedesktop.Sdk
-sdk-extensions:
-  - org.freedesktop.Sdk.Extension.rust-stable
 command: kattri
 
 finish-args:
@@ -41,7 +41,7 @@ finish-args:
 build-options:
   env:
     CARGO_HOME: /run/build/kattri/cargo
-  append-path: /usr/lib/sdk/rust-stable/bin
+  append-path: /app/lib/rust/bin
 
 modules:
   - name: uchardet
@@ -76,6 +76,18 @@ modules:
       - type: archive
         url: https://github.com/Archerkattri/jellyfin-kattri/releases/download/libmpv-v0.41.0-abe7469/kattri-libmpv-linux-x64-v0.41.0.tar.gz
         sha256: cc4217e1caf6d1c1d99285e375a4ea598313a0a183b93ba0deb9032773f12fb0
+
+  # Keep the version equal to rust-toolchain.toml.
+  - name: rust
+    buildsystem: simple
+    cleanup:
+      - "*"
+    build-commands:
+      - ./install.sh --prefix=/app/lib/rust --disable-ldconfig --components=rustc,cargo,rust-std-x86_64-unknown-linux-gnu
+    sources:
+      - type: archive
+        url: https://static.rust-lang.org/dist/rust-1.99.1-x86_64-unknown-linux-gnu.tar.xz
+        sha256: 231fcae47ee950621374725b5fc3b5441d2fbda2955ac45dd7dc816d8876cfe7
 
   - name: kattri
     buildsystem: simple
