@@ -162,9 +162,45 @@ fn choose(ui: &egui::Ui, item: &MediaItem, action: ItemMenuAction, list_id: Opti
         .data_mut(|data| data.insert_temp(chosen_id(), (target, action)));
 }
 
-/// Shows the menu when `response` is secondary-clicked, and records the chosen entry.
+/// Shows the menu when `response` is secondary-clicked, or focused and Shift+F10 or the Menu
+/// key is pressed, and records the chosen entry.
 pub(crate) fn attach(response: &egui::Response, item: &MediaItem) {
-    response.context_menu(|ui| show(ui, item));
+    menu_popup(response).show(|ui| show(ui, item));
+}
+
+/// The card's context menu. Opened from the keyboard it sits under the card instead of at the
+/// pointer.
+fn menu_popup(response: &egui::Response) -> egui::Popup<'_> {
+    let ctx = &response.ctx;
+    let opened_by_keyboard = response.id.with("kattri-keyboard-menu");
+    let pressed = response.has_focus()
+        && ctx.input_mut(|input| {
+            input.consume_key(egui::Modifiers::SHIFT, egui::Key::F10)
+                || input.consume_key(egui::Modifiers::NONE, egui::Key::Menu)
+        });
+    if pressed {
+        ctx.data_mut(|data| data.insert_temp(opened_by_keyboard, true));
+    }
+    let popup = egui::Popup::context_menu(response);
+    if response.secondary_clicked() {
+        ctx.data_mut(|data| data.remove::<bool>(opened_by_keyboard));
+        return popup;
+    }
+    if !ctx
+        .data(|data| data.get_temp::<bool>(opened_by_keyboard))
+        .unwrap_or(false)
+    {
+        return popup;
+    }
+    let popup = popup.anchor(egui::PopupAnchor::ParentRect(response.rect));
+    if pressed {
+        popup.open_memory(Some(egui::SetOpenCommand::Bool(true)))
+    } else {
+        if !popup.is_open() {
+            ctx.data_mut(|data| data.remove::<bool>(opened_by_keyboard));
+        }
+        popup
+    }
 }
 
 fn show(ui: &mut egui::Ui, item: &MediaItem) {
@@ -238,7 +274,7 @@ pub(crate) fn take(ctx: &egui::Context) -> Option<(ItemMenuTarget, ItemMenuActio
 /// Same menu for a server DTO such as a search result, which is not a catalog entry yet. The
 /// catalog item is built only when the menu opens, so a frame of results costs nothing.
 pub(crate) fn attach_dto(response: &egui::Response, dto: &jellyfin_api::BaseItemDto) {
-    response.context_menu(|ui| show(ui, &MediaItem::from_api(dto.clone())));
+    menu_popup(response).show(|ui| show(ui, &MediaItem::from_api(dto.clone())));
 }
 
 #[cfg(test)]
@@ -311,6 +347,40 @@ mod tests {
         assert!(can_join_playlist(&album));
         let folder = item(serde_json::json!({"Id": "f", "Name": "F", "Type": "Folder"}));
         assert!(!can_join_playlist(&folder));
+    }
+
+    #[test]
+    fn shift_f10_on_a_focused_card_opens_its_menu() {
+        let ctx = egui::Context::default();
+        let card = item(serde_json::json!({"Id": "m", "Name": "Film", "Type": "Movie"}));
+        let frame = |ctx: &egui::Context, events: Vec<egui::Event>, focus: bool| {
+            let mut opened = false;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let response = ui.add(egui::Button::new("card").sense(egui::Sense::click()));
+                    if focus {
+                        response.request_focus();
+                    }
+                    opened = menu_popup(&response).show(|ui| show(ui, &card)).is_some();
+                },
+            );
+            output.textures_delta.clear();
+            opened
+        };
+        assert!(!frame(&ctx, Vec::new(), true), "closed until asked");
+        let shift_f10 = egui::Event::Key {
+            key: egui::Key::F10,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        };
+        assert!(frame(&ctx, vec![shift_f10], false), "opens under the card");
+        assert!(frame(&ctx, Vec::new(), false), "and stays open");
     }
 
     #[test]
