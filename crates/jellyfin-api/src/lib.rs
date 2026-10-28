@@ -306,14 +306,33 @@ impl JellyfinClient {
         decode_response(response).await
     }
 
-    /// Genre names used in one library or item type (`GET /Genres`), sorted by name, for
-    /// a genre filter. At most [`MAX_GENRES`] are returned.
-    pub async fn list_genres(
+    /// Studios used in one library or item type (`GET /Studios`) as `(id, name)`, sorted by
+    /// name, for a studio filter. At most [`MAX_GENRES`] are returned.
+    pub async fn list_studios(
         &self,
         session: &Session,
         parent_id: Option<&str>,
         include_item_types: Option<&[String]>,
-    ) -> Result<Vec<String>, ApiError> {
+    ) -> Result<Vec<(String, String)>, ApiError> {
+        let response = self
+            .list_named_values(session, "Studios", parent_id, include_item_types)
+            .await?;
+        Ok(response
+            .items
+            .into_iter()
+            .filter(|studio| !studio.name.trim().is_empty())
+            .map(|studio| (studio.id, studio.name))
+            .take(MAX_GENRES)
+            .collect())
+    }
+
+    async fn list_named_values(
+        &self,
+        session: &Session,
+        kind: &str,
+        parent_id: Option<&str>,
+        include_item_types: Option<&[String]>,
+    ) -> Result<ItemsResponse, ApiError> {
         let mut query = vec![
             ("userId", session.user.id.clone()),
             ("recursive", "true".to_owned()),
@@ -330,11 +349,24 @@ impl JellyfinClient {
         }
         let request = self
             .http
-            .request(Method::GET, self.endpoint(&["Genres"]))
+            .request(Method::GET, self.endpoint(&[kind]))
             .query(&query);
         let request = self.add_metadata(request, Some(&session.access_token));
         let response = request.send().await.map_err(transport_error)?;
-        let genres: ItemsResponse = decode_response(response).await?;
+        decode_response(response).await
+    }
+
+    /// Genre names used in one library or item type (`GET /Genres`), sorted by name, for
+    /// a genre filter. At most [`MAX_GENRES`] are returned.
+    pub async fn list_genres(
+        &self,
+        session: &Session,
+        parent_id: Option<&str>,
+        include_item_types: Option<&[String]>,
+    ) -> Result<Vec<String>, ApiError> {
+        let genres = self
+            .list_named_values(session, "Genres", parent_id, include_item_types)
+            .await?;
         let mut names: Vec<String> = genres
             .items
             .into_iter()
@@ -365,6 +397,7 @@ impl JellyfinClient {
                         enable_total_record_count: Some(false),
                         name_starts_with: None,
                         name_less_than: None,
+                        studio_ids: None,
                         ..ItemQuery::default()
                     },
                 )
@@ -1578,6 +1611,8 @@ pub struct ItemQuery {
     /// Only items whose sort name sorts before this text (`NameLessThan`); `"A"` selects
     /// names starting with a digit or symbol.
     pub name_less_than: Option<String>,
+    /// Only items from these studios (`studioIds`).
+    pub studio_ids: Option<Vec<String>>,
 }
 
 /// Jellyfin's `/Items` `sortBy` values used by the library browser.
@@ -1721,6 +1756,9 @@ impl ItemQuery {
         if let Some(bound) = &self.name_less_than {
             params.push(("nameLessThan".into(), bound.clone()));
         }
+        if let Some(studios) = self.studio_ids.as_ref().filter(|ids| !ids.is_empty()) {
+            params.push(("studioIds".into(), studios.join("|")));
+        }
         params
     }
 }
@@ -1744,6 +1782,7 @@ impl Default for ItemQuery {
             enable_total_record_count: None,
             name_starts_with: None,
             name_less_than: None,
+            studio_ids: None,
         }
     }
 }
@@ -2445,6 +2484,7 @@ mod item_query_serialization_tests {
             enable_total_record_count: Some(false),
             name_starts_with: None,
             name_less_than: None,
+            studio_ids: None,
             start_index: 100,
             limit: 50,
             ..ItemQuery::default()
@@ -2481,6 +2521,7 @@ mod item_query_serialization_tests {
             enable_total_record_count: Some(true),
             name_starts_with: None,
             name_less_than: None,
+            studio_ids: None,
             ..ItemQuery::default()
         };
         let actual = params(&query);
@@ -2498,6 +2539,15 @@ mod item_query_serialization_tests {
     }
 
     #[test]
+    fn serializes_studio_ids_pipe_separated() {
+        let query = params(&ItemQuery {
+            studio_ids: Some(vec!["s1".into(), "s2".into()]),
+            ..ItemQuery::default()
+        });
+        assert_values(&query, "studioIds", &["s1|s2"]);
+    }
+
+    #[test]
     fn serializes_the_alphabet_picker_bounds() {
         let letter = params(&ItemQuery {
             name_starts_with: Some("K".into()),
@@ -2506,6 +2556,7 @@ mod item_query_serialization_tests {
         assert_values(&letter, "nameStartsWith", &["K"]);
         let symbols = params(&ItemQuery {
             name_less_than: Some("A".into()),
+            studio_ids: None,
             ..ItemQuery::default()
         });
         assert_values(&symbols, "nameLessThan", &["A"]);

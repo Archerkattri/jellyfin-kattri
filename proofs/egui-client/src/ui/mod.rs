@@ -2273,9 +2273,36 @@ fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                 });
         });
     }
+    let mut studio = app.catalog_studio.clone();
+    if !app.catalog_studios.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(ui_text(ids::BROWSE_STUDIO_LABEL)).color(colors.muted));
+            let selected = studio
+                .as_ref()
+                .and_then(|id| {
+                    app.catalog_studios
+                        .iter()
+                        .find(|(studio_id, _)| studio_id == id)
+                })
+                .map_or_else(
+                    || ui_text(ids::BROWSE_STUDIO_ALL).to_owned(),
+                    |(_, name)| name.clone(),
+                );
+            egui::ComboBox::from_id_salt("catalog_studio")
+                .selected_text(selected)
+                .height(360.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut studio, None, ui_text(ids::BROWSE_STUDIO_ALL));
+                    for (id, name) in &app.catalog_studios {
+                        ui.selectable_value(&mut studio, Some(id.clone()), name);
+                    }
+                });
+        });
+    }
     let mut name_prefix = app.catalog_name_prefix;
     alphabet_picker(ui, &mut name_prefix, colors);
     app.set_catalog_genre(genre);
+    app.set_catalog_studio(studio);
     app.set_catalog_sort(sort);
     app.set_catalog_sort_order(order);
     app.set_catalog_played_filter(played_filter);

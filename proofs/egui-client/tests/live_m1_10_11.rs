@@ -150,6 +150,7 @@ fn live_search_and_profile_playback_negotiation_are_read_only() {
                     enable_total_record_count: Some(true),
                     name_starts_with: None,
                     name_less_than: None,
+                    studio_ids: None,
                     ..ItemQuery::default()
                 },
             )

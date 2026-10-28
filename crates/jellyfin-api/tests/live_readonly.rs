@@ -488,6 +488,7 @@ async fn readonly_collection_members_preserve_server_order() {
                 enable_total_record_count: Some(true),
                 name_starts_with: None,
                 name_less_than: None,
+                studio_ids: None,
                 ..ItemQuery::default()
             },
         )
@@ -714,6 +715,7 @@ async fn readonly_home_and_playback_negotiation() {
                         enable_total_record_count: Some(true),
                         name_starts_with: None,
                         name_less_than: None,
+                        studio_ids: None,
                         ..ItemQuery::default()
                     },
                 )
@@ -755,6 +757,7 @@ async fn readonly_home_and_playback_negotiation() {
                                 enable_total_record_count: Some(true),
                                 name_starts_with: None,
                                 name_less_than: None,
+                                studio_ids: None,
                                 ..ItemQuery::default()
                             },
                         )

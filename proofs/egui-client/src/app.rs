@@ -773,6 +773,10 @@ pub struct KattriApp {
     pub(crate) music_view: MusicView,
     /// Genres offered by the genre filter, for [`Self::catalog_genres_scope`].
     pub(crate) catalog_genres: Vec<String>,
+    /// Studios `(id, name)` offered by the studio filter, for the same scope.
+    pub(crate) catalog_studios: Vec<(String, String)>,
+    /// The studio filter's choice (studio id).
+    pub(crate) catalog_studio: Option<String>,
     catalog_genres_request_id: u64,
     /// The page and folder the genre list belongs to.
     catalog_genres_scope: Option<(Page, Option<String>)>,
@@ -1238,6 +1242,8 @@ impl KattriApp {
             catalog_genre: None,
             music_view: MusicView::All,
             catalog_genres: Vec::new(),
+            catalog_studios: Vec::new(),
+            catalog_studio: None,
             catalog_genres_request_id: 0,
             catalog_genres_scope: None,
             high_contrast,
@@ -2593,6 +2599,7 @@ impl KattriApp {
         }
         self.catalog_name_prefix = None;
         self.catalog_genre = None;
+        self.catalog_studio = None;
         self.detail_parent = None;
         self.photo_selected_id = None;
         self.photo_page_start = 0;
@@ -2679,6 +2686,7 @@ impl KattriApp {
         self.page = page;
         self.catalog_name_prefix = None;
         self.catalog_genre = None;
+        self.catalog_studio = None;
         self.photo_selected_id = None;
         self.photo_items.clear();
         self.photo_thumbnails.clear();
@@ -3856,6 +3864,14 @@ impl KattriApp {
         self.restart_catalog_query();
     }
 
+    pub(crate) fn set_catalog_studio(&mut self, studio: Option<String>) {
+        if self.catalog_studio == studio {
+            return;
+        }
+        self.catalog_studio = studio;
+        self.restart_catalog_query();
+    }
+
     pub(crate) fn set_catalog_genre(&mut self, genre: Option<String>) {
         if self.catalog_genre == genre {
             return;
@@ -3878,6 +3894,7 @@ impl KattriApp {
         let scope = (self.page, parent_id.clone());
         if !Self::page_has_genres(self.page) {
             self.catalog_genres.clear();
+            self.catalog_studios.clear();
             self.catalog_genres_scope = None;
             return;
         }
@@ -3885,6 +3902,7 @@ impl KattriApp {
             return;
         }
         self.catalog_genres.clear();
+        self.catalog_studios.clear();
         let request_id = self.allocate_request_id();
         if self.worker.as_ref().is_some_and(|worker| {
             worker
@@ -3912,6 +3930,7 @@ impl KattriApp {
         self.catalog_favorites_only = false;
         self.catalog_name_prefix = None;
         self.catalog_genre = None;
+        self.catalog_studio = None;
         self.restart_catalog_query();
     }
 
@@ -3920,6 +3939,7 @@ impl KattriApp {
             || self.catalog_favorites_only
             || self.catalog_name_prefix.is_some()
             || self.catalog_genre.is_some()
+            || self.catalog_studio.is_some()
     }
 
     /// `(nameStartsWith, nameLessThan)` for the alphabet picker. `'#'` asks for names that
@@ -4151,6 +4171,11 @@ impl KattriApp {
             .clone()
             .filter(|_| browsing)
             .map(|genre| vec![genre]);
+        let studio_ids = self
+            .catalog_studio
+            .clone()
+            .filter(|_| browsing)
+            .map(|studio| vec![studio]);
         if browsing && start_index == 0 {
             let page_types = self
                 .page_item_types()
@@ -4229,6 +4254,7 @@ impl KattriApp {
                             enable_total_record_count: Some(true),
                             name_starts_with: name_bounds.0,
                             name_less_than: name_bounds.1,
+                            studio_ids,
                         },
                     )
                 });
@@ -6714,9 +6740,14 @@ impl KattriApp {
                         }
                     }
                 }
-                WorkerEvent::GenresLoaded { request_id, genres } => {
+                WorkerEvent::GenresLoaded {
+                    request_id,
+                    genres,
+                    studios,
+                } => {
                     if request_id == self.catalog_genres_request_id {
                         self.catalog_genres = genres;
+                        self.catalog_studios = studios;
                     }
                 }
                 WorkerEvent::LyricsLoaded { request_id, lines } => {
@@ -8163,6 +8194,7 @@ mod catalog_query_tests {
             .try_send(crate::worker::WorkerEvent::GenresLoaded {
                 request_id,
                 genres: vec!["Action".into(), "Drama".into()],
+                studios: vec![("s1".into(), "Studio One".into())],
             })
             .expect("send genres");
         let ctx = egui::Context::default();
@@ -8171,6 +8203,11 @@ mod catalog_query_tests {
         });
         output.textures_delta.clear();
         assert_eq!(app.catalog_genres, ["Action", "Drama"]);
+        assert_eq!(app.catalog_studios.len(), 1);
+        app.set_catalog_studio(Some("s1".into()));
+        assert!(app.has_catalog_filters());
+        app.clear_catalog_filters();
+        assert_eq!(app.catalog_studio, None);
         app.set_catalog_genre(Some("Drama".into()));
         assert!(app.has_catalog_filters());
         app.clear_catalog_filters();
@@ -8333,6 +8370,7 @@ mod catalog_query_tests {
                 enable_total_record_count: Some(true),
                 name_starts_with: None,
                 name_less_than: None,
+                studio_ids: None,
             };
             let old_page = client
                 .list_items(

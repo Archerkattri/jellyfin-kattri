@@ -339,10 +339,11 @@ pub enum WorkerEvent {
         action: ItemAdminAction,
         result: Result<(), ErrorClass>,
     },
-    /// Genre names for the library page's genre filter. Empty on failure.
+    /// Genre names and studios `(id, name)` for the library page's filters. Empty on failure.
     GenresLoaded {
         request_id: u64,
         genres: Vec<String>,
+        studios: Vec<(String, String)>,
     },
     /// Lyrics of the track on screen. Empty when it has none or on failure.
     LyricsLoaded {
@@ -3346,20 +3347,34 @@ async fn execute_command(
                 parent_id,
                 item_types,
             } => {
-                let genres = match (client.as_ref(), session.as_ref()) {
-                    (Some(client), Some(session)) => client
-                        .list_genres(session, parent_id.as_deref(), item_types.as_deref())
-                        .await
-                        .unwrap_or_else(|error| {
-                            tracing::debug!(%error, "genres unavailable");
-                            Vec::new()
-                        }),
-                    _ => Vec::new(),
+                let (genres, studios) = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        let genres = client
+                            .list_genres(session, parent_id.as_deref(), item_types.as_deref())
+                            .await
+                            .unwrap_or_else(|error| {
+                                tracing::debug!(%error, "genres unavailable");
+                                Vec::new()
+                            });
+                        let studios = client
+                            .list_studios(session, parent_id.as_deref(), item_types.as_deref())
+                            .await
+                            .unwrap_or_else(|error| {
+                                tracing::debug!(%error, "studios unavailable");
+                                Vec::new()
+                            });
+                        (genres, studios)
+                    }
+                    _ => (Vec::new(), Vec::new()),
                 };
                 send_event(
                     events,
                     ctx,
-                    WorkerEvent::GenresLoaded { request_id, genres },
+                    WorkerEvent::GenresLoaded {
+                        request_id,
+                        genres,
+                        studios,
+                    },
                 )
                 .await
             }
@@ -5473,6 +5488,7 @@ async fn list_music_album_tracks(
                     enable_total_record_count: Some(true),
                     name_starts_with: None,
                     name_less_than: None,
+                    studio_ids: None,
                     ..ItemQuery::default()
                 },
             )
@@ -5739,6 +5755,7 @@ fn item_query(
         enable_total_record_count: Some(true),
         name_starts_with: None,
         name_less_than: None,
+        studio_ids: None,
     }
 }
 
@@ -6109,6 +6126,7 @@ mod item_query_tests {
                 enable_total_record_count: Some(true),
                 name_starts_with: None,
                 name_less_than: None,
+                studio_ids: None,
             }
         );
     }
