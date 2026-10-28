@@ -93,6 +93,8 @@ pub const PHOTO_FULL_SIZE_MAX_DIMENSION: u32 = 8_000;
 const MAX_ITEMS_ERROR_RESPONSE_BYTES: usize = 16 * 1024;
 /// Upper bound for `/Items?ids=...` requests used when restoring saved queues.
 pub const MAX_ITEM_IDS_PER_QUERY: usize = 50;
+/// Most genres [`JellyfinClient::list_genres`] returns.
+pub const MAX_GENRES: usize = 500;
 
 /// Stable client metadata sent in Jellyfin's `Authorization` header.
 #[derive(Clone, PartialEq, Eq)]
@@ -295,6 +297,46 @@ impl JellyfinClient {
             return Err(classify_items_bad_request(response, query.filters.as_deref()).await);
         }
         decode_response(response).await
+    }
+
+    /// Genre names used in one library or item type (`GET /Genres`), sorted by name, for
+    /// a genre filter. At most [`MAX_GENRES`] are returned.
+    pub async fn list_genres(
+        &self,
+        session: &Session,
+        parent_id: Option<&str>,
+        include_item_types: Option<&[String]>,
+    ) -> Result<Vec<String>, ApiError> {
+        let mut query = vec![
+            ("userId", session.user.id.clone()),
+            ("recursive", "true".to_owned()),
+            ("sortBy", "SortName".to_owned()),
+            ("limit", MAX_GENRES.to_string()),
+            ("enableImages", "false".to_owned()),
+        ];
+        if let Some(parent_id) = parent_id {
+            home::validate_id(parent_id)?;
+            query.push(("parentId", parent_id.to_owned()));
+        }
+        if let Some(types) = include_item_types.filter(|types| !types.is_empty()) {
+            query.push(("includeItemTypes", types.join(",")));
+        }
+        let request = self
+            .http
+            .request(Method::GET, self.endpoint(&["Genres"]))
+            .query(&query);
+        let request = self.add_metadata(request, Some(&session.access_token));
+        let response = request.send().await.map_err(transport_error)?;
+        let genres: ItemsResponse = decode_response(response).await?;
+        let mut names: Vec<String> = genres
+            .items
+            .into_iter()
+            .map(|genre| genre.name)
+            .filter(|name| !name.trim().is_empty())
+            .collect();
+        names.dedup();
+        names.truncate(MAX_GENRES);
+        Ok(names)
     }
 
     /// Fetch saved queue items in bounded batches and return them in the

@@ -729,6 +729,13 @@ pub struct KattriApp {
     pub(crate) catalog_favorites_only: bool,
     /// The alphabet picker's letter, `'#'` for names that start with a digit or symbol.
     pub(crate) catalog_name_prefix: Option<char>,
+    /// The genre filter's choice.
+    pub(crate) catalog_genre: Option<String>,
+    /// Genres offered by the genre filter, for [`Self::catalog_genres_scope`].
+    pub(crate) catalog_genres: Vec<String>,
+    catalog_genres_request_id: u64,
+    /// The page and folder the genre list belongs to.
+    catalog_genres_scope: Option<(Page, Option<String>)>,
     pub(crate) high_contrast: bool,
     pub(crate) reduce_motion: bool,
     pub(crate) interface_size: kattri_settings::InterfaceSize,
@@ -1164,6 +1171,10 @@ impl KattriApp {
             catalog_played_filter: CatalogPlayedFilter::Any,
             catalog_favorites_only: false,
             catalog_name_prefix: None,
+            catalog_genre: None,
+            catalog_genres: Vec::new(),
+            catalog_genres_request_id: 0,
+            catalog_genres_scope: None,
             high_contrast,
             interface_size,
             reduce_motion,
@@ -2482,6 +2493,7 @@ impl KattriApp {
         self.cancel_navigation_requests();
         self.page = page;
         self.catalog_name_prefix = None;
+        self.catalog_genre = None;
         self.photo_selected_id = None;
         self.photo_page_start = 0;
         self.photo_items.clear();
@@ -2566,6 +2578,7 @@ impl KattriApp {
         self.view = AppView::Library;
         self.page = page;
         self.catalog_name_prefix = None;
+        self.catalog_genre = None;
         self.photo_selected_id = None;
         self.photo_items.clear();
         self.photo_thumbnails.clear();
@@ -3680,6 +3693,46 @@ impl KattriApp {
         self.restart_catalog_query();
     }
 
+    pub(crate) fn set_catalog_genre(&mut self, genre: Option<String>) {
+        if self.catalog_genre == genre {
+            return;
+        }
+        self.catalog_genre = genre;
+        self.restart_catalog_query();
+    }
+
+    /// Pages whose items carry genres.
+    fn page_has_genres(page: Page) -> bool {
+        matches!(page, Page::Movies | Page::Series | Page::Music)
+    }
+
+    /// Loads the genre list for the page and folder on screen, once per scope.
+    fn request_catalog_genres(&mut self, item_types: Option<Vec<String>>) {
+        let parent_id = self
+            .browse_context
+            .as_ref()
+            .map(|context| context.parent_id.clone());
+        let scope = (self.page, parent_id.clone());
+        if !Self::page_has_genres(self.page) {
+            self.catalog_genres.clear();
+            self.catalog_genres_scope = None;
+            return;
+        }
+        if self.catalog_genres_scope.as_ref() == Some(&scope) {
+            return;
+        }
+        self.catalog_genres.clear();
+        let request_id = self.allocate_request_id();
+        if self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .list_genres(request_id, parent_id, item_types)
+                .is_ok()
+        }) {
+            self.catalog_genres_request_id = request_id;
+            self.catalog_genres_scope = Some(scope);
+        }
+    }
+
     pub(crate) fn set_catalog_name_prefix(&mut self, prefix: Option<char>) {
         if self.catalog_name_prefix == prefix {
             return;
@@ -3695,6 +3748,7 @@ impl KattriApp {
         self.catalog_played_filter = CatalogPlayedFilter::Any;
         self.catalog_favorites_only = false;
         self.catalog_name_prefix = None;
+        self.catalog_genre = None;
         self.restart_catalog_query();
     }
 
@@ -3702,6 +3756,7 @@ impl KattriApp {
         self.catalog_played_filter != CatalogPlayedFilter::Any
             || self.catalog_favorites_only
             || self.catalog_name_prefix.is_some()
+            || self.catalog_genre.is_some()
     }
 
     /// `(nameStartsWith, nameLessThan)` for the alphabet picker. `'#'` asks for names that
@@ -3922,11 +3977,24 @@ impl KattriApp {
             return;
         }
 
-        let name_bounds = if is_search || is_search_browse {
-            (None, None)
-        } else {
+        let browsing = !is_search && !is_search_browse;
+        let name_bounds = if browsing {
             self.catalog_name_bounds()
+        } else {
+            (None, None)
         };
+        let genres = self
+            .catalog_genre
+            .clone()
+            .filter(|_| browsing)
+            .map(|genre| vec![genre]);
+        if browsing && start_index == 0 {
+            let page_types = self
+                .page
+                .item_types()
+                .map(|types| types.iter().map(|kind| (*kind).to_owned()).collect());
+            self.request_catalog_genres(page_types);
+        }
         let request_result =
             self.worker
                 .as_ref()
@@ -3992,7 +4060,7 @@ impl KattriApp {
                             } else {
                                 self.catalog_filters()
                             },
-                            genres: None,
+                            genres,
                             years: None,
                             person_ids: None,
                             ids: None,
@@ -6231,6 +6299,11 @@ impl KattriApp {
                     self.series_episodes_loading = false;
                     self.series_episodes_error = Some(message);
                 }
+                WorkerEvent::GenresLoaded { request_id, genres } => {
+                    if request_id == self.catalog_genres_request_id {
+                        self.catalog_genres = genres;
+                    }
+                }
                 WorkerEvent::UserPlaylistsLoaded {
                     request_id,
                     playlists,
@@ -7557,6 +7630,42 @@ mod catalog_query_tests {
             app.catalog_name_prefix, None,
             "a new page starts unfiltered"
         );
+    }
+
+    #[test]
+    fn genre_list_loads_once_per_page_and_the_choice_is_a_filter() {
+        let mut app = KattriApp::new(egui::Context::default());
+        let (worker, sender) = crate::worker::ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.page = crate::app::Page::Movies;
+        app.request_catalog_genres(Some(vec!["Movie".into()]));
+        let request_id = app.catalog_genres_request_id;
+        assert_ne!(request_id, 0);
+        app.request_catalog_genres(Some(vec!["Movie".into()]));
+        assert_eq!(
+            app.catalog_genres_request_id, request_id,
+            "same scope, no new request"
+        );
+        sender
+            .try_send(crate::worker::WorkerEvent::GenresLoaded {
+                request_id,
+                genres: vec!["Action".into(), "Drama".into()],
+            })
+            .expect("send genres");
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.catalog_genres, ["Action", "Drama"]);
+        app.set_catalog_genre(Some("Drama".into()));
+        assert!(app.has_catalog_filters());
+        app.clear_catalog_filters();
+        assert_eq!(app.catalog_genre, None);
+
+        app.page = crate::app::Page::Photos;
+        app.request_catalog_genres(None);
+        assert!(app.catalog_genres.is_empty(), "photos have no genre filter");
     }
 
     #[test]

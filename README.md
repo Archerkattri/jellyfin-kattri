@@ -132,9 +132,9 @@ yet a replacement for the official clients. The main missing pieces:
   icon bar, with previous/next for music tracks and episodes and an Up Next card. Still
   missing: trickplay thumbnails on the seek bar and quality/source selection inside the
   player.
-- **Library views:** one grid per type with sort, played/favorite filters and an
-  alphabet picker. Missing Suggestions, Genres, Studios, Collections, Upcoming and
-  Episodes tabs and view modes; music has no album/artist views; books, home videos and
+- **Library views:** one grid per type with sort, played/favorite and genre filters and
+  an alphabet picker. Missing Suggestions, Studios, Collections, Upcoming and Episodes
+  tabs and view modes; music has no album/artist views; books, home videos and
   music videos have no views.
 - **Details pages:** no version picker, extras/special features, trailers, theme media,
   "more from this season", lyrics or media-info dialog.

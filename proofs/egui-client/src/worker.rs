@@ -307,6 +307,11 @@ pub enum WorkerEvent {
         season_id: String,
         message: String,
     },
+    /// Genre names for the library page's genre filter. Empty on failure.
+    GenresLoaded {
+        request_id: u64,
+        genres: Vec<String>,
+    },
     /// The signed-in user's playlists as `(id, name)`, for the card menu. Empty on failure.
     UserPlaylistsLoaded {
         request_id: u64,
@@ -749,6 +754,11 @@ enum WorkerCommand {
     },
     ListUserPlaylists {
         request_id: u64,
+    },
+    ListGenres {
+        request_id: u64,
+        parent_id: Option<String>,
+        item_types: Option<Vec<String>>,
     },
     ListMusicAlbumTracks {
         request_id: u64,
@@ -1234,6 +1244,19 @@ impl ApiWorker {
             request_id,
             series_id,
             episode_id,
+        })
+    }
+
+    pub(crate) fn list_genres(
+        &self,
+        request_id: u64,
+        parent_id: Option<String>,
+        item_types: Option<Vec<String>>,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ListGenres {
+            request_id,
+            parent_id,
+            item_types,
         })
     }
 
@@ -3078,6 +3101,28 @@ async fn execute_command(
                         previous: adjacent.previous.map(Box::new),
                         next: adjacent.next.map(Box::new),
                     },
+                )
+                .await
+            }
+            WorkerCommand::ListGenres {
+                request_id,
+                parent_id,
+                item_types,
+            } => {
+                let genres = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .list_genres(session, parent_id.as_deref(), item_types.as_deref())
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(%error, "genres unavailable");
+                            Vec::new()
+                        }),
+                    _ => Vec::new(),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::GenresLoaded { request_id, genres },
                 )
                 .await
             }

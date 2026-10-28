@@ -758,6 +758,8 @@ pub const ITEM_MENU_ADD_FAVORITE: &str = "item_menu.add_favorite";
 pub const ITEM_MENU_REMOVE_FAVORITE: &str = "item_menu.remove_favorite";
 pub const ITEM_MENU_DOWNLOAD: &str = "item_menu.download";
 pub const BROWSE_ALPHABET_ALL: &str = "browse.alphabet.all";
+pub const BROWSE_GENRE_LABEL: &str = "browse.genre.label";
+pub const BROWSE_GENRE_ALL: &str = "browse.genre.all";
 pub const BROWSE_ALPHABET_SYMBOLS: &str = "browse.alphabet.symbols";
 pub const BROWSE_ALPHABET_LETTER: &str = "browse.alphabet.letter";
 pub const ITEM_MENU_ADD_TO_QUEUE: &str = "item_menu.add_to_queue";
@@ -909,6 +911,8 @@ pub const ALL: &[&str] = &[
     ITEM_MENU_REMOVE_FAVORITE,
     ITEM_MENU_DOWNLOAD,
     BROWSE_ALPHABET_ALL,
+    BROWSE_GENRE_LABEL,
+    BROWSE_GENRE_ALL,
     BROWSE_ALPHABET_SYMBOLS,
     BROWSE_ALPHABET_LETTER,
     ITEM_MENU_ADD_TO_QUEUE,

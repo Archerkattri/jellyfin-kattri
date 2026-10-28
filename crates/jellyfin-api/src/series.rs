@@ -410,6 +410,27 @@ mod tests {
         assert_eq!(query.get("userId").map(String::as_str), Some("user-id"));
     }
 
+    #[tokio::test]
+    async fn genres_are_listed_by_name_for_one_library() {
+        let body = r#"{"Items":[{"Id":"g1","Name":"Action"},{"Id":"g2","Name":" "},{"Id":"g3","Name":"Drama"}]}"#;
+        let (base, task) = mock_server(vec![(200, body)]).await;
+        let genres = client(&base)
+            .list_genres(&session(), Some("library-1"), Some(&["Movie".to_owned()]))
+            .await
+            .expect("genres");
+        assert_eq!(genres, ["Action", "Drama"]);
+        let requests = task.await.expect("server task");
+        let url = request_uri(&requests[0]);
+        assert_eq!(url.path(), "/jellyfin/Genres");
+        let query = params(&url);
+        assert_eq!(query.get("parentId").map(String::as_str), Some("library-1"));
+        assert_eq!(
+            query.get("includeItemTypes").map(String::as_str),
+            Some("Movie")
+        );
+        assert_eq!(query.get("userId").map(String::as_str), Some("user-id"));
+    }
+
     #[test]
     fn adjacent_window_edges_and_a_missing_episode() {
         let item = |id: &str| -> crate::BaseItemDto {
