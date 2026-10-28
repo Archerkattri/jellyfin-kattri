@@ -32,7 +32,7 @@ desktop window.
 | Details | Metadata, overview, cast, similar titles, seasons and episodes, play and download actions |
 | Search | Debounced cross-type search grouped by movies, series, episodes, music, playlists, photos, people and channels |
 | Playback | Direct play, direct stream and transcode through the relay, resume, playback reporting, audio and subtitle tracks, subtitle delay, chapters, speed control, segment skip |
-| Player | Media info panel (`I`), equalizer and loudness filters, A-B loop and frame stepping, HDR to SDR tone mapping, refresh-rate matching on Windows, open a stream address |
+| Player | Icon control bar (transport, 10-second seek, frame step, chapter step and chapter menu, volume and mute, speed, A-B loop, picture-in-picture, fullscreen) with title and elapsed/total time, audio and subtitle menu with subtitle sync, auto-hiding overlay, media info panel (`I`), equalizer and loudness filters, HDR to SDR tone mapping, refresh-rate matching on Windows, open a stream address |
 | Music | Album and playlist browsing, queue with shuffle and repeat, queue restore after restart |
 | Live TV | Channel list, 24-hour guide, tune through the relay |
 | Offline | Download manager with pause, resume, range fallback, checksum verification and external subtitles |

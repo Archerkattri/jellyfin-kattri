@@ -1473,11 +1473,20 @@ fn osd_controls(
     fullscreen_toggle_requested: &mut bool,
 ) {
     let live_stream_active = mpv.live_stream_active();
+    // Both reads happen before the skipper takes a mutable borrow of the host for the draw.
+    let subtitle_selected = mpv.subtitle_track_selected();
+    let sync_feedback = mpv.sync_feedback().display().0.to_owned();
     let skip = osd.skip_settings.map(|settings| SkipControls {
         skipper: mpv.segment_skipper_mut(),
         settings,
     });
-    let actions = player_controls::draw_with_skip(
+    // The menu lives inside the panel, so it is built during the draw and the host performs the
+    // chosen actions afterwards: the panel is drawn while the skipper still holds the host.
+    let mut audio_pick = None;
+    let mut subtitle_pick = None;
+    let mut sync_marker = None;
+    let mut reset_subtitle_delay = false;
+    let actions = player_controls::draw_with_skip_and_extra(
         ui,
         PlayerControlsView {
             position: osd.position,
@@ -1501,7 +1510,49 @@ fn osd_controls(
             fullscreen: osd.fullscreen,
         },
         skip,
+        |ui| {
+            ui.menu_button("Audio & subtitles", |ui| {
+                ui.set_max_width(300.0);
+                let (audio, subtitle) = player_controls::track_menu_contents(
+                    ui,
+                    osd.audio_tracks,
+                    osd.subtitle_tracks,
+                    osd.track_feedback,
+                );
+                if let Some(selection) = audio {
+                    audio_pick = Some(selection);
+                }
+                if let Some(selection) = subtitle {
+                    subtitle_pick = Some(selection);
+                }
+                ui.separator();
+                ui.label("Sync subtitles to speech");
+                ui.add_enabled_ui(subtitle_selected, |ui| {
+                    for (marker, label) in SYNC_MARKER_BUTTONS {
+                        if ui.button(label).clicked() {
+                            sync_marker = Some(marker);
+                        }
+                    }
+                    if ui.button("Reset subtitle delay").clicked() {
+                        reset_subtitle_delay = true;
+                    }
+                });
+                ui.label(&sync_feedback);
+            });
+        },
     );
+    if let Some(selection) = audio_pick {
+        mpv.select_audio_track(selection);
+    }
+    if let Some(selection) = subtitle_pick {
+        mpv.select_subtitle_track(selection);
+    }
+    if let Some(marker) = sync_marker {
+        mpv.capture_sync_marker(marker);
+    }
+    if reset_subtitle_delay {
+        mpv.reset_subtitle_delay();
+    }
     if live_stream_active {
         ui.small("Live TV cannot pause; the Pause button stops the channel.");
     }
@@ -1545,34 +1596,6 @@ fn osd_controls(
     if let Some(feedback) = osd.feedback {
         ui.colored_label(egui::Color32::LIGHT_RED, feedback);
     }
-    ui.menu_button("Audio & subtitles", |ui| {
-        ui.set_max_width(300.0);
-        let (audio, subtitle) = player_controls::track_menu_contents(
-            ui,
-            osd.audio_tracks,
-            osd.subtitle_tracks,
-            osd.track_feedback,
-        );
-        if let Some(selection) = audio {
-            mpv.select_audio_track(selection);
-        }
-        if let Some(selection) = subtitle {
-            mpv.select_subtitle_track(selection);
-        }
-        ui.separator();
-        ui.label("Sync subtitles to speech");
-        ui.add_enabled_ui(mpv.subtitle_track_selected(), |ui| {
-            for (marker, label) in SYNC_MARKER_BUTTONS {
-                if ui.button(label).clicked() {
-                    mpv.capture_sync_marker(marker);
-                }
-            }
-            if ui.button("Reset subtitle delay").clicked() {
-                mpv.reset_subtitle_delay();
-            }
-        });
-        ui.label(mpv.sync_feedback().display().0);
-    });
 }
 
 /// Keep keyboard focus and open player menus visible beyond the pointer inactivity timer.

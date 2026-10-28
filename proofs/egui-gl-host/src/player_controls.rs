@@ -220,12 +220,27 @@ const OSD_MUTED: Color32 = Color32::from_rgb(164, 170, 174);
 /// Draw compact, keyboard-accessible playback controls and return user actions. The automatic
 /// skip seeks without a press. The button seeks on press and appears only while a segment is
 /// skippable now. Both return [`PlayerControlAction::SeekAbsolute`] for the caller to perform.
+///
+/// The host calls [`draw_with_skip_and_extra`]; this entry point is what the widget tests use.
+#[cfg(test)]
 pub fn draw_with_skip(
     ui: &mut egui::Ui,
     view: PlayerControlsView<'_>,
     skip: Option<SkipControls<'_>>,
 ) -> Vec<PlayerControlAction> {
-    draw_inner_with_skip(ui, view, skip, |_, _| {})
+    draw_inner_with_skip(ui, view, skip, |_, _| {}, |_| {})
+}
+
+/// Draw the controls, then let the caller place one widget inside the panel. The host puts the
+/// audio and subtitle menu there, so it moves and hides with the bar instead of floating below
+/// the panel, and the menu is reachable by pointer and keyboard from the first control.
+pub fn draw_with_skip_and_extra(
+    ui: &mut egui::Ui,
+    view: PlayerControlsView<'_>,
+    skip: Option<SkipControls<'_>>,
+    extra: impl FnOnce(&mut egui::Ui),
+) -> Vec<PlayerControlAction> {
+    draw_inner_with_skip(ui, view, skip, |_, _| {}, extra)
 }
 
 // The host always goes through `draw_with_skip`. The plain draw and the observer hook exist for
@@ -241,7 +256,7 @@ fn draw_inner(
     view: PlayerControlsView<'_>,
     observe: impl FnMut(ControlId, egui::Rect),
 ) -> Vec<PlayerControlAction> {
-    draw_inner_with_skip(ui, view, None, observe)
+    draw_inner_with_skip(ui, view, None, observe, |_| {})
 }
 
 /// The automatic skip for a frame when the controls are not drawn. `draw_with_skip` runs the same
@@ -267,6 +282,7 @@ fn draw_inner_with_skip(
     view: PlayerControlsView<'_>,
     mut skip: Option<SkipControls<'_>>,
     mut observe: impl FnMut(ControlId, egui::Rect),
+    extra: impl FnOnce(&mut egui::Ui),
 ) -> Vec<PlayerControlAction> {
     let seek_available = view.seek_enabled && view.duration.is_some_and(|d| !d.is_zero());
     let mut actions = keyboard_seek_actions(ui.ctx(), seek_available);
@@ -687,6 +703,8 @@ fn draw_inner_with_skip(
                 ) {
                     actions.push(PlayerControlAction::ToggleFullscreen);
                 }
+
+                extra(ui);
             });
         });
 
@@ -1875,6 +1893,7 @@ mod tests {
                             skip_rect = Some(rect);
                         }
                     },
+                    |_| {},
                 );
             });
         });
@@ -1934,6 +1953,7 @@ mod tests {
                                 skip_rect = Some(rect);
                             }
                         },
+                        |_| {},
                     );
                 });
             });
@@ -1977,6 +1997,7 @@ mod tests {
                                 skip_rect = Some(rect);
                             }
                         },
+                        |_| {},
                     );
                 });
             });
@@ -2157,6 +2178,7 @@ mod tests {
                         settings,
                     }),
                     |id, rect| rects.push((id, rect)),
+                    |_| {},
                 );
             });
         });
