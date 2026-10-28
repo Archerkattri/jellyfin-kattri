@@ -36,10 +36,10 @@ pub use profile::{
     parse_index, to_index_string, validate_profile_name,
 };
 pub use schema::{
-    AspectMode, AudioOutput, AudioSettings, BACKBUFFER_MB_MAX, CACHE_MB_MAX, CACHE_MB_MIN,
-    CURRENT_SCHEMA_VERSION, ChannelLayout, DecodeMode, EQUALIZER_BANDS, EQUALIZER_GAIN_LIMIT_DB,
-    GeneralSettings, HdrPreference, ImageFormat, InputSettings, InterfaceSize,
-    LOUDNESS_TARGET_LUFS_RANGE, LogDetail, MAX_SERIES_LANGUAGE_ENTRIES, Passthrough,
+    AspectMode, AudioOutput, AudioSettings, BACKBUFFER_MB_MAX, BackdropPreference, CACHE_MB_MAX,
+    CACHE_MB_MIN, CURRENT_SCHEMA_VERSION, ChannelLayout, DecodeMode, EQUALIZER_BANDS,
+    EQUALIZER_GAIN_LIMIT_DB, GeneralSettings, HdrPreference, ImageFormat, InputSettings,
+    InterfaceSize, LOUDNESS_TARGET_LUFS_RANGE, LogDetail, MAX_SERIES_LANGUAGE_ENTRIES, Passthrough,
     PlaybackSettings, PluginSettings, READAHEAD_SECS_MAX, ScreenshotSettings,
     SeriesLanguageSetting, Settings, SubtitleSettings, SyncMode, ToneMapping, TranscodePreferences,
     UpdateSettings, VideoSettings, WindowGeometry, WindowSettings,

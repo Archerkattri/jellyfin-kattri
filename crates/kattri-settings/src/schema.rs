@@ -152,6 +152,9 @@ impl Default for Settings {
 pub struct GeneralSettings {
     pub high_contrast: bool,
     pub reduce_motion: bool,
+    pub backdrop: BackdropPreference,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_backdrop_path: Option<PathBuf>,
     /// How large the interface is drawn (M6-17).
     pub interface_size: InterfaceSize,
     /// Home screen sections. Each is shown, and loaded, only when on.
@@ -169,6 +172,8 @@ impl Default for GeneralSettings {
         Self {
             high_contrast: false,
             reduce_motion: true,
+            backdrop: BackdropPreference::Server,
+            custom_backdrop_path: None,
             interface_size: InterfaceSize::Standard,
             home_continue_watching: true,
             home_next_up: true,
@@ -178,6 +183,15 @@ impl Default for GeneralSettings {
             unknown: toml::Table::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackdropPreference {
+    #[default]
+    Server,
+    Custom,
+    Off,
 }
 
 /// Overall size of the interface. `TenFoot` is the couch-distance layout: everything is drawn

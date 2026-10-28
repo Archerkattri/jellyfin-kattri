@@ -403,6 +403,12 @@ impl HomeState {
     pub fn hero_item_id(&self) -> Option<String> {
         hero_card(&self.rows).map(|card| card.media.backdrop_id.clone())
     }
+
+    pub fn hero_artwork(&self) -> Option<egui::load::SizedTexture> {
+        hero_card(&self.rows)
+            .map(card_view)
+            .and_then(|card| card.image)
+    }
 }
 
 /// The hero shows the first Continue Watching item, else the first Latest item.

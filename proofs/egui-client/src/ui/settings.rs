@@ -607,6 +607,54 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             &mut general.reduce_motion,
             ui_text(ids::SETTINGS_GENERAL_REDUCE_MOTION),
         );
+        choice(
+            ui,
+            ui_text(ids::SETTINGS_GENERAL_BACKDROP),
+            "general_backdrop",
+            &mut general.backdrop,
+            &[
+                (
+                    kattri_settings::BackdropPreference::Server,
+                    ui_text(ids::SETTINGS_GENERAL_BACKDROP_SERVER),
+                ),
+                (
+                    kattri_settings::BackdropPreference::Custom,
+                    ui_text(ids::SETTINGS_GENERAL_BACKDROP_CUSTOM),
+                ),
+                (
+                    kattri_settings::BackdropPreference::Off,
+                    ui_text(ids::SETTINGS_GENERAL_BACKDROP_OFF),
+                ),
+            ],
+        );
+        if general.backdrop == kattri_settings::BackdropPreference::Custom {
+            let mut path = general
+                .custom_backdrop_path
+                .as_ref()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            ui.label(ui_text(ids::SETTINGS_GENERAL_BACKDROP_PATH));
+            if ui
+                .text_edit_singleline(&mut path)
+                .on_hover_text(ui_text(ids::SETTINGS_GENERAL_BACKDROP_PATH))
+                .changed()
+            {
+                general.custom_backdrop_path =
+                    (!path.trim().is_empty()).then(|| std::path::PathBuf::from(path.trim()));
+            }
+            if ui
+                .button(ui_text(ids::SETTINGS_GENERAL_BACKDROP_CLEAR))
+                .clicked()
+            {
+                general.custom_backdrop_path = None;
+            }
+            muted(
+                ui,
+                colors,
+                ui_text(ids::SETTINGS_GENERAL_BACKDROP_PATH_HELP),
+                12.0,
+            );
+        }
         app.high_contrast = general.high_contrast;
         app.reduce_motion = general.reduce_motion;
         muted(ui, colors, ui_text(ids::SETTINGS_GENERAL_MOTION_HELP), 12.0);

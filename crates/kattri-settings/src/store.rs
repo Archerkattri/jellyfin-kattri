@@ -159,6 +159,8 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
             &[
                 "high_contrast",
                 "reduce_motion",
+                "backdrop",
+                "custom_backdrop_path",
                 "interface_size",
                 "home_continue_watching",
                 "home_next_up",
@@ -534,6 +536,36 @@ mod tests {
     fn default_settings_round_trip_through_toml() {
         let text = to_toml_string(&Settings::default()).unwrap();
         assert_eq!(load_from_str(&text).unwrap(), Settings::default());
+    }
+
+    #[test]
+    fn backdrop_preferences_default_and_round_trip() {
+        use crate::BackdropPreference;
+        let defaults = Settings::default();
+        assert_eq!(defaults.general.backdrop, BackdropPreference::Server);
+        assert_eq!(defaults.general.custom_backdrop_path, None);
+        for (preference, spelling) in [
+            (BackdropPreference::Server, "server"),
+            (BackdropPreference::Custom, "custom"),
+            (BackdropPreference::Off, "off"),
+        ] {
+            let mut settings = Settings::default();
+            settings.general.backdrop = preference;
+            settings.general.custom_backdrop_path = Some("art/backdrop.jpg".into());
+            let text = to_toml_string(&settings).unwrap();
+            assert!(text.contains(&format!("backdrop = \"{spelling}\"")));
+            assert_eq!(load_from_str(&text).unwrap().general, settings.general);
+        }
+        let legacy = to_toml_string(&defaults)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with("backdrop = "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            load_from_str(&legacy).unwrap().general.backdrop,
+            BackdropPreference::Server
+        );
     }
 
     #[test]

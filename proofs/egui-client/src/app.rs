@@ -642,6 +642,9 @@ pub struct KattriApp {
     pub(crate) home_hero_backdrop: Option<(String, egui::TextureHandle)>,
     /// The backdrop request in flight or already tried for the Home hero: (request id, item id).
     home_hero_request: Option<(u64, String)>,
+    pub(crate) ambient_backdrop: crate::ui::ambient::AmbientBackdrop,
+    pub(crate) custom_backdrop_texture: Option<egui::TextureHandle>,
+    custom_backdrop_request: Option<(u64, std::path::PathBuf)>,
     /// Set by `play_item`; consumed by `poll_auto_play` once the stream can start.
     pub(crate) auto_play: Option<AutoPlay>,
     pub(crate) details_loading: bool,
@@ -1149,6 +1152,9 @@ impl KattriApp {
             detail_backdrop_attempted: false,
             home_hero_backdrop: None,
             home_hero_request: None,
+            ambient_backdrop: crate::ui::ambient::AmbientBackdrop::default(),
+            custom_backdrop_texture: None,
+            custom_backdrop_request: None,
             auto_play: None,
             details_loading: false,
             details_error: None,
@@ -5837,6 +5843,66 @@ impl KattriApp {
         }
     }
 
+    pub(crate) fn request_custom_backdrop(&mut self) {
+        use kattri_settings::BackdropPreference;
+        let general = &self.settings.settings().general;
+        if general.backdrop != BackdropPreference::Custom {
+            self.custom_backdrop_request = None;
+            self.custom_backdrop_texture = None;
+            return;
+        }
+        let Some(path) = general.custom_backdrop_path.clone() else {
+            self.custom_backdrop_request = None;
+            self.custom_backdrop_texture = None;
+            return;
+        };
+        if self
+            .custom_backdrop_request
+            .as_ref()
+            .is_some_and(|(_, wanted)| *wanted == path)
+        {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        if self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .load_custom_backdrop(request_id, path.clone())
+                .is_ok()
+        }) {
+            self.custom_backdrop_request = Some((request_id, path));
+        }
+    }
+
+    pub(crate) fn ambient_texture(&self) -> Option<egui::load::SizedTexture> {
+        fn sized_texture(texture: &egui::TextureHandle) -> egui::load::SizedTexture {
+            egui::load::SizedTexture::new(texture.id(), texture.size_vec2())
+        }
+        match self.settings.settings().general.backdrop {
+            kattri_settings::BackdropPreference::Off => None,
+            kattri_settings::BackdropPreference::Custom => {
+                self.custom_backdrop_texture.as_ref().map(sized_texture)
+            }
+            kattri_settings::BackdropPreference::Server => {
+                if self.view == AppView::Home {
+                    self.home_hero_backdrop
+                        .as_ref()
+                        .map(|(_, texture)| sized_texture(texture))
+                        .or_else(|| self.home.hero_artwork())
+                } else {
+                    self.selected_artwork_texture
+                        .as_ref()
+                        .map(sized_texture)
+                        .or_else(|| {
+                            self.home_hero_backdrop
+                                .as_ref()
+                                .map(|(_, texture)| sized_texture(texture))
+                        })
+                        .or_else(|| self.home.hero_artwork())
+                }
+            }
+        }
+    }
+
     fn request_detail_backdrop(&mut self) {
         let Some(item_id) = self.selected_item_id.clone() else {
             return;
@@ -7661,6 +7727,36 @@ impl KattriApp {
                     && self.selected_item_id.as_deref() == Some(item_id.as_str()) =>
                 {
                     self.request_detail_primary_artwork();
+                }
+                WorkerEvent::CustomBackdropLoaded {
+                    request_id,
+                    width,
+                    height,
+                    rgba,
+                } if self
+                    .custom_backdrop_request
+                    .as_ref()
+                    .is_some_and(|(wanted, _)| *wanted == request_id) =>
+                {
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [width as usize, height as usize],
+                        &rgba,
+                    );
+                    self.custom_backdrop_texture = Some(ctx.load_texture(
+                        "kattri-custom-backdrop",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+                WorkerEvent::CustomBackdropFailed { request_id }
+                    if self
+                        .custom_backdrop_request
+                        .as_ref()
+                        .is_some_and(|(wanted, _)| *wanted == request_id) =>
+                {
+                    self.custom_backdrop_texture = None;
+                    self.catalog_filter_notice =
+                        Some(ui_text(ids::SETTINGS_GENERAL_BACKDROP_LOAD_FAILED).to_owned());
                 }
                 WorkerEvent::PlaybackInfoLoaded {
                     request_id,

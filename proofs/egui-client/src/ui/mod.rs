@@ -1,4 +1,5 @@
 pub(crate) mod admin;
+pub mod ambient;
 pub mod anim;
 mod artwork;
 pub(crate) mod detail;
@@ -209,6 +210,14 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
             let mut entries = Vec::new();
             let mut search_show_all_targets = Vec::new();
             let mut visible_artwork = Vec::new();
+            app.request_custom_backdrop();
+            if app.view == AppView::Home
+                || (app.view == AppView::Library && matches!(app.page, Page::Movies | Page::Series))
+            {
+                let rect = ui.max_rect();
+                let backdrop = app.ambient_texture();
+                app.ambient_backdrop.paint(ui, rect, backdrop, colors);
+            }
             egui::ScrollArea::vertical()
                 .id_salt(content_scroll_id)
                 .auto_shrink([false, false])

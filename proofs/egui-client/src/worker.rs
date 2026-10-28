@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{Semaphore, mpsc};
 
 mod clock_sampler;
+mod custom_backdrop;
 pub(crate) mod downloads;
 mod saved_sign_in;
 mod scheduler;
@@ -632,6 +633,15 @@ pub enum WorkerEvent {
         request_id: u64,
         item_id: String,
     },
+    CustomBackdropLoaded {
+        request_id: u64,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
+    CustomBackdropFailed {
+        request_id: u64,
+    },
     LiveTvLogoLoaded {
         request_id: u64,
         channel_id: String,
@@ -1067,6 +1077,10 @@ enum WorkerCommand {
     GetBackdropArtwork {
         request_id: u64,
         item_id: String,
+    },
+    LoadCustomBackdrop {
+        request_id: u64,
+        path: PathBuf,
     },
     GetLiveTvLogo {
         request_id: u64,
@@ -1887,6 +1901,15 @@ impl ApiWorker {
             request_id,
             item_id,
         })
+    }
+
+    pub fn load_custom_backdrop(
+        &self,
+        request_id: u64,
+        path: PathBuf,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::LoadCustomBackdrop { request_id, path })
     }
 
     pub(crate) fn get_live_tv_logo(
@@ -4571,6 +4594,21 @@ async fn execute_command(
                     ctx.clone(),
                 )
                 .await;
+            }
+            WorkerCommand::LoadCustomBackdrop { request_id, path } => {
+                let result = custom_backdrop::read_custom_backdrop(&path)
+                    .await
+                    .and_then(|bytes| decode_backdrop_artwork(bytes).ok());
+                let event = match result {
+                    Some((width, height, rgba)) => WorkerEvent::CustomBackdropLoaded {
+                        request_id,
+                        width,
+                        height,
+                        rgba,
+                    },
+                    None => WorkerEvent::CustomBackdropFailed { request_id },
+                };
+                send_event(events, ctx, event).await;
             }
             WorkerCommand::GetLiveTvLogo {
                 request_id,

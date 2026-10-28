@@ -39,7 +39,7 @@ desktop window.
 | Extras | Right-click item menu (play, mark watched, favorite, download, add to playlist or queue), playlists, collections, favorites, photos, admin-lite dashboard, parental PIN |
 | Settings | General, playback, audio, subtitles, video, input, server, About; versioned TOML per profile |
 | Input | Keyboard map, gamepad support (in menus and during playback), full focus navigation, rebindable actions |
-| Interface | Standard, Large and TV (10-foot) sizes; choose which home sections appear |
+| Interface | Ambient movie/show backdrops with poster fallback and reduced-motion-aware crossfades; optional local custom backdrop; Standard, Large and TV (10-foot) sizes; choose which home sections appear |
 
 ### Library browsing
 
@@ -102,12 +102,12 @@ and authorized stream-only relay playback. A separate Windows RTX 4060 run used
 NVDEC and rendered an HDR10 source tone-mapped to SDR. These checks do not establish
 complete playback, release readiness, or feature parity with Jellyfin Web/Desktop.
 
-Last visual pass (2026-10-27, Windows x64, real server, stream-only): home, all items,
-movies, series, music, photos, playlists, downloads, Live TV, Watch Together and
-settings render; an episode played by DirectPlay with hardware decoding (d3d11va) and
-WASAPI audio. Fixed in that pass: episode cards without their own image now use the
-series poster, the home hero uses a full-resolution series backdrop, and the Series
-page lists shows instead of episodes.
+Latest visual pass (2026-10-28, Windows x64, real server): Home, Movies, movie details
+and General settings were exercised. Server artwork and a local custom backdrop rendered
+with the legibility scrims. These framebuffer captures are the screenshots above.
+Playback was not part of this pass. The previous 2026-10-27 stream-only pass exercised
+browsing and an episode using DirectPlay with hardware decoding (d3d11va) and WASAPI
+audio; it did not establish complete playback or feature parity.
 
 ### Feature parity with Jellyfin Web
 

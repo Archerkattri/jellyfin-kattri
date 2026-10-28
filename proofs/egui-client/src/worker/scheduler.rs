@@ -222,6 +222,7 @@ impl WorkerCommand {
             | Self::LoadPhotoThumbnail { .. }
             | Self::LoadPhotoFullSize { .. }
             | Self::GetBackdropArtwork { .. }
+            | Self::LoadCustomBackdrop { .. }
             | Self::GetLiveTvLogo { .. }
             | Self::MetadataThumbnail { .. }
             | Self::GetTrickplayTile { .. } => Lane::Artwork,

@@ -450,6 +450,14 @@ pub const SETTINGS_HEADING_DISPLAY: &str = "settings.heading.display";
 pub const SETTINGS_GENERAL_HIGH_CONTRAST: &str = "settings.general.high_contrast";
 pub const SETTINGS_GENERAL_REDUCE_MOTION: &str = "settings.general.reduce_motion";
 pub const SETTINGS_GENERAL_MOTION_HELP: &str = "settings.general.motion_help";
+pub const SETTINGS_GENERAL_BACKDROP: &str = "settings.general.backdrop";
+pub const SETTINGS_GENERAL_BACKDROP_SERVER: &str = "settings.general.backdrop.server";
+pub const SETTINGS_GENERAL_BACKDROP_CUSTOM: &str = "settings.general.backdrop.custom";
+pub const SETTINGS_GENERAL_BACKDROP_OFF: &str = "settings.general.backdrop.off";
+pub const SETTINGS_GENERAL_BACKDROP_PATH: &str = "settings.general.backdrop.path";
+pub const SETTINGS_GENERAL_BACKDROP_PATH_HELP: &str = "settings.general.backdrop.path_help";
+pub const SETTINGS_GENERAL_BACKDROP_CLEAR: &str = "settings.general.backdrop.clear";
+pub const SETTINGS_GENERAL_BACKDROP_LOAD_FAILED: &str = "settings.general.backdrop.load_failed";
 pub const SETTINGS_GENERAL_INTERFACE_SIZE: &str = "settings.general.interface_size";
 pub const SETTINGS_GENERAL_INTERFACE_SIZE_STANDARD: &str =
     "settings.general.interface_size.standard";
@@ -1427,6 +1435,14 @@ pub const ALL: &[&str] = &[
     SETTINGS_GENERAL_HIGH_CONTRAST,
     SETTINGS_GENERAL_REDUCE_MOTION,
     SETTINGS_GENERAL_MOTION_HELP,
+    SETTINGS_GENERAL_BACKDROP,
+    SETTINGS_GENERAL_BACKDROP_SERVER,
+    SETTINGS_GENERAL_BACKDROP_CUSTOM,
+    SETTINGS_GENERAL_BACKDROP_OFF,
+    SETTINGS_GENERAL_BACKDROP_PATH,
+    SETTINGS_GENERAL_BACKDROP_PATH_HELP,
+    SETTINGS_GENERAL_BACKDROP_CLEAR,
+    SETTINGS_GENERAL_BACKDROP_LOAD_FAILED,
     SETTINGS_GENERAL_INTERFACE_SIZE,
     SETTINGS_GENERAL_INTERFACE_SIZE_STANDARD,
     SETTINGS_GENERAL_INTERFACE_SIZE_LARGE,
