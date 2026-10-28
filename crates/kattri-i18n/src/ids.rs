@@ -769,6 +769,8 @@ pub const ITEM_MENU_PLAY_NEXT: &str = "item_menu.play_next";
 pub const ITEM_MENU_ADD_TO_PLAYLIST: &str = "item_menu.add_to_playlist";
 pub const ITEM_MENU_REFRESH_METADATA: &str = "item_menu.refresh_metadata";
 pub const ITEM_MENU_DELETE: &str = "item_menu.delete";
+pub const PHOTOS_BUTTON_SLIDESHOW: &str = "photos.button.slideshow";
+pub const PHOTOS_BUTTON_STOP_SLIDESHOW: &str = "photos.button.stop_slideshow";
 pub const DETAIL_MEDIA_INFO: &str = "detail.media_info";
 pub const ITEM_MENU_ADD_TO_COLLECTION: &str = "item_menu.add_to_collection";
 pub const TOAST_ADDED_TO_COLLECTION: &str = "toast.added_to_collection";
@@ -936,6 +938,8 @@ pub const ALL: &[&str] = &[
     ITEM_MENU_ADD_TO_PLAYLIST,
     ITEM_MENU_REFRESH_METADATA,
     ITEM_MENU_DELETE,
+    PHOTOS_BUTTON_SLIDESHOW,
+    PHOTOS_BUTTON_STOP_SLIDESHOW,
     DETAIL_MEDIA_INFO,
     ITEM_MENU_ADD_TO_COLLECTION,
     TOAST_ADDED_TO_COLLECTION,

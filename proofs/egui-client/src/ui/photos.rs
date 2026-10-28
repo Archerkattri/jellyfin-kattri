@@ -195,10 +195,38 @@ pub fn draw(ui: &mut Ui, view: &mut PhotosView<'_>) -> Option<PhotosAction> {
     action
 }
 
+/// How long the slideshow shows each photo once it has loaded.
+const SLIDESHOW_INTERVAL_SECS: f64 = 5.0;
+
+/// Slideshow state kept in egui memory: running, and when the shown photo appeared.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Slideshow {
+    running: bool,
+    photo_id: String,
+    shown_at: f64,
+}
+
+/// Whether the slideshow should move on from a photo shown since `shown_at`.
+fn slideshow_due(shown_at: f64, now: f64) -> bool {
+    now - shown_at >= SLIDESHOW_INTERVAL_SECS
+}
+
 fn draw_full_size(ui: &mut Ui, view: &PhotosView<'_>, photo_id: &str) -> Option<PhotosAction> {
     let current_index = view.items.iter().position(|item| item.id == photo_id)?;
     let current = &view.items[current_index];
     ui.label(&current.name);
+    let slideshow_id = egui::Id::unique("kattri-photo-slideshow");
+    let now = ui.input(|input| input.time);
+    let loaded = view.full_size_images.contains_key(photo_id);
+    let mut slideshow: Slideshow = ui
+        .ctx()
+        .data(|data| data.get_temp(slideshow_id))
+        .unwrap_or_default();
+    if slideshow.photo_id != photo_id || !loaded {
+        // The interval starts once the photo is on screen.
+        slideshow.photo_id = photo_id.to_owned();
+        slideshow.shown_at = now;
+    }
 
     let available = ui.available_size();
     if let Some(texture) = view.full_size_images.get(photo_id) {
@@ -241,9 +269,43 @@ fn draw_full_size(ui: &mut Ui, view: &PhotosView<'_>, photo_id: &str) -> Option<
             )
             .clicked()
         {
-            action = next;
+            action = next.clone();
+        }
+        let toggle = if slideshow.running {
+            ui_text(ids::PHOTOS_BUTTON_STOP_SLIDESHOW)
+        } else {
+            ui_text(ids::PHOTOS_BUTTON_SLIDESHOW)
+        };
+        if ui
+            .add_enabled(
+                next.is_some() || slideshow.running,
+                egui::Button::new(toggle),
+            )
+            .clicked()
+        {
+            slideshow.running = !slideshow.running;
+            slideshow.shown_at = now;
+        }
+        if slideshow.running && action.is_none() {
+            match next {
+                Some(next) if loaded && slideshow_due(slideshow.shown_at, now) => {
+                    action = Some(next);
+                }
+                Some(_) => ui
+                    .ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f64(
+                        (SLIDESHOW_INTERVAL_SECS - (now - slideshow.shown_at)).max(0.05),
+                    )),
+                // The last photo ends the slideshow.
+                None => slideshow.running = false,
+            }
         }
     });
+    if matches!(action, Some(PhotosAction::ClosePhoto)) {
+        slideshow.running = false;
+    }
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(slideshow_id, slideshow));
     action
 }
 
@@ -324,6 +386,12 @@ mod tests {
     use egui::{Context, RawInput};
     use jellyfin_api::BaseItemDto;
     use std::collections::HashMap;
+
+    #[test]
+    fn slideshow_moves_on_after_the_interval() {
+        assert!(!super::slideshow_due(10.0, 14.9));
+        assert!(super::slideshow_due(10.0, 15.0));
+    }
 
     fn item(id: &str, name: &str, kind: &str) -> BaseItemDto {
         serde_json::from_value(serde_json::json!({

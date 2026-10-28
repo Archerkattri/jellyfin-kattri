@@ -141,7 +141,7 @@ yet a replacement for the official clients. The main missing pieces:
 - **Details pages:** a Media info section lists the source's container, size, bitrate
   and streams. Missing: version picker, extras/special features, trailers, theme media,
   "more from this season" and lyrics.
-- **Other:** no photo slideshow, Live TV recordings and timers, forgot-password flow,
+- **Other:** photos have a slideshow. Missing: Live TV recordings and timers, forgot-password flow,
   home-screen section preferences or library management; the dashboard is admin-lite.
 
 ### Work still required for a production release
