@@ -7,6 +7,7 @@ pub mod hero;
 pub mod home;
 pub(crate) mod item_menu;
 pub mod live_tv;
+mod media_source;
 pub mod music;
 pub(crate) mod open_url;
 mod people;
@@ -2571,6 +2572,21 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                     .color(colors.muted),
                             );
                         }
+                    }
+                }
+                if let Some(info) = app.playback_info.as_ref()
+                    && info.error_code.is_none()
+                {
+                    let index = select_playback_info_source_for_profile(info, app.device_profile())
+                        .map_or(0, |selection| selection.source_index);
+                    if let Some(source) = info.media_sources.get(index) {
+                        egui::CollapsingHeader::new(ui_text(ids::DETAIL_MEDIA_INFO))
+                            .id_salt("detail_media_info")
+                            .show(ui, |ui| {
+                                for line in media_source::summary_lines(source) {
+                                    ui.label(RichText::new(line).size(12.0).color(colors.muted));
+                                }
+                            });
                     }
                 }
                 if app.playback_start_loading {

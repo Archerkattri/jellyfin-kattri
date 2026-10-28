@@ -138,8 +138,9 @@ yet a replacement for the official clients. The main missing pieces:
   an alphabet picker. Missing Suggestions, Studios, Collections, Upcoming and Episodes
   tabs and view modes; music has no album/artist views; books, home videos and
   music videos have no views.
-- **Details pages:** no version picker, extras/special features, trailers, theme media,
-  "more from this season", lyrics or media-info dialog.
+- **Details pages:** a Media info section lists the source's container, size, bitrate
+  and streams. Missing: version picker, extras/special features, trailers, theme media,
+  "more from this season" and lyrics.
 - **Other:** no photo slideshow, Live TV recordings and timers, forgot-password flow,
   home-screen section preferences or library management; the dashboard is admin-lite.
 
