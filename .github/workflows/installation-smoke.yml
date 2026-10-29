@@ -30,7 +30,7 @@ jobs:
             runner: windows-11-arm
     steps:
       - name: Download artifacts from the triggering build
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: kattri-windows-${{ matrix.platform }}-*
           path: artifacts
@@ -81,7 +81,7 @@ jobs:
 
       - name: Upload installation and startup logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: windows-installation-smoke-${{ matrix.platform }}
           path: smoke-logs/
@@ -95,10 +95,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Download artifacts from the triggering build
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: kattri-*-macos-universal*
           path: artifacts
@@ -142,7 +142,7 @@ jobs:
 
       - name: Upload macOS startup logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: macos-installation-smoke
           path: smoke-logs/
@@ -155,8 +155,10 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: kattri-linux-deb-rpm
           path: artifacts
@@ -176,7 +178,7 @@ jobs:
             packaging/linux/smoke-launch.sh /usr/bin/kattri | tee smoke-logs/window.txt
       - name: Upload deb startup logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: linux-deb-installation-smoke
           path: smoke-logs/
@@ -190,8 +192,10 @@ jobs:
     container: fedora:latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: kattri-linux-deb-rpm
           path: artifacts
@@ -210,7 +214,7 @@ jobs:
             packaging/linux/smoke-launch.sh /usr/bin/kattri | tee smoke-logs/window.txt
       - name: Upload rpm startup logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: linux-rpm-installation-smoke
           path: smoke-logs/
@@ -223,8 +227,10 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: kattri-linux-appimage
           path: artifacts
@@ -245,7 +251,7 @@ jobs:
             packaging/linux/smoke-launch.sh ./artifacts/kattri-*-linux-x64.AppImage | tee smoke-logs/window.txt
       - name: Upload AppImage startup logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: linux-appimage-installation-smoke
           path: smoke-logs/
@@ -258,8 +264,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: kattri-linux-flatpak
           path: artifacts
@@ -281,7 +289,7 @@ jobs:
             packaging/linux/smoke-launch.sh flatpak run org.kattri.JellyfinKattri | tee smoke-logs/window.txt
       - name: Upload Flatpak startup logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: linux-flatpak-installation-smoke
           path: smoke-logs/

@@ -158,6 +158,7 @@ fi
 echo "==> appimagetool packs $OUT"
 ARCH=x86_64 "$APPIMAGETOOL" "${APPIMAGETOOL_ARGS[@]}" "$APPDIR" "$OUT"
 chmod 755 "$OUT"
-sha256sum "$OUT" > "$OUT.sha256"
+# Hash the bare file name so `sha256sum -c` works in a directory of downloaded assets.
+(cd "$(dirname "$OUT")" && sha256sum "$(basename "$OUT")" > "$(basename "$OUT").sha256")
 echo "==> built $OUT"
 echo "$OUT"

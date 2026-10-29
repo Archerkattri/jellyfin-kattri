@@ -194,7 +194,8 @@ try {
         'dnf install',
         'flatpak install',
         'xvfb-run',
-        'actions/upload-artifact@v7'
+        # Pinned to a commit SHA, so check the action name only.
+        'actions/upload-artifact@'
     )) {
         if ($installWorkflow -notmatch [regex]::Escape($requiredCheck)) {
             throw "Installation smoke workflow is missing required check: $requiredCheck"

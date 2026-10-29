@@ -32,4 +32,7 @@ license = "GPL-3.0-only"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-debug = 1
+# Distribution artifacts must not carry DWARF or absolute build paths. The deb/rpm scripts strip
+# their binaries, but the Windows and macOS packages would otherwise ship whatever this profile
+# embeds, so keep it at zero. Use a separate debug profile if symbols are ever needed.
+debug = 0

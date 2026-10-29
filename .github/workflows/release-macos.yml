@@ -35,11 +35,11 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       # The toolchain channel comes from rust-toolchain.toml. Both targets are added here.
       - name: Install pinned Rust toolchain with macOS targets
-        uses: actions-rust-lang/setup-rust-toolchain@v2
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
         with:
           target: aarch64-apple-darwin,x86_64-apple-darwin
 
@@ -146,6 +146,15 @@ jobs:
           DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
         run: packaging/macos/sign-and-notarize.sh "dist/macos/kattri-${KATTRI_VERSION}-macos-universal.dmg"
 
+      - name: Refresh the DMG checksum after signing
+        run: |
+          set -euo pipefail
+          DMG="dist/macos/kattri-${KATTRI_VERSION}-macos-universal.dmg"
+          # Codesigning and stapling change the file, so the digest written by make-dmg.sh
+          # before those steps would not match the published artifact.
+          (cd "$(dirname "$DMG")" && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256")
+          cat "$DMG.sha256"
+
       - name: Mark artifact signing state
         id: signing-state
         env:
@@ -160,7 +169,7 @@ jobs:
           fi
 
       - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: kattri-${{ env.KATTRI_VERSION }}-macos-universal${{ steps.signing-state.outputs.suffix }}
           path: |

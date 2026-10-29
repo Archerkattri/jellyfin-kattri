@@ -59,6 +59,8 @@ hdiutil create \
   "$DMG"
 
 hdiutil verify "$DMG" >/dev/null
-shasum -a 256 "$DMG" > "$DMG.sha256"
+# Hash the bare file name so `shasum -c` works in a directory of downloaded assets. The release
+# workflow rewrites this after signing and notarizing, which change the file's bytes.
+(cd "$(dirname "$DMG")" && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256")
 echo "==> built $DMG"
 echo "$DMG"

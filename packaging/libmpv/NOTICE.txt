@@ -14,8 +14,11 @@ distribution as applicable to that build. This short notice does not replace
 those upstream materials. Packaging and license-compliance acceptance remain
 incomplete; a pinned archive alone is not a validated release.
 
-No macOS or Linux archive is currently pinned by this manifest. Fetch scripts
-refuse unpinned platform entries. Local diagnostic runtimes are not part of the
+macOS universal and Linux x64 also pin their archives in
+packaging/libmpv/manifest.toml, from the same libmpv v0.41.0 release. Those
+builds use --disable-gpl --disable-version3 and are licensed under
+LGPL-2.1-or-later, unlike the Windows archive above. Fetch scripts refuse
+unpinned platform entries. Local diagnostic runtimes are not part of the
 packaging manifest and must not be substituted for the selected build.
 
 Upstream source and license information:

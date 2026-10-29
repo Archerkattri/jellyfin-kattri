@@ -52,18 +52,24 @@ jobs:
       KATTRI_SIGNING_SERVICE: ${{ vars.KATTRI_SIGNING_SERVICE }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Derive version from tag
         shell: pwsh
         env:
           KATTRI_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: |
+          $workspaceVersion = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$' |
+            Select-Object -First 1).Matches[0].Groups[1].Value
           if ($env:KATTRI_TAG) {
             $version = $env:KATTRI_TAG -replace '^v', ''
+            # Refuse a tag that does not match the workspace version, matching the macOS and
+            # Linux release guards. Otherwise the MSI could be labelled with another version.
+            if ("v$workspaceVersion" -ne $env:KATTRI_TAG) {
+              throw "Tag '$env:KATTRI_TAG' does not match workspace version '$workspaceVersion'."
+            }
           } else {
-            $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$' |
-              Select-Object -First 1).Matches[0].Groups[1].Value
+            $version = $workspaceVersion
           }
           if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
             throw "Tag '$env:KATTRI_TAG' does not give a numeric version (expected vX.Y.Z)."
@@ -121,7 +127,7 @@ jobs:
           }
 
       - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: kattri-windows-${{ matrix.platform }}${{ steps.signing-state.outputs.suffix }}
           path: dist/*

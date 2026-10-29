@@ -32,10 +32,10 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Install pinned Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v2
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
 
       - name: Install system packages for the build
         run: |
@@ -58,7 +58,7 @@ jobs:
           } | tee dist/linux/BUILD-INFO.txt
 
       - name: Upload build record
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: kattri-linux-build-info
           path: dist/linux/BUILD-INFO.txt
@@ -66,7 +66,7 @@ jobs:
           retention-days: 30
 
       - name: Upload release binary
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: kattri-linux-binary
           path: target/release/jellyfin-kattri
@@ -80,10 +80,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Download release binary
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: kattri-linux-binary
           path: target/release
@@ -121,7 +121,7 @@ jobs:
             target/release/jellyfin-kattri dist/linux
 
       - name: Upload AppImage
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: kattri-linux-appimage
           path: |
@@ -138,13 +138,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Install pinned Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v2
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
 
       - name: Download release binary
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: kattri-linux-binary
           path: target/release
@@ -170,7 +170,7 @@ jobs:
           # The release binary is already built, so cargo deb does not rebuild it.
           echo >> proofs/egui-gl-host/Cargo.toml
           cat packaging/linux/deb/cargo-deb.toml >> proofs/egui-gl-host/Cargo.toml
-          cargo deb -p egui-gl-host-proof --no-build --dbgsym
+          cargo deb -p egui-gl-host-proof --no-build
           mkdir -p dist/linux
           mv target/debian/kattri_*.deb dist/linux/
 
@@ -200,7 +200,7 @@ jobs:
           for f in kattri_*.deb kattri-*.rpm; do sha256sum "$f" > "$f.sha256"; done
 
       - name: Upload deb and rpm
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: kattri-linux-deb-rpm
           path: |
@@ -221,7 +221,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Install flatpak-builder
         run: |
@@ -266,7 +266,7 @@ jobs:
           sha256sum "kattri-${VERSION}-linux-x64.flatpak" > "kattri-${VERSION}-linux-x64.flatpak.sha256"
 
       - name: Upload Flatpak bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: kattri-linux-flatpak
           path: |
