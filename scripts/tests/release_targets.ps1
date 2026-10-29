@@ -159,6 +159,12 @@ try {
         throw 'macOS release workflow and build script must target the jellyfin-kattri host binary.'
     }
 
+    if ($macosWorkflow -notmatch 'codesign --force --deep -s - "dist/macos/Jellyfin Kattri\.app"' -or
+        $macosWorkflow -notmatch 'suffix=-ad-hoc' -or
+        $macosWorkflow -match 'suffix=-unsigned') {
+        throw 'macOS releases without Developer ID credentials must use and label ad-hoc app signing.'
+    }
+
     foreach ($workflowPath in @(
         '.github/workflows/release-windows.yml',
         '.github/workflows/release-linux.yml',

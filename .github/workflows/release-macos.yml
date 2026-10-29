@@ -1,5 +1,5 @@
-# macOS universal release build. Produces a universal disk image, signed and notarized
-# only when signing secrets are configured. Without them the artifacts are unsigned.
+# macOS universal release build. With Developer ID credentials the app and disk image
+# are signed and notarized. Without them the app is ad-hoc signed and not notarized.
 #
 # Runner: macos-15 (Apple silicon). GitHub retired the macos-13 image, which left this job
 # queued with no runner. The macOS 13 minimum in M5-01 is set by MACOSX_DEPLOYMENT_TARGET in
@@ -14,8 +14,8 @@
 #   APPLE_TEAM_ID                 Apple team identifier
 #   APPLE_APP_SPECIFIC_PASSWORD   App-specific password for notarization
 #
-# Not verified here: this workflow has not been run on GitHub. The keychain and
-# notarytool steps are unverified until a run with real credentials.
+# The v0.2.0 packaging workflow passed on GitHub. The keychain and notarytool steps
+# remain unverified until a run with real Developer ID and notarization credentials.
 
 name: Release macOS universal
 
@@ -78,8 +78,8 @@ jobs:
             lipo -info "dist/macos/Jellyfin Kattri.app/Contents/MacOS/jellyfin-kattri"
           } | tee dist/macos/BUILD-INFO.txt
 
-      # Imports the Developer ID certificate into a temporary keychain. Skipped with a
-      # notice when the secret is empty, which leaves the artifacts unsigned.
+      # Imports the Developer ID certificate into a temporary keychain. Without it,
+      # the app-bundle step uses an ad-hoc signature instead.
       - name: Import signing certificate
         env:
           MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
@@ -87,7 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "$MACOS_CERT_P12_BASE64" ]]; then
-            echo "No signing certificate configured. Artifacts will be unsigned."
+            echo "No Developer ID certificate configured. The app will use ad-hoc signing."
             exit 0
           fi
           KEYCHAIN="$RUNNER_TEMP/kattri-signing.keychain-db"
@@ -128,7 +128,15 @@ jobs:
       - name: Sign and notarize app bundle
         env:
           DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
-        run: packaging/macos/sign-and-notarize.sh "dist/macos/Jellyfin Kattri.app"
+        run: |
+          set -euo pipefail
+          if [[ -z "$DEVELOPER_ID" ]]; then
+            codesign --force --deep -s - "dist/macos/Jellyfin Kattri.app"
+            codesign --verify --deep --strict "dist/macos/Jellyfin Kattri.app"
+            echo "App bundle is ad-hoc signed and not notarized."
+          else
+            packaging/macos/sign-and-notarize.sh "dist/macos/Jellyfin Kattri.app"
+          fi
 
       - name: Build disk image
         run: packaging/macos/make-dmg.sh "dist/macos/Jellyfin Kattri.app" "$KATTRI_VERSION" dist/macos
@@ -144,8 +152,8 @@ jobs:
           DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
         run: |
           if [[ -z "$DEVELOPER_ID" ]]; then
-            echo "suffix=-unsigned" >> "$GITHUB_OUTPUT"
-            echo "Artifacts in this run are UNSIGNED and not notarized." >> "$GITHUB_STEP_SUMMARY"
+            echo "suffix=-ad-hoc" >> "$GITHUB_OUTPUT"
+            echo "The app bundle is ad-hoc signed; artifacts are not notarized." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "suffix=" >> "$GITHUB_OUTPUT"
             echo "Artifacts in this run were signed and notarized." >> "$GITHUB_STEP_SUMMARY"
