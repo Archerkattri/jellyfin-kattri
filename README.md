@@ -1,11 +1,15 @@
 # Jellyfin Kattri
 
+[![Rust client CI](https://github.com/Archerkattri/jellyfin-kattri/actions/workflows/rust-client-ci.yml/badge.svg)](https://github.com/Archerkattri/jellyfin-kattri/actions/workflows/rust-client-ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/Archerkattri/jellyfin-kattri?include_prereleases&label=release)](https://github.com/Archerkattri/jellyfin-kattri/releases)
+[![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue)](LICENSE)
+
 A native desktop client for Jellyfin. Rust, egui and libmpv, with no web view, no
 JavaScript UI layer and no server-side changes. Your Jellyfin server stays where it
 is; Kattri connects to it like any other client and plays your media in a real
 desktop window.
 
-![Home screen](assets/screenshots/home.jpg)
+![Jellyfin Kattri home screen](assets/screenshots/home.jpg)
 
 ## Why Kattri
 
@@ -20,46 +24,65 @@ desktop window.
   server for DirectPlay, DirectStream or Transcode only for formats it can actually
   present. Unsupported sources fall back through the server's transcode path.
 - **Built for a TV and a desk.** Hero banners, artwork rows and focus animation,
-  driven by keyboard or gamepad as well as the mouse.
+  driven by keyboard or gamepad as well as the mouse, with Standard, Large and
+  10-foot interface sizes.
 
-## What it does
+## Screenshots
+
+| Movies library | Item details |
+| --- | --- |
+| ![Movies library](assets/screenshots/library.jpg) | ![Item details](assets/screenshots/detail.jpg) |
+
+All screenshots are framebuffer captures of the running application against a real
+Jellyfin 12.4.0 server (Windows x64, 2026-10-29). Server artwork is shown; no mock
+data is used.
+
+## Features
 
 | Area | Included |
 | --- | --- |
-| Sign-in | Password sign-in, Quick Connect, saved servers, multiple profiles, stay signed in |
-| Home | Continue Watching, Next Up, Latest, My Media and Collections shelves, hero banner |
-| Library | Paging, sorting, play-state and favorites filters, 1,000-item photo and poster grids |
-| Details | Metadata, overview, cast, similar titles, seasons and episodes with overview and progress, Next Up on series pages, play and download actions |
-| Search | Debounced cross-type search grouped by movies, series, episodes, music, playlists, photos, people and channels |
-| Playback | Direct play, direct stream and transcode through the relay, resume, playback reporting, audio and subtitle tracks, subtitle delay, chapters, speed control, segment skip |
-| Player | Icon control bar (transport, 10-second seek, frame step, chapter step and chapter menu, volume and mute, speed, A-B loop, picture-in-picture, fullscreen) with title and elapsed/total time; previous/next for tracks and episodes, an Up Next card and auto-play of the next episode; audio and subtitle menu with subtitle sync, auto-hiding overlay, media info panel (`I`), equalizer and loudness filters, HDR to SDR tone mapping, refresh-rate matching on Windows, open a stream address |
+| Sign-in | Password sign-in, Quick Connect, saved servers, multiple profiles, stay signed in, forgot-password flow |
+| Home | Continue Watching, Next Up, Latest, My Media and Collections shelves, hero banner, per-section visibility settings |
+| Library | Paging, sorting, play-state, favorites, genre and studio filters, alphabet picker, 1,000-item photo and poster grids, music All/Albums/Songs views |
+| Details | Metadata, overview, cast, similar titles, seasons and episodes with overview and progress, series Next Up, media info, version picker, trailers and extras, lyrics, play and download actions |
+| Search | Debounced cross-type search grouped by movies, series, episodes, music, playlists, photos, people and channels, with Show all and server subtitle search |
+| Playback | Direct play, direct stream and transcode through the relay, resume, playback reporting, audio and subtitle tracks, subtitle delay, chapters, speed control, segment skip, bounded mid-stream recovery |
+| Player | Icon control bar (transport, 10-second seek, frame step, chapter step and chapter menu, volume and mute, speed, A-B loop, picture-in-picture, fullscreen) with title and elapsed/total time; previous/next for tracks and episodes, an Up Next card and auto-play of the next episode; audio and subtitle menu, auto-hiding overlay, media info panel (`I`), equalizer and loudness filters, HDR to SDR tone mapping, refresh-rate matching on Windows, open a stream address |
 | Music | Album and playlist browsing, queue with shuffle and repeat, queue restore after restart |
 | Live TV | Channel list, 24-hour guide, tune through the relay, record the current program, recordings and scheduled recordings |
 | Offline | Download manager with pause, resume, range fallback, checksum verification and external subtitles |
-| Extras | Right-click item menu (play, mark watched, favorite, download, add to playlist or queue), playlists, collections, favorites, photos, admin-lite dashboard, parental PIN |
+| Extras | Right-click item menu (play, mark watched, favorite, download, add to playlist or queue), playlists, collections, favorites, photos with slideshow, admin-lite dashboard, parental PIN |
+| Administration | Edit metadata, Identify, and Edit images for administrators, plus Add to collection, Refresh metadata and confirmed Delete |
 | Settings | General, playback, audio, subtitles, video, input, server, About; versioned TOML per profile |
-| Input | Keyboard map, gamepad support (in menus and during playback), full focus navigation, rebindable actions |
-| Interface | Ambient movie/show backdrops with poster fallback and reduced-motion-aware crossfades; optional local custom backdrop; Standard, Large and TV (10-foot) sizes; choose which home sections appear |
+| Input | Keyboard map, gamepad support in menus and during playback, full focus navigation, rebindable actions |
+| Interface | Ambient movie/show backdrops with poster fallback and reduced-motion-aware crossfades; optional local custom backdrop; Standard, Large and TV (10-foot) sizes; narrow-window More menu |
 
-### Library browsing
+## Download
 
-![Movies library](assets/screenshots/library.jpg)
+Grab a build from the [releases page](https://github.com/Archerkattri/jellyfin-kattri/releases).
+The current prerelease is **v0.2.0**.
 
-### Item details
-
-![Item details](assets/screenshots/detail.jpg)
-
-## Platform support
-
-| Platform | Build | Runtime |
+| Platform | Artifacts | libmpv |
 | --- | --- | --- |
-| Windows x64 | Supported | Exercised: browsing, negotiation, native video presentation |
-| Windows ARM64 | Release build and installer scripts | Not exercised on hardware |
-| macOS | Universal build scripts and CI build | Not exercised |
-| Linux x64 / ARM64 | Packages and CI build | Not exercised |
+| Windows x64 | `JellyfinKattri-<version>-x64.msi`, `-x64-portable.zip` | Bundled next to the executable |
+| Windows ARM64 | `JellyfinKattri-<version>-arm64.msi`, `-arm64-portable.zip` | Bundled next to the executable |
+| macOS universal | `kattri-<version>-macos-universal.dmg` | Bundled inside the app |
+| Linux x64 | `kattri_<version>-1_amd64.deb`, `kattri-<version>-1.x86_64.rpm` | Uses the distribution package (`libmpv2` or `libmpv1`) |
+| Linux x64 | `kattri-<version>-linux-x64.AppImage`, `kattri-<version>-linux-x64.flatpak` | Bundled |
+| Linux ARM64 | Built and tested in CI | No package yet |
 
-Playback needs libmpv available to the platform's library loader and a graphical
-session. Signed installers and clean-machine installs are not yet part of a release.
+Every package and bundle ships with a `.sha256` file. Install examples:
+
+```sh
+sudo apt install ./kattri_0.2.0-1_amd64.deb        # Debian/Ubuntu; uses a system libmpv
+sudo dnf install ./kattri-0.2.0-1.x86_64.rpm       # Fedora; uses a system libmpv
+chmod +x kattri-0.2.0-linux-x64.AppImage && ./kattri-0.2.0-linux-x64.AppImage
+flatpak install --user --bundle ./kattri-0.2.0-linux-x64.flatpak
+```
+
+The packages are **unsigned**: Windows SmartScreen and macOS Gatekeeper will warn.
+The macOS app is ad-hoc signed, not notarized. This is a development prerelease, not
+a 1.0 release.
 
 ## Build from source
 
@@ -71,13 +94,20 @@ cargo build --workspace --locked
 cargo run --locked -p egui-gl-host-proof --bin jellyfin-kattri
 ```
 
-The executable is `jellyfin-kattri`. The optional eframe demo is a UI preview only;
-it does not host libmpv.
+The executable is `jellyfin-kattri`. libmpv is loaded at run time, so it is not needed
+to build. The optional eframe demo is a UI preview only; it does not host libmpv.
 
-Linux builds also need pkg-config and libudev development headers for gamepad input:
+Platform prerequisites:
 
 ```sh
-sudo apt-get install pkg-config libudev-dev
+# Linux: gamepad input headers, X11 keyboard library, and a libmpv to load
+# (Ubuntu 24.04 and Debian 12 ship libmpv2; Ubuntu 22.04 ships libmpv1)
+sudo apt-get install pkg-config libudev-dev libxkbcommon-x11-0 libmpv2
+
+# macOS: a libmpv build; the packaged app carries its own
+brew install mpv
+
+# Windows: place libmpv-2.dll beside jellyfin-kattri.exe or on PATH
 ```
 
 ## First run
@@ -89,152 +119,145 @@ sudo apt-get install pkg-config libudev-dev
    access token in the OS credential store.
 3. Pick a profile with `--profile <name>` to keep separate settings and queues.
 
-Settings and profiles live in the platform config directory. `KATTRI_LOG` overrides
-the log level for one run, and the About screen shows the log location. Logs redact
-credentials and server addresses; nothing is uploaded anywhere.
+Settings, profiles and logs live in the platform config directory; the About screen
+shows the exact log folder. `KATTRI_LOG` overrides the log level for one run. Logs
+redact credentials and server addresses, and nothing is uploaded anywhere.
+
+## Keyboard and gamepad
+
+The default keymap covers navigation and playback. Every action can be rebound in
+Settings → Input, and a gamepad can drive menus and the player.
+
+| Action | Keys |
+| --- | --- |
+| Navigate | Arrow keys or `W` `A` `S` `D` |
+| Confirm / back | `Enter` · `Esc`, `Backspace` or `B` |
+| Home / search / settings | `H` · `Ctrl+F` · `M` |
+| Play, pause, stop | `Space` or `P` · `Ctrl+P` · `X` |
+| Seek and step | `PgUp` / `PgDn` · `Home` / `End` |
+| Audio, subtitles, mute | `E` / `Ctrl+A` · `L` / `Ctrl+L`, `C` · `N` |
+| Volume and speed | `=` / `-` · `Ctrl+Up` / `Ctrl+Down` |
+| Subtitle delay | `Alt+S` / `Alt+Shift+S`, reset with `Alt+R` |
+| Fullscreen, screenshot, close | `F11` · `Ctrl+S` · `Ctrl+Q` |
+
+## Platform support
+
+| Platform | Packages | Automated checks | Runtime evidence |
+| --- | --- | --- | --- |
+| Windows x64 | MSI, portable zip | Build, tests; the clean-runner MSI install → window → close → uninstall check is written but its last run failed | Browsing, search, PlaybackInfo, native video presentation, and an HDR10 → SDR tone-mapped run on an RTX 4060 |
+| Windows ARM64 | MSI, portable zip | Build, tests; same MSI check, not yet green | Install and launch only |
+| macOS universal | DMG | Build, mount, signature verification, launch and quit | Launch only |
+| Linux x64 | deb, rpm, AppImage, flatpak | Build plus fresh-runner install, launch and normal close for all four formats (2026-10-29) | Launch only |
+| Linux ARM64 | CI build | Build and tests | Not exercised |
+
+Playback needs a graphical session and a libmpv the platform loader can find. The
+clean-runner checks that pass (macOS and Linux) started the application and closed it
+normally; none of these checks played media.
 
 ## Project status
 
-Kattri is an early development build, not a production release. Public CI is green
-on Windows x64/ARM64, macOS, and Linux x64/ARM64. Windows x64 has been exercised
-against Jellyfin 12.x for browsing, search, PlaybackInfo, native video rendering,
-and authorized stream-only relay playback. A separate Windows RTX 4060 run used
-NVDEC and rendered an HDR10 source tone-mapped to SDR. These checks do not establish
-complete playback, release readiness, or feature parity with Jellyfin Web/Desktop.
+Kattri is an early development build, not a production release. The build and test
+workflows are green on Windows x64/ARM64, macOS and Linux x64/ARM64. More than 2,800
+automated tests run in the default workspace suite against local fixtures and an
+in-process mock Jellyfin server.
 
-Latest visual pass (2026-10-28, Windows x64, real server): Home, Movies, movie details
-and General settings were exercised. Server artwork and a local custom backdrop rendered
-with the legibility scrims. These framebuffer captures are the screenshots above.
-Playback was not part of this pass. The previous 2026-10-27 stream-only pass exercised
-browsing and an episode using DirectPlay with hardware decoding (d3d11va) and WASAPI
-audio; it did not establish complete playback or feature parity.
+What has actually been exercised:
 
-### Feature parity with Jellyfin Web
+- **Real-server browsing** against Jellyfin 12.x: sign-in, Home rows, libraries, item
+  details, search, people and similar items, and PlaybackInfo negotiation.
+- **Stream-only playback** through the relay on Windows x64: a 10-minute DirectPlay
+  run and a 30-second Transcode run with software/null outputs. Visible video and
+  audible audio were not part of that run.
+- **A Windows RTX 4060 pass** that used NVDEC and rendered an HDR10 source tone-mapped
+  to SDR.
+- **Packaging**: release-built artifacts for every platform. Clean-runner install,
+  startup and normal-close checks pass for the macOS DMG and all four Linux formats;
+  the Windows MSI check is implemented but red on its last run.
 
-A source-level audit against jellyfin-web (2026-10-27) found large gaps. Kattri is not
-yet a replacement for the official clients. The main missing pieces:
+These checks do not establish complete playback, release readiness, or feature parity
+with Jellyfin Web or Jellyfin Desktop. Unvalidated areas include visible/audible
+playback on macOS and Linux, GPU decode across hardware, HDR passthrough, long HLS
+sessions, SyncPlay with two clients, physical controllers, and accessibility walks on
+each platform.
 
-- **Item context menu:** right-click (or Shift+F10 / the Menu key on a focused card) on
-  library cards, home rows and search results offers Play, Play from beginning, Open details, Go to series, Mark played/unplayed,
-  Add/remove favorite, Download, Add to playlist and, for music tracks, Play next and Add
-  to queue. Administrators also get Add to collection, Refresh metadata and Delete (with
-  a confirmation), Edit metadata, Identify and Edit images. Administrators and users
-  allowed to manage subtitles get Search
-  subtitles for movies and episodes. Still missing: shuffle from the menu and multi-select.
-- **Episodes and series:** the series page offers the server's Next Up episode (Play or
-  Resume), and episode rows show the still, overview, runtime, progress and a watched
-  mark.
-  In the player, an Up Next card counts down the last 30 seconds of an episode with
-  Play now and Cancel. An episode's title opens its own page (Back returns to the
-  series) and its ▶ button plays it; rows show the episode's still. Shuffle plays the
-  series' episodes in random order, with previous/next and Up Next following that order. The player's previous and next
-  buttons move between episodes, and the next episode starts when one ends (a Playback
-  setting, on by default).
-- **Player OSD:** title, elapsed/total time, transport, chapter stepping, volume with
-  mute, frame stepping, A-B loop, speed, PiP and a fullscreen toggle, as a compact
-  icon bar, with previous/next for music tracks and episodes and an Up Next card. Hovering
-  or dragging the seek bar shows the time there and, when available, the server's
-  trickplay thumbnail.
-  The audio and subtitle menu can search the server's subtitle providers by language and
-  download a result, which joins the track list. Still missing: quality/source selection
-  inside the player.
-- **Library views:** one grid per type with sort, played/favorite, genre and studio
-  filters and an alphabet picker. Missing Suggestions, Collections, Upcoming and Episodes
-  tabs and view modes; music can list everything, albums only or songs only, but has no
-  artist view. Collections, books, home videos and music videos have dedicated pages;
-  books can be downloaded for an external reader. Narrow windows move extra navigation
-  destinations into a More menu, and photo folders show their names.
-- **Details pages:** a Media info section lists the source's container, size, bitrate
-  and streams; an episode page lists the rest of its season; an item with several
-  versions offers a Version picker that playback follows; movie and series pages list
-  their trailers and special features; music track pages show lyrics. Missing: theme
-  media and lyrics synced to playback.
-- **Other:** photos have a slideshow, and the home sections can be turned off one by one
-  in General settings, and sign-in has a Forgot password flow. Live TV lists recordings
-  (playable) and scheduled recordings (cancellable), and records a channel's current
-  program. Missing: series recordings and library management; the dashboard is
-  admin-lite.
+The screenshots above come from a 2026-10-29 Windows x64 pass against Jellyfin 12.4.0
+that exercised Home, the Movies library, movie details, search and settings. Playback
+was not part of that pass.
+
+### Where Kattri still differs from Jellyfin Web
+
+A source-level audit against jellyfin-web (2026-10-27) found real gaps. Kattri is not
+yet a replacement for the official clients. The main ones:
+
+- **Item menu:** Play, Play from beginning, Open details, Go to series, watched and
+  favorite toggles, Download, playlists and queue, plus administrator actions (Edit
+  metadata, Identify, Edit images, Add to collection, Refresh, Delete). Missing:
+  shuffle from the menu and multi-select.
+- **Library views:** one rich grid per type with filters and an alphabet picker.
+  Missing Suggestions, Collections, Upcoming and Episodes tabs, alternate view modes,
+  and an artist view for music.
+- **Player:** no quality/source picker inside the player; SyncPlay is not connected to
+  playback yet.
+- **Details:** theme media and lyrics synced to playback are missing.
+- **Live TV:** no series recordings or library management; the dashboard is admin-lite.
+- **Distribution:** unsigned packages, no automatic updates in 1.0, and no Discord
+  presence until 1.1.
 
 ### Work still required for a production release
 
 **Playback and reliability**
 
-- Validate mid-stream recovery in the running app. A movie or episode that fails after
-  it starts now reopens the same source at its last position (then other sources),
-  bounded to three reopens; this is unit-tested, not exercised against a real failure.
 - Validate the complete graphical path: visible video, audible audio, pause, seek,
-  speed, chapters, tracks, subtitles, stop, and clean shutdown.
-- Exercise relay replacement in the running graphical host. Unit and software/null
-  libmpv replacement-event checks pass, but the full rendered relay flow is unverified.
-- Run a long live HLS session. The relay now evicts least-recently-used aliases past
-  4,096 instead of refusing (tested with 40,960 rolling segments in unit tests).
-- Exercise DirectPlay, DirectStream, and Transcode end to end. Previous server samples
-  did not offer DirectStream.
-- Validate resume, start/progress/stop reporting, failure reporting, and watched-state
-  behavior on an authorized test setup.
-- Run disconnect, reconnect, slow-server, stalled-stream, and playback-cancellation
-  scenarios.
+  speed, chapters, tracks, subtitles, stop and clean shutdown on each platform.
+- Exercise mid-stream recovery against a real failure; the bounded reopen logic is
+  unit-tested only.
+- Run DirectPlay, DirectStream and Transcode end to end, plus a long live HLS session.
+- Validate resume, start/progress/stop reporting and watched-state behavior.
+- Run disconnect, reconnect, slow-server, stalled-stream and cancellation scenarios.
 
-**Feature integration and acceptance**
+**Integration and acceptance**
 
-- Finish SyncPlay shared-queue playback, ready/buffering reports, queue updates,
-  reconnect/error handling, and two-client synchronization acceptance.
-- Connect the sandboxed plugin runtime to the app, including load, permission grants,
-  run, revoke, unload, and failure handling. Current app runtime fails closed.
-- Validate audible music queue advancement, shuffle, repeat, gapless transitions, and
-  the 200-track restart/resume scenario.
-- Validate tuner-backed Live TV guide data, real channel playback, channel switching,
-  reconnects, and tune-time targets.
-- Validate the download lifecycle: pause/resume, restart recovery, subtitles, offline
-  playback, and low-disk handling.
-- Exercise cast and remote control with real devices; mocks do not prove device behavior.
-- Validate the admin-lite dashboard with a real administrator account. User counts,
-  per-library counts, and scheduled-task summaries are already implemented.
-- Verify settings persistence and actual engine/OS effects across profiles, including
-  passthrough/PCM fallback, cache, PiP, window memory, screenshots, track memory, and
-  subtitle synchronization.
-- Complete keyboard, gamepad, and 10-foot navigation walks across menus, dialogs,
-  settings, and playback; record screen-reader, focus, and contrast checks per platform.
+- Finish SyncPlay shared-queue playback, ready/buffering reports and two-client
+  synchronization acceptance.
+- Connect the sandboxed plugin runtime to the app end to end.
+- Validate music queue advancement, tuner-backed Live TV, the download lifecycle,
+  cast and remote control, and the admin dashboards with a real administrator.
+- Walk keyboard, gamepad and 10-foot navigation across every screen and record
+  screen-reader, focus and contrast checks per platform.
 
-**Media, hardware, and quality**
+**Media and hardware**
 
-- Validate HDR output on HDR-capable hardware per platform. Tone mapping and HDR
-  policies exist; HDR passthrough is not proven. Dolby Vision and HDR10+ remain open.
-- Validate Windows refresh-rate switching/restoration across fullscreen and monitors;
-  Linux/macOS switching remains limited.
-- Expand hardware-decode coverage across codecs, drivers, GPUs, and platforms. One
-  Windows RTX 4060/NVDEC run has succeeded.
-- Validate audio-device switching, equalizer and filters, volume boost, Atmos/DTS:X
-  passthrough, and fallback on real equipment.
-- Validate ASS/SSA rendering, subtitle styling, secondary subtitles, offset/reset, and
-  subtitle synchronization visually.
-- Complete or explicitly scope the planned ISO/BDMV/DVD playback support.
-- Measure startup, playback startup, scrolling/frame time, texture and resident memory
-  against release budgets; complete the eight-hour mixed-use stability soak.
+- Validate HDR output per platform; HDR passthrough, Dolby Vision and HDR10+ remain
+  open.
+- Expand hardware decode across codecs, drivers and GPUs; validate refresh-rate
+  switching and restoration.
+- Validate audio devices, equalizer, filters, passthrough and fallback on real
+  equipment, and ASS/SSA styling visually.
+- Complete or explicitly scope ISO/BDMV/DVD playback.
+- Measure startup, frame time and memory against the budgets, and finish the
+  eight-hour stability soak.
 
-**Distribution and release gates**
+**Distribution**
 
-- Play with the bundled libmpv on clean Linux and macOS machines. All four platforms
-  are now pinned with checksums (Linux x64 and macOS universal from release
-  `libmpv-v0.41.0-abe7469`); the AppImage and the Flatpak bundle the pinned build.
-- Test Windows x64/ARM64, macOS universal, Linux packages, AppImage, and Flatpak on clean
-  systems. All of them now build in CI from the release workflows (2026-10-28: Windows
-  MSI and zip for x64 and ARM64, macOS universal, AppImage, deb, rpm and Flatpak).
-- 1.0 ships unsigned on Windows (owner decision); complete macOS signing/notarization
-  and verify each artifact. The Windows MSI is dual-purpose (per user by default,
-  per machine with `ALLUSERS=1`).
-- Exercise tag-based packaging, uploads, checksums, and publication on the release head.
-- Verify the final embedded SBOM, shipped license notices, and reproducible-build result.
-- Review three ignored Linux accessibility dependency advisories and record the release
+- Test every artifact on clean physical machines, including the bundled libmpv.
+- Complete macOS signing/notarization; Windows packages stay unsigned in 1.0 by owner
   decision.
-- Choose the release version, verify README build steps on each platform, and publish
-  release notes with known gaps.
+- Verify the embedded SBOM, licence notices and reproducible-build result.
+- Review the ignored Linux accessibility dependency advisories and record the
+  release decision.
 
-Discord presence is deferred to 1.1. Automatic update fetching is deferred for 1.0;
-the updater signing keyring is empty, so signed automatic updates are unavailable.
-Owner approval to use required licenses is recorded; shipped third-party notices and
-package-level compliance evidence are still required. Kattri does not guarantee a
-feature will work on every device until its platform and hardware checks are recorded.
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `crates/jellyfin-api` | Typed Jellyfin client: connect, login, libraries, home, PlaybackInfo, playback sources, reporting |
+| `crates/client-core` | Pure logic: playback phase machine, source selection, report scheduling, downloads, subtitle sync |
+| `crates/playback-relay` | Loopback relay with capability URLs, origin binding and HLS rewrite |
+| `crates/kattri-*` | Settings, input, platform services, downloads, parental control, plugins, updater, i18n, logging |
+| `proofs/egui-client` | The egui application: screens, rows, hero, player controls, API worker |
+| `proofs/mpv-render` | Dynamically loaded libmpv FFI, render context, tracks, subtitle delay |
+| `proofs/egui-gl-host` | winit + glutin host; the binary that runs libmpv and the UI together |
+| `packaging/` | Windows MSI/zip, macOS app/DMG, deb/rpm/AppImage/Flatpak, pinned libmpv builds |
 
 ## Development checks
 
@@ -253,7 +276,9 @@ Run the full gate on Windows with:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 ```
 
-or on bash with `bash scripts/check.sh`.
+or on bash with `bash scripts/check.sh`. It also runs the credential-helper
+regressions, the no-network live-runner checks, and the release-target and packaging
+contract checks.
 
 Live-server tests are opt-in and ignored by default. Point them at a test server with
 `JELLYFIN_TEST_URL`, `JELLYFIN_TEST_USER` and `JELLYFIN_TEST_PASSWORD`, and read each
