@@ -1077,6 +1077,7 @@ enum WorkerCommand {
     GetBackdropArtwork {
         request_id: u64,
         item_id: String,
+        ambient: bool,
     },
     LoadCustomBackdrop {
         request_id: u64,
@@ -1900,6 +1901,19 @@ impl ApiWorker {
         self.commands.send(WorkerCommand::GetBackdropArtwork {
             request_id,
             item_id,
+            ambient: false,
+        })
+    }
+
+    pub fn get_ambient_backdrop_artwork(
+        &self,
+        request_id: u64,
+        item_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::GetBackdropArtwork {
+            request_id,
+            item_id,
+            ambient: true,
         })
     }
 
@@ -4584,10 +4598,12 @@ async fn execute_command(
             WorkerCommand::GetBackdropArtwork {
                 request_id,
                 item_id,
+                ambient,
             } => {
                 start_backdrop_artwork_load(
                     request_id,
                     item_id,
+                    ambient,
                     client.as_ref().cloned(),
                     session.as_ref().cloned(),
                     events.clone(),
@@ -4596,9 +4612,10 @@ async fn execute_command(
                 .await;
             }
             WorkerCommand::LoadCustomBackdrop { request_id, path } => {
-                let result = custom_backdrop::read_custom_backdrop(&path)
-                    .await
-                    .and_then(|bytes| decode_backdrop_artwork(bytes).ok());
+                let result = match custom_backdrop::read_custom_backdrop(&path).await {
+                    Some(bytes) => decode_backdrop(bytes, events, true).await.ok(),
+                    None => None,
+                };
                 let event = match result {
                     Some((width, height, rgba)) => WorkerEvent::CustomBackdropLoaded {
                         request_id,
@@ -5542,7 +5559,11 @@ async fn decode_artwork(
 
 /// Backdrops fill the hero and the detail header, so they get larger limits than card
 /// artwork (which is capped at 512x768 and would reject a full-width backdrop).
-async fn decode_backdrop(bytes: Vec<u8>, events: &WorkerSink) -> Result<(u32, u32, Vec<u8>), ()> {
+async fn decode_backdrop(
+    bytes: Vec<u8>,
+    events: &WorkerSink,
+    ambient: bool,
+) -> Result<(u32, u32, Vec<u8>), ()> {
     let permit = events
         .decoders
         .clone()
@@ -5551,7 +5572,11 @@ async fn decode_backdrop(bytes: Vec<u8>, events: &WorkerSink) -> Result<(u32, u3
         .map_err(|_| ())?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        decode_backdrop_artwork(bytes)
+        if ambient {
+            decode_ambient_backdrop_artwork(bytes)
+        } else {
+            decode_backdrop_artwork(bytes)
+        }
     })
     .await
     .map_err(|_| ())?
@@ -5739,10 +5764,61 @@ fn decode_backdrop_artwork(bytes: Vec<u8>) -> Result<(u32, u32, Vec<u8>), ()> {
     Ok((width, height, image.into_raw()))
 }
 
+fn decode_ambient_backdrop_artwork(bytes: Vec<u8>) -> Result<(u32, u32, Vec<u8>), ()> {
+    let (width, height, rgba) = decode_backdrop_artwork(bytes)?;
+    let image = image::RgbaImage::from_raw(width, height, rgba).ok_or(())?;
+    let image = image::DynamicImage::ImageRgba8(image);
+    let image = if image.width() > 480 {
+        image.resize(480, u32::MAX, image::imageops::FilterType::Lanczos3)
+    } else {
+        image
+    }
+    .to_rgba8();
+    let image = image::imageops::blur(&image, 6.0);
+    Ok((image.width(), image.height(), image.into_raw()))
+}
+
 /// The request asks for 1920 wide; these bounds also accept a server that ignores maxWidth
 /// on a 4K backdrop.
 const BACKDROP_MAX_WIDTH: u32 = 3840;
 const BACKDROP_MAX_HEIGHT: u32 = 2160;
+
+#[cfg(test)]
+mod ambient_backdrop_tests {
+    use super::decode_ambient_backdrop_artwork;
+    use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+    use std::io::Cursor;
+
+    #[test]
+    fn ambient_backdrop_blurs_contrast_and_bounds_tiny_images() {
+        let checkerboard = RgbaImage::from_fn(960, 540, |x, y| {
+            if (x + y) % 2 == 0 {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            }
+        });
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(checkerboard)
+            .write_to(&mut encoded, ImageFormat::Png)
+            .expect("encode checkerboard");
+        let (width, height, rgba) = decode_ambient_backdrop_artwork(encoded.into_inner())
+            .expect("decode ambient checkerboard");
+        assert!(width <= 480 && width > 0 && height > 0);
+        assert_eq!(rgba.len(), width as usize * height as usize * 4);
+        assert!(rgba.as_chunks::<4>().0.iter().all(|pixel| {
+            pixel[0] > 80 && pixel[0] < 175 && pixel[0] == pixel[1] && pixel[1] == pixel[2]
+        }));
+
+        let mut tiny = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, Rgba([20, 40, 60, 255])))
+            .write_to(&mut tiny, ImageFormat::Png)
+            .expect("encode tiny backdrop");
+        let (width, height, rgba) =
+            decode_ambient_backdrop_artwork(tiny.into_inner()).expect("decode tiny backdrop");
+        assert_eq!((width, height, rgba.len()), (1, 1, 4));
+    }
+}
 
 fn decode_person_artwork(bytes: Vec<u8>) -> Result<(u32, u32, Vec<u8>), ()> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
@@ -5885,6 +5961,7 @@ async fn start_primary_artwork_load(
 async fn start_backdrop_artwork_load(
     request_id: u64,
     item_id: String,
+    ambient: bool,
     client: Option<JellyfinClient>,
     session: Option<Session>,
     events: WorkerSink,
@@ -5905,7 +5982,7 @@ async fn start_backdrop_artwork_load(
 
     let result = (client.get_backdrop_image(&session, &item_id)).await;
     match result {
-        Ok(bytes) => match decode_backdrop(bytes, &events).await {
+        Ok(bytes) => match decode_backdrop(bytes, &events, ambient).await {
             Ok((width, height, rgba)) => {
                 send_event(
                     &events,

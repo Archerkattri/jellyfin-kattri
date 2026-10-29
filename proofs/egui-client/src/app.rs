@@ -638,10 +638,12 @@ pub struct KattriApp {
     pub(crate) selected_artwork_texture: Option<egui::TextureHandle>,
     detail_artwork_request_id: u64,
     detail_backdrop_attempted: bool,
-    /// Backdrop texture for the Home hero, keyed by the item it belongs to.
+    /// Sharp backdrop texture for the Home hero, keyed by the item it belongs to.
     pub(crate) home_hero_backdrop: Option<(String, egui::TextureHandle)>,
-    /// The backdrop request in flight or already tried for the Home hero: (request id, item id).
+    home_ambient_backdrop: Option<(String, egui::TextureHandle)>,
+    /// The backdrop requests in flight or already tried for the Home hero.
     home_hero_request: Option<(u64, String)>,
+    home_ambient_request: Option<(u64, String)>,
     pub(crate) ambient_backdrop: crate::ui::ambient::AmbientBackdrop,
     pub(crate) custom_backdrop_texture: Option<egui::TextureHandle>,
     custom_backdrop_request: Option<(u64, std::path::PathBuf)>,
@@ -1151,7 +1153,9 @@ impl KattriApp {
             detail_artwork_request_id: 0,
             detail_backdrop_attempted: false,
             home_hero_backdrop: None,
+            home_ambient_backdrop: None,
             home_hero_request: None,
+            home_ambient_request: None,
             ambient_backdrop: crate::ui::ambient::AmbientBackdrop::default(),
             custom_backdrop_texture: None,
             custom_backdrop_request: None,
@@ -5814,7 +5818,7 @@ impl KattriApp {
         );
     }
 
-    /// Asks for the backdrop of the item the Home hero shows. One attempt per item.
+    /// Loads separate sharp hero and blurred ambient textures for the selected item.
     fn request_home_hero_backdrop(&mut self) {
         if self.view != AppView::Home {
             return;
@@ -5822,24 +5826,42 @@ impl KattriApp {
         let Some(item_id) = self.home.hero_item_id() else {
             return;
         };
-        if self
+        let sharp_loaded = self
             .home_hero_backdrop
             .as_ref()
-            .is_some_and(|(shown, _)| *shown == item_id)
-            || self
-                .home_hero_request
-                .as_ref()
-                .is_some_and(|(_, wanted)| *wanted == item_id)
-        {
-            return;
+            .is_some_and(|(shown, _)| *shown == item_id);
+        let sharp_requested = self
+            .home_hero_request
+            .as_ref()
+            .is_some_and(|(_, wanted)| *wanted == item_id);
+        if !sharp_loaded && !sharp_requested {
+            let request_id = self.allocate_request_id();
+            if self.worker.as_ref().is_some_and(|worker| {
+                worker
+                    .get_backdrop_artwork(request_id, item_id.clone())
+                    .is_ok()
+            }) {
+                self.home_hero_request = Some((request_id, item_id.clone()));
+            }
         }
-        let request_id = self.allocate_request_id();
-        if self.worker.as_ref().is_some_and(|worker| {
-            worker
-                .get_backdrop_artwork(request_id, item_id.clone())
-                .is_ok()
-        }) {
-            self.home_hero_request = Some((request_id, item_id));
+
+        let ambient_loaded = self
+            .home_ambient_backdrop
+            .as_ref()
+            .is_some_and(|(shown, _)| *shown == item_id);
+        let ambient_requested = self
+            .home_ambient_request
+            .as_ref()
+            .is_some_and(|(_, wanted)| *wanted == item_id);
+        if !ambient_loaded && !ambient_requested {
+            let request_id = self.allocate_request_id();
+            if self.worker.as_ref().is_some_and(|worker| {
+                worker
+                    .get_ambient_backdrop_artwork(request_id, item_id.clone())
+                    .is_ok()
+            }) {
+                self.home_ambient_request = Some((request_id, item_id));
+            }
         }
     }
 
@@ -5884,7 +5906,7 @@ impl KattriApp {
             }
             kattri_settings::BackdropPreference::Server => {
                 if self.view == AppView::Home {
-                    self.home_hero_backdrop
+                    self.home_ambient_backdrop
                         .as_ref()
                         .map(|(_, texture)| sized_texture(texture))
                         .or_else(|| self.home.hero_artwork())
@@ -5893,7 +5915,7 @@ impl KattriApp {
                         .as_ref()
                         .map(sized_texture)
                         .or_else(|| {
-                            self.home_hero_backdrop
+                            self.home_ambient_backdrop
                                 .as_ref()
                                 .map(|(_, texture)| sized_texture(texture))
                         })
@@ -7678,6 +7700,29 @@ impl KattriApp {
                         "home hero backdrop loaded {width}x{height} for {item_id}"
                     ));
                     self.home_hero_backdrop = Some((item_id, texture));
+                }
+                WorkerEvent::BackdropArtworkLoaded {
+                    request_id,
+                    item_id,
+                    width,
+                    height,
+                    rgba,
+                } if self.home_ambient_request.as_ref().is_some_and(
+                    |(wanted_request, wanted_item)| {
+                        *wanted_request == request_id && *wanted_item == item_id
+                    },
+                ) =>
+                {
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                        [width as usize, height as usize],
+                        &rgba,
+                    );
+                    let texture = ctx.load_texture(
+                        format!("jellyfin-home-ambient:{item_id}"),
+                        color_image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.home_ambient_backdrop = Some((item_id, texture));
                 }
                 WorkerEvent::BackdropArtworkUnavailable {
                     request_id,
