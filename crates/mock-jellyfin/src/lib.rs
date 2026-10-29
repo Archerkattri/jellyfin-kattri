@@ -246,6 +246,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/Items/{id}", get(get_item).post(metadata::update_item))
         .route("/MediaSegments/{id}", get(media_segments))
         .route("/Items/{id}/PlaybackInfo", post(playback_info))
+        .route("/Items/{id}/Download", get(download))
         .route("/Items/{id}/Images/{image_type}", get(image))
         .route("/Videos/{id}/master.m3u8", get(master_playlist))
         .route("/Videos/{id}/main.m3u8", get(media_playlist))
@@ -1448,18 +1449,35 @@ async fn stream(
         return unauthorized();
     }
     let is_stream = stream_name == "stream" || stream_name.starts_with("stream.");
-    let Some(item) = state.catalog.get(&id) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
     if !is_stream {
         return StatusCode::NOT_FOUND.into_response();
     }
+    media_response(&state, &headers, &id)
+}
+
+/// The original-file download route the download manager uses.
+async fn download(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !is_authorized(&headers) {
+        return unauthorized();
+    }
+    media_response(&state, &headers, &id)
+}
+
+fn media_response(state: &AppState, headers: &HeaderMap, id: &str) -> Response {
+    let Some(item) = state.catalog.get(id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let body = placeholder_media();
     let total = body.len() as u64;
     let range = headers
         .get(header::RANGE)
         .and_then(|value| value.to_str().ok())
         .map(|value| parse_range(value, total));
+    let etag = HeaderValue::from_static("\"mock-media-v1\"");
 
     let content_type = if item.kind.media_type() == Some("Audio") {
         HeaderValue::from_static("audio/mpeg")
@@ -1472,6 +1490,7 @@ async fn stream(
             let headers = response.headers_mut();
             headers.insert(header::CONTENT_TYPE, content_type);
             headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            headers.insert(header::ETAG, etag);
             response
         }
         Some(RangeOutcome::Unsatisfiable) => {
@@ -1487,6 +1506,7 @@ async fn stream(
             let headers = response.headers_mut();
             headers.insert(header::CONTENT_TYPE, content_type);
             headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            headers.insert(header::ETAG, etag);
             if let Ok(value) = HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")) {
                 headers.insert(header::CONTENT_RANGE, value);
             }

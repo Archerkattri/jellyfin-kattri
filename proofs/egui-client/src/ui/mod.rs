@@ -1964,14 +1964,14 @@ fn render_connected(
         Page::Collections => |kind| kind == MediaKind::Folder,
         Page::MusicVideos | Page::HomeVideos => |kind| kind == MediaKind::Video,
         Page::Books => |kind| matches!(kind, MediaKind::Book | MediaKind::Audio),
+        // These pages do not render the catalog grid. A future caller must not crash the app;
+        // showing nothing is the safe default.
         Page::Home
         | Page::Downloads
         | Page::LiveTv
         | Page::Dashboard
         | Page::SyncPlay
-        | Page::Settings => {
-            unreachable!()
-        }
+        | Page::Settings => |_| false,
     };
     let mut items = app
         .items

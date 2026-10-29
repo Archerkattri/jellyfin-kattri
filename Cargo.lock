@@ -2802,6 +2802,7 @@ dependencies = [
 name = "kattri-plugin-host"
 version = "0.2.0"
 dependencies = [
+ "kattri-guard",
  "kattri-plugins",
  "thiserror 2.0.21",
  "wasmtime",

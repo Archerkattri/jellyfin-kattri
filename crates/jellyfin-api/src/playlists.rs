@@ -350,13 +350,16 @@ impl JellyfinClient {
         }
         let request = self.add_metadata(request, Some(&session.access_token));
         let response = request.send().await.map_err(crate::transport_error)?;
-        expect_no_content(response.status())
+        expect_no_content(response.status(), response.headers())
     }
 }
 
 /// Map a status from an endpoint with no response body. Success is any 2xx
-/// status; the error mapping matches the shared `decode_response` path.
-fn expect_no_content(status: StatusCode) -> Result<(), ApiError> {
+/// status; 429/503 keep their Retry-After like the shared `decode_response` path.
+fn expect_no_content(
+    status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> Result<(), ApiError> {
     if status == StatusCode::UNAUTHORIZED {
         return Err(ApiError::ReauthenticationRequired);
     }
@@ -364,7 +367,7 @@ fn expect_no_content(status: StatusCode) -> Result<(), ApiError> {
         return Err(ApiError::Forbidden);
     }
     if !status.is_success() {
-        return Err(ApiError::HttpStatus(status));
+        return Err(crate::status_error(status, headers));
     }
     Ok(())
 }
@@ -455,18 +458,19 @@ mod tests {
 
     #[test]
     fn empty_success_statuses_are_ok_and_errors_map_like_json_calls() {
-        assert!(expect_no_content(StatusCode::NO_CONTENT).is_ok());
-        assert!(expect_no_content(StatusCode::OK).is_ok());
+        let headers = reqwest::header::HeaderMap::new();
+        assert!(expect_no_content(StatusCode::NO_CONTENT, &headers).is_ok());
+        assert!(expect_no_content(StatusCode::OK, &headers).is_ok());
         assert!(matches!(
-            expect_no_content(StatusCode::UNAUTHORIZED),
+            expect_no_content(StatusCode::UNAUTHORIZED, &headers),
             Err(ApiError::ReauthenticationRequired)
         ));
         assert!(matches!(
-            expect_no_content(StatusCode::FORBIDDEN),
+            expect_no_content(StatusCode::FORBIDDEN, &headers),
             Err(ApiError::Forbidden)
         ));
         assert!(matches!(
-            expect_no_content(StatusCode::NOT_FOUND),
+            expect_no_content(StatusCode::NOT_FOUND, &headers),
             Err(ApiError::HttpStatus(StatusCode::NOT_FOUND))
         ));
     }

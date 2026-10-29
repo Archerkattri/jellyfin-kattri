@@ -947,15 +947,21 @@ impl<'session> GlHost<'session> {
             self.toggle_pip(event_loop);
         }
         if fullscreen_toggle_requested {
-            // Borderless fullscreen on the current monitor, the same mode the saved placement
-            // restores, so leaving fullscreen returns to the stored window rect.
-            let next = self
-                .window
-                .fullscreen()
-                .is_none()
-                .then_some(winit::window::Fullscreen::Borderless(None));
-            self.window.set_fullscreen(next);
-            self.window.request_redraw();
+            if self.pip.is_pip() {
+                // Fullscreen is meaningless for the small always-on-top PiP window and would
+                // leave the PiP controller's stored placement out of sync.
+                self.set_shell_notice("Leave picture-in-picture before going fullscreen.".into());
+            } else {
+                // Borderless fullscreen on the current monitor, the same mode the saved
+                // placement restores, so leaving fullscreen returns to the stored window rect.
+                let next = self
+                    .window
+                    .fullscreen()
+                    .is_none()
+                    .then_some(winit::window::Fullscreen::Borderless(None));
+                self.window.set_fullscreen(next);
+                self.window.request_redraw();
+            }
         }
         // Track choices the viewer made this frame go to the per-series memory (M2-10).
         for (series_id, event) in self.mpv.take_track_memory_events() {
@@ -1348,12 +1354,11 @@ impl<'session> GlHost<'session> {
     }
 
     fn resize_video_target(&mut self, size: [u32; 2]) -> Result<(), String> {
-        if self
-            .video_target
-            .as_ref()
-            .is_some_and(|current| current.size() == size)
-        {
-            return Ok(());
+        if let Some(current) = self.video_target.as_mut() {
+            // Reuse the registered texture and FBO. Allocating a new target per resize and
+            // handing the old texture to egui_glow would queue one full-size texture for
+            // every frame of a drag until shutdown.
+            return current.resize(&self.gl, size);
         }
         let next = VideoTarget::new(&self.gl, size)?;
         let painter = self
@@ -1361,9 +1366,7 @@ impl<'session> GlHost<'session> {
             .as_mut()
             .ok_or_else(|| "egui_glow painter has already been destroyed".to_owned())?;
         painter.replace_native_texture(self.video_texture_id, next.texture());
-        if let Some(previous) = self.video_target.replace(next) {
-            previous.destroy_framebuffer(&self.gl);
-        }
+        self.video_target = Some(next);
         Ok(())
     }
 
@@ -1372,18 +1375,26 @@ impl<'session> GlHost<'session> {
             return true;
         }
         if let Err(error) = self.mpv.close() {
+            // A lost GL context makes a correct libmpv teardown impossible. Vetoing the close
+            // forever would leave a window the user cannot dismiss, so finish the teardown
+            // without GL and let the renderer leak its callback owners (it already refuses to
+            // free pointers libmpv may still hold).
             self.shutdown_error = Some(format!(
-                "Could not close libmpv while its GL context is current: {error}. Keep the window open and retry."
+                "libmpv could not be closed because the GL context is unavailable: {error}"
             ));
-            return false;
+            self.destroyed = true;
+            self.painter.take();
+            return true;
         }
         self.mpv.finish_playback_reporting();
         self.flush_playback_reports();
         if let Err(error) = self.parts.make_current() {
             self.shutdown_error = Some(format!(
-                "Could not make the host GL context current for teardown: {error}. Keep the window open and retry."
+                "Could not make the host GL context current for teardown: {error}"
             ));
-            return false;
+            self.destroyed = true;
+            self.painter.take();
+            return true;
         }
         if let Some(target) = self.video_target.take() {
             target.destroy_framebuffer(&self.gl);
@@ -1874,6 +1885,8 @@ struct HostApp<'session> {
     proxy: EventLoopProxy<HostEvent>,
     redraw_at: Option<Instant>,
     failed: bool,
+    /// Why startup failed, so `main` can exit non-zero after the event loop stops.
+    failure_message: Option<String>,
     /// Discord presence (M4-09). Built only when `plugins.discord_presence` is on and a
     /// Discord application id is configured. Neither is in place yet, so this stays `None`.
     presence: Option<PresenceBinding<IpcTransport>>,
@@ -1898,6 +1911,7 @@ impl<'session> HostApp<'session> {
             proxy,
             redraw_at: None,
             failed: false,
+            failure_message: None,
             presence: None,
             started: Instant::now(),
         }
@@ -1909,21 +1923,35 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
         if self.host.is_some() || self.failed {
             return;
         }
-        match GlHost::new(
-            event_loop,
-            self.proxy.clone(),
-            self.session,
-            self.runtime_error.clone(),
-            self.local_media.clone(),
-            self.profile.as_deref(),
-        ) {
-            Ok(host) => {
+        // Convert any panic during window/GL/libmpv initialization (for example a driver that
+        // exposes no usable config) into the normal failure path, and make the process exit
+        // non-zero so automation does not read a dead window as success.
+        let created = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            GlHost::new(
+                event_loop,
+                self.proxy.clone(),
+                self.session,
+                self.runtime_error.clone(),
+                self.local_media.clone(),
+                self.profile.as_deref(),
+            )
+        }));
+        match created {
+            Ok(Ok(host)) => {
                 host.window.request_redraw();
                 self.host = Some(host);
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 eprintln!("failed to initialize native GL host: {error}");
                 self.failed = true;
+                self.failure_message = Some(error.to_string());
+                event_loop.exit();
+            }
+            Err(_) => {
+                eprintln!("the native GL host panicked while starting");
+                self.failed = true;
+                self.failure_message =
+                    Some("the native GL host panicked while starting".to_owned());
                 event_loop.exit();
             }
         }
@@ -2207,6 +2235,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let session = runtime.as_ref().map(|runtime| &runtime.session);
     let mut app = HostApp::new(session, runtime_error, local_media, profile, proxy);
     event_loop.run_app(&mut app)?;
+    // A failed window/GL setup previously exited 0, which made installers and CI treat a dead
+    // app as a successful launch. Report it as an error instead.
+    if let Some(message) = app.failure_message.take() {
+        return Err(message.into());
+    }
     Ok(())
 }
 

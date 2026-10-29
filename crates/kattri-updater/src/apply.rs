@@ -60,6 +60,9 @@ pub struct Journal {
     pub healthy: Option<String>,
     /// Versions whose update was rolled back. They are not offered again automatically.
     pub failed_targets: Vec<String>,
+    /// True when the previous launch of the pending target ended cleanly. Such a launch is not
+    /// counted as a failed health check, so ordinary quick quits cannot trigger a rollback.
+    pub clean_shutdown: bool,
 }
 
 /// A failure in the install store. The message describes the operation, never the bytes.
@@ -252,7 +255,14 @@ pub fn on_launch<S: InstallStore>(
         });
     }
 
-    let failed_launches = pending.failed_launches.saturating_add(1);
+    // A launch only counts as a failed health check when the previous launch neither wrote the
+    // healthy marker nor recorded a clean shutdown.
+    let failed_launches = if journal.clean_shutdown {
+        pending.failed_launches
+    } else {
+        pending.failed_launches.saturating_add(1)
+    };
+    journal.clean_shutdown = false;
     let target = pending.target.clone();
     journal.pending = Some(Pending {
         failed_launches,
@@ -271,6 +281,21 @@ pub fn on_launch<S: InstallStore>(
             failed_launches,
         })
     }
+}
+
+/// Record that the running build is shutting down normally.
+///
+/// The next [`on_launch`] then does not count this launch as a failed health check, so opening
+/// and quitting the app before the 60-second marker cannot accumulate into a rollback offer.
+/// Returns `false` when no update is pending.
+pub fn note_clean_shutdown<S: InstallStore>(store: &mut S) -> Result<bool, ApplyError> {
+    let mut journal = store.journal()?;
+    if journal.pending.is_none() {
+        return Ok(false);
+    }
+    journal.clean_shutdown = true;
+    store.set_journal(journal)?;
+    Ok(true)
 }
 
 /// Record the healthy marker for `running` and drop the kept previous build.
@@ -302,6 +327,10 @@ pub fn rollback<S: InstallStore>(store: &mut S) -> Result<(), ApplyError> {
         return Err(ApplyError::NoPendingUpdate);
     };
     let previous = store.previous()?.ok_or(ApplyError::NoPrevious)?;
+    // Trust boundary: the digest and the slot live in the same user-writable store, so this
+    // check detects corruption and partial writes, not an attacker who can already rewrite the
+    // installed build. Authenticating a rollback would require the previous build's signed
+    // envelope, which the updater does not retain; see docs/BLOCKERS.md (M4-16).
     if previous.version != pending.previous
         || sha256_hex(&previous.bytes) != pending.previous_sha256
     {

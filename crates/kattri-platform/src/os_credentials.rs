@@ -8,7 +8,7 @@
 //! Error values are built from fixed text or the platform's own message, never from the stored
 //! bytes, so a failure cannot put a secret into a log.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use crate::{CredentialKey, CredentialStore, PlatformError, Secret};
 
@@ -18,17 +18,27 @@ pub struct OsCredentialStore {
     _private: (),
 }
 
-/// Result of installing the platform store, shared by every `open` in the process.
-static INSTALLED: OnceLock<Result<(), PlatformError>> = OnceLock::new();
+/// Set once the platform store has been installed successfully. A failure is deliberately not
+/// cached: a locked keyring or a Secret Service that starts after the app can succeed later.
+static INSTALLED: OnceLock<()> = OnceLock::new();
+static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
 impl OsCredentialStore {
-    /// Opens the OS store. The first call installs the platform backend; later calls reuse the
-    /// outcome. Errors with [`PlatformError::Unsupported`] on a platform without a backend.
+    /// Opens the OS store, installing the platform backend on first success. A failed install
+    /// is retried on the next call so a transient startup failure does not disable credential
+    /// persistence for the whole process. Errors with [`PlatformError::Unsupported`] on a
+    /// platform without a backend.
     pub fn open() -> Result<Self, PlatformError> {
-        INSTALLED
-            .get_or_init(install_platform_store)
-            .clone()
-            .map(|()| Self { _private: () })
+        if INSTALLED.get().is_none() {
+            let _guard = INSTALL_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if INSTALLED.get().is_none() {
+                install_platform_store()?;
+                let _ = INSTALLED.set(());
+            }
+        }
+        Ok(Self { _private: () })
     }
 
     /// For tests: a handle on whatever default `keyring-core` store the test installed.

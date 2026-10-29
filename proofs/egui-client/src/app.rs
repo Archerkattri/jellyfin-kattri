@@ -755,6 +755,8 @@ pub struct KattriApp {
     /// Stills for the episode rows of the series on screen.
     pub(crate) episode_thumbnails: HashMap<String, egui::TextureHandle>,
     episode_thumbnail_pending: HashMap<u64, String>,
+    /// Episode stills waiting for room in the worker's bounded artwork queue.
+    episode_thumbnail_queue: std::collections::VecDeque<(String, String)>,
     /// The user's playlists for the card menu's Add to playlist.
     menu_playlists: crate::ui::item_menu::MenuPlaylists,
     /// The server's collections for the administrator entry Add to collection.
@@ -778,6 +780,8 @@ pub struct KattriApp {
     pub(crate) music_queue_resume_position_ms: Option<u64>,
     music_queue_resume_position_ticks: Option<i64>,
     music_queue_last_saved_json: Option<String>,
+    /// Cheap fingerprint of the queue at the last save, used to skip per-frame JSON encoding.
+    music_queue_saved_fingerprint: u64,
     music_queue_last_saved_at: Duration,
     music_queue_position_ms: u64,
     music_queue_persistence_suspended: bool,
@@ -893,6 +897,11 @@ pub struct KattriApp {
     person_artwork_queue: Vec<BaseItemPerson>,
     pending_person_artwork: HashMap<u64, String>,
     attempted_person_artwork: HashSet<String>,
+    /// Card-menu played toggles in flight: request id -> (item id, previous value). The detail
+    /// page owns `watched`; a rejected card toggle must revert the card by itself.
+    menu_watched_pending: HashMap<u64, (String, bool)>,
+    /// Card-menu favorite toggles in flight, same shape.
+    menu_favorite_pending: HashMap<u64, (String, bool)>,
     playback_request_id: u64,
     playback_start_request_id: u64,
     pending_playback_report_requests: HashMap<u64, PendingPlaybackReport>,
@@ -1250,6 +1259,7 @@ impl KattriApp {
             detail_parent: None,
             episode_thumbnails: HashMap::new(),
             episode_thumbnail_pending: HashMap::new(),
+            episode_thumbnail_queue: std::collections::VecDeque::new(),
             menu_playlists: Default::default(),
             menu_collections: Default::default(),
             menu_collections_request_id: 0,
@@ -1268,6 +1278,7 @@ impl KattriApp {
             music_queue_resume_position_ms: None,
             music_queue_resume_position_ticks: None,
             music_queue_last_saved_json: None,
+            music_queue_saved_fingerprint: u64::MAX,
             music_queue_last_saved_at: Duration::ZERO,
             music_queue_position_ms: 0,
             music_queue_persistence_suspended: false,
@@ -1362,6 +1373,8 @@ impl KattriApp {
             playback_request_id: 0,
             playback_start_request_id: 0,
             pending_playback_report_requests: HashMap::new(),
+            menu_watched_pending: HashMap::new(),
+            menu_favorite_pending: HashMap::new(),
             playback_report_session_generation: 0,
             consecutive_progress_report_failures: 0,
             pending_artwork_requests: HashMap::new(),
@@ -2529,6 +2542,7 @@ impl KattriApp {
         self.music_queue_resume_position_ms = None;
         self.music_queue_resume_position_ticks = None;
         self.music_queue_last_saved_json = None;
+        self.music_queue_saved_fingerprint = u64::MAX;
         self.music_queue_persistence_suspended = self.pending_stored_music_queue.is_some();
         self.playlist_entries.clear();
         self.playlist_items_loading = false;
@@ -3503,6 +3517,7 @@ impl KattriApp {
         self.music_queue_restore_loading = false;
         self.music_queue_persistence_suspended = false;
         self.music_queue_last_saved_json = None;
+        self.music_queue_saved_fingerprint = u64::MAX;
         self.music_queue_position_ms = stored.position_ms;
         self.music_queue_notice = match (removed, self.music_queue.is_empty()) {
             (_, true) => Some(ui_text(ids::MUSIC_QUEUE_NO_SAVED_TRACKS).into()),
@@ -3564,6 +3579,27 @@ impl KattriApp {
         self.music_queue_position_ms = (seconds * 1000.0).min(u64::MAX as f64) as u64;
     }
 
+    /// Hash of the queue's identity and playback state. Two equal fingerprints mean the encoded
+    /// queue would be identical for every field the store keeps.
+    fn music_queue_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.music_queue.len().hash(&mut hasher);
+        self.music_queue.current_index().hash(&mut hasher);
+        self.music_queue.is_shuffled().hash(&mut hasher);
+        let repeat: u8 = match self.music_queue.repeat() {
+            jellyfin_api::session_reporting::RepeatMode::None => 0,
+            jellyfin_api::session_reporting::RepeatMode::All => 1,
+            jellyfin_api::session_reporting::RepeatMode::One => 2,
+        };
+        repeat.hash(&mut hasher);
+        for item in self.music_queue.items() {
+            item.id.hash(&mut hasher);
+            item.playlist_item_id.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     fn persist_music_queue_if_needed(&mut self) {
         if self.music_queue_persistence_suspended
             || self.pending_stored_music_queue.is_some()
@@ -3571,14 +3607,21 @@ impl KattriApp {
         {
             return;
         }
+        // Cheap change detection first: serializing the whole queue every frame is wasted work
+        // for a queue that did not change.
+        let checkpoint_due =
+            self.ui_time.saturating_sub(self.music_queue_last_saved_at) >= Duration::from_secs(10);
+        let fingerprint = self.music_queue_fingerprint();
+        if fingerprint == self.music_queue_saved_fingerprint && !checkpoint_due {
+            return;
+        }
         let Ok(encoded) = self.music_queue.encode() else {
             self.music_queue_notice = Some(ui_text(ids::MUSIC_QUEUE_SAVE_FAILED).into());
             return;
         };
         let dirty = self.music_queue_last_saved_json.as_deref() != Some(encoded.as_str());
-        let checkpoint_due =
-            self.ui_time.saturating_sub(self.music_queue_last_saved_at) >= Duration::from_secs(10);
         if !dirty && !checkpoint_due {
+            self.music_queue_saved_fingerprint = fingerprint;
             return;
         }
         match self
@@ -3587,10 +3630,12 @@ impl KattriApp {
         {
             Some(Ok(())) => {
                 self.music_queue_last_saved_json = Some(encoded);
+                self.music_queue_saved_fingerprint = fingerprint;
                 self.music_queue_last_saved_at = self.ui_time;
             }
             Some(Err(_)) => {
                 self.music_queue_last_saved_json = Some(encoded);
+                self.music_queue_saved_fingerprint = fingerprint;
                 self.music_queue_last_saved_at = self.ui_time;
                 self.music_queue_notice = Some(ui_text(ids::MUSIC_QUEUE_SAVE_FAILED).into());
             }
@@ -4256,20 +4301,24 @@ impl KattriApp {
         }
         self.catalog_loading = true;
         self.catalog_error = None;
-        self.selected_item_id = None;
-        self.selected_details = None;
-        self.details_loading = false;
-        self.details_error = None;
-        self.playback_info = None;
-        self.playback_loading = false;
-        self.playback_error = None;
-        self.playback_start_loading = false;
-        self.playback_start_error = None;
-        self.playback_start_status = None;
-        self.pending_playback = None;
-        self.details_request_id = self.allocate_request_id();
-        self.playback_request_id = self.allocate_request_id();
-        self.playback_start_request_id = self.allocate_request_id();
+        // Appending a page must not close an open detail page or invalidate an in-flight
+        // playback start: auto-prefetch while scrolling would otherwise cancel playback.
+        if start_index == 0 {
+            self.selected_item_id = None;
+            self.selected_details = None;
+            self.details_loading = false;
+            self.details_error = None;
+            self.playback_info = None;
+            self.playback_loading = false;
+            self.playback_error = None;
+            self.playback_start_loading = false;
+            self.playback_start_error = None;
+            self.playback_start_status = None;
+            self.pending_playback = None;
+            self.details_request_id = self.allocate_request_id();
+            self.playback_request_id = self.allocate_request_id();
+            self.playback_start_request_id = self.allocate_request_id();
+        }
         if !self.catalog_loaded {
             self.connection = ConnectionStatus::LoadingItems;
         }
@@ -4702,10 +4751,12 @@ impl KattriApp {
         self.series_episodes_error = None;
         self.episode_thumbnails.clear();
         self.episode_thumbnail_pending.clear();
+        self.episode_thumbnail_queue.clear();
     }
 
     /// Asks for the stills of the episodes now listed, keeping at most
-    /// [`MAX_EPISODE_THUMBNAILS`] textures.
+    /// [`MAX_EPISODE_THUMBNAILS`] textures. Requests are queued and pumped a few at a time, so
+    /// the worker's artwork queue cap cannot strand every episode past the first batch.
     fn request_episode_thumbnails(&mut self) {
         if self.episode_thumbnails.len() > MAX_EPISODE_THUMBNAILS {
             self.episode_thumbnails.clear();
@@ -4724,7 +4775,14 @@ impl KattriApp {
             .take(MAX_EPISODE_THUMBNAILS)
             .collect();
         self.episode_thumbnail_pending.clear();
-        for (episode_id, tag) in wanted {
+        self.episode_thumbnail_queue = wanted.into();
+        self.pump_episode_thumbnails();
+    }
+
+    /// Submit queued episode stills until the worker refuses another one, then wait for a
+    /// completion event and pump again.
+    fn pump_episode_thumbnails(&mut self) {
+        while let Some((episode_id, tag)) = self.episode_thumbnail_queue.front().cloned() {
             let request_id = self.allocate_request_id();
             let sent = self.worker.as_ref().is_some_and(|worker| {
                 worker
@@ -4732,8 +4790,9 @@ impl KattriApp {
                     .is_ok()
             });
             if !sent {
-                break;
+                return;
             }
+            self.episode_thumbnail_queue.pop_front();
             self.episode_thumbnail_pending
                 .insert(request_id, episode_id);
         }
@@ -6234,6 +6293,9 @@ impl KattriApp {
     }
 
     fn clear_connection(&mut self) {
+        // An admin dialog must not survive a sign-out: its next Save would otherwise go to
+        // whatever session the worker holds.
+        self.metadata_editor = None;
         if let Some(worker) = self.worker.as_ref() {
             worker.cancel_reads();
         }
@@ -6322,6 +6384,7 @@ impl KattriApp {
         self.music_queue_resume_position_ms = None;
         self.music_queue_resume_position_ticks = None;
         self.music_queue_last_saved_json = None;
+        self.music_queue_saved_fingerprint = u64::MAX;
         self.music_queue_persistence_suspended = self.pending_stored_music_queue.is_some();
         self.playlist_entries.clear();
         self.playlist_items_loading = false;
@@ -6694,6 +6757,9 @@ impl KattriApp {
                             && let Some(evicted) = self.live_tv_channel_logos.keys().next().cloned()
                         {
                             self.live_tv_channel_logos.remove(&evicted);
+                            // Let a later visit request the evicted logo again instead of
+                            // leaving the card on a placeholder forever.
+                            self.live_tv_logo_attempted.remove(&evicted);
                         }
                         let color_image = egui::ColorImage::from_rgba_unmultiplied(
                             [width as usize, height as usize],
@@ -7034,7 +7100,11 @@ impl KattriApp {
                 }
                 WorkerEvent::ExtrasLoaded { request_id, extras } => {
                     if request_id == self.item_extras_request_id {
-                        self.item_extras = extras;
+                        let ceiling = self.browse_rating_ceiling(ctx);
+                        self.item_extras = extras
+                            .into_iter()
+                            .filter(|item| crate::parental::item_record_is_shown(ceiling, item))
+                            .collect();
                     }
                 }
                 WorkerEvent::SeasonSiblingsLoaded {
@@ -7043,9 +7113,13 @@ impl KattriApp {
                 } => {
                     if request_id == self.season_siblings_request_id {
                         let current = self.selected_item_id.clone();
+                        let ceiling = self.browse_rating_ceiling(ctx);
                         self.season_siblings = episodes
                             .into_iter()
                             .filter(|episode| Some(&episode.id) != current.as_ref())
+                            .filter(|episode| {
+                                crate::parental::item_record_is_shown(ceiling, episode)
+                            })
                             .collect();
                     }
                 }
@@ -7156,14 +7230,21 @@ impl KattriApp {
                     previous,
                     next,
                 } => {
-                    if let Some(neighbors) = self.episode_neighbors.as_mut()
-                        && neighbors.request_id == request_id
-                        && neighbors.episode_id == episode_id
-                    {
-                        neighbors.previous = previous.map(|item| item.id);
-                        neighbors.next_label =
-                            next.as_deref().map(crate::ui::episode_display_label);
-                        neighbors.next = next.map(|item| item.id);
+                    let matches = self.episode_neighbors.as_ref().is_some_and(|neighbors| {
+                        neighbors.request_id == request_id && neighbors.episode_id == episode_id
+                    });
+                    if matches {
+                        if previous.is_none() && next.is_none() {
+                            // The worker reports a failed neighbours query as an empty result.
+                            // Forgetting it lets a later play retry instead of disabling
+                            // Previous/Next for the rest of the episode.
+                            self.episode_neighbors = None;
+                        } else if let Some(neighbors) = self.episode_neighbors.as_mut() {
+                            neighbors.previous = previous.map(|item| item.id);
+                            neighbors.next_label =
+                                next.as_deref().map(crate::ui::episode_display_label);
+                            neighbors.next = next.map(|item| item.id);
+                        }
                     }
                 }
                 WorkerEvent::MusicAlbumTracksLoaded {
@@ -7235,7 +7316,11 @@ impl KattriApp {
                     self.record_network_success();
                     self.playlist_items_loading = false;
                     self.playlist_items_error = None;
-                    self.playlist_entries = entries;
+                    let ceiling = self.browse_rating_ceiling(ctx);
+                    self.playlist_entries = entries
+                        .into_iter()
+                        .filter(|entry| crate::parental::item_record_is_shown(ceiling, &entry.item))
+                        .collect();
                 }
                 WorkerEvent::PlaylistItemsFailed {
                     request_id,
@@ -7368,6 +7453,24 @@ impl KattriApp {
                         state.error = Some(watched_error_message(&message));
                     }
                 }
+                // Card-menu toggle without detail state: revert the optimistic card.
+                WorkerEvent::WatchedStateFailed {
+                    request_id,
+                    item_id,
+                    message,
+                } => {
+                    if let Some((_, previous)) = self.menu_watched_pending.remove(&request_id) {
+                        for item in self.items.iter_mut().chain(self.home.media_mut()) {
+                            if item.id == item_id {
+                                item.played = previous;
+                            }
+                        }
+                        tracing::warn!(%message, "card played toggle was rejected");
+                    }
+                }
+                WorkerEvent::WatchedStateUpdated { request_id, .. } => {
+                    self.menu_watched_pending.remove(&request_id);
+                }
                 WorkerEvent::FavoriteStateUpdated {
                     request_id,
                     item_id,
@@ -7415,6 +7518,25 @@ impl KattriApp {
                         state.error = Some(favorite_error_message(&message));
                     }
                 }
+                // A card-menu toggle has no detail-page state; revert the optimistic card and
+                // drop the pending marker when the server rejects it.
+                WorkerEvent::FavoriteStateFailed {
+                    request_id,
+                    item_id,
+                    message,
+                } => {
+                    if let Some((_, previous)) = self.menu_favorite_pending.remove(&request_id) {
+                        for item in self.items.iter_mut().chain(self.home.media_mut()) {
+                            if item.id == item_id {
+                                item.favorite = previous;
+                            }
+                        }
+                        tracing::warn!(%message, "card favorite toggle was rejected");
+                    }
+                }
+                WorkerEvent::FavoriteStateUpdated { request_id, .. } => {
+                    self.menu_favorite_pending.remove(&request_id);
+                }
                 WorkerEvent::SimilarItemsLoaded {
                     request_id,
                     item_id,
@@ -7423,7 +7545,11 @@ impl KattriApp {
                     && self.selected_item_id.as_deref() == Some(item_id.as_str()) =>
                 {
                     self.similar_loading = false;
-                    self.similar_items = remove_current_item(&item_id, items);
+                    let ceiling = self.browse_rating_ceiling(ctx);
+                    self.similar_items = remove_current_item(&item_id, items)
+                        .into_iter()
+                        .filter(|item| crate::parental::item_record_is_shown(ceiling, item))
+                        .collect();
                 }
                 WorkerEvent::SimilarItemsFailed {
                     request_id,
@@ -7447,7 +7573,11 @@ impl KattriApp {
                 {
                     self.person_items_loading = false;
                     self.person_items_error = None;
-                    self.person_items = items;
+                    let ceiling = self.browse_rating_ceiling(ctx);
+                    self.person_items = items
+                        .into_iter()
+                        .filter(|item| crate::parental::item_record_is_shown(ceiling, item))
+                        .collect();
                 }
                 WorkerEvent::PersonItemsFailed {
                     request_id,
@@ -7642,6 +7772,7 @@ impl KattriApp {
                                 ),
                             );
                         }
+                        self.pump_episode_thumbnails();
                     } else if let Some((expected_item_id, expected_tag)) =
                         self.pending_artwork_requests.remove(&request_id)
                         && expected_item_id == item_id
@@ -7671,8 +7802,14 @@ impl KattriApp {
                     self.trim_artwork_cache();
                 }
                 WorkerEvent::PrimaryArtworkFailed { request_id } => {
-                    self.pending_artwork_requests.remove(&request_id);
+                    // Do not remember the failure: a transient image error must be retried the
+                    // next time the card is visible.
+                    if let Some((item_id, tag)) = self.pending_artwork_requests.remove(&request_id)
+                    {
+                        self.attempted_artwork.remove(&(item_id, tag));
+                    }
                     self.episode_thumbnail_pending.remove(&request_id);
+                    self.pump_episode_thumbnails();
                 }
                 WorkerEvent::BackdropArtworkLoaded {
                     request_id,
@@ -7942,26 +8079,14 @@ impl KattriApp {
                         error: Some(message),
                     };
                 }
+                // The worker clears its session when any request sees an expired token, so this
+                // is connection-wide: playlists, Live TV, photos, subtitles and the rest must
+                // not leave the UI claiming to be connected. No request-id guard is used.
                 WorkerEvent::ReauthenticationRequired {
                     request_id,
                     message,
-                } if request_id == self.connection_request_id
-                    || request_id == self.catalog_request_id
-                    || request_id == self.details_request_id
-                    || request_id == self.playback_request_id
-                    || request_id == self.playback_start_request_id
-                    || request_id == self.detail_artwork_request_id
-                    || self
-                        .watched
-                        .as_ref()
-                        .is_some_and(|state| state.request_id == request_id)
-                    || self.home.owns_request(request_id)
-                    || self.pending_artwork_requests.contains_key(&request_id)
-                    || is_pending_playback_report(
-                        &self.pending_playback_report_requests,
-                        request_id,
-                    ) =>
-                {
+                } => {
+                    tracing::debug!(request_id, "session expired during a request");
                     self.network_notice = Some(ErrorClass::AuthExpired);
                     if let Some(worker) = self.worker.as_ref() {
                         let _ = worker.disconnect();
@@ -9101,6 +9226,7 @@ fn finish_playback_report(
     true
 }
 
+#[cfg(test)]
 fn is_pending_playback_report(
     pending: &HashMap<u64, PendingPlaybackReport>,
     request_id: u64,
@@ -9486,6 +9612,14 @@ impl KattriApp {
         else {
             return;
         };
+        // The dialog can outlive a sign-out/sign-in cycle; never submit admin operations for a
+        // session that is not an administrator.
+        if !self.user_is_admin {
+            self.metadata_editor = None;
+            self.metadata_editor_request = 0;
+            self.metadata_thumbnail_requests.clear();
+            return;
+        }
         for request in outcome.requests {
             let request_id = self.allocate_request_id();
             let Some(worker) = self.worker.as_ref() else {
@@ -9656,10 +9790,16 @@ impl KattriApp {
                         .is_ok()
                 });
                 if sent {
+                    let mut previous = None;
                     for item in self.items.iter_mut().chain(self.home.media_mut()) {
                         if item.id == target.item_id {
+                            previous = Some(item.played);
                             item.played = played;
                         }
+                    }
+                    if let Some(previous) = previous {
+                        self.menu_watched_pending
+                            .insert(request_id, (target.item_id.clone(), previous));
                     }
                 }
             }
@@ -9671,10 +9811,16 @@ impl KattriApp {
                         .is_ok()
                 });
                 if sent {
+                    let mut previous = None;
                     for item in self.items.iter_mut().chain(self.home.media_mut()) {
                         if item.id == target.item_id {
+                            previous = Some(item.favorite);
                             item.favorite = favorite;
                         }
+                    }
+                    if let Some(previous) = previous {
+                        self.menu_favorite_pending
+                            .insert(request_id, (target.item_id.clone(), previous));
                     }
                 }
             }

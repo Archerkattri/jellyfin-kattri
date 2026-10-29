@@ -126,6 +126,7 @@ pub struct ClientConfig {
     device_id: String,
     version: String,
     allow_insecure_remote_http: bool,
+    allow_loopback_provider_images: bool,
 }
 
 impl ClientConfig {
@@ -158,6 +159,7 @@ impl ClientConfig {
             device_id: device_id.into(),
             version: version.into(),
             allow_insecure_remote_http: false,
+            allow_loopback_provider_images: false,
         };
         for value in [
             &config.client_name,
@@ -176,6 +178,14 @@ impl ClientConfig {
     /// server over unencrypted HTTP. Prefer HTTPS whenever the server supports it.
     pub fn with_insecure_remote_http(mut self) -> Self {
         self.allow_insecure_remote_http = true;
+        self
+    }
+
+    /// Allow provider-image URLs that point at a loopback or private address. This exists for
+    /// the in-process mock server in tests; production code must not set it, because a
+    /// server-controlled image URL could otherwise probe local services.
+    pub fn with_loopback_provider_images(mut self) -> Self {
+        self.allow_loopback_provider_images = true;
         self
     }
 }
@@ -224,6 +234,10 @@ impl JellyfinClient {
         }
         let http = HttpClient::builder()
             .redirect(Policy::none())
+            // Never route token-bearing requests through a system or environment proxy: a
+            // plain-HTTP LAN server would otherwise receive the Authorization header from the
+            // proxy, and loopback traffic could leave the machine.
+            .no_proxy()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
             .build()
@@ -250,9 +264,13 @@ impl JellyfinClient {
     pub async fn authenticate(&self, username: &str, password: &str) -> Result<Session, ApiError> {
         let url = self.endpoint(&["Users", "AuthenticateByName"]);
         let credentials = Credentials { username, password };
-        let body = serde_json::to_value(credentials).map_err(|_| ApiError::InvalidResponse)?;
-        let result: AuthenticationResult =
-            self.send_json(Method::POST, url, None, Some(body)).await?;
+        // Serialize the borrowed credentials straight into the request. Building a
+        // `serde_json::Value` first would keep an extra, non-zeroizing copy of the password.
+        let request = self
+            .add_metadata(self.http.request(Method::POST, url), None)
+            .json(&credentials);
+        let response = request.send().await.map_err(transport_error)?;
+        let result: AuthenticationResult = decode_response(response).await?;
         if result.access_token.is_empty() || result.access_token.chars().any(char::is_control) {
             return Err(ApiError::InvalidResponse);
         }

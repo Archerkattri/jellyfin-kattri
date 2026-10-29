@@ -64,7 +64,12 @@ pub fn load_with_report(path: &Path) -> Result<(Settings, Vec<LoadWarning>), Set
             };
             match load_from_str_with_report(&text) {
                 Ok(result) => Ok(result),
-                Err(SettingsError::Parse(_)) => move_corrupt_aside(path),
+                // Only a document that cannot be parsed as TOML at all is unrecoverable.
+                // A well-formed file with one bad value is kept so the user can fix it; the
+                // app shows the error and refuses to overwrite it.
+                Err(SettingsError::Syntax(_) | SettingsError::TooLarge { .. }) => {
+                    move_corrupt_aside(path)
+                }
                 Err(error) => Err(error),
             }
         }
@@ -101,7 +106,9 @@ pub fn load_from_str_with_report(
             max_bytes: MAX_SETTINGS_BYTES,
         });
     }
-    let table: toml::Table = text.parse()?;
+    let table: toml::Table = text
+        .parse()
+        .map_err(|error: toml::de::Error| SettingsError::Syntax(error.to_string()))?;
     if let Some(key) = guard::find_secret_like_key(&table) {
         return Err(SettingsError::SecretLikeKey { key });
     }
@@ -331,7 +338,9 @@ pub fn to_toml_string(settings: &Settings) -> Result<String, SettingsError> {
     }
     settings.validate()?;
     let text = toml::to_string_pretty(settings)?;
-    let table: toml::Table = text.parse()?;
+    let table: toml::Table = text
+        .parse()
+        .map_err(|error: toml::de::Error| SettingsError::Syntax(error.to_string()))?;
     if let Some(field) = guard::find_secret_like_value(&table) {
         return Err(SettingsError::SecretLikeValue { field });
     }
@@ -836,6 +845,36 @@ mod tests {
             })
         ));
         assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn a_bad_value_keeps_the_file_and_a_syntax_error_moves_it_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+
+        // Well-formed TOML with an unknown enum spelling: kept, error returned.
+        let original = b"schema_version = 3\n[diagnostics]\nlog_level = \"loud\"\n";
+        fs::write(&path, original).unwrap();
+        assert!(matches!(
+            load_with_report(&path),
+            Err(SettingsError::Parse(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+
+        // Invalid TOML: moved aside, defaults loaded.
+        fs::write(&path, b"this is not toml = = =\n").unwrap();
+        let (settings, warnings) = load_with_report(&path).unwrap();
+        assert_eq!(settings, Settings::default());
+        assert!(matches!(warnings.as_slice(), [LoadWarning::CorruptFile(_)]));
+        assert!(!path.exists());
+        let aside = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .find(|name| name.starts_with("settings.toml.corrupt-"))
+            .expect("the invalid file was moved aside");
+        assert!(aside.len() > "settings.toml.corrupt-".len());
     }
 
     #[test]

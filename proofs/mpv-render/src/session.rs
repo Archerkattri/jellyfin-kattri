@@ -32,6 +32,7 @@ use crate::{
         validate_selection,
     },
 };
+
 use kattri_client_core::{
     audio::audio_spdif_option,
     mpv_options::{MpvOptionError, OptionValue, validate},
@@ -39,6 +40,17 @@ use kattri_client_core::{
     subtitles::{SecondarySelection, secondary_position_option, secondary_sid_write},
 };
 use kattri_settings::AudioSettings;
+
+/// Longest the UI thread waits for a libmpv owner-thread reply. A wedged mpv core must not
+/// freeze the window forever.
+const WORKER_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn worker_reply_error(error: mpsc::RecvTimeoutError) -> MpvError {
+    match error {
+        mpsc::RecvTimeoutError::Timeout => MpvError::WorkerTimeout,
+        mpsc::RecvTimeoutError::Disconnected => MpvError::WorkerUnavailable,
+    }
+}
 
 /// `MPV_ERROR_INVALID_PARAMETER` from mpv's client.h: reported when a name or value cannot be a
 /// C string, instead of calling mpv with it.
@@ -604,10 +616,10 @@ impl MpvSession {
     /// Reset playback speed before stopping. Both commands are queued in order
     /// on the libmpv owner thread; this method does not wait for either reply.
     pub fn stop_playback(&self) -> Result<CommandId, PlaybackControlError> {
-        let reset = stop_speed_reset_arguments();
-        self.command(&reset).map_err(PlaybackControlError::Mpv)?;
-        let stop = stop_command_arguments();
-        self.command(&stop).map_err(PlaybackControlError::Mpv)
+        // The reset is cosmetic; a full owner queue must never prevent the stop itself.
+        let _ = self.command(&stop_speed_reset_arguments());
+        self.command(&stop_command_arguments())
+            .map_err(PlaybackControlError::Mpv)
     }
 
     /// Queue an absolute primary-subtitle delay in seconds. Positive values
@@ -869,8 +881,11 @@ impl MpvSession {
                 TrySendError::Disconnected(_) => TrackSelectionError::WorkerUnavailable,
             })?;
         response_rx
-            .recv()
-            .map_err(|_| TrackSelectionError::WorkerUnavailable)??;
+            .recv_timeout(WORKER_REPLY_TIMEOUT)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => TrackSelectionError::WorkerUnavailable,
+                mpsc::RecvTimeoutError::Disconnected => TrackSelectionError::WorkerUnavailable,
+            })??;
         Ok(CommandId(request_id))
     }
 
@@ -897,8 +912,8 @@ impl MpvSession {
             })
             .map_err(map_control_enqueue_error)?;
         response_rx
-            .recv()
-            .map_err(|_| MpvError::WorkerUnavailable)??;
+            .recv_timeout(WORKER_REPLY_TIMEOUT)
+            .map_err(worker_reply_error)??;
         Ok(id)
     }
 
@@ -913,8 +928,8 @@ impl MpvSession {
             })
             .map_err(map_control_enqueue_error)?;
         response_rx
-            .recv()
-            .map_err(|_| MpvError::WorkerUnavailable)?
+            .recv_timeout(WORKER_REPLY_TIMEOUT)
+            .map_err(worker_reply_error)?
     }
 }
 

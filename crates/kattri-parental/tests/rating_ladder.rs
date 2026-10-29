@@ -84,9 +84,6 @@ fn unknown_and_blank_text_is_blocked_under_a_ceiling() {
 }
 
 #[test]
-fn a_missing_rating_stays_visible_under_a_ceiling() {
-    assert_eq!(
-        check_rating_text(Some(0), None),
-        RatingDecision::AllowUnrated
-    );
+fn a_missing_rating_is_blocked_under_a_ceiling() {
+    assert_eq!(check_rating_text(Some(0), None), RatingDecision::Block);
 }

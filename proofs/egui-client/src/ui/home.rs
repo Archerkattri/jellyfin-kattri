@@ -232,7 +232,9 @@ impl HomeState {
         row.request_id = request_id;
     }
 
-    /// True when `request_id` belongs to a row that is still waiting for its response.
+    /// True when `request_id` belongs to a row or catalog that is still waiting. Kept for the
+    /// app tests that check request ownership; production handling is connection-wide.
+    #[cfg(test)]
     pub fn owns_request(&self, request_id: u64) -> bool {
         self.rows.iter().any(|row| row.accepts(request_id))
             || self.is_catalog_pending(HomeCatalogKind::Libraries, request_id)
@@ -969,7 +971,7 @@ mod tests {
             .into_iter()
             .map(|card| card.media.id)
             .collect();
-        assert_eq!(shown, ["g", "bare"]);
+        assert_eq!(shown, ["g"]);
     }
 
     fn client_for(base_url: &str) -> JellyfinClient {

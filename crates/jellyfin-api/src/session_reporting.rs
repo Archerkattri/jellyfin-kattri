@@ -257,11 +257,14 @@ impl JellyfinClient {
         let request = self.http.post(url).json(body);
         let request = self.add_metadata(request, Some(&session.access_token));
         let response = request.send().await.map_err(crate::transport_error)?;
-        decode_empty_response(response.status())
+        decode_empty_response(response.status(), response.headers())
     }
 }
 
-fn decode_empty_response(status: StatusCode) -> Result<(), ApiError> {
+fn decode_empty_response(
+    status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> Result<(), ApiError> {
     if status == StatusCode::UNAUTHORIZED {
         return Err(ApiError::ReauthenticationRequired);
     }
@@ -269,7 +272,8 @@ fn decode_empty_response(status: StatusCode) -> Result<(), ApiError> {
         return Err(ApiError::Forbidden);
     }
     if !status.is_success() {
-        return Err(ApiError::HttpStatus(status));
+        // Keeps 429/503 Retry-After so the report scheduler honours server backpressure.
+        return Err(crate::status_error(status, headers));
     }
     Ok(())
 }

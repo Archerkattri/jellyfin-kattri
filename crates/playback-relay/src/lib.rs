@@ -45,6 +45,9 @@ use zeroize::Zeroizing;
 const CAPABILITY_BYTES: usize = 32;
 const RESOURCE_ID_BYTES: usize = 16;
 const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
+/// A byte cap alone would let a 2 MiB body of one-byte lines allocate a million parsed lines.
+/// Real HLS playlists are a few hundred lines; live windows are larger but far below this.
+const MAX_MANIFEST_LINES: usize = 32_768;
 const MAX_ALIAS_COUNT: usize = 4096;
 const MAX_URI_REFERENCES: usize = 8192;
 const MAX_UPSTREAM_URL_BYTES: usize = 64 * 1024;
@@ -528,7 +531,14 @@ async fn relay_handler(
         return empty_response(StatusCode::BAD_GATEWAY);
     }
 
-    let is_manifest = status == StatusCode::OK && is_hls_manifest(&upstream_url, &upstream);
+    // Classify playlists by URL and content type, not by status: a 206, or a 2xx with an odd
+    // content type at a playlist URL, must never be streamed unrewritten because its segment
+    // URLs would bypass the relay's origin binding.
+    let playlist_request = is_manifest_url(&upstream_url) || is_playlist_content_type(&upstream);
+    if playlist_request && status != StatusCode::OK {
+        return response_for_error(RelayError::UpstreamUnavailable);
+    }
+    let is_manifest = playlist_request;
     if is_manifest && method == Method::HEAD {
         let selected_headers = selected_response_headers(upstream.headers());
         let mut response = empty_response(status);
@@ -783,26 +793,29 @@ where
     Ok(body)
 }
 
-fn is_hls_manifest(url: &Url, response: &reqwest::Response) -> bool {
-    if let Some(value) = response.headers().get(header::CONTENT_TYPE) {
-        let value = value.to_str().unwrap_or_default();
-        let media_type = value
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-        if matches!(
-            media_type.as_str(),
-            "application/vnd.apple.mpegurl"
-                | "application/x-mpegurl"
-                | "audio/mpegurl"
-                | "audio/x-mpegurl"
-        ) {
-            return true;
-        }
-    }
+fn is_manifest_url(url: &Url) -> bool {
     url.path().to_ascii_lowercase().ends_with(".m3u8")
+}
+
+fn is_playlist_content_type(response: &reqwest::Response) -> bool {
+    let Some(value) = response.headers().get(header::CONTENT_TYPE) else {
+        return false;
+    };
+    let media_type = value
+        .to_str()
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        media_type.as_str(),
+        "application/vnd.apple.mpegurl"
+            | "application/x-mpegurl"
+            | "audio/mpegurl"
+            | "audio/x-mpegurl"
+    )
 }
 
 fn parse_allowed_origin(value: &str) -> Result<Url, RelayError> {
@@ -961,6 +974,9 @@ struct PlaylistLine {
 fn split_playlist_lines(text: &str) -> Result<Vec<PlaylistLine>, RelayError> {
     let mut lines = Vec::new();
     for line in text.split_inclusive('\n') {
+        if lines.len() >= MAX_MANIFEST_LINES {
+            return Err(RelayError::ManifestTooLarge);
+        }
         let (without_lf, ending) = match line.strip_suffix('\n') {
             Some(without_lf) => (without_lf, "\n"),
             None => (line, ""),
@@ -2076,12 +2092,11 @@ mod tests {
     fn a_manifest_over_the_size_cap_is_refused_and_one_at_the_cap_is_not() {
         let (playlist_url, mut aliases) =
             initial_aliases("https://jellyfin.example:8920/base/hls/main.m3u8");
+        // Pad with one long comment line: repeating short lines would now hit the line cap
+        // (the point of the separate test below), not the byte cap this test covers.
         let at_cap = {
-            let mut text = String::from("#EXTM3U\n");
-            while text.len() < MAX_MANIFEST_BYTES {
-                text.push_str("#EXT-X-VERSION:3\n");
-            }
-            text.truncate(MAX_MANIFEST_BYTES);
+            let mut text = String::from("#EXTM3U\n#");
+            text.push_str(&"a".repeat(MAX_MANIFEST_BYTES - text.len()));
             text
         };
         assert_eq!(at_cap.len(), MAX_MANIFEST_BYTES);
@@ -2093,6 +2108,17 @@ mod tests {
             !matches!(at, Err(RelayError::ManifestTooLarge)),
             "a manifest exactly at the cap must not be reported as too large"
         );
+    }
+
+    #[test]
+    fn a_manifest_with_too_many_lines_is_refused_before_allocating_them() {
+        let (playlist_url, mut aliases) =
+            initial_aliases("https://jellyfin.example:8920/base/hls/main.m3u8");
+        let mut text = String::from("#EXTM3U\n");
+        text.push_str(&"\n".repeat(MAX_MANIFEST_LINES + 1));
+        assert!(text.len() < MAX_MANIFEST_BYTES, "still under the byte cap");
+        let refused = rewrite_manifest(text.as_bytes(), &playlist_url, &origin(), &mut aliases);
+        assert!(matches!(refused, Err(RelayError::ManifestTooLarge)));
     }
 
     #[test]

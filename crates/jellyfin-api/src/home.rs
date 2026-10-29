@@ -187,7 +187,14 @@ fn clamp_limit(limit: u32) -> u32 {
 /// Reject empty, oversized, or control-character identifiers and tags, the
 /// same bounds used by the primary-artwork path.
 pub(crate) fn validate_id(value: &str) -> Result<(), ApiError> {
-    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+    if value.is_empty()
+        || value.len() > 128
+        || value.chars().any(char::is_control)
+        // An ID is one URL path segment. `.` and `..` would be dropped by URL joining and
+        // silently change the endpoint, so refuse them with the separators.
+        || value == "."
+        || value == ".."
+    {
         return Err(ApiError::InvalidResponse);
     }
     Ok(())

@@ -3427,7 +3427,15 @@ pub(crate) fn playback_key_actions(events: &[egui::Event]) -> Vec<PlaybackKeyAct
                 pressed: true,
                 modifiers,
                 ..
-            } => playback_key_action(*key, modifiers.shift),
+            } => {
+                // Playback shortcuts are bare keys except for Shift (the documented step
+                // modifier). Ctrl/Alt/Cmd chords belong to the app and must not stop playback
+                // or change tracks.
+                if modifiers.ctrl || modifiers.alt || modifiers.mac_cmd || modifiers.command {
+                    return None;
+                }
+                playback_key_action(*key, modifiers.shift)
+            }
             _ => None,
         })
         .collect()

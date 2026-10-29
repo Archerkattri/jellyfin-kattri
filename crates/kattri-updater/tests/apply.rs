@@ -9,7 +9,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use kattri_updater::apply::memory::{MemoryStore, Op};
 use kattri_updater::apply::{
     ApplyError, InstallStore, LaunchOutcome, Pending, Slot, apply_verified, mark_healthy,
-    on_launch, rollback, sha256_hex,
+    note_clean_shutdown, on_launch, rollback, sha256_hex,
 };
 use kattri_updater::{Channel, InstallState, KeyState, Keyring, VerifiedManifest, open_envelope};
 use serde_json::{Value, json};
@@ -261,6 +261,46 @@ fn healthy_marker_clears_pending_and_drops_previous_build() {
     assert!(
         !mark_healthy(&mut store, NEW_VERSION).unwrap(),
         "nothing left to mark"
+    );
+}
+
+#[test]
+fn clean_quits_before_the_healthy_marker_do_not_accumulate_failed_launches() {
+    let v = verified(NEW_VERSION, 7, NEW_BYTES);
+    let mut store = store_at_old();
+    apply_verified(&mut store, &v, "windows", "x64", NEW_BYTES).unwrap();
+
+    // Three ordinary open/quit cycles: each launch is followed by a clean shutdown.
+    for expected in [1, 1, 1] {
+        let outcome = on_launch(&mut store, NEW_VERSION).unwrap();
+        match outcome {
+            LaunchOutcome::HealthCheckPending {
+                failed_launches, ..
+            } => {
+                assert_eq!(failed_launches, expected);
+            }
+            other => panic!("expected a pending health check, got {other:?}"),
+        }
+        assert!(note_clean_shutdown(&mut store).unwrap());
+    }
+    assert!(store.journal().unwrap().pending.is_some());
+
+    // Two launches without a clean shutdown in between do count and reach the rollback offer.
+    let outcome = on_launch(&mut store, NEW_VERSION).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            LaunchOutcome::HealthCheckPending {
+                failed_launches: 1,
+                ..
+            }
+        ),
+        "got {outcome:?}"
+    );
+    let outcome = on_launch(&mut store, NEW_VERSION).unwrap();
+    assert!(
+        matches!(outcome, LaunchOutcome::RollbackOffered { .. }),
+        "got {outcome:?}"
     );
 }
 

@@ -691,16 +691,19 @@ impl JellyfinClient {
     /// Fetch a provider thumbnail (an identify poster or a remote image preview).
     ///
     /// These addresses point at third-party hosts, so no Jellyfin credentials are sent,
-    /// redirects are not followed, plain HTTP is refused unless the host is local, and the
-    /// body is capped like card artwork.
+    /// redirects are not followed, only public HTTPS hosts are accepted, and the body is
+    /// capped like card artwork. Refusing loopback and private addresses keeps server-supplied
+    /// URLs from probing local services.
     pub async fn get_remote_thumbnail(&self, url: &str) -> Result<Vec<u8>, ApiError> {
         let url = Url::parse(url).map_err(|_| ApiError::InvalidConfiguration)?;
         let host = url.host_str().unwrap_or_default();
-        let allowed = match url.scheme() {
-            "https" => !host.is_empty(),
-            "http" => is_local_host(host),
-            _ => false,
-        };
+        let public_https = url.scheme() == "https" && !host.is_empty() && !is_local_host(host);
+        // Loopback/private provider URLs are refused by default; only the mock-server opt-in
+        // used by tests allows them.
+        let loopback_opt_in = self.config.allow_loopback_provider_images
+            && matches!(url.scheme(), "http" | "https")
+            && is_local_host(host);
+        let allowed = public_https || loopback_opt_in;
         if !allowed || !url.username().is_empty() || url.password().is_some() {
             return Err(ApiError::InsecureRemoteTransport);
         }
@@ -816,6 +819,11 @@ mod tests {
         .expect("client");
         for url in [
             "http://image.example.com/poster.jpg",
+            "http://127.0.0.1:8096/Items/1/Images/Primary",
+            "http://192.168.1.10/admin",
+            "http://nas.local/poster.jpg",
+            "https://127.0.0.1:8096/Items/1/Images/Primary",
+            "https://nas.local/poster.jpg",
             "ftp://image.example.com/poster.jpg",
             "https://user:pass@image.example.com/poster.jpg",
             "not a url",

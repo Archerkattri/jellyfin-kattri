@@ -11,7 +11,7 @@
 //! target. A crash leaves either the old manifest or the new one.
 
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
 use kattri_client_core::downloads::{DownloadSnapshot, DownloadState};
@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use crate::verify::Verification;
 
 pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+/// Manifests are a few hundred bytes; a larger file is refused rather than allocated.
+const MAX_MANIFEST_READ_BYTES: u64 = 1024 * 1024;
 /// Longest title kept for display (characters, not bytes).
 pub const MAX_TITLE_CHARS: usize = 200;
 
@@ -169,9 +171,18 @@ pub fn write_atomic(path: &Path, manifest: &Manifest) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-/// Reads a manifest back.
+/// Reads a manifest back. The read is bounded so a damaged or replaced file cannot be fully
+/// allocated.
 pub fn read(path: &Path) -> io::Result<Manifest> {
-    let bytes = fs::read(path)?;
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(MAX_MANIFEST_READ_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_MANIFEST_READ_BYTES {
+        return Err(io::Error::other(
+            "download manifest is larger than the limit",
+        ));
+    }
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 

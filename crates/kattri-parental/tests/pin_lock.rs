@@ -354,6 +354,6 @@ fn rating_without_ceiling_allows_everything() {
 }
 
 #[test]
-fn missing_server_rating_is_shown_and_flagged() {
-    assert_eq!(check_rating(Some(13), None), RatingDecision::AllowUnrated);
+fn missing_server_rating_is_blocked_under_a_ceiling() {
+    assert_eq!(check_rating(Some(13), None), RatingDecision::Block);
 }

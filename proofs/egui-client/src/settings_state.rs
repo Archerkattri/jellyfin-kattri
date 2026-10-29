@@ -44,6 +44,9 @@ pub(crate) struct SettingsState {
     settings: Settings,
     notice: Option<String>,
     save_failure_logged: bool,
+    /// The profile file exists but could not be understood. Saves are refused so a single
+    /// bad value cannot turn into a whole-file overwrite with defaults.
+    load_failed: bool,
 }
 
 struct SaveRequest {
@@ -219,6 +222,7 @@ impl SettingsState {
                     settings: Settings::default(),
                     notice: None,
                     save_failure_logged: false,
+                    load_failed: false,
                 };
                 state.writer = state.spawn_writer();
                 let writer_unavailable = state.writer.is_none();
@@ -248,6 +252,7 @@ impl SettingsState {
             settings: Settings::default(),
             notice: Some(notice.to_owned()),
             save_failure_logged: false,
+            load_failed: false,
         }
     }
 
@@ -385,6 +390,7 @@ impl SettingsState {
                     }
                 }
                 self.settings = settings;
+                self.load_failed = false;
                 self.notice = future_schema.then(|| {
                     "Settings were written by a newer version and are read-only until Kattri is updated."
                         .to_owned()
@@ -392,8 +398,10 @@ impl SettingsState {
             }
             Err(error) => {
                 tracing::warn!(%error, "active profile settings could not be read");
+                self.load_failed = true;
                 self.notice = Some(
-                    "The saved settings could not be read; current values are kept.".to_owned(),
+                    "The saved settings could not be read. They are kept on disk and not overwritten; fix the file or reset it from this page."
+                        .to_owned(),
                 );
             }
         }
@@ -403,6 +411,13 @@ impl SettingsState {
     /// were drawn. Disk I/O is queued to the dedicated writer thread.
     pub(crate) fn save_if_changed(&mut self, before: &Settings) {
         if self.settings == *before {
+            return;
+        }
+        if self.load_failed {
+            self.notice = Some(
+                "Settings are not saved because the file on disk could not be read. Fix or reset the file first."
+                    .to_owned(),
+            );
             return;
         }
         let Some(writer) = self.writer.as_mut() else {

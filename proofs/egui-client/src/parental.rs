@@ -25,16 +25,29 @@ pub(crate) fn browse_ceiling(
 }
 
 /// Whether an item with `official_rating` stays visible under `ceiling`. An item with no rating
-/// at all stays visible. Blank or unknown rating text is hidden while a ceiling is set.
+/// is hidden while a ceiling is set, and blank or unknown rating text is hidden too.
 pub(crate) fn item_is_shown(ceiling: Option<u32>, official_rating: Option<&str>) -> bool {
     check_rating_text(ceiling, official_rating) != RatingDecision::Block
+}
+
+/// Whether a loaded server item stays visible under `ceiling`. Episodes without their own
+/// rating inherit the series rating; the series is filtered where it is listed, so hiding every
+/// unrated episode would empty otherwise-allowed seasons.
+pub(crate) fn item_record_is_shown(ceiling: Option<u32>, item: &BaseItemDto) -> bool {
+    if ceiling.is_some()
+        && item.official_rating.is_none()
+        && item.item_type.as_deref() == Some("Episode")
+    {
+        return true;
+    }
+    item_is_shown(ceiling, item.official_rating.as_deref())
 }
 
 /// The items of one browse page that stay visible under `ceiling`, in their original order.
 pub(crate) fn shown_items(items: &[BaseItemDto], ceiling: Option<u32>) -> Vec<BaseItemDto> {
     items
         .iter()
-        .filter(|item| item_is_shown(ceiling, item.official_rating.as_deref()))
+        .filter(|item| item_record_is_shown(ceiling, item))
         .cloned()
         .collect()
 }
@@ -161,13 +174,23 @@ mod tests {
     }
 
     #[test]
-    fn item_above_the_ceiling_is_hidden_and_unrated_items_stay() {
+    fn item_above_the_ceiling_and_unrated_items_are_hidden() {
         // Ceiling 6 is PG-13 on the ladder (TV-Y is 0).
         assert!(item_is_shown(Some(6), Some("PG-13")));
         assert!(item_is_shown(Some(6), Some("pg")));
         assert!(!item_is_shown(Some(6), Some("R")));
-        assert!(item_is_shown(Some(6), None));
+        assert!(!item_is_shown(Some(6), None));
         assert!(item_is_shown(None, Some("NC-17")));
+    }
+
+    #[test]
+    fn an_unrated_episode_inherits_its_series_and_stays_visible() {
+        let mut episode = rated("episode", None);
+        episode.item_type = Some("Episode".to_owned());
+        assert!(item_record_is_shown(Some(6), &episode));
+        let mut movie = rated("movie", None);
+        movie.item_type = Some("Movie".to_owned());
+        assert!(!item_record_is_shown(Some(6), &movie));
     }
 
     #[test]
@@ -201,7 +224,7 @@ mod tests {
             .into_iter()
             .map(|item| item.id)
             .collect();
-        assert_eq!(shown, ["kids", "bare", "pg13"]);
+        assert_eq!(shown, ["kids", "pg13"]);
         assert_eq!(shown_items(&page, None).len(), page.len());
     }
 

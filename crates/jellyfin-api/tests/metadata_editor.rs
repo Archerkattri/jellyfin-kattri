@@ -14,7 +14,9 @@ fn client(base_url: &str) -> JellyfinClient {
         "device-id",
         "test-version",
     )
-    .expect("valid client configuration");
+    .expect("valid client configuration")
+    // The mock serves provider thumbnails from its own loopback address.
+    .with_loopback_provider_images();
     JellyfinClient::new(config).expect("configured Jellyfin client")
 }
 

@@ -9,7 +9,7 @@
 //! and is never replaced by a default. Replacing it would reset the failure count.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -22,6 +22,8 @@ use crate::lock::AttemptState;
 pub const ATTEMPT_FILE_NAME: &str = "parental-lock.json";
 /// Format version written to and required from the attempt file.
 pub const ATTEMPT_FILE_VERSION: u32 = 1;
+/// The record is a few dozen bytes; anything larger is damaged and refused before parsing.
+const MAX_ATTEMPT_BYTES: u64 = 16 * 1024;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -88,12 +90,22 @@ pub fn decode_attempts(text: &str) -> Result<AttemptState, AttemptFileError> {
 }
 
 /// Reads the attempt state from `path`. A missing file means no failures and no delay.
+/// The read is bounded: a damaged or replaced file must not be fully allocated at startup.
 pub fn load_attempts(path: &Path) -> Result<AttemptState, AttemptFileError> {
-    match fs::read_to_string(path) {
-        Ok(text) => decode_attempts(&text),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(AttemptState::default()),
-        Err(e) => Err(io_error("read", &e)),
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(AttemptState::default()),
+        Err(e) => return Err(io_error("read", &e)),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_ATTEMPT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| io_error("read", &e))?;
+    if bytes.len() as u64 > MAX_ATTEMPT_BYTES {
+        return Err(AttemptFileError::Malformed);
     }
+    let text = String::from_utf8(bytes).map_err(|_| AttemptFileError::Malformed)?;
+    decode_attempts(&text)
 }
 
 /// Writes the attempt state to `path` atomically: sibling temp file, sync, rename.

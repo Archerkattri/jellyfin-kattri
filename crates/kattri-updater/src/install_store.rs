@@ -245,6 +245,8 @@ struct JournalFile {
     healthy: Option<String>,
     #[serde(default)]
     failed_targets: Vec<String>,
+    #[serde(default)]
+    clean_shutdown: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -267,6 +269,7 @@ fn encode_journal(journal: &Journal) -> Result<Vec<u8>, StoreError> {
         }),
         healthy: journal.healthy.clone(),
         failed_targets: journal.failed_targets.clone(),
+        clean_shutdown: journal.clean_shutdown,
     };
     serde_json::to_vec_pretty(&file)
         .map_err(|_| StoreError("could not encode the journal".to_owned()))
@@ -287,6 +290,7 @@ fn decode_journal(raw: &[u8]) -> Result<Journal, StoreError> {
         }),
         healthy: file.healthy,
         failed_targets: file.failed_targets,
+        clean_shutdown: file.clean_shutdown,
     })
 }
 

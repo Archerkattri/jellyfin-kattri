@@ -73,7 +73,7 @@ impl JellyfinClient {
                 .unwrap_or(0)
                 .min(MAX_BACKDROP_IMAGE_RESPONSE_BYTES as u64) as usize,
         );
-        while let Some(chunk) = response.chunk().await.map_err(|_| ApiError::Transport)? {
+        while let Some(chunk) = response.chunk().await.map_err(crate::transport_error)? {
             if body.len().saturating_add(chunk.len()) > MAX_BACKDROP_IMAGE_RESPONSE_BYTES {
                 return Err(ApiError::ImageTooLarge.into());
             }

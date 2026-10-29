@@ -9,7 +9,12 @@ pub enum SettingsError {
     #[error("settings file I/O failed: {0}")]
     Io(#[from] io::Error),
 
-    /// The file is not valid TOML, or a value has the wrong type or an unknown enum spelling.
+    /// The file is not valid TOML at all. Only this case may be moved aside as corrupt.
+    #[error("settings file is not valid TOML: {0}")]
+    Syntax(String),
+
+    /// The TOML is well formed but a value has the wrong type or an unknown enum spelling.
+    /// The file is kept: the caller decides whether to ignore the value or refuse the load.
     #[error("settings file could not be parsed: {0}")]
     Parse(#[from] toml::de::Error),
 

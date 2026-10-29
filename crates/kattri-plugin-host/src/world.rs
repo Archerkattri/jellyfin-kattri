@@ -165,7 +165,22 @@ impl LoadedPlugin {
         let outcome = run_bounded(&self.engine, &self.limits, || {
             self.plugin.call_init(&mut self.store, plugin_id)
         })?;
-        outcome.map_err(RuntimeError::Refused)
+        outcome.map_err(|message| RuntimeError::Refused(self.bounded_guest_error(&message)))
+    }
+
+    /// Guest error strings are attacker-controlled. Redact credentials and cap the length at the
+    /// configured output bound before the text can reach the UI or the log.
+    fn bounded_guest_error(&self, message: &str) -> String {
+        let limit = self.limits.max_output_bytes();
+        let mut text = kattri_guard::redact(message);
+        if text.len() > limit {
+            let mut cut = limit;
+            while cut > 0 && !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+        }
+        text
     }
 
     /// Call the guest's `on-playback-event` export.

@@ -26,6 +26,8 @@ pub enum MpvError {
     },
     InitializeFailed(i32),
     WorkerUnavailable,
+    /// The owner thread did not answer within the UI-safe deadline.
+    WorkerTimeout,
     WorkerPanicked,
     EmptyCommand,
     CommandContainsNul,
@@ -87,6 +89,9 @@ impl fmt::Display for MpvError {
                 write!(formatter, "mpv_initialize failed with error {code}")
             }
             Self::WorkerUnavailable => formatter.write_str("libmpv owner thread is unavailable"),
+            Self::WorkerTimeout => {
+                formatter.write_str("libmpv owner thread did not answer in time")
+            }
             Self::WorkerPanicked => formatter.write_str("libmpv owner thread panicked"),
             Self::EmptyCommand => formatter.write_str("an mpv command needs at least one argument"),
             Self::CommandContainsNul => {

@@ -108,7 +108,7 @@ impl JellyfinClient {
                 Some(join_group_body(group_id)),
             )
             .await?;
-        expect_no_content(response.status())
+        expect_no_content(response.status(), response.headers())
     }
 
     /// Leave the SyncPlay group the session is currently in
@@ -117,7 +117,7 @@ impl JellyfinClient {
         let response = self
             .sync_play_post(session, &["SyncPlay", "Leave"], None)
             .await?;
-        expect_no_content(response.status())
+        expect_no_content(response.status(), response.headers())
     }
 
     /// Send a group pause to the joined group (`POST /SyncPlay/Pause`).
@@ -170,7 +170,7 @@ impl JellyfinClient {
         let response = self
             .sync_play_post(session, &["SyncPlay", "SetNewQueue"], Some(request.body()))
             .await?;
-        expect_no_content(response.status())
+        expect_no_content(response.status(), response.headers())
     }
 
     /// Report that the client can play the selected group item (`POST /SyncPlay/Ready`).
@@ -205,7 +205,7 @@ impl JellyfinClient {
         let response = self
             .sync_play_post(session, &["SyncPlay", route], Some(body))
             .await?;
-        expect_no_content(response.status())
+        expect_no_content(response.status(), response.headers())
     }
 
     async fn send_playback_command(
@@ -216,7 +216,7 @@ impl JellyfinClient {
         // Build the body first, so an out-of-range value never reaches the network.
         let body = command.body()?;
         let response = self.sync_play_post(session, command.route(), body).await?;
-        expect_no_content(response.status())
+        expect_no_content(response.status(), response.headers())
     }
 
     async fn sync_play_post(
@@ -320,8 +320,12 @@ pub enum SyncPlayStatusReportKind {
 }
 
 /// Map a status from an endpoint with no response body. Any 2xx status is
-/// success; the error mapping matches the shared response path.
-fn expect_no_content(status: StatusCode) -> Result<(), ApiError> {
+/// success; 429/503 keep their Retry-After so a SyncPlay command can be retried
+/// without hammering the server.
+fn expect_no_content(
+    status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> Result<(), ApiError> {
     if status == StatusCode::UNAUTHORIZED {
         return Err(ApiError::ReauthenticationRequired);
     }
@@ -329,7 +333,7 @@ fn expect_no_content(status: StatusCode) -> Result<(), ApiError> {
         return Err(ApiError::Forbidden);
     }
     if !status.is_success() {
-        return Err(ApiError::HttpStatus(status));
+        return Err(crate::status_error(status, headers));
     }
     Ok(())
 }

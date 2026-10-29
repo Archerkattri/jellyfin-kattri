@@ -314,11 +314,17 @@ pub struct Transfer {
     stop: Arc<AtomicBool>,
     checksum: Option<ServerChecksum>,
     verification: Option<Verification>,
+    /// Absolute offset just past the last byte the current response promised. Used to tell a
+    /// legal short range (ask for the next one) from a truncated body (network failure).
+    response_end: Option<u64>,
 }
 
 enum Step {
     Done(Outcome),
     Interrupted,
+    /// A valid response ended before the whole file; request the next range without
+    /// counting a network failure.
+    Continue,
 }
 
 impl Transfer {
@@ -331,6 +337,7 @@ impl Transfer {
             stop: Arc::new(AtomicBool::new(false)),
             checksum: None,
             verification: None,
+            response_end: None,
         }
     }
 
@@ -351,6 +358,7 @@ impl Transfer {
             stop: Arc::new(AtomicBool::new(false)),
             checksum: None,
             verification: None,
+            response_end: None,
         }
     }
 
@@ -440,6 +448,8 @@ impl Transfer {
                     }
                     tokio::time::sleep(cfg.retry_backoff * network_failures).await;
                 }
+                // `attempt` consumes Continue internally; treat a stray one as a retry.
+                Step::Continue => continue,
             }
         }
     }
@@ -448,6 +458,7 @@ impl Transfer {
         if let Err(error) = self.job.begin_negotiation() {
             return Step::Done(self.fail(FailureReason::Model(error)));
         }
+        self.response_end = None;
 
         let mut restarted = false;
         loop {
@@ -507,7 +518,13 @@ impl Transfer {
                         Ok(file) => file,
                         Err(outcome) => return Step::Done(outcome),
                     };
-                    return self.stream_body(cfg, response, fresh).await;
+                    self.response_end = response
+                        .content_length()
+                        .or(self.job.snapshot().expected_total_length);
+                    match self.stream_body(cfg, response, fresh).await {
+                        Step::Continue => continue,
+                        step => return step,
+                    }
                 }
                 206 => {
                     let Some((start, end_inclusive, total)) = response
@@ -535,7 +552,11 @@ impl Transfer {
                                     Err(outcome) => return Step::Done(outcome),
                                 },
                             };
-                            return self.stream_body(cfg, response, file).await;
+                            self.response_end = Some(end_inclusive.saturating_add(1));
+                            match self.stream_body(cfg, response, file).await {
+                                Step::Continue => continue,
+                                step => return step,
+                            }
                         }
                         Err(DownloadTransitionError::ValidatorMismatch) if !restarted => {
                             drop(temp);
@@ -685,11 +706,20 @@ impl Transfer {
         }
         drop(temp);
         let snapshot = self.job.snapshot();
-        if let Some(expected) = snapshot.expected_total_length
-            && snapshot.durable_offset < expected
-        {
-            // The body ended early: a network-level interruption, resume later.
-            return self.interrupted();
+        let expected = self.response_end.or(snapshot.expected_total_length);
+        if let Some(expected) = expected {
+            if snapshot.durable_offset < expected {
+                // The body stopped before the range this response promised.
+                return self.interrupted();
+            }
+            if snapshot
+                .expected_total_length
+                .is_some_and(|total| expected < total)
+            {
+                // A shorter range than the file is legal (servers may cap range length):
+                // ask for the next one without spending the network retry budget.
+                return Step::Continue;
+            }
         }
         self.finish_and_commit(cfg)
     }

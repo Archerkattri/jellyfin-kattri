@@ -128,7 +128,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             path,
-            expected_path(directory, "kattri-movie-00.00.05.000.png")
+            expected_path(directory, "kattri-movie-00.00.05.000-1.png")
         );
         assert_eq!(mode, "subtitles");
     }
@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn collisions_get_a_numeric_suffix() {
         let directory = Path::new("shots");
-        let existing = vec!["kattri-movie-00.00.05.000.png".to_owned()];
+        let existing = vec!["kattri-movie-00.00.05.000-1.png".to_owned()];
         let [path, _] = screenshot_arguments(
             directory,
             "",
@@ -160,7 +160,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             path,
-            expected_path(directory, "kattri-movie-00.00.05.000-2.png")
+            expected_path(directory, "kattri-movie-00.00.05.000-1-2.png")
         );
     }
 

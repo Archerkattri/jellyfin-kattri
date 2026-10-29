@@ -13,8 +13,9 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-/// Template used when the setting is empty (product choice).
-pub const DEFAULT_TEMPLATE: &str = "kattri-%f-%P";
+/// Template used when the setting is empty (product choice). The counter keeps captures at the
+/// same playback position from colliding while the asynchronous libmpv write is still pending.
+pub const DEFAULT_TEMPLATE: &str = "kattri-%f-%P-%n";
 
 /// Longest template accepted, in characters.
 pub const MAX_TEMPLATE_CHARS: usize = 200;
@@ -299,7 +300,7 @@ mod tests {
     #[test]
     fn default_template_produces_the_expected_stem() {
         let stem = screenshot_stem("", &context("Show S01E02", 65)).expect("default template");
-        assert_eq!(stem, "kattri-Show S01E02-00.01.05.000");
+        assert_eq!(stem, "kattri-Show S01E02-00.01.05.000-7");
         let explicit =
             screenshot_stem(DEFAULT_TEMPLATE, &context("Show S01E02", 65)).expect("template");
         assert_eq!(explicit, stem);

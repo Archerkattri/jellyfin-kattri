@@ -119,6 +119,7 @@ pub struct DownloadManager {
     shared: Arc<Mutex<Shared>>,
     driver: DriverConfig,
     recovered: Option<PathBuf>,
+    dir: PathBuf,
 }
 
 impl DownloadManager {
@@ -133,7 +134,10 @@ impl DownloadManager {
         store.ensure_dir()?;
         let driver = with_volume_check(DriverConfig::new(store)?);
         let list_path = dir.join(JOB_LIST_FILE);
-        let (jobs, recovered) = load_list(&list_path)?;
+        let (mut jobs, recovered) = load_list(&list_path)?;
+        // A crash between job-list writes leaves a newer per-job snapshot on disk. Apply it
+        // so a restart resumes from the last durable offset instead of re-downloading.
+        restore_snapshots(&dir, &mut jobs);
         Ok(Self {
             shared: Arc::new(Mutex::new(Shared {
                 list_path,
@@ -142,6 +146,7 @@ impl DownloadManager {
             })),
             driver,
             recovered,
+            dir,
         })
     }
 
@@ -295,7 +300,10 @@ impl DownloadManager {
             return Err(error);
         }
         let owner = Arc::clone(&self.shared);
-        let cfg = self.driver.clone();
+        let mut cfg = self.driver.clone();
+        // The driver writes the durable offset here after every synced chunk, which is what
+        // survives a crash between job-list saves.
+        cfg.snapshot_path = Some(snapshot_path(&self.dir, item_id));
         let thread_item = item_id.to_owned();
         let spawned = thread::Builder::new()
             .name("kattri-download".to_owned())
@@ -362,6 +370,39 @@ fn with_volume_check(mut driver: DriverConfig) -> DriverConfig {
 #[cfg(not(windows))]
 fn with_volume_check(driver: DriverConfig) -> DriverConfig {
     driver
+}
+
+/// Per-job crash snapshot beside the job list. The driver writes it after every synced chunk.
+fn snapshot_path(dir: &Path, item_id: &str) -> PathBuf {
+    dir.join(format!("{item_id}.download.json"))
+}
+
+/// Overlay a newer per-job snapshot onto the loaded job list so an interrupted transfer resumes
+/// from its last durable offset instead of from zero.
+fn restore_snapshots(dir: &Path, jobs: &mut BTreeMap<String, Entry>) {
+    for (item_id, entry) in jobs.iter_mut() {
+        let Ok(record) = crate::persist::load(&snapshot_path(dir, item_id)) else {
+            continue;
+        };
+        let Ok((job, temp_name)) = record.into_job() else {
+            continue;
+        };
+        let restored_state = job.snapshot().state;
+        let restored_offset = job.snapshot().durable_offset;
+        if matches!(
+            restored_state,
+            DownloadState::Committed | DownloadState::Failed | DownloadState::Cancelled
+        ) {
+            continue;
+        }
+        if restored_offset < entry.job.snapshot().durable_offset {
+            continue;
+        }
+        entry.job = job;
+        if temp_name.is_some() {
+            entry.temp_name = temp_name;
+        }
+    }
 }
 
 fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
