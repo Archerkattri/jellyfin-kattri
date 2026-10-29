@@ -64,8 +64,17 @@ jobs:
               Start-Sleep -Seconds 1
             } while ([DateTime]::UtcNow -lt $deadline)
             if ($process.MainWindowHandle -eq 0) { throw 'No application window appeared within 60 seconds.' }
-            "Window title: $($process.MainWindowTitle)" | Tee-Object -FilePath smoke-logs\startup.txt
-            if ($process.MainWindowTitle -ne 'Jellyfin Kattri') { throw "Unexpected window title: $($process.MainWindowTitle)" }
+            # The handle exists before the window manager publishes the title on some runners,
+            # so poll briefly instead of failing on an empty title read.
+            $title = $process.MainWindowTitle
+            $titleDeadline = [DateTime]::UtcNow.AddSeconds(10)
+            while ($title -ne 'Jellyfin Kattri' -and [DateTime]::UtcNow -lt $titleDeadline) {
+              Start-Sleep -Milliseconds 250
+              $process.Refresh()
+              $title = $process.MainWindowTitle
+            }
+            "Window title: $title" | Tee-Object -FilePath smoke-logs\startup.txt
+            if ($title -ne 'Jellyfin Kattri') { throw "Unexpected window title: $title" }
             if (-not $process.CloseMainWindow()) { throw 'The application refused the normal close request.' }
             if (-not $process.WaitForExit(15000)) { throw 'Application did not exit after CloseMainWindow.' }
             if ($process.ExitCode -ne 0) { throw "Application exited with code $($process.ExitCode)" }
