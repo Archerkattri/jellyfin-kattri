@@ -14,6 +14,9 @@ build/
 /.local/
 .verify/
 **/.verify/
+# Debug-build QA captures (logs, framebuffer PNGs, UI trees)
+_dbg_audio/
+**/_dbg_audio/
 /docs/
 /legacy/
 /spikes/
