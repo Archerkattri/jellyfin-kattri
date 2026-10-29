@@ -22,8 +22,8 @@ section = "video"
 # rejects. The crate license (GPL-3.0-only) is written as a short entry that points at
 # /usr/share/common-licenses/GPL-3.
 copyright = "2026 Jellyfin Kattri contributors"
-# Strip the packaged binary. The release workflow passes --dbgsym so the debug symbols (the
-# release profile keeps them) go to a separate -dbgsym package instead of usr/lib/debug.
+# Strip the packaged binary. Release builds carry no debug info (profile debug = 0), so there
+# is no dbgsym package; stripping still removes the remaining symbols.
 separate-debug-symbols = true
 extended-description = """
 Jellyfin Kattri is a native client for Jellyfin media servers. Playback uses the
@@ -35,4 +35,7 @@ assets = [
     ["../../packaging/linux/icons/kattri.svg", "usr/share/icons/hicolor/scalable/apps/kattri.svg", "644"],
     # Compressed by the release workflow (gzip -9n) before cargo deb runs.
     ["../../target/kattri.1.gz", "usr/share/man/man1/kattri.1.gz", "644"],
+    # Redistribution requires the project license and the libmpv notice.
+    ["../../LICENSE", "usr/share/doc/kattri/LICENSE", "644"],
+    ["../../packaging/libmpv/NOTICE.txt", "usr/share/doc/kattri/libmpv-NOTICE.txt", "644"],
 ]

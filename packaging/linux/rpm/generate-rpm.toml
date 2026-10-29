@@ -20,6 +20,9 @@ assets = [
     { source = "packaging/linux/share/kattri.desktop", dest = "/usr/share/applications/kattri.desktop", mode = "644" },
     { source = "packaging/linux/icons/kattri.svg", dest = "/usr/share/icons/hicolor/scalable/apps/kattri.svg", mode = "644" },
     { source = "target/kattri.1.gz", dest = "/usr/share/man/man1/kattri.1.gz", mode = "644", doc = true },
+    # Redistribution requires the project license and the libmpv notice.
+    { source = "LICENSE", dest = "/usr/share/licenses/kattri/LICENSE", mode = "644" },
+    { source = "packaging/libmpv/NOTICE.txt", dest = "/usr/share/licenses/kattri/libmpv-NOTICE.txt", mode = "644" },
 ]
 
 # Depend on the library soname, not a package name: Fedora (mpv-libs) and openSUSE (libmpv2)

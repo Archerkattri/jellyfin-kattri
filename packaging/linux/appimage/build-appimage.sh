@@ -121,6 +121,11 @@ mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
 install -m 755 "$BINARY" "$APPDIR/usr/bin/kattri"
 install -m 644 "$DESKTOP" "$APPDIR/usr/share/applications/kattri.desktop"
 install -m 644 "$ICON" "$APPDIR/usr/share/icons/hicolor/scalable/apps/kattri.svg"
+# Redistribution requires the project license and the bundled libmpv notice.
+mkdir -p "$APPDIR/usr/share/licenses/kattri"
+install -m 644 "$ROOT/LICENSE" "$APPDIR/usr/share/licenses/kattri/LICENSE"
+install -m 644 "$ROOT/packaging/libmpv/NOTICE.txt" \
+  "$APPDIR/usr/share/licenses/kattri/libmpv-NOTICE.txt"
 
 LINUXDEPLOY_ARGS=(
   --appdir "$APPDIR"
