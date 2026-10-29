@@ -208,9 +208,31 @@ try {
     if ((git ls-files --stage packaging/linux/smoke-launch.sh) -notmatch '^100755 ') {
         throw 'Linux smoke launcher must be executable in a fresh checkout.'
     }
+    if ($installWorkflow -match 'usr/bin/jellyfin-kattri') {
+        throw 'Linux smoke setup must launch the packaged /usr/bin/kattri binary.'
+    }
+    if (([regex]::Matches($installWorkflow, [regex]::Escape('/usr/bin/kattri'))).Count -ne 2) {
+        throw 'deb and rpm smoke jobs must both launch /usr/bin/kattri.'
+    }
+    # winit loads libxkbcommon-x11 at run time, so no package metadata pulls it in.
+    foreach ($linuxJob in @(
+        @{ Label = 'deb'; Anchor = './artifacts/kattri_*.deb'; Library = 'libxkbcommon-x11-0' },
+        @{ Label = 'rpm'; Anchor = './artifacts/kattri-*.rpm'; Library = 'libxkbcommon-x11' },
+        @{ Label = 'AppImage'; Anchor = 'libfuse2'; Library = 'libxkbcommon-x11-0' }
+    )) {
+        $installLine = @($installWorkflow -split "`n" | Where-Object {
+            $_.Contains($linuxJob.Anchor) -and $_ -match 'apt-get install|dnf install'
+        })
+        if ($installLine.Count -ne 1) {
+            throw "Could not find exactly one Linux $($linuxJob.Label) install step."
+        }
+        if (-not $installLine[0].Contains($linuxJob.Library)) {
+            throw "Linux $($linuxJob.Label) smoke setup must install $($linuxJob.Library)."
+        }
+    }
     $linuxSmoke = Get-Content 'packaging/linux/smoke-launch.sh' -Raw
     if ($linuxSmoke -notmatch 'xdotool search' -or
-        $linuxSmoke -notmatch 'xdotool windowquit' -or
+        $linuxSmoke -notmatch 'xdotool windowclose' -or
         $linuxSmoke -notmatch 'xwininfo') {
         throw 'Linux smoke launcher must require a visible window and request a normal close.'
     }

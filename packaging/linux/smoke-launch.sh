@@ -36,7 +36,7 @@ if [[ -z "$WINDOW_ID" ]]; then
 fi
 
 xwininfo -id "$WINDOW_ID"
-xdotool windowquit "$WINDOW_ID"
+xdotool windowclose "$WINDOW_ID"
 for _ in $(seq 1 15); do
   if ! kill -0 "$APP_PID" 2>/dev/null; then
     wait "$APP_PID"
