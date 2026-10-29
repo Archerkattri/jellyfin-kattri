@@ -166,7 +166,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y ./artifacts/kattri_*.deb libxkbcommon-x11-0 xvfb xdotool x11-utils libgl1-mesa-dri
+          sudo apt-get install -y ./artifacts/kattri_*.deb libxkbcommon-x11-0 xvfb openbox wmctrl xdotool x11-utils libgl1-mesa-dri
       - name: Require a real application window and normal close
         run: |
           set -euo pipefail
@@ -200,7 +200,7 @@ jobs:
       - name: Install rpm and window-check dependencies
         run: |
           set -euo pipefail
-          dnf install -y ./artifacts/kattri-*.rpm libxkbcommon-x11 xorg-x11-server-Xvfb xdotool xwininfo mesa-dri-drivers
+          dnf install -y ./artifacts/kattri-*.rpm libxkbcommon-x11 xorg-x11-server-Xvfb openbox wmctrl xdotool xwininfo mesa-dri-drivers
       - name: Require a real application window and normal close
         run: |
           set -euo pipefail
@@ -234,7 +234,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libfuse2 libxkbcommon-x11-0 xvfb xdotool x11-utils libgl1-mesa-dri
+          sudo apt-get install -y libfuse2 libxkbcommon-x11-0 xvfb openbox wmctrl xdotool x11-utils libgl1-mesa-dri
           chmod +x ./artifacts/kattri-*-linux-x64.AppImage
       - name: Require a real application window and normal close
         run: |
@@ -269,7 +269,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y flatpak xvfb xdotool x11-utils libgl1-mesa-dri
+          sudo apt-get install -y flatpak xvfb openbox wmctrl xdotool x11-utils libgl1-mesa-dri
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user --noninteractive --bundle ./artifacts/kattri-*-linux-x64.flatpak
       - name: Require a real application window and normal close

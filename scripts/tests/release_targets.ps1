@@ -215,10 +215,12 @@ try {
         throw 'deb and rpm smoke jobs must both launch /usr/bin/kattri.'
     }
     # winit loads libxkbcommon-x11 at run time, so no package metadata pulls it in.
+    # Xvfb has no window manager, so the close request needs openbox plus wmctrl.
     foreach ($linuxJob in @(
         @{ Label = 'deb'; Anchor = './artifacts/kattri_*.deb'; Library = 'libxkbcommon-x11-0' },
         @{ Label = 'rpm'; Anchor = './artifacts/kattri-*.rpm'; Library = 'libxkbcommon-x11' },
-        @{ Label = 'AppImage'; Anchor = 'libfuse2'; Library = 'libxkbcommon-x11-0' }
+        @{ Label = 'AppImage'; Anchor = 'libfuse2'; Library = 'libxkbcommon-x11-0' },
+        @{ Label = 'Flatpak'; Anchor = 'apt-get install -y flatpak'; Library = 'openbox' }
     )) {
         $installLine = @($installWorkflow -split "`n" | Where-Object {
             $_.Contains($linuxJob.Anchor) -and $_ -match 'apt-get install|dnf install'
@@ -226,15 +228,19 @@ try {
         if ($installLine.Count -ne 1) {
             throw "Could not find exactly one Linux $($linuxJob.Label) install step."
         }
-        if (-not $installLine[0].Contains($linuxJob.Library)) {
-            throw "Linux $($linuxJob.Label) smoke setup must install $($linuxJob.Library)."
+        foreach ($requiredPackage in @($linuxJob.Library, 'openbox', 'wmctrl')) {
+            if (-not $installLine[0].Contains($requiredPackage)) {
+                throw "Linux $($linuxJob.Label) smoke setup must install $requiredPackage."
+            }
         }
     }
     $linuxSmoke = Get-Content 'packaging/linux/smoke-launch.sh' -Raw
     if ($linuxSmoke -notmatch 'xdotool search' -or
-        $linuxSmoke -notmatch 'xdotool windowclose' -or
+        $linuxSmoke -notmatch 'openbox --sm-disable' -or
+        $linuxSmoke -notmatch 'wmctrl -i -c' -or
+        $linuxSmoke -notmatch 'xdotool windowquit' -or
         $linuxSmoke -notmatch 'xwininfo') {
-        throw 'Linux smoke launcher must require a visible window and request a normal close.'
+        throw 'Linux smoke launcher must start a window manager and request a normal close.'
     }
 
     Write-Output 'PASS: release targets and clean-runner installation contracts.'
