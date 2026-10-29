@@ -5,10 +5,10 @@
 #
 # The Flatpak job builds packaging/flatpak/org.kattri.JellyfinKattri.yml into a bundle.
 #
-# Not verified: this workflow has not been run. The AppImage bundles the pinned,
-# SHA-256-verified libmpv archive (packaging/libmpv/manifest.toml, linux-x64). Deb and
-# rpm declare the distro libmpv as a dependency instead. They are not installed or
-# launched in a clean container here. That check is separate.
+# The v0.2.0 package builds passed. The AppImage bundles the pinned, SHA-256-verified
+# libmpv archive (packaging/libmpv/manifest.toml, linux-x64). Deb and rpm declare the
+# distro libmpv as a dependency instead. installation-smoke.yml installs and launches
+# the produced packages in fresh runners; that is not playback validation.
 
 name: Release Linux
 

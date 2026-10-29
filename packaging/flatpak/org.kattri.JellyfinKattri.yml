@@ -1,4 +1,5 @@
-# Flatpak manifest for Jellyfin Kattri. UNVERIFIED: this has not been built.
+# Flatpak manifest for Jellyfin Kattri. The v0.2.0 CI build passed; installation and
+# window startup are checked separately by installation-smoke.yml.
 #
 # Build (from the repository root, after generating cargo-sources.json):
 #   flatpak-builder --force-clean --user --install-deps-from=flathub \
@@ -8,8 +9,7 @@
 # org.freedesktop.Platform runtime is used. Its GNOME runtime pin is not applicable.
 # Runtime and SDK are pinned to branch 25.08, which must match each other. The Flathub Rust
 # extension for 25.08 is older than rust-toolchain.toml, so the pinned Rust release is
-# installed from its checksummed archive for the build and removed from the app. The branch was not checked against the current Flathub
-# listing; check it before the first build.
+# installed from its checksummed archive for the build and removed from the app.
 #
 # libmpv is the pinned LGPL linux-x64 archive from packaging/libmpv/manifest.toml (same URL
 # and SHA-256), not a source build: FFmpeg, libplacebo and dav1d are linked into it
@@ -17,8 +17,8 @@
 # uchardet, which the runtime does not ship and are built below from checksummed releases.
 #
 # Offline build: flatpak-builder runs cargo with --offline. Every crate comes from
-# cargo-sources.json, generated from Cargo.lock with the flatpak-cargo-generator tool
-# (version not recorded here). The generated file is not committed to the repository.
+# cargo-sources.json, generated from Cargo.lock with flatpak-builder-tools commit
+# 9d86d336a39b9af38b86f114b6ce5820fe260f91. The generated file is not committed.
 #
 # Permissions: the finish args grant only the display sockets, GPU access, audio, the
 # network (needed to reach the Jellyfin server), and no general filesystem access. Files

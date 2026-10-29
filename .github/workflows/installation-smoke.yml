@@ -1,0 +1,289 @@
+# Fresh-runner installation and window-startup checks for artifacts from one packaging run.
+# These jobs do not validate audible output, real-server playback, hardware decode, or HDR.
+name: Clean-runner installation and startup
+
+on:
+  workflow_run:
+    workflows:
+      - Release (Windows packaging)
+      - Release macOS universal
+      - Release Linux
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Install MSI (${{ matrix.platform }})
+    if: github.event.workflow_run.name == 'Release (Windows packaging)' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x64
+            runner: windows-latest
+          - platform: arm64
+            runner: windows-11-arm
+    steps:
+      - name: Download artifacts from the triggering build
+        uses: actions/download-artifact@v8
+        with:
+          pattern: kattri-windows-${{ matrix.platform }}-*
+          path: artifacts
+          merge-multiple: true
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Install, launch, close, and uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = Get-ChildItem -LiteralPath artifacts -Filter '*.msi' | Select-Object -First 1
+          if ($null -eq $msi) { throw 'No MSI was downloaded from the triggering run.' }
+          New-Item -ItemType Directory -Force -Path smoke-logs | Out-Null
+          $installLog = (Resolve-Path smoke-logs).Path + '\msi-install.log'
+          $uninstallLog = (Resolve-Path smoke-logs).Path + '\msi-uninstall.log'
+          & msiexec.exe /i $msi.FullName /qn /norestart ALLUSERS=1 /L*v $installLog
+          if ($LASTEXITCODE -ne 0) { throw "MSI installation failed with exit code $LASTEXITCODE" }
+          $installDir = Join-Path $env:ProgramFiles 'Jellyfin Kattri'
+          $exe = Join-Path $installDir 'jellyfin-kattri.exe'
+          $libmpv = Join-Path $installDir 'libmpv-2.dll'
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Installed executable is missing: $exe" }
+          if (-not (Test-Path -LiteralPath $libmpv)) { throw "Installed libmpv is missing: $libmpv" }
+          try {
+            $process = Start-Process -FilePath $exe -WorkingDirectory $installDir -PassThru
+            $deadline = [DateTime]::UtcNow.AddSeconds(60)
+            do {
+              $process.Refresh()
+              if ($process.HasExited) { throw "Application exited during startup with code $($process.ExitCode)" }
+              if ($process.MainWindowHandle -ne 0) { break }
+              Start-Sleep -Seconds 1
+            } while ([DateTime]::UtcNow -lt $deadline)
+            if ($process.MainWindowHandle -eq 0) { throw 'No application window appeared within 60 seconds.' }
+            "Window title: $($process.MainWindowTitle)" | Tee-Object -FilePath smoke-logs\startup.txt
+            if ($process.MainWindowTitle -ne 'Jellyfin Kattri') { throw "Unexpected window title: $($process.MainWindowTitle)" }
+            if (-not $process.CloseMainWindow()) { throw 'The application refused the normal close request.' }
+            if (-not $process.WaitForExit(15000)) { throw 'Application did not exit after CloseMainWindow.' }
+            if ($process.ExitCode -ne 0) { throw "Application exited with code $($process.ExitCode)" }
+          }
+          finally {
+            & msiexec.exe /x $msi.FullName /qn /norestart /L*v $uninstallLog
+            if ($LASTEXITCODE -ne 0) { throw "MSI uninstall failed with exit code $LASTEXITCODE" }
+          }
+          if (Test-Path -LiteralPath $exe) { throw 'Uninstall left the executable behind.' }
+          if (Test-Path -LiteralPath $libmpv) { throw 'Uninstall left libmpv behind.' }
+          'PASS: per-machine install, real-window startup, normal close, and clean uninstall.' |
+            Tee-Object -FilePath smoke-logs\result.txt -Append
+
+      - name: Upload installation and startup logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installation-smoke-${{ matrix.platform }}
+          path: smoke-logs/
+          if-no-files-found: warn
+          retention-days: 30
+
+  macos:
+    name: Mount DMG and launch universal app
+    if: github.event.workflow_run.name == 'Release macOS universal' && github.event.workflow_run.conclusion == 'success'
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Download artifacts from the triggering build
+        uses: actions/download-artifact@v8
+        with:
+          pattern: kattri-*-macos-universal*
+          path: artifacts
+          merge-multiple: true
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Mount, install, verify signature, launch, and quit
+        run: |
+          set -euo pipefail
+          mkdir -p smoke-logs "$RUNNER_TEMP/dmg" "$RUNNER_TEMP/Applications"
+          DMG="$(find artifacts -name '*.dmg' -print -quit)"
+          if [[ -z "$DMG" ]]; then echo 'No DMG was downloaded.' >&2; exit 1; fi
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$RUNNER_TEMP/dmg" | tee smoke-logs/mount.txt
+          cleanup() { hdiutil detach "$RUNNER_TEMP/dmg" || true; }
+          trap cleanup EXIT
+          cp -R "$RUNNER_TEMP/dmg/Jellyfin Kattri.app" "$RUNNER_TEMP/Applications/"
+          APP="$RUNNER_TEMP/Applications/Jellyfin Kattri.app"
+          codesign --verify --deep --strict "$APP" 2>&1 | tee smoke-logs/codesign.txt
+          codesign -dv --verbose=4 "$APP" 2>&1 | tee -a smoke-logs/codesign.txt
+          open -a "$APP"
+          APP_PID=""
+          for _ in $(seq 1 60); do
+            APP_PID="$(pgrep -f '^/.*/Jellyfin Kattri.app/Contents/MacOS/jellyfin-kattri$' | head -n 1 || true)"
+            [[ -n "$APP_PID" ]] && break
+            sleep 1
+          done
+          if [[ -z "$APP_PID" ]]; then echo 'Application process did not start.' >&2; exit 1; fi
+          sleep 10
+          kill -0 "$APP_PID"
+          osascript -e 'tell application "Jellyfin Kattri" to quit'
+          for _ in $(seq 1 15); do
+            if ! kill -0 "$APP_PID" 2>/dev/null; then
+              echo 'PASS: DMG app launched and quit normally.' | tee smoke-logs/result.txt
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'Application did not quit normally.' >&2
+          exit 1
+
+      - name: Upload macOS startup logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-installation-smoke
+          path: smoke-logs/
+          if-no-files-found: warn
+          retention-days: 30
+
+  linux-deb:
+    name: Install deb and launch (Ubuntu 22.04)
+    if: github.event.workflow_run.name == 'Release Linux' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: kattri-linux-deb-rpm
+          path: artifacts
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Install deb and window-check dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ./artifacts/kattri_*.deb xvfb xdotool x11-utils libgl1-mesa-dri
+      - name: Require a real application window and normal close
+        run: |
+          set -euo pipefail
+          mkdir -p smoke-logs
+          KATTRI_SMOKE_LOG="$PWD/smoke-logs/application.txt" \
+            xvfb-run -a -s '-screen 0 1280x720x24' \
+            packaging/linux/smoke-launch.sh /usr/bin/jellyfin-kattri | tee smoke-logs/window.txt
+      - name: Upload deb startup logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-deb-installation-smoke
+          path: smoke-logs/
+          if-no-files-found: warn
+          retention-days: 30
+
+  linux-rpm:
+    name: Install rpm and launch (Fedora)
+    if: github.event.workflow_run.name == 'Release Linux' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: kattri-linux-deb-rpm
+          path: artifacts
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Install rpm and window-check dependencies
+        run: |
+          set -euo pipefail
+          dnf install -y ./artifacts/kattri-*.rpm xorg-x11-server-Xvfb xdotool xwininfo mesa-dri-drivers
+      - name: Require a real application window and normal close
+        run: |
+          set -euo pipefail
+          mkdir -p smoke-logs
+          KATTRI_SMOKE_LOG="$PWD/smoke-logs/application.txt" \
+            xvfb-run -a -s '-screen 0 1280x720x24' \
+            packaging/linux/smoke-launch.sh /usr/bin/jellyfin-kattri | tee smoke-logs/window.txt
+      - name: Upload rpm startup logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-rpm-installation-smoke
+          path: smoke-logs/
+          if-no-files-found: warn
+          retention-days: 30
+
+  linux-appimage:
+    name: Launch AppImage (Ubuntu 22.04)
+    if: github.event.workflow_run.name == 'Release Linux' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: kattri-linux-appimage
+          path: artifacts
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Install window-check dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libfuse2 xvfb xdotool x11-utils libgl1-mesa-dri
+          chmod +x ./artifacts/kattri-*-linux-x64.AppImage
+      - name: Require a real application window and normal close
+        run: |
+          set -euo pipefail
+          mkdir -p smoke-logs
+          KATTRI_SMOKE_LOG="$PWD/smoke-logs/application.txt" \
+            xvfb-run -a -s '-screen 0 1280x720x24' \
+            packaging/linux/smoke-launch.sh ./artifacts/kattri-*-linux-x64.AppImage | tee smoke-logs/window.txt
+      - name: Upload AppImage startup logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-appimage-installation-smoke
+          path: smoke-logs/
+          if-no-files-found: warn
+          retention-days: 30
+
+  linux-flatpak:
+    name: Install Flatpak and launch (Ubuntu 24.04)
+    if: github.event.workflow_run.name == 'Release Linux' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: kattri-linux-flatpak
+          path: artifacts
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Install Flatpak and window-check dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak xvfb xdotool x11-utils libgl1-mesa-dri
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive --bundle ./artifacts/kattri-*-linux-x64.flatpak
+      - name: Require a real application window and normal close
+        run: |
+          set -euo pipefail
+          mkdir -p smoke-logs
+          KATTRI_SMOKE_LOG="$PWD/smoke-logs/application.txt" \
+            xvfb-run -a -s '-screen 0 1280x720x24' \
+            packaging/linux/smoke-launch.sh flatpak run org.kattri.JellyfinKattri | tee smoke-logs/window.txt
+      - name: Upload Flatpak startup logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-flatpak-installation-smoke
+          path: smoke-logs/
+          if-no-files-found: warn
+          retention-days: 30

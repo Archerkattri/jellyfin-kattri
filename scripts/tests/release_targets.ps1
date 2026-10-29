@@ -179,7 +179,36 @@ try {
         }
     }
 
-    Write-Output 'PASS: release package and all three OS workflows target jellyfin-kattri without demo features.'
+    $installWorkflow = Get-Content '.github/workflows/installation-smoke.yml' -Raw
+    foreach ($requiredWorkflow in @('Release (Windows packaging)', 'Release macOS universal', 'Release Linux')) {
+        if ($installWorkflow -notmatch [regex]::Escape($requiredWorkflow)) {
+            throw "Installation smoke workflow must follow $requiredWorkflow."
+        }
+    }
+    foreach ($requiredCheck in @(
+        'github.event.workflow_run.id',
+        'msiexec.exe /i',
+        'msiexec.exe /x',
+        'hdiutil attach',
+        'codesign --verify --deep --strict',
+        'apt-get install',
+        'dnf install',
+        'flatpak install',
+        'xvfb-run',
+        'actions/upload-artifact@v7'
+    )) {
+        if ($installWorkflow -notmatch [regex]::Escape($requiredCheck)) {
+            throw "Installation smoke workflow is missing required check: $requiredCheck"
+        }
+    }
+    $linuxSmoke = Get-Content 'packaging/linux/smoke-launch.sh' -Raw
+    if ($linuxSmoke -notmatch 'xdotool search' -or
+        $linuxSmoke -notmatch 'xdotool windowquit' -or
+        $linuxSmoke -notmatch 'xwininfo') {
+        throw 'Linux smoke launcher must require a visible window and request a normal close.'
+    }
+
+    Write-Output 'PASS: release targets and clean-runner installation contracts.'
 }
 finally {
     Pop-Location
