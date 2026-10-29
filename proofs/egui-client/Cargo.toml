@@ -31,6 +31,7 @@ eframe = { version = "=0.37.0", default-features = false, features = [
     "x11",
 ], optional = true }
 directories = "6"
+libc = "0.2"
 jellyfin-api = { path = "../../crates/jellyfin-api" }
 kattri-downloads = { path = "../../crates/kattri-downloads" }
 kattri-client-core = { path = "../../crates/client-core" }

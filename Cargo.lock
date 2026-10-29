@@ -2591,6 +2591,7 @@ dependencies = [
  "kattri-platform",
  "kattri-settings",
  "kattri-updater",
+ "libc",
  "mock-jellyfin",
  "mpv-render-proof",
  "serde_json",

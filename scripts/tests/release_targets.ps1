@@ -202,9 +202,13 @@ try {
         }
     }
     foreach ($installer in @('/i', '/x')) {
-        if ($installWorkflow -notmatch [regex]::Escape("Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('$installer")) {
+        if ($installWorkflow -notmatch [regex]::Escape("@('$installer")) {
             throw 'MSI smoke checks must wait for installer completion and inspect its exit code.'
         }
+    }
+    if ($installWorkflow -notmatch [regex]::Escape("@('/i', `$msi.FullName, '/qn'") -or
+        $installWorkflow -notmatch [regex]::Escape("Start-Process msiexec.exe -Wait -PassThru -ArgumentList")) {
+        throw 'MSI smoke checks must run msiexec with /i, /qn and inspect its exit code.'
     }
     if ((git ls-files --stage packaging/linux/smoke-launch.sh) -notmatch '^100755 ') {
         throw 'Linux smoke launcher must be executable in a fresh checkout.'

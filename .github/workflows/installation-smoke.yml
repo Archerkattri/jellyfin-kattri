@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   windows:
-    name: Install MSI (${{ matrix.platform }})
+    name: Install MSI (${{ matrix.platform }} ${{ matrix.scope }})
     if: github.event.workflow_run.name == 'Release (Windows packaging)' && github.event.workflow_run.conclusion == 'success'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -26,8 +26,20 @@ jobs:
         include:
           - platform: x64
             runner: windows-latest
+            scope: machine
+            allusers: '1'
+          - platform: x64
+            runner: windows-latest
+            scope: user
+            allusers: '0'
           - platform: arm64
             runner: windows-11-arm
+            scope: machine
+            allusers: '1'
+          - platform: arm64
+            runner: windows-11-arm
+            scope: user
+            allusers: '0'
     steps:
       - name: Download artifacts from the triggering build
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
@@ -47,9 +59,16 @@ jobs:
           New-Item -ItemType Directory -Force -Path smoke-logs | Out-Null
           $installLog = (Resolve-Path smoke-logs).Path + '\msi-install.log'
           $uninstallLog = (Resolve-Path smoke-logs).Path + '\msi-uninstall.log'
-          $installer = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', $msi.FullName, '/qn', '/norestart', 'ALLUSERS=1', '/L*v', $installLog)
+          $perMachine = '${{ matrix.allusers }}' -eq '1'
+          $extraArgs = if ($perMachine) { @('ALLUSERS=1') } else { @() }
+          $installer = Start-Process msiexec.exe -Wait -PassThru -ArgumentList (@('/i', $msi.FullName, '/qn', '/norestart', '/L*v', $installLog) + $extraArgs)
           if ($installer.ExitCode -ne 0) { throw "MSI installation failed with exit code $($installer.ExitCode)" }
-          $installDir = Join-Path $env:ProgramFiles 'Jellyfin Kattri'
+          # A plain install is per user under %LOCALAPPDATA%\Programs; ALLUSERS=1 is per machine.
+          $installDir = if ($perMachine) {
+            Join-Path $env:ProgramFiles 'Jellyfin Kattri'
+          } else {
+            Join-Path $env:LOCALAPPDATA 'Programs\Jellyfin Kattri'
+          }
           $exe = Join-Path $installDir 'jellyfin-kattri.exe'
           $libmpv = Join-Path $installDir 'libmpv-2.dll'
           if (-not (Test-Path -LiteralPath $exe)) { throw "Installed executable is missing: $exe" }
@@ -85,7 +104,7 @@ jobs:
           }
           if (Test-Path -LiteralPath $exe) { throw 'Uninstall left the executable behind.' }
           if (Test-Path -LiteralPath $libmpv) { throw 'Uninstall left libmpv behind.' }
-          'PASS: per-machine install, real-window startup, normal close, and clean uninstall.' |
+          "PASS: ${{ matrix.scope }} install, real-window startup, normal close, and clean uninstall." |
             Tee-Object -FilePath smoke-logs\result.txt -Append
 
       - name: Upload installation and startup logs

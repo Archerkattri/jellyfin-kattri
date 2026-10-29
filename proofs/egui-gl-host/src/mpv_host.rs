@@ -51,8 +51,8 @@ use kattri_settings::{
 use mpv_render_proof::playback_policy::OptionWriteLedger;
 use mpv_render_proof::{
     BackendSelection, CalibrationMarker, CapabilityUnavailable, CapabilityValue, ChapterStep,
-    EndFileReason, EventKind, FboTarget, FrameDecision, MpvError, MpvRenderer, MpvSession,
-    MpvTrack, ObservationId, PlaybackProperty, PlaybackPropertyValue, RepaintNotifier,
+    CommandId, EndFileReason, EventKind, FboTarget, FrameDecision, MpvError, MpvRenderer,
+    MpvSession, MpvTrack, ObservationId, PlaybackProperty, PlaybackPropertyValue, RepaintNotifier,
     SubtitleDelayError, SubtitleSelectionError, SubtitleSyncController, SubtitleSyncFailure,
     SubtitleSyncUpdate, TrackInventory, TrackInventoryError, TrackKind, TrackSelection,
     TrackSelectionError, TrackSelectionState,
@@ -875,6 +875,10 @@ pub(crate) struct MpvHost<'session> {
     /// item; cleared on `StartFile` (M6-12).
     ab_loop: AbLoop,
     chapter_list_request: Option<u64>,
+    /// The `screenshot-to-file` command whose reply has not arrived yet.
+    screenshot_command: Option<u64>,
+    /// libmpv's reply code for the last requested screenshot; taken by the host for its notice.
+    screenshot_result: Option<i32>,
     controls_feedback: Option<String>,
     track_inventory: Option<TrackInventory>,
     track_inventory_request: Option<u64>,
@@ -987,6 +991,8 @@ impl<'session> MpvHost<'session> {
                 subtitle_delay_seconds: None,
                 controls: PlaybackControlsState::default(),
                 chapter_list_request: None,
+                screenshot_command: None,
+                screenshot_result: None,
                 controls_feedback: None,
                 track_inventory: None,
                 track_inventory_request: None,
@@ -1086,6 +1092,8 @@ impl<'session> MpvHost<'session> {
                     subtitle_delay_seconds: None,
                     controls: PlaybackControlsState::default(),
                     chapter_list_request: None,
+                    screenshot_command: None,
+                    screenshot_result: None,
                     controls_feedback: None,
                     track_inventory: None,
                     track_inventory_request: None,
@@ -1155,6 +1163,8 @@ impl<'session> MpvHost<'session> {
             subtitle_delay_seconds: None,
             controls: PlaybackControlsState::default(),
             chapter_list_request: None,
+            screenshot_command: None,
+            screenshot_result: None,
             controls_feedback: None,
             track_inventory: None,
             track_inventory_request: None,
@@ -1546,6 +1556,12 @@ impl<'session> MpvHost<'session> {
                     self.track_feedback = None;
                     self.pending_track_selection = None;
                     self.reset_subtitle_state();
+                }
+                EventKind::CommandReply | EventKind::CommandSubmissionFailed
+                    if Some(event.request_id) == self.screenshot_command =>
+                {
+                    self.screenshot_command = None;
+                    self.screenshot_result = Some(event.error);
                 }
                 EventKind::CommandReply | EventKind::CommandSubmissionFailed
                     if self
@@ -3108,6 +3124,18 @@ impl<'session> MpvHost<'session> {
 
     pub(crate) fn status(&self) -> &str {
         &self.status
+    }
+
+    /// Track a queued `screenshot-to-file` command so its reply can be reported.
+    pub(crate) fn expect_screenshot(&mut self, command: CommandId) {
+        self.screenshot_command = Some(command.get());
+        self.screenshot_result = None;
+    }
+
+    /// The reply code for the last requested screenshot, once libmpv answers. `None` while the
+    /// command is still queued, or when no screenshot was requested.
+    pub(crate) fn take_screenshot_result(&mut self) -> Option<i32> {
+        self.screenshot_result.take()
     }
 
     pub(crate) fn take_playback_loaded(&mut self) -> Option<u64> {

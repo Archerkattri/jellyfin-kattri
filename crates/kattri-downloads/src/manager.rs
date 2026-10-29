@@ -588,3 +588,79 @@ fn move_aside(path: &Path) -> Result<PathBuf, ManagerError> {
         "no free name for the corrupt job list",
     )))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::persist::{self, PersistedDownload, PersistedState};
+    use kattri_client_core::downloads::DownloadJob;
+
+    fn entry() -> Entry {
+        Entry {
+            server_id: "server-1".to_owned(),
+            job: DownloadJob::new(),
+            temp_name: None,
+            notice: None,
+            verification: None,
+            failure: None,
+            pause: None,
+        }
+    }
+
+    #[test]
+    fn a_newer_snapshot_restores_the_durable_offset_on_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut jobs = BTreeMap::new();
+        jobs.insert("item-1".to_owned(), entry());
+
+        let record = PersistedDownload {
+            version: persist::FORMAT_VERSION,
+            state: PersistedState::Queued,
+            etag: Some("\"v1\"".to_owned()),
+            last_modified: None,
+            expected_total_length: Some(100),
+            durable_offset: 40,
+            temp_name: Some("0123456789abcdef.part".to_owned()),
+        };
+        persist::save(&snapshot_path(dir.path(), "item-1"), &record).expect("snapshot");
+
+        restore_snapshots(dir.path(), &mut jobs);
+
+        let restored = &jobs["item-1"];
+        assert_eq!(restored.job.snapshot().durable_offset, 40);
+        assert_eq!(restored.temp_name.as_deref(), Some("0123456789abcdef.part"));
+    }
+
+    #[test]
+    fn a_snapshot_older_than_the_job_list_is_ignored() {
+        use kattri_client_core::downloads::{DownloadSnapshot, Validators};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let job = DownloadJob::from_snapshot(DownloadSnapshot {
+            state: DownloadState::Queued,
+            validators: Validators {
+                etag: Some("\"v1\"".to_owned()),
+                last_modified: None,
+            },
+            expected_total_length: Some(100),
+            durable_offset: 40,
+        })
+        .expect("restored job");
+        let mut jobs = BTreeMap::new();
+        jobs.insert("item-1".to_owned(), Entry { job, ..entry() });
+
+        // The snapshot on disk is behind the job list; it must not move the offset back.
+        let record = PersistedDownload {
+            version: persist::FORMAT_VERSION,
+            state: PersistedState::Queued,
+            etag: Some("\"v1\"".to_owned()),
+            last_modified: None,
+            expected_total_length: Some(100),
+            durable_offset: 10,
+            temp_name: Some("0123456789abcdef.part".to_owned()),
+        };
+        persist::save(&snapshot_path(dir.path(), "item-1"), &record).expect("snapshot");
+        restore_snapshots(dir.path(), &mut jobs);
+        assert_eq!(jobs["item-1"].job.snapshot().durable_offset, 40);
+    }
+}

@@ -1344,13 +1344,29 @@ impl<'session> GlHost<'session> {
             &existing,
             PROVISIONAL_SCREENSHOT_MODE,
         ) {
-            Ok(_) => self.set_shell_notice(format!("Screenshot requested: {file_name}")),
+            Ok(command) => {
+                self.mpv.expect_screenshot(command);
+                self.set_shell_notice(format!("Screenshot requested: {file_name}"));
+            }
             Err(error) => self.set_shell_notice(format!("Screenshot failed: {error}")),
         }
     }
 
     fn set_shell_notice(&mut self, text: String) {
         self.shell_notice = Some((text, self.osd_clock.elapsed()));
+    }
+
+    /// Report the queued screenshot's real outcome once libmpv answers. Queueing alone does not
+    /// prove the file was written (unwritable folder, render-mode capture failure).
+    fn poll_screenshot_result(&mut self) {
+        let Some(error) = self.mpv.take_screenshot_result() else {
+            return;
+        };
+        if error < 0 {
+            self.set_shell_notice(format!("Screenshot failed (libmpv error {error})."));
+        } else {
+            self.set_shell_notice("Screenshot saved.".to_owned());
+        }
     }
 
     fn resize_video_target(&mut self, size: [u32; 2]) -> Result<(), String> {
@@ -2062,6 +2078,7 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(host) = self.host.as_mut() {
+            host.poll_screenshot_result();
             if host.advance_close() {
                 event_loop.exit();
                 return;

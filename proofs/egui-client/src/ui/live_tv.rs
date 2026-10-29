@@ -436,84 +436,68 @@ fn format_time(unix_seconds: i64) -> String {
 
 #[cfg(unix)]
 fn os_local_time_label(unix_seconds: i64) -> Option<String> {
-    use std::ffi::{CStr, c_char, c_long};
+    use std::ffi::CStr;
 
-    #[repr(C, align(8))]
-    struct TmStorage([u64; 32]);
-
-    #[link(name = "c")]
-    unsafe extern "C" {
-        fn localtime_r(time: *const c_long, result: *mut TmStorage) -> *mut TmStorage;
-        fn strftime(
-            output: *mut c_char,
-            capacity: usize,
-            format: *const c_char,
-            time: *const TmStorage,
-        ) -> usize;
-    }
-
-    let timestamp = c_long::try_from(unix_seconds).ok()?;
-    let mut broken_down = TmStorage([0; 32]);
-    let mut output = [0 as c_char; 32];
+    let timestamp = libc::time_t::try_from(unix_seconds).ok()?;
+    // SAFETY: `tm` is a real `struct tm` owned here; `localtime_r` writes into it and returns
+    // null on failure. The output buffer is a NUL-terminated C string on success.
+    let mut broken_down: libc::tm = unsafe { std::mem::zeroed() };
+    let mut output = [0 as libc::c_char; 32];
     let format = c"%H:%M %z";
-    // The oversized, aligned storage is used opaquely by the platform C runtime.
-    let result = unsafe {
-        if localtime_r(&timestamp, &mut broken_down).is_null() {
+    unsafe {
+        if libc::localtime_r(&timestamp, &mut broken_down).is_null() {
             return None;
         }
-        strftime(
+        if libc::strftime(
             output.as_mut_ptr(),
             output.len(),
             format.as_ptr(),
             &broken_down,
-        )
-    };
-    if result == 0 {
-        return None;
+        ) == 0
+        {
+            return None;
+        }
+        let formatted = CStr::from_ptr(output.as_ptr()).to_str().ok()?;
+        Some(add_offset_colon(formatted))
     }
-    let formatted = unsafe { CStr::from_ptr(output.as_ptr()) }.to_str().ok()?;
-    Some(add_offset_colon(formatted))
 }
 
 #[cfg(windows)]
 fn os_local_time_label(unix_seconds: i64) -> Option<String> {
-    use std::ffi::{CStr, c_char, c_int};
+    use std::ffi::{CStr, c_char};
 
-    #[repr(C, align(8))]
-    struct TmStorage([u64; 32]);
-
-    #[link(name = "ucrt")]
+    // libc's Windows bindings omit strftime, so declare it against the real `struct tm` type.
     unsafe extern "C" {
-        #[link_name = "_localtime64_s"]
-        fn localtime64_s(result: *mut TmStorage, time: *const i64) -> c_int;
         fn strftime(
             output: *mut c_char,
             capacity: usize,
             format: *const c_char,
-            time: *const TmStorage,
+            time: *const libc::tm,
         ) -> usize;
     }
 
-    let mut broken_down = TmStorage([0; 32]);
-    let mut output = [0_i8; 32];
+    let timestamp: libc::time_t = unix_seconds;
+    // SAFETY: `tm` is a real `struct tm` owned here; `localtime_s` writes into it and returns
+    // non-zero on failure. The output buffer is a NUL-terminated C string on success.
+    let mut broken_down: libc::tm = unsafe { std::mem::zeroed() };
+    let mut output = [0 as libc::c_char; 32];
     let format = c"%H:%M %z";
-    // The oversized, aligned storage is used opaquely by the platform C runtime.
-    let result = unsafe {
-        if localtime64_s(&mut broken_down, &unix_seconds) != 0 {
+    unsafe {
+        if libc::localtime_s(&mut broken_down, &timestamp) != 0 {
             return None;
         }
-        strftime(
+        if strftime(
             output.as_mut_ptr(),
             output.len(),
             format.as_ptr(),
             &broken_down,
-        )
-    };
-    if result == 0 {
-        return None;
+        ) == 0
+        {
+            return None;
+        }
+        let formatted = CStr::from_ptr(output.as_ptr()).to_str().ok()?;
+        Some(add_offset_colon(formatted))
     }
-    let formatted = unsafe { CStr::from_ptr(output.as_ptr()) }.to_str().ok()?;
-    Some(add_offset_colon(formatted))
 }
 
 #[cfg(not(any(unix, windows)))]
