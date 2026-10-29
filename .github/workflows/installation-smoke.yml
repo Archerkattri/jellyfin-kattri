@@ -47,8 +47,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path smoke-logs | Out-Null
           $installLog = (Resolve-Path smoke-logs).Path + '\msi-install.log'
           $uninstallLog = (Resolve-Path smoke-logs).Path + '\msi-uninstall.log'
-          & msiexec.exe /i $msi.FullName /qn /norestart ALLUSERS=1 /L*v $installLog
-          if ($LASTEXITCODE -ne 0) { throw "MSI installation failed with exit code $LASTEXITCODE" }
+          $installer = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', $msi.FullName, '/qn', '/norestart', 'ALLUSERS=1', '/L*v', $installLog)
+          if ($installer.ExitCode -ne 0) { throw "MSI installation failed with exit code $($installer.ExitCode)" }
           $installDir = Join-Path $env:ProgramFiles 'Jellyfin Kattri'
           $exe = Join-Path $installDir 'jellyfin-kattri.exe'
           $libmpv = Join-Path $installDir 'libmpv-2.dll'
@@ -71,8 +71,8 @@ jobs:
             if ($process.ExitCode -ne 0) { throw "Application exited with code $($process.ExitCode)" }
           }
           finally {
-            & msiexec.exe /x $msi.FullName /qn /norestart /L*v $uninstallLog
-            if ($LASTEXITCODE -ne 0) { throw "MSI uninstall failed with exit code $LASTEXITCODE" }
+            $installer = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/x', $msi.FullName, '/qn', '/norestart', '/L*v', $uninstallLog)
+            if ($installer.ExitCode -ne 0) { throw "MSI uninstall failed with exit code $($installer.ExitCode)" }
           }
           if (Test-Path -LiteralPath $exe) { throw 'Uninstall left the executable behind.' }
           if (Test-Path -LiteralPath $libmpv) { throw 'Uninstall left libmpv behind.' }

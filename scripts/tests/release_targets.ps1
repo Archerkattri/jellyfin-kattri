@@ -187,8 +187,7 @@ try {
     }
     foreach ($requiredCheck in @(
         'github.event.workflow_run.id',
-        'msiexec.exe /i',
-        'msiexec.exe /x',
+        'Start-Process msiexec.exe -Wait -PassThru',
         'hdiutil attach',
         'codesign --verify --deep --strict',
         'apt-get install',
@@ -200,6 +199,14 @@ try {
         if ($installWorkflow -notmatch [regex]::Escape($requiredCheck)) {
             throw "Installation smoke workflow is missing required check: $requiredCheck"
         }
+    }
+    foreach ($installer in @('/i', '/x')) {
+        if ($installWorkflow -notmatch [regex]::Escape("Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('$installer")) {
+            throw 'MSI smoke checks must wait for installer completion and inspect its exit code.'
+        }
+    }
+    if ((git ls-files --stage packaging/linux/smoke-launch.sh) -notmatch '^100755 ') {
+        throw 'Linux smoke launcher must be executable in a fresh checkout.'
     }
     $linuxSmoke = Get-Content 'packaging/linux/smoke-launch.sh' -Raw
     if ($linuxSmoke -notmatch 'xdotool search' -or
