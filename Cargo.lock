@@ -1483,7 +1483,7 @@ dependencies = [
 
 [[package]]
 name = "egui-gl-host-proof"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "directories",
  "egui",
@@ -2557,7 +2557,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jellyfin-api"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "mock-jellyfin",
  "reqwest",
@@ -2700,7 +2700,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-bench"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "criterion",
  "jellyfin-api",
@@ -2710,7 +2710,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-client-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "jellyfin-api",
  "kattri-guard",
@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-downloads"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "jellyfin-api",
  "kattri-client-core",
@@ -2738,15 +2738,15 @@ dependencies = [
 
 [[package]]
 name = "kattri-guard"
-version = "0.3.1"
+version = "0.4.0"
 
 [[package]]
 name = "kattri-i18n"
-version = "0.3.1"
+version = "0.4.0"
 
 [[package]]
 name = "kattri-input"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "gilrs",
  "serde_json",
@@ -2755,7 +2755,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-logging"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "directories",
  "jellyfin-api",
@@ -2769,7 +2769,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-parental"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "argon2",
  "getrandom 0.3.4",
@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-platform"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "apple-native-keyring-store",
  "keyring-core",
@@ -2793,7 +2793,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-player"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2802,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-plugin-host"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "kattri-guard",
  "kattri-plugins",
@@ -2812,7 +2812,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-plugins"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "kattri-client-core",
  "kattri-guard",
@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-settings"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "kattri-guard",
  "serde",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-updater"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -3076,7 +3076,7 @@ dependencies = [
 
 [[package]]
 name = "mock-jellyfin"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "axum",
  "form_urlencoded",
