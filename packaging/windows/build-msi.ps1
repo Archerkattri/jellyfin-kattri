@@ -93,4 +93,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "wix build failed with exit code $LASTEXITCODE."
 }
 
+$hash = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$msiName = Split-Path -Leaf $msiPath
+Set-Content -LiteralPath "$msiPath.sha256" -Value "$hash  $msiName" -Encoding ascii
+
 Write-Output "Built MSI: $msiPath"
+Write-Output "Wrote checksum: $msiPath.sha256"
