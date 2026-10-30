@@ -190,6 +190,7 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
                 "auto_skip_intro",
                 "auto_skip_outro",
                 "outro_delay_ms",
+                "resume_rewind_seconds",
                 "auto_play_next_episode",
                 "external_player",
                 "max_streaming_bitrate",

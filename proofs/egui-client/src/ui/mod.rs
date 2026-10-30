@@ -514,6 +514,15 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs
     let connected = has_server(&app.connection);
     ui.horizontal_centered(|ui| {
         ui.add_space(20.0);
+        app.ensure_brand_logo(ui.ctx());
+        if let Some(texture) = &app.brand_logo {
+            ui.add(
+                egui::Image::new(texture)
+                    .fit_to_exact_size(egui::vec2(26.0, 26.0))
+                    .corner_radius(6.0),
+            );
+            ui.add_space(8.0);
+        }
         ui.label(
             RichText::new(ui_text(ids::SHELL_BRAND_NAME))
                 .size(20.0)
@@ -3443,6 +3452,14 @@ pub(crate) fn resumable_position_ticks(
     Some(position_ticks)
 }
 
+/// Rewind a saved resume point by the configured number of seconds. Ticks are 100 ns, so one
+/// second is 10,000,000 ticks. The result never goes below zero.
+pub(crate) fn resume_rewind_ticks(position_ticks: i64, seconds: u32) -> i64 {
+    position_ticks
+        .saturating_sub(i64::from(seconds).saturating_mul(10_000_000))
+        .max(0)
+}
+
 fn format_resume_position(ticks: i64) -> String {
     let total_seconds = (ticks.max(0) as u64) / 10_000_000;
     let hours = total_seconds / 3_600;
@@ -3453,7 +3470,7 @@ fn format_resume_position(ticks: i64) -> String {
 
 #[cfg(test)]
 mod resume_playback_tests {
-    use super::{format_resume_position, resumable_position_ticks};
+    use super::{format_resume_position, resumable_position_ticks, resume_rewind_ticks};
 
     #[test]
     fn offers_only_a_valid_unfinished_resume_position() {
@@ -3492,6 +3509,14 @@ mod resume_playback_tests {
     #[test]
     fn displays_resume_time_as_a_clock_timestamp() {
         assert_eq!(format_resume_position(37_230_000_000), "01:02:03");
+    }
+
+    #[test]
+    fn resume_rewind_subtracts_seconds_and_never_goes_negative() {
+        // Ten seconds into a 100-second resume point, with a 5-second rewind.
+        assert_eq!(resume_rewind_ticks(1_000_000_000, 0), 1_000_000_000);
+        assert_eq!(resume_rewind_ticks(1_000_000_000, 5), 950_000_000);
+        assert_eq!(resume_rewind_ticks(30_000_000, 5), 0);
     }
 }
 

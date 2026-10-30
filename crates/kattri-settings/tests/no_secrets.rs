@@ -39,6 +39,7 @@ fn populated() -> Settings {
         auto_skip_intro: true,
         auto_skip_outro: true,
         outro_delay_ms: 30_000,
+        resume_rewind_seconds: 10,
         auto_play_next_episode: false,
         external_player: true,
         max_streaming_bitrate: 20_000_000,

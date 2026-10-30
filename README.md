@@ -1,12 +1,20 @@
-# Jellyfin Kattri
+<p align="center">
+  <img src="packaging/linux/icons/kattri.svg" width="96" height="96" alt="jellyfin kattri logo">
+</p>
 
-[![Rust client CI](https://github.com/Archerkattri/jellyfin-kattri/actions/workflows/rust-client-ci.yml/badge.svg)](https://github.com/Archerkattri/jellyfin-kattri/actions/workflows/rust-client-ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/Archerkattri/jellyfin-kattri?include_prereleases&label=release)](https://github.com/Archerkattri/jellyfin-kattri/releases)
-[![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue)](LICENSE)
+<h1 align="center">jellyfin kattri</h1>
 
-A fast, native desktop client for Jellyfin. Built in Rust with egui and libmpv:
-no web view, no JavaScript UI, no server changes. Kattri connects to your Jellyfin
-server like any other client and plays your library in a real desktop window.
+<p align="center">
+  <a href="https://github.com/Archerkattri/jellyfin-kattri/actions/workflows/rust-client-ci.yml"><img src="https://github.com/Archerkattri/jellyfin-kattri/actions/workflows/rust-client-ci.yml/badge.svg" alt="Rust client CI"></a>
+  <a href="https://github.com/Archerkattri/jellyfin-kattri/releases"><img src="https://img.shields.io/github/v/release/Archerkattri/jellyfin-kattri?include_prereleases&label=release" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--only-blue" alt="License: GPL-3.0-only"></a>
+</p>
+
+<p align="center">A fast, native desktop client for Jellyfin. Built in Rust with egui and libmpv:
+no web view, no JavaScript UI, no server changes.</p>
+
+Kattri connects to your Jellyfin server like any other client and plays your library
+in a real desktop window.
 
 ![Jellyfin Kattri home screen](assets/screenshots/home.jpg)
 
@@ -40,7 +48,7 @@ server like any other client and plays your library in a real desktop window.
 | **Library** | Paging, sorting, play state, favorites, genre and studio filters, alphabet picker, 1,000-item poster and photo grids, music All/Albums/Songs views |
 | **Details** | Metadata, overview, cast, similar titles, seasons and episodes, series Next Up, media info, version picker, trailers and extras, lyrics, play and download |
 | **Search** | Debounced cross-type search grouped by movies, series, episodes, music, playlists, photos, people and channels; subtitle search |
-| **Playback** | Direct play, direct stream and transcode through the relay; resume; playback reporting; audio and subtitle tracks; subtitle delay; chapters; speed; segment skip; bounded mid-stream recovery |
+| **Playback** | Direct play, direct stream and transcode through the relay; resume with optional rewind; playback reporting; audio and subtitle tracks; subtitle delay; chapters; speed; segment skip; bounded mid-stream recovery |
 | **Player** | Transport bar, 10-second seek, frame step, chapter step and menu, volume and mute, speed, A-B loop, picture-in-picture, fullscreen; previous/next; Up Next card and auto-play; track menus; media info (`I`); equalizer and loudness filters; HDR-to-SDR tone mapping; refresh-rate matching on Windows; open a stream address |
 | **Music** | Album and playlist browsing, queue with shuffle and repeat, queue restored after restart |
 | **Live TV** | Channel list, 24-hour guide, tune through the relay, record the current program, recordings and scheduled recordings |
@@ -55,30 +63,30 @@ server like any other client and plays your library in a real desktop window.
 
 Download the installer for your platform from the
 [releases page](https://github.com/Archerkattri/jellyfin-kattri/releases). The current
-prerelease is **v0.4.0**.
+prerelease is **v0.4.1**.
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows x64 | `JellyfinKattri-0.4.0-x64.msi` or `-x64-portable.zip` | libmpv is bundled; the portable zip runs `jellyfin-kattri.exe` |
-| Windows ARM64 | `JellyfinKattri-0.4.0-arm64.msi` or `-arm64-portable.zip` | libmpv is bundled |
-| macOS (universal) | `kattri-0.4.0-macos-universal.dmg` | libmpv is bundled; ad-hoc signed |
-| Linux x64 | `kattri_0.4.0-1_amd64.deb`, `kattri-0.4.0-1.x86_64.rpm`, `kattri-0.4.0-linux-x64.AppImage`, `kattri-0.4.0-linux-x64.flatpak` | deb/rpm use the distro libmpv; AppImage and Flatpak bundle it |
+| Windows x64 | `JellyfinKattri-0.4.1-x64.msi` or `-x64-portable.zip` | libmpv is bundled; the portable zip runs `jellyfin-kattri.exe` |
+| Windows ARM64 | `JellyfinKattri-0.4.1-arm64.msi` or `-arm64-portable.zip` | libmpv is bundled |
+| macOS (universal) | `kattri-0.4.1-macos-universal.dmg` | libmpv is bundled; ad-hoc signed |
+| Linux x64 | `kattri_0.4.1-1_amd64.deb`, `kattri-0.4.1-1.x86_64.rpm`, `kattri-0.4.1-linux-x64.AppImage`, `kattri-0.4.1-linux-x64.flatpak` | deb/rpm use the distro libmpv; AppImage and Flatpak bundle it |
 
 Every download has a matching `.sha256` file.
 
 ```sh
 # Debian / Ubuntu (needs libmpv2 or libmpv1 installed)
-sudo apt install ./kattri_0.4.0-1_amd64.deb
+sudo apt install ./kattri_0.4.1-1_amd64.deb
 
 # Fedora (needs libmpv)
-sudo dnf install ./kattri-0.4.0-1.x86_64.rpm
+sudo dnf install ./kattri-0.4.1-1.x86_64.rpm
 
 # AppImage, no install needed
-chmod +x kattri-0.4.0-linux-x64.AppImage
-./kattri-0.4.0-linux-x64.AppImage
+chmod +x kattri-0.4.1-linux-x64.AppImage
+./kattri-0.4.1-linux-x64.AppImage
 
 # Flatpak
-flatpak install --user --bundle kattri-0.4.0-linux-x64.flatpak
+flatpak install --user --bundle kattri-0.4.1-linux-x64.flatpak
 ```
 
 Windows SmartScreen and macOS Gatekeeper will warn because the packages are not

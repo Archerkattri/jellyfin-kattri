@@ -211,6 +211,10 @@ pub(super) fn playback_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             &mut playback.auto_play_next_episode,
             ui_text(ids::SETTINGS_MEDIA_AUTO_PLAY_NEXT_EPISODE),
         );
+        ui.add(
+            egui::Slider::new(&mut playback.resume_rewind_seconds, 0..=120)
+                .text(ui_text(ids::SETTINGS_MEDIA_RESUME_REWIND)),
+        );
         ui.add_enabled(
             false,
             egui::Checkbox::new(
