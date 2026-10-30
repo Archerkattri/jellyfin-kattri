@@ -1,3 +1,11 @@
+kattri (0.3.1-1) unstable; urgency=medium
+
+  * Fix the changelog date that made lintian fail the package build.
+  * Functionally identical to 0.3.0: parental, recovery, download, relay,
+    window-host and packaging fixes from the audit.
+
+ -- Jellyfin Kattri <krishiattriwork@gmail.com>  Fri, 30 Oct 2026 00:00:00 +0000
+
 kattri (0.3.0-1) unstable; urgency=medium
 
   * Parental controls fail closed for unrated media and cover every media list.
@@ -12,7 +20,7 @@ kattri (0.3.0-1) unstable; urgency=medium
   * Release packages carry the project license and libmpv notice; release
     binaries no longer embed debug info.
 
- -- Jellyfin Kattri <krishiattriwork@gmail.com>  Wed, 29 Oct 2026 00:00:00 +0000
+ -- Jellyfin Kattri <krishiattriwork@gmail.com>  Thu, 29 Oct 2026 00:00:00 +0000
 
 kattri (0.2.0-1) unstable; urgency=medium
 
@@ -21,7 +29,7 @@ kattri (0.2.0-1) unstable; urgency=medium
   * Library views, subtitle search and seek previews.
   * Item menu metadata editing, identify and image management for administrators.
 
- -- Jellyfin Kattri <krishiattriwork@gmail.com>  Wed, 29 Oct 2026 00:00:00 +0000
+ -- Jellyfin Kattri <krishiattriwork@gmail.com>  Wed, 28 Oct 2026 00:00:00 +0000
 
 kattri (0.1.0-1) unstable; urgency=medium
 
