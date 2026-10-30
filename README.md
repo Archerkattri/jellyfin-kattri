@@ -60,7 +60,7 @@ data is used.
 ## Download
 
 Grab a build from the [releases page](https://github.com/Archerkattri/jellyfin-kattri/releases).
-The current prerelease is **v0.2.0**.
+The current prerelease is **v0.3.0**.
 
 | Platform | Artifacts | libmpv |
 | --- | --- | --- |
@@ -74,10 +74,10 @@ The current prerelease is **v0.2.0**.
 Every package and bundle ships with a `.sha256` file. Install examples:
 
 ```sh
-sudo apt install ./kattri_0.2.0-1_amd64.deb        # Debian/Ubuntu; uses a system libmpv
-sudo dnf install ./kattri-0.2.0-1.x86_64.rpm       # Fedora; uses a system libmpv
-chmod +x kattri-0.2.0-linux-x64.AppImage && ./kattri-0.2.0-linux-x64.AppImage
-flatpak install --user --bundle ./kattri-0.2.0-linux-x64.flatpak
+sudo apt install ./kattri_0.3.0-1_amd64.deb        # Debian/Ubuntu; uses a system libmpv
+sudo dnf install ./kattri-0.3.0-1.x86_64.rpm       # Fedora; uses a system libmpv
+chmod +x kattri-0.3.0-linux-x64.AppImage && ./kattri-0.3.0-linux-x64.AppImage
+flatpak install --user --bundle ./kattri-0.3.0-linux-x64.flatpak
 ```
 
 The packages are **unsigned**: Windows SmartScreen and macOS Gatekeeper will warn.
