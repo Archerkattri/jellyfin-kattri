@@ -31,6 +31,7 @@ use kattri_client_core::screenshot::{
     ScreenshotContext, ScreenshotFormat, screenshot_stem, unique_file_name,
 };
 use kattri_client_core::window_state::SavedWindow;
+use kattri_platform::{PowerGuard, PowerInhibitor, default_power_inhibitor};
 use kattri_plugins::discord::{IpcTransport, PresenceBinding};
 use mpv_host::{
     ItemLoadSettings, MpvHost, SYNC_MARKER_BUTTONS, SyncFeedbackTone, TrackMemoryEvent,
@@ -109,6 +110,10 @@ struct GlHost<'session> {
     local_stem: Option<String>,
     screenshot_count: u32,
     shell_notice: Option<(String, Duration)>,
+    /// Keeps the OS from sleeping or turning the display off while media is loaded.
+    power: Box<dyn PowerInhibitor>,
+    power_guard: Option<PowerGuard>,
+    power_error_logged: bool,
     display_switch: display_switch::DisplaySwitch,
     // Pending window-geometry write. Moves and resizes restart it; it is polled from about_to_wait.
     geometry_save: window_hooks::SaveDebounce,
@@ -301,6 +306,9 @@ impl<'session> GlHost<'session> {
             local_stem,
             screenshot_count: 0,
             shell_notice: None,
+            power: default_power_inhibitor(),
+            power_guard: None,
+            power_error_logged: false,
             display_switch: display_switch::DisplaySwitch::new(),
             geometry_save: window_hooks::SaveDebounce::new(window_hooks::SAVE_DEBOUNCE),
         })
@@ -1356,6 +1364,25 @@ impl<'session> GlHost<'session> {
         self.shell_notice = Some((text, self.osd_clock.elapsed()));
     }
 
+    /// Hold a sleep/display requirement while media is loaded, and release it when playback
+    /// stops. The platform guard is created and dropped on this UI thread.
+    fn update_sleep_inhibit(&mut self) {
+        let playing = self.mpv.is_playing();
+        if playing && self.power_guard.is_none() {
+            match self.power.inhibit_sleep("Playing video") {
+                Ok(guard) => self.power_guard = Some(guard),
+                Err(error) => {
+                    if !self.power_error_logged {
+                        tracing::warn!(%error, "sleep inhibition is unavailable");
+                        self.power_error_logged = true;
+                    }
+                }
+            }
+        } else if !playing {
+            self.power_guard = None;
+        }
+    }
+
     /// Report the queued screenshot's real outcome once libmpv answers. Queueing alone does not
     /// prove the file was written (unwritable folder, render-mode capture failure).
     fn poll_screenshot_result(&mut self) {
@@ -2078,6 +2105,7 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(host) = self.host.as_mut() {
+            host.update_sleep_inhibit();
             host.poll_screenshot_result();
             if host.advance_close() {
                 event_loop.exit();

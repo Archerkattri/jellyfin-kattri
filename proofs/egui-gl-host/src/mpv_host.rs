@@ -3126,6 +3126,11 @@ impl<'session> MpvHost<'session> {
         &self.status
     }
 
+    /// True while a file is loaded and has not reached its end or an error.
+    pub(crate) fn is_playing(&self) -> bool {
+        self.file_loaded
+    }
+
     /// Track a queued `screenshot-to-file` command so its reply can be reported.
     pub(crate) fn expect_screenshot(&mut self, command: CommandId) {
         self.screenshot_command = Some(command.get());

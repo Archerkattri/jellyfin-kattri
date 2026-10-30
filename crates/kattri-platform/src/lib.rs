@@ -174,6 +174,70 @@ pub trait PowerInhibitor {
     fn inhibit_sleep(&mut self, reason: &str) -> Result<PowerGuard, PlatformError>;
 }
 
+/// The platform's sleep inhibitor. Windows uses the thread execution state; other platforms
+/// have no backend yet, so the caller keeps playing and logs the refusal once.
+pub fn default_power_inhibitor() -> Box<dyn PowerInhibitor> {
+    #[cfg(windows)]
+    {
+        Box::new(WindowsPowerInhibitor)
+    }
+    #[cfg(not(windows))]
+    {
+        Box::new(UnsupportedPowerInhibitor)
+    }
+}
+
+/// Windows implementation backed by `SetThreadExecutionState`.
+///
+/// The requirement is per thread. The guard is created and dropped on the UI thread, which
+/// owns the native window and the playback session. `reason` is not passed to the OS; the
+/// Win32 API has no reason field.
+#[cfg(windows)]
+#[derive(Debug, Default)]
+pub struct WindowsPowerInhibitor;
+
+#[cfg(windows)]
+impl PowerInhibitor for WindowsPowerInhibitor {
+    fn inhibit_sleep(&mut self, _reason: &str) -> Result<PowerGuard, PlatformError> {
+        const ES_CONTINUOUS: u32 = 0x8000_0000;
+        const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+        const ES_DISPLAY_REQUIRED: u32 = 0x0000_0002;
+
+        unsafe extern "system" {
+            fn SetThreadExecutionState(flags: u32) -> u32;
+        }
+
+        // SAFETY: no pointers are passed; the call only changes this thread's execution state.
+        let previous = unsafe {
+            SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)
+        };
+        if previous == 0 {
+            return Err(PlatformError::Failed(format!(
+                "SetThreadExecutionState failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(PowerGuard::new(|| {
+            // SAFETY: clears the requirement set by the guard on this thread.
+            unsafe {
+                SetThreadExecutionState(ES_CONTINUOUS);
+            }
+        }))
+    }
+}
+
+/// Fallback for platforms without a sleep-inhibition backend.
+#[cfg(not(windows))]
+#[derive(Debug, Default)]
+pub struct UnsupportedPowerInhibitor;
+
+#[cfg(not(windows))]
+impl PowerInhibitor for UnsupportedPowerInhibitor {
+    fn inhibit_sleep(&mut self, _reason: &str) -> Result<PowerGuard, PlatformError> {
+        Err(PlatformError::Unsupported("sleep inhibition"))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Window
 // ---------------------------------------------------------------------------

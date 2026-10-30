@@ -21,6 +21,7 @@ jellyfin-api = { path = "../../crates/jellyfin-api" }
 jellyfin-egui-client = { path = "../egui-client" }
 kattri-client-core = { path = "../../crates/client-core" }
 kattri-logging = { path = "../../crates/kattri-logging" }
+kattri-platform = { path = "../../crates/kattri-platform" }
 kattri-player = { path = "../../crates/kattri-player" }
 kattri-plugins = { path = "../../crates/kattri-plugins", features = ["discord-ipc"] }
 kattri-settings = { path = "../../crates/kattri-settings" }
