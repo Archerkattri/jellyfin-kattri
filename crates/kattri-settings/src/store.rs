@@ -168,6 +168,9 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
                 "reduce_motion",
                 "backdrop",
                 "custom_backdrop_path",
+                "custom_ca_path",
+                "client_cert_path",
+                "client_key_path",
                 "interface_size",
                 "home_continue_watching",
                 "home_next_up",
@@ -547,6 +550,32 @@ mod tests {
     fn default_settings_round_trip_through_toml() {
         let text = to_toml_string(&Settings::default()).unwrap();
         assert_eq!(load_from_str(&text).unwrap(), Settings::default());
+    }
+
+    #[test]
+    fn tls_paths_default_to_none_and_round_trip_when_set() {
+        assert!(Settings::default().general.custom_ca_path.is_none());
+        assert!(Settings::default().general.client_cert_path.is_none());
+        assert!(Settings::default().general.client_key_path.is_none());
+
+        let mut settings = Settings::default();
+        settings.general.custom_ca_path = Some("C:/certs/ca.pem".into());
+        settings.general.client_cert_path = Some("C:/certs/client.pem".into());
+        settings.general.client_key_path = Some("C:/certs/client-key.pem".into());
+        let saved = to_toml_string(&settings).expect("save");
+        let loaded = load_from_str(&saved).expect("reload");
+        assert_eq!(
+            loaded.general.custom_ca_path,
+            settings.general.custom_ca_path
+        );
+        assert_eq!(
+            loaded.general.client_cert_path,
+            settings.general.client_cert_path
+        );
+        assert_eq!(
+            loaded.general.client_key_path,
+            settings.general.client_key_path
+        );
     }
 
     #[test]

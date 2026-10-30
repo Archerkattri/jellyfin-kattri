@@ -55,7 +55,7 @@ in a real desktop window.
 | **Offline** | Download manager with pause, resume, range fallback, checksum verification and external subtitles |
 | **Extras** | Item menu (play, mark watched, favorite, download, add to playlist or queue), playlists, collections, favorites, photo slideshow, admin-lite dashboard, parental PIN |
 | **Administration** | Edit metadata, Identify, Edit images, Add to collection, Refresh metadata and confirmed Delete for administrators |
-| **Settings** | General, playback, audio, subtitles (including bold), video, input, server, About; versioned TOML per profile |
+| **Settings** | General, playback, audio, subtitles (including bold), video, input, server (private CA and client certificate), About; versioned TOML per profile |
 | **Input** | Rebindable keyboard map, gamepad menus and player control, full focus navigation |
 | **Interface** | Ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu |
 

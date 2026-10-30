@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -86,6 +87,19 @@ impl HomeCatalogData {
             Self::Collections(_) => HomeCatalogKind::Collections,
         }
     }
+}
+
+/// Paths to the optional TLS material for a private CA and mutual TLS. Set once per worker
+/// thread, because every client the worker builds uses the same profile settings.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ClientTlsFiles {
+    pub custom_ca: Option<PathBuf>,
+    pub client_cert: Option<PathBuf>,
+    pub client_key: Option<PathBuf>,
+}
+
+thread_local! {
+    static CLIENT_TLS: RefCell<ClientTlsFiles> = RefCell::new(crate::worker::ClientTlsFiles::default());
 }
 
 pub struct ApiWorker {
@@ -1175,7 +1189,7 @@ impl ApiWorker {
         )
     }
 
-    pub fn new(ctx: egui::Context) -> std::io::Result<Self> {
+    pub fn new(ctx: egui::Context, tls: ClientTlsFiles) -> std::io::Result<Self> {
         let commands = Arc::new(CommandQueue::default());
         let worker_commands = commands.clone();
         let (event_tx, event_rx) = mpsc::channel(EVENT_CAPACITY);
@@ -1195,7 +1209,7 @@ impl ApiWorker {
         let device_id = crate::device_id::load_or_create();
         let thread = std::thread::Builder::new()
             .name("jellyfin-api-worker".into())
-            .spawn(move || run_worker(worker_commands, sink, device_id))?;
+            .spawn(move || run_worker(worker_commands, sink, device_id, tls))?;
         Ok(Self {
             commands,
             events: Mutex::new(event_rx),
@@ -2125,6 +2139,42 @@ impl ApiWorker {
     }
 }
 
+/// Upper bound for a configured CA, certificate or key file. PEM bundles are small.
+const MAX_TLS_FILE_BYTES: u64 = 1024 * 1024;
+
+fn read_tls_file(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|_| "Could not read the configured TLS file.".to_owned())?;
+    if metadata.len() > MAX_TLS_FILE_BYTES {
+        return Err("The configured TLS file is larger than 1 MiB.".to_owned());
+    }
+    std::fs::read(path).map_err(|_| "Could not read the configured TLS file.".to_owned())
+}
+
+/// The optional CA bundle and combined client identity PEM.
+type ClientTlsPem = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// Load the CA bundle and the client identity for this worker thread. A certificate without a
+/// key (or the reverse) is refused rather than silently ignored.
+fn client_tls_pem() -> Result<ClientTlsPem, String> {
+    CLIENT_TLS.with(|slot| {
+        let tls = slot.borrow();
+        let custom_ca = tls.custom_ca.as_deref().map(read_tls_file).transpose()?;
+        let identity = match (tls.client_cert.as_deref(), tls.client_key.as_deref()) {
+            (Some(cert), Some(key)) => {
+                let mut pem = read_tls_file(cert)?;
+                pem.extend_from_slice(&read_tls_file(key)?);
+                Some(pem)
+            }
+            (None, None) => None,
+            _ => {
+                return Err("Set both the client certificate and its key, or neither.".to_owned());
+            }
+        };
+        Ok((custom_ca, identity))
+    })
+}
+
 /// Builds a client for `server_url`. The error text is safe to show.
 fn build_client(
     server_url: &str,
@@ -2142,7 +2192,79 @@ fn build_client(
     if allow_insecure_remote_http {
         config = config.with_insecure_remote_http();
     }
+    let (custom_ca, identity) = client_tls_pem()?;
+    if let Some(pem) = custom_ca {
+        config = config.with_custom_ca_pem(pem);
+    }
+    if let Some(pem) = identity {
+        config = config.with_client_identity_pem(pem);
+    }
     JellyfinClient::new(config).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tls_file_tests {
+    use super::{CLIENT_TLS, ClientTlsFiles, MAX_TLS_FILE_BYTES, client_tls_pem};
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("kattri-tls-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn a_certificate_without_its_key_is_refused() {
+        let dir = scratch("pair");
+        let cert = dir.join("cert.pem");
+        std::fs::write(&cert, b"cert-pem").expect("cert");
+        CLIENT_TLS.with(|slot| {
+            *slot.borrow_mut() = ClientTlsFiles {
+                custom_ca: None,
+                client_cert: Some(cert),
+                client_key: None,
+            };
+        });
+        assert!(client_tls_pem().is_err());
+        CLIENT_TLS.with(|slot| *slot.borrow_mut() = crate::worker::ClientTlsFiles::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ca_and_identity_pem_are_combined_and_bounded() {
+        let dir = scratch("combine");
+        let ca = dir.join("ca.pem");
+        let cert = dir.join("cert.pem");
+        let key = dir.join("key.pem");
+        std::fs::write(&ca, b"ca-pem").expect("ca");
+        std::fs::write(&cert, b"cert-pem").expect("cert");
+        std::fs::write(&key, b"key-pem").expect("key");
+        CLIENT_TLS.with(|slot| {
+            *slot.borrow_mut() = ClientTlsFiles {
+                custom_ca: Some(ca.clone()),
+                client_cert: Some(cert.clone()),
+                client_key: Some(key.clone()),
+            };
+        });
+        let (loaded_ca, identity) = client_tls_pem().expect("tls");
+        assert_eq!(loaded_ca.as_deref(), Some(&b"ca-pem"[..]));
+        assert_eq!(identity.as_deref(), Some(&b"cert-pemkey-pem"[..]));
+
+        let big = dir.join("big.pem");
+        std::fs::write(&big, vec![0_u8; MAX_TLS_FILE_BYTES as usize + 1]).expect("big");
+        CLIENT_TLS.with(|slot| {
+            *slot.borrow_mut() = ClientTlsFiles {
+                custom_ca: Some(big),
+                client_cert: None,
+                client_key: None,
+            };
+        });
+        assert!(client_tls_pem().is_err());
+
+        CLIENT_TLS.with(|slot| *slot.borrow_mut() = crate::worker::ClientTlsFiles::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 fn sign_in_error_message(error: &ApiError, authenticating: bool) -> String {
@@ -2297,7 +2419,9 @@ fn run_worker(
     commands: Arc<CommandQueue>,
     events: WorkerSink,
     device_id: String,
+    tls: ClientTlsFiles,
 ) -> WorkerShutdownReport {
+    CLIENT_TLS.with(|slot| *slot.borrow_mut() = tls);
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(2)
@@ -8922,7 +9046,14 @@ mod playback_reporting_worker_tests {
         let sink = WorkerSink::for_test(event_tx);
         let thread = thread::Builder::new()
             .name("m1-13-test-worker".into())
-            .spawn(move || run_worker(command_rx, sink, "test-device".into()))
+            .spawn(move || {
+                run_worker(
+                    command_rx,
+                    sink,
+                    "test-device".into(),
+                    crate::worker::ClientTlsFiles::default(),
+                )
+            })
             .expect("spawn API worker");
         ApiWorker {
             commands,
@@ -9217,7 +9348,14 @@ mod saved_sign_in_worker_tests {
         };
         let thread = thread::Builder::new()
             .name("saved-sign-in-test-worker".into())
-            .spawn(move || run_worker(command_rx, sink, "test-device".into()))
+            .spawn(move || {
+                run_worker(
+                    command_rx,
+                    sink,
+                    "test-device".into(),
+                    crate::worker::ClientTlsFiles::default(),
+                )
+            })
             .expect("spawn API worker");
         ApiWorker {
             commands,
@@ -9496,7 +9634,14 @@ mod saved_sign_in_worker_tests {
         let sink = WorkerSink::for_test(event_tx);
         let thread = thread::Builder::new()
             .name("saved-sign-in-probe-worker".into())
-            .spawn(move || run_worker(command_rx, sink, "test-device".into()))
+            .spawn(move || {
+                run_worker(
+                    command_rx,
+                    sink,
+                    "test-device".into(),
+                    crate::worker::ClientTlsFiles::default(),
+                )
+            })
             .expect("spawn API worker");
         let without_store = ApiWorker {
             commands,

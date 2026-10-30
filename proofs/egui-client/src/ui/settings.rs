@@ -10,6 +10,8 @@
 //! category. On a category page, Escape or Backspace (Back) returns to the list.
 //! Back on the list is left to the app shell, which leaves the Settings page.
 
+use std::path::PathBuf;
+
 use super::{ui_text, ui_text_args};
 use egui::{RichText, Ui};
 use kattri_client_core::focus::NavAction;
@@ -851,6 +853,40 @@ fn server_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             {
                 app.navigate_to(Page::Home);
             }
+        }
+        ui.add_space(18.0);
+        subsection_heading(ui, ui_text(ids::SETTINGS_SERVER_TLS_HEADING), colors);
+        let general = &mut app.settings.settings_mut().general;
+        path_field(
+            ui,
+            ui_text(ids::SETTINGS_SERVER_CUSTOM_CA),
+            &mut general.custom_ca_path,
+        );
+        path_field(
+            ui,
+            ui_text(ids::SETTINGS_SERVER_CLIENT_CERT),
+            &mut general.client_cert_path,
+        );
+        path_field(
+            ui,
+            ui_text(ids::SETTINGS_SERVER_CLIENT_KEY),
+            &mut general.client_key_path,
+        );
+        muted(ui, colors, ui_text(ids::SETTINGS_SERVER_TLS_HELP), 12.0);
+    });
+}
+
+/// A single-line path field. An empty value stores `None`, so the default trust store applies.
+fn path_field(ui: &mut Ui, label: &str, value: &mut Option<PathBuf>) {
+    let mut text = value
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if ui.text_edit_singleline(&mut text).changed() {
+            let trimmed = text.trim();
+            *value = (!trimmed.is_empty()).then(|| PathBuf::from(trimmed));
         }
     });
 }

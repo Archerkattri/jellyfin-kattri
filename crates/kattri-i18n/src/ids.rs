@@ -511,6 +511,11 @@ pub const PARENTAL_ERROR_FOLDER: &str = "parental.error.folder";
 pub const SETTINGS_SCOPE_TEXT: &str = "settings.scope.text";
 pub const SETTINGS_LABEL_ACTIVE_PROFILE: &str = "settings.label.active_profile";
 pub const SETTINGS_LABEL_ADDRESS: &str = "settings.label.address";
+pub const SETTINGS_SERVER_TLS_HEADING: &str = "settings.server.tls_heading";
+pub const SETTINGS_SERVER_CUSTOM_CA: &str = "settings.server.custom_ca";
+pub const SETTINGS_SERVER_CLIENT_CERT: &str = "settings.server.client_cert";
+pub const SETTINGS_SERVER_CLIENT_KEY: &str = "settings.server.client_key";
+pub const SETTINGS_SERVER_TLS_HELP: &str = "settings.server.tls_help";
 pub const PARENTAL_STATUS_WAIT: &str = "parental.status.wait";
 pub const PARENTAL_ERROR_SAVED_LOCK_NOT_WRITTEN: &str = "parental.error.saved_lock_not_written";
 pub const PARENTAL_ERROR_LOCK_NOT_WRITTEN: &str = "parental.error.lock_not_written";
@@ -1496,6 +1501,11 @@ pub const ALL: &[&str] = &[
     SETTINGS_SCOPE_TEXT,
     SETTINGS_LABEL_ACTIVE_PROFILE,
     SETTINGS_LABEL_ADDRESS,
+    SETTINGS_SERVER_TLS_HEADING,
+    SETTINGS_SERVER_CUSTOM_CA,
+    SETTINGS_SERVER_CLIENT_CERT,
+    SETTINGS_SERVER_CLIENT_KEY,
+    SETTINGS_SERVER_TLS_HELP,
     PARENTAL_STATUS_WAIT,
     PARENTAL_ERROR_SAVED_LOCK_NOT_WRITTEN,
     PARENTAL_ERROR_LOCK_NOT_WRITTEN,

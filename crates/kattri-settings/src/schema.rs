@@ -155,6 +155,14 @@ pub struct GeneralSettings {
     pub backdrop: BackdropPreference,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_backdrop_path: Option<PathBuf>,
+    /// Extra root certificates (PEM) for a private CA.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_ca_path: Option<PathBuf>,
+    /// Client certificate and key (PEM) for mutual TLS. Both are required together.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_cert_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_key_path: Option<PathBuf>,
     /// How large the interface is drawn (M6-17).
     pub interface_size: InterfaceSize,
     /// Home screen sections. Each is shown, and loaded, only when on.
@@ -174,6 +182,9 @@ impl Default for GeneralSettings {
             reduce_motion: true,
             backdrop: BackdropPreference::Server,
             custom_backdrop_path: None,
+            custom_ca_path: None,
+            client_cert_path: None,
+            client_key_path: None,
             interface_size: InterfaceSize::Standard,
             home_continue_watching: true,
             home_next_up: true,

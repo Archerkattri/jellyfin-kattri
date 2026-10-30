@@ -13,7 +13,7 @@ use crate::ui::{ui_text, ui_text_args};
 use crate::worker::downloads::DownloadsState;
 use crate::worker::update::{ApplyRequest, UpdateState, UpdateStatus, prepare};
 use crate::worker::{
-    ApiWorker, HomeCatalogData, HomeCatalogKind, HomeRowKind, PlaylistMutationKind,
+    ApiWorker, ClientTlsFiles, HomeCatalogData, HomeCatalogKind, HomeRowKind, PlaylistMutationKind,
     PreparedPlayback, SavedSignInRequest, ServerIdentity, SyncPlayCommand, WorkerEvent,
     WorkerSubmitError,
 };
@@ -1077,7 +1077,13 @@ impl KattriApp {
     fn with_launch_profile_inner(ctx: egui::Context, requested: Option<&str>) -> Self {
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx, false, true);
-        let worker = ApiWorker::new(ctx.clone()).ok();
+        let settings = SettingsState::open(default_profiles_dir().as_deref(), requested);
+        let tls = ClientTlsFiles {
+            custom_ca: settings.settings().general.custom_ca_path.clone(),
+            client_cert: settings.settings().general.client_cert_path.clone(),
+            client_key: settings.settings().general.client_key_path.clone(),
+        };
+        let worker = ApiWorker::new(ctx.clone(), tls).ok();
         let connection = if worker.is_some() {
             ConnectionStatus::Disconnected { error: None }
         } else {
@@ -1085,8 +1091,6 @@ impl KattriApp {
                 error: Some(ui_text(ids::APP_ERROR_WORKER_START).into()),
             }
         };
-
-        let settings = SettingsState::open(default_profiles_dir().as_deref(), requested);
         // Off unless the saved switch is on. The switch is read once here, so a change in
         // Settings takes effect at the next start. Nothing is uploaded from the crash folder.
         let crash_reporting =

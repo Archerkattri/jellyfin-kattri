@@ -127,6 +127,10 @@ pub struct ClientConfig {
     version: String,
     allow_insecure_remote_http: bool,
     allow_loopback_provider_images: bool,
+    /// Extra root certificates in PEM form, for a private CA.
+    custom_ca_pem: Option<Vec<u8>>,
+    /// Client certificate and private key in PEM form, for mutual TLS.
+    client_identity_pem: Option<Vec<u8>>,
 }
 
 impl ClientConfig {
@@ -160,6 +164,8 @@ impl ClientConfig {
             version: version.into(),
             allow_insecure_remote_http: false,
             allow_loopback_provider_images: false,
+            custom_ca_pem: None,
+            client_identity_pem: None,
         };
         for value in [
             &config.client_name,
@@ -188,6 +194,19 @@ impl ClientConfig {
         self.allow_loopback_provider_images = true;
         self
     }
+
+    /// Trust an additional root certificate (one or more PEM blocks) for this server. Used for
+    /// private CAs behind a reverse proxy; the bytes never reach logs because `Debug` omits them.
+    pub fn with_custom_ca_pem(mut self, pem: Vec<u8>) -> Self {
+        self.custom_ca_pem = Some(pem);
+        self
+    }
+
+    /// Present a client certificate and private key (PEM, certificate first) for mutual TLS.
+    pub fn with_client_identity_pem(mut self, pem: Vec<u8>) -> Self {
+        self.client_identity_pem = Some(pem);
+        self
+    }
 }
 
 impl fmt::Debug for ClientConfig {
@@ -203,8 +222,14 @@ impl fmt::Debug for ClientConfig {
                 "allow_insecure_remote_http",
                 &self.allow_insecure_remote_http,
             )
+            .field("custom_ca", &self.custom_ca_pem.is_some())
+            .field("client_identity", &self.client_identity_pem.is_some())
             .finish()
     }
+}
+
+fn pem_has_label(pem: &[u8], label: &[u8]) -> bool {
+    pem.windows(label.len()).any(|window| window == label)
 }
 
 /// A Jellyfin API client. Redirects are disabled to prevent credentials or
@@ -232,14 +257,33 @@ impl JellyfinClient {
         {
             return Err(ApiError::InsecureRemoteTransport);
         }
-        let http = HttpClient::builder()
+        let mut builder = HttpClient::builder()
             .redirect(Policy::none())
             // Never route token-bearing requests through a system or environment proxy: a
             // plain-HTTP LAN server would otherwise receive the Authorization header from the
             // proxy, and loopback traffic could leave the machine.
             .no_proxy()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(60));
+        if let Some(pem) = config.custom_ca_pem.as_deref() {
+            // rustls defers certificate parsing to the handshake, so check the PEM shape here to
+            // fail at startup on an obviously wrong file rather than on the first request.
+            if !pem_has_label(pem, b"BEGIN CERTIFICATE") {
+                return Err(ApiError::InvalidConfiguration);
+            }
+            let certificate =
+                reqwest::Certificate::from_pem(pem).map_err(|_| ApiError::InvalidConfiguration)?;
+            builder = builder.add_root_certificate(certificate);
+        }
+        if let Some(pem) = config.client_identity_pem.as_deref() {
+            if !pem_has_label(pem, b"BEGIN CERTIFICATE") || !pem_has_label(pem, b"PRIVATE KEY") {
+                return Err(ApiError::InvalidConfiguration);
+            }
+            let identity =
+                reqwest::Identity::from_pem(pem).map_err(|_| ApiError::InvalidConfiguration)?;
+            builder = builder.identity(identity);
+        }
+        let http = builder
             .build()
             .map_err(|_| ApiError::ClientInitialization)?;
         Ok(Self { http, config })
@@ -1232,6 +1276,38 @@ mod connection_security_tests {
                 "{url} should be refused, got {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn malformed_tls_material_is_refused_and_never_printed() {
+        // rustls validates the PEM when the client is built, so either the strict parse or the
+        // builder reports it. Both are configuration errors, never a silent plaintext fallback.
+        let with_ca = config("https://jellyfin.example.com")
+            .expect("config")
+            .with_custom_ca_pem(b"not a pem".to_vec());
+        assert!(
+            matches!(
+                JellyfinClient::new(with_ca),
+                Err(ApiError::InvalidConfiguration | ApiError::ClientInitialization)
+            ),
+            "CA result was not an error"
+        );
+
+        let with_identity = config("https://jellyfin.example.com")
+            .expect("config")
+            .with_client_identity_pem(b"not a pem".to_vec());
+        assert!(matches!(
+            JellyfinClient::new(with_identity),
+            Err(ApiError::InvalidConfiguration | ApiError::ClientInitialization)
+        ));
+
+        let debug = format!(
+            "{:?}",
+            config("https://jellyfin.example.com")
+                .expect("config")
+                .with_custom_ca_pem(b"SECRET-PEM".to_vec())
+        );
+        assert!(!debug.contains("SECRET-PEM"));
     }
 
     #[test]
