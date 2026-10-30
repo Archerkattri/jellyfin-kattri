@@ -68,7 +68,9 @@ pub(crate) fn saved_from_settings(window: &WindowSettings) -> Option<SavedWindow
         height: i32::try_from(geometry.height).ok(),
         monitor_name: geometry.monitor.clone(),
         maximized: None,
-        fullscreen: Some(window.fullscreen),
+        // Startup is always windowed; the window is then maximized. A saved fullscreen flag
+        // would otherwise cover the taskbar on launch, which is not the desktop behaviour.
+        fullscreen: Some(false),
     })
 }
 
@@ -85,11 +87,16 @@ pub(crate) fn restore_at_startup(
     event_loop: &ActiveEventLoop,
     saved: Option<&SavedWindow>,
 ) {
-    let Some(saved) = saved else {
-        return;
-    };
-    let monitors = monitor_infos(event_loop);
-    apply_placement(window, &plan_placement(Some(saved), &monitors));
+    match saved {
+        Some(saved) => {
+            let monitors = monitor_infos(event_loop);
+            apply_placement(window, &plan_placement(Some(saved), &monitors));
+        }
+        None => window.set_maximized(true),
+    }
+    // Open maximized but never fullscreen: the taskbar stays visible and the platform frame
+    // still controls the window. Fullscreen remains a player action.
+    window.set_maximized(true);
 }
 
 /// Monitors in the form the window model reads. The primary is the one winit reports as primary.
@@ -277,7 +284,8 @@ mod tests {
                 height: 768,
                 monitor_name: "LEFT".to_owned(),
                 maximized: false,
-                fullscreen: true,
+                // Startup is windowed and then maximized; a saved fullscreen flag is not restored.
+                fullscreen: false,
             })
         );
     }

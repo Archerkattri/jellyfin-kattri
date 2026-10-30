@@ -17,9 +17,9 @@ const SEEK_PREVIEW_WIDTH: f32 = 240.0;
 
 /// Size of one icon button in points. Compact enough for a row of transports without the
 /// control bar dwarfing the video.
-const ICON_BUTTON: f32 = 34.0;
+const ICON_BUTTON: f32 = 30.0;
 /// The play/pause button, the one control a viewer looks for first.
-const PRIMARY_BUTTON: f32 = 40.0;
+const PRIMARY_BUTTON: f32 = 36.0;
 
 /// Maximum number of chapter entries exposed in the menu.
 pub const MAX_CHAPTER_CHOICES: usize = 128;
@@ -402,24 +402,27 @@ fn draw_controls(
     egui::Frame::new()
         .fill(THEATER_BG.gamma_multiply(0.97))
         .stroke(egui::Stroke::new(1.0, Color32::from_white_alpha(24)))
-        .corner_radius(egui::CornerRadius::same(14))
-        .inner_margin(egui::Margin::symmetric(horizontal_margin, 10))
+        .corner_radius(egui::CornerRadius::same(18))
+        .inner_margin(egui::Margin::symmetric(horizontal_margin, 8))
         .show(ui, |ui| {
             ui.set_min_width(0.0);
             ui.visuals_mut().selection.bg_fill = OSD_ACCENT;
             ui.visuals_mut().selection.stroke.color = OSD_TEXT;
-            ui.visuals_mut().widgets.inactive.bg_fill = OSD_CONTROL;
+            // Unpressed controls are borderless; only hover and the primary button carry a fill.
+            ui.visuals_mut().widgets.inactive.bg_fill = Color32::TRANSPARENT;
+            ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
             ui.visuals_mut().widgets.inactive.fg_stroke.color = OSD_TEXT;
             ui.visuals_mut().widgets.hovered.bg_fill = OSD_CONTROL_HOVER;
+            ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;
             ui.visuals_mut().widgets.hovered.fg_stroke.color = OSD_TEXT;
             ui.visuals_mut().widgets.active.bg_fill = OSD_ACCENT;
             ui.visuals_mut().widgets.active.fg_stroke.color = OSD_TEXT;
-            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
 
             if let Some(title) = view.title.map(str::trim).filter(|t| !t.is_empty()) {
                 ui.label(
                     RichText::new(title)
-                        .size(13.0)
+                        .size(12.5)
                         .strong()
                         .color(OSD_TEXT),
                 );
@@ -434,7 +437,7 @@ fn draw_controls(
                     .clamp(0.0, seek_end.as_secs_f64());
                 // Keep the timeline inside the OSD at every window width.
                 ui.spacing_mut().slider_width = ui.available_width().max(1.0);
-                ui.spacing_mut().slider_rail_height = 6.0;
+                ui.spacing_mut().slider_rail_height = 4.0;
                 let slider = egui::Slider::new(&mut position, 0.0..=seek_end.as_secs_f64())
                     .show_value(false)
                     .clamping(egui::SliderClamping::Always);
@@ -476,7 +479,7 @@ fn draw_controls(
                 timeline = Some((displayed_position, duration));
             }
 
-            ui.add_space(4.0);
+            ui.add_space(2.0);
             // Transport row: the position readout, item and chapter stepping around the one
             // primary control.
             ui.horizontal_wrapped(|ui| {
@@ -729,10 +732,10 @@ fn draw_controls(
                     actions.push(PlayerControlAction::StepFrame { backward: false });
                 }
 
-                let (loop_label, loop_accessible) = ab_loop_label(view.ab_loop_a, view.ab_loop_b);
-                if labeled_button(
+                let (_, loop_accessible) = ab_loop_label(view.ab_loop_a, view.ab_loop_b);
+                if icon_button(
                     ui,
-                    loop_label,
+                    OsdIcon::Loop,
                     loop_accessible,
                     seek_available,
                     |rect| observe(ControlId::AbLoop, rect),

@@ -59,6 +59,8 @@ use zeroize::{Zeroize, Zeroizing};
 const MAX_PENDING_ARTWORK_REQUESTS: usize = 3;
 const MAX_CACHED_ARTWORK_TEXTURES: usize = 36;
 const MAX_LIVE_TV_LOGO_TEXTURES: usize = 128;
+/// Cast portraits are small, but a long session across many titles would keep every one.
+const MAX_PERSON_ARTWORK_TEXTURES: usize = 48;
 const CATALOG_PAGE_SIZE: u32 = 50;
 const QUICK_CONNECT_PROBE_DELAY: Duration = Duration::from_millis(500);
 /// How often the download list is re-read while a transfer runs.
@@ -7627,6 +7629,11 @@ impl KattriApp {
                 } => {
                     let expected_name = self.pending_person_artwork.remove(&request_id);
                     if expected_name.as_deref() == Some(name.as_str()) {
+                        if self.person_artwork_textures.len() >= MAX_PERSON_ARTWORK_TEXTURES {
+                            // Drop the whole cache rather than grow without bound while browsing.
+                            self.person_artwork_textures.clear();
+                            self.attempted_person_artwork.clear();
+                        }
                         let color_image = egui::ColorImage::from_rgba_unmultiplied(
                             [width as usize, height as usize],
                             &rgba,

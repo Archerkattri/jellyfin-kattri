@@ -49,7 +49,7 @@ in a real desktop window.
 | **Details** | Metadata, overview, cast, similar titles, seasons and episodes, series Next Up, media info, version picker, trailers and extras, lyrics, play and download |
 | **Search** | Debounced cross-type search grouped by movies, series, episodes, music, playlists, photos, people and channels; subtitle search |
 | **Playback** | Direct play, direct stream and transcode through the relay; resume with optional rewind; playback reporting; audio and subtitle tracks; subtitle delay; chapters; speed; segment skip; bounded mid-stream recovery |
-| **Player** | Transport bar, 10-second seek, frame step, chapter step and menu, volume and mute, speed, A-B loop, picture-in-picture, fullscreen; previous/next; Up Next card and auto-play; track menus; media info (`I`); equalizer and loudness filters; HDR-to-SDR tone mapping; refresh-rate matching on Windows; open a stream address |
+| **Player** | Transport bar, 10-second seek, frame step, chapter step and menu, volume and mute, speed, A-B loop, picture-in-picture, fullscreen; previous/next; Up Next card and auto-play; fullscreen mouse-wheel seek; track menus; media info (`I`); equalizer and loudness filters; HDR-to-SDR tone mapping; refresh-rate matching on Windows; open a stream address |
 | **Music** | Album and playlist browsing, queue with shuffle and repeat, queue restored after restart |
 | **Live TV** | Channel list, 24-hour guide, tune through the relay, record the current program, recordings and scheduled recordings |
 | **Offline** | Download manager with pause, resume, range fallback, checksum verification and external subtitles |
@@ -57,36 +57,36 @@ in a real desktop window.
 | **Administration** | Edit metadata, Identify, Edit images, Add to collection, Refresh metadata and confirmed Delete for administrators |
 | **Settings** | General, playback, audio, subtitles (including bold), video, input, server (private CA and client certificate), About; versioned TOML per profile |
 | **Input** | Rebindable keyboard map, gamepad menus and player control, full focus navigation |
-| **Interface** | Ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu |
+| **Interface** | Inter typeface, ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu |
 
 ## Install
 
 Download the installer for your platform from the
 [releases page](https://github.com/Archerkattri/jellyfin-kattri/releases). The current
-prerelease is **v0.4.1**.
+prerelease is **v0.5.0**.
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows x64 | `JellyfinKattri-0.4.1-x64.msi` or `-x64-portable.zip` | libmpv is bundled; the portable zip runs `jellyfin-kattri.exe` |
-| Windows ARM64 | `JellyfinKattri-0.4.1-arm64.msi` or `-arm64-portable.zip` | libmpv is bundled |
-| macOS (universal) | `kattri-0.4.1-macos-universal.dmg` | libmpv is bundled; ad-hoc signed |
-| Linux x64 | `kattri_0.4.1-1_amd64.deb`, `kattri-0.4.1-1.x86_64.rpm`, `kattri-0.4.1-linux-x64.AppImage`, `kattri-0.4.1-linux-x64.flatpak` | deb/rpm use the distro libmpv; AppImage and Flatpak bundle it |
+| Windows x64 | `JellyfinKattri-0.5.0-x64.msi` or `-x64-portable.zip` | libmpv is bundled; the portable zip runs `jellyfin-kattri.exe` |
+| Windows ARM64 | `JellyfinKattri-0.5.0-arm64.msi` or `-arm64-portable.zip` | libmpv is bundled |
+| macOS (universal) | `kattri-0.5.0-macos-universal.dmg` | libmpv is bundled; ad-hoc signed |
+| Linux x64 | `kattri_0.5.0-1_amd64.deb`, `kattri-0.5.0-1.x86_64.rpm`, `kattri-0.5.0-linux-x64.AppImage`, `kattri-0.5.0-linux-x64.flatpak` | deb/rpm use the distro libmpv; AppImage and Flatpak bundle it |
 
 Every download has a matching `.sha256` file.
 
 ```sh
 # Debian / Ubuntu (needs libmpv2 or libmpv1 installed)
-sudo apt install ./kattri_0.4.1-1_amd64.deb
+sudo apt install ./kattri_0.5.0-1_amd64.deb
 
 # Fedora (needs libmpv)
-sudo dnf install ./kattri-0.4.1-1.x86_64.rpm
+sudo dnf install ./kattri-0.5.0-1.x86_64.rpm
 
 # AppImage, no install needed
-chmod +x kattri-0.4.1-linux-x64.AppImage
-./kattri-0.4.1-linux-x64.AppImage
+chmod +x kattri-0.5.0-linux-x64.AppImage
+./kattri-0.5.0-linux-x64.AppImage
 
 # Flatpak
-flatpak install --user --bundle kattri-0.4.1-linux-x64.flatpak
+flatpak install --user --bundle kattri-0.5.0-linux-x64.flatpak
 ```
 
 Windows SmartScreen and macOS Gatekeeper will warn because the packages are not
@@ -205,7 +205,7 @@ credentials, tokens or live output.
 
 ## License
 
-GPL-3.0-only. See `LICENSE` and `NOTICE`. Bundled native libraries and codecs keep
+GPL-3.0-only. See `LICENSE` and `NOTICE`. The bundled Inter typeface is under the SIL Open Font License (`assets/fonts/OFL.txt`). Bundled native libraries and codecs keep
 their own licenses; the libmpv packaging notice is under
 `packaging/libmpv/NOTICE.txt`. Jellyfin Kattri is an independent client and is not
 affiliated with the Jellyfin project.

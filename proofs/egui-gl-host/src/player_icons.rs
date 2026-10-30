@@ -39,6 +39,8 @@ pub(crate) enum OsdIcon {
     Volume,
     /// Speaker with a cross.
     Muted,
+    /// A-B loop: two arrows chasing each other.
+    Loop,
     /// Picture-in-picture: a small inset frame in the corner.
     Pip,
     /// Entry to fullscreen: four corners pointing outward.
@@ -153,6 +155,12 @@ pub(crate) fn shapes(rect: Rect, icon: OsdIcon, color: Color32) -> Vec<Shape> {
             speaker(),
             polyline(&[(16.0, 9.0), (21.0, 15.0)], thin),
             polyline(&[(21.0, 9.0), (16.0, 15.0)], thin),
+        ],
+        OsdIcon::Loop => vec![
+            polyline(&[(14.5, 4.5), (18.5, 7.0), (14.5, 9.5)], stroke),
+            polyline(&[(5.0, 7.0), (18.0, 7.0)], stroke),
+            polyline(&[(9.5, 14.5), (5.5, 17.0), (9.5, 19.5)], stroke),
+            polyline(&[(19.0, 17.0), (6.0, 17.0)], stroke),
         ],
         OsdIcon::Pip => vec![
             Shape::rect_stroke(

@@ -58,21 +58,30 @@ pub fn palette(high_contrast: bool) -> Palette {
     }
 }
 
-/// Install the fonts once at start-up. egui's proportional font (Ubuntu Light) has no arrows,
-/// geometric shapes such as `◌`, or `▾`; its bundled monospace font (Hack) has them, so it is the
-/// last fallback for proportional text. Without it those characters render as empty boxes.
+/// The UI typeface. Inter is the closest open-licensed match to Apple TV's San Francisco: the
+/// app cannot bundle SF Pro, which Apple licenses only for its own platforms.
+const UI_FONT: &[u8] = include_bytes!("../../../assets/fonts/Inter.ttf");
+
+/// Install the fonts once at start-up. Inter is the primary proportional face, then egui's own
+/// proportional font, then the monospace family for arrows and geometric shapes (`◌`, `▾`) that
+/// Inter lacks. Without the last fallback those characters render as empty boxes.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "inter".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(UI_FONT)),
+    );
     let monospace = fonts
         .families
         .get(&egui::FontFamily::Monospace)
         .and_then(|family| family.first().cloned());
-    if let (Some(fallback), Some(proportional)) = (
-        monospace,
-        fonts.families.get_mut(&egui::FontFamily::Proportional),
-    ) && !proportional.contains(&fallback)
-    {
-        proportional.push(fallback);
+    if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        proportional.insert(0, "inter".to_owned());
+        if let Some(fallback) = monospace
+            && !proportional.contains(&fallback)
+        {
+            proportional.push(fallback);
+        }
     }
     ctx.set_fonts(fonts);
 }
