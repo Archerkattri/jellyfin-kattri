@@ -3455,6 +3455,20 @@ pub(crate) fn playback_key_action(key: Key, shift: bool) -> Option<PlaybackKeyAc
 
 /// The playback actions for the pressed keys in one frame of input, in event order. Releases
 /// are ignored. Repeats count, so holding a key keeps stepping.
+/// Fullscreen wheel seek: one vertical notch is five seconds, wheel up forward. Unrelated
+/// pointer movement and horizontal-only wheels produce no seek.
+pub(crate) fn wheel_seek_seconds(events: &[egui::Event]) -> Option<i64> {
+    let notches: i64 = events
+        .iter()
+        .filter_map(|event| match event {
+            egui::Event::MouseWheel { delta, .. } if delta.y > 0.0 => Some(1),
+            egui::Event::MouseWheel { delta, .. } if delta.y < 0.0 => Some(-1),
+            _ => None,
+        })
+        .sum();
+    (notches != 0).then_some(notches * 5)
+}
+
 pub(crate) fn playback_key_actions(events: &[egui::Event]) -> Vec<PlaybackKeyAction> {
     events
         .iter()
@@ -3934,6 +3948,24 @@ mod tests {
             super::ab_loop_error_text(AbLoopError::TooShort),
             "An A-B loop must be at least half a second long."
         );
+    }
+
+    #[test]
+    fn fullscreen_wheel_notches_seek_in_five_second_steps() {
+        let wheel = |dx: f32, dy: f32| {
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(dx, dy),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
+                modifiers: egui::Modifiers::NONE,
+            }]
+        };
+        assert_eq!(wheel_seek_seconds(&wheel(0.0, 1.0)), Some(5));
+        assert_eq!(wheel_seek_seconds(&wheel(0.0, -1.0)), Some(-5));
+        assert_eq!(wheel_seek_seconds(&wheel(0.0, 0.0)), None);
+        assert_eq!(wheel_seek_seconds(&wheel(2.0, 0.0)), None);
+        assert_eq!(wheel_seek_seconds(&[]), None);
     }
 
     #[test]

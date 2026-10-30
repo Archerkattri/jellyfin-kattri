@@ -1219,6 +1219,10 @@ fn sign_in_form(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: 
                 ui.ctx().request_repaint_after(Duration::from_millis(600));
             }
         });
+    ui.add_space(16.0);
+    if ui.button(ui_text(ids::CONNECT_BUTTON_QUIT)).clicked() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+    }
 }
 
 fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {

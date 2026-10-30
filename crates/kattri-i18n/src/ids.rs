@@ -19,6 +19,7 @@ pub const CONNECT_OPTION_REMEMBER_SIGN_IN: &str = "connect.option.remember_sign_
 pub const CONNECT_NOTE_REMEMBER_SIGN_IN: &str = "connect.note.remember_sign_in";
 pub const CONNECT_SAVED_SIGN_IN_EXPIRED: &str = "connect.error.saved_sign_in_expired";
 pub const CONNECT_BUTTON_SUBMIT: &str = "connect.button.submit";
+pub const CONNECT_BUTTON_QUIT: &str = "connect.button.quit";
 pub const CONNECT_OPTION_ALLOW_PUBLIC_HTTP: &str = "connect.option.allow_public_http";
 pub const CONNECT_WARNING_HTTP_TITLE: &str = "connect.warning.http_title";
 pub const CONNECT_WARNING_HTTP_BODY: &str = "connect.warning.http_body";
@@ -928,6 +929,7 @@ pub const ALL: &[&str] = &[
     CONNECT_NOTE_REMEMBER_SIGN_IN,
     CONNECT_SAVED_SIGN_IN_EXPIRED,
     CONNECT_BUTTON_SUBMIT,
+    CONNECT_BUTTON_QUIT,
     CONNECT_OPTION_ALLOW_PUBLIC_HTTP,
     CONNECT_WARNING_HTTP_TITLE,
     CONNECT_WARNING_HTTP_BODY,

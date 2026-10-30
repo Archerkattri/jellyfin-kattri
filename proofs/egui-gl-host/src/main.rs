@@ -573,6 +573,13 @@ impl<'session> GlHost<'session> {
         let volume_max_percent = self.kattri_app.audio_settings().max_volume_percent;
         let muted = controls_snapshot.muted;
         let fullscreen = self.window.fullscreen().is_some();
+        // In fullscreen there is no scrollable page behind the video, so the wheel seeks.
+        if fullscreen
+            && !typing
+            && let Some(seconds) = mpv_host::wheel_seek_seconds(&input.events)
+        {
+            self.mpv.seek_relative(seconds);
+        }
         if screenshot_requested {
             self.take_screenshot();
         }
