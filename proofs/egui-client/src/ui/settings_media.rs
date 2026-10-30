@@ -502,6 +502,10 @@ pub(super) fn subtitles_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) 
             ui.label(ui_text(ids::SETTINGS_MEDIA_SUBTITLE_FONT));
             ui.text_edit_singleline(&mut subtitles.font);
         });
+        ui.checkbox(
+            &mut subtitles.bold,
+            ui_text(ids::SETTINGS_MEDIA_SUBTITLE_BOLD),
+        );
         ui.add(
             egui::Slider::new(&mut subtitles.size, -1..=100)
                 .text(ui_text(ids::SETTINGS_MEDIA_SUBTITLE_SIZE)),

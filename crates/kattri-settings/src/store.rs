@@ -233,6 +233,7 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
             "subtitles",
             &[
                 "font",
+                "bold",
                 "size",
                 "color",
                 "border_color",
@@ -545,6 +546,15 @@ mod tests {
     fn default_settings_round_trip_through_toml() {
         let text = to_toml_string(&Settings::default()).unwrap();
         assert_eq!(load_from_str(&text).unwrap(), Settings::default());
+    }
+
+    #[test]
+    fn subtitle_bold_defaults_off_and_round_trips() {
+        assert!(!Settings::default().subtitles.bold);
+        let loaded = load_from_str("[subtitles]\nbold = true\n").expect("load");
+        assert!(loaded.subtitles.bold);
+        let saved = to_toml_string(&loaded).expect("save");
+        assert!(load_from_str(&saved).expect("reload").subtitles.bold);
     }
 
     #[test]

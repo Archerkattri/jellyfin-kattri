@@ -652,6 +652,7 @@ pub const SETTINGS_MEDIA_PASSTHROUGH_DTS: &str = "settings.media.passthrough.dts
 pub const SETTINGS_MEDIA_PASSTHROUGH_DTS_HD: &str = "settings.media.passthrough.dts_hd";
 pub const SETTINGS_MEDIA_PASSTHROUGH_TRUEHD: &str = "settings.media.passthrough.truehd";
 pub const SETTINGS_MEDIA_SUBTITLE_FONT: &str = "settings.media.subtitle.font";
+pub const SETTINGS_MEDIA_SUBTITLE_BOLD: &str = "settings.media.subtitle.bold";
 pub const SETTINGS_MEDIA_SUBTITLE_SIZE: &str = "settings.media.subtitle.size";
 pub const SETTINGS_MEDIA_SUBTITLE_OUTLINE_SIZE: &str = "settings.media.subtitle.outline_size";
 pub const SETTINGS_MEDIA_SUBTITLE_SECONDARY_POSITION: &str =
@@ -1633,6 +1634,7 @@ pub const ALL: &[&str] = &[
     SETTINGS_MEDIA_PASSTHROUGH_DTS_HD,
     SETTINGS_MEDIA_PASSTHROUGH_TRUEHD,
     SETTINGS_MEDIA_SUBTITLE_FONT,
+    SETTINGS_MEDIA_SUBTITLE_BOLD,
     SETTINGS_MEDIA_SUBTITLE_SIZE,
     SETTINGS_MEDIA_SUBTITLE_OUTLINE_SIZE,
     SETTINGS_MEDIA_SUBTITLE_SECONDARY_POSITION,

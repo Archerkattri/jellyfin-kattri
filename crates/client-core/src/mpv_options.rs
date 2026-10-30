@@ -353,6 +353,12 @@ pub const ALLOWLIST: &[OptionSpec] = &[
         default: OptionValue::Text("sans-serif"),
     },
     OptionSpec {
+        name: "sub-bold",
+        kind: ValueKind::Flag,
+        owner: "subtitles.bold",
+        default: OptionValue::Flag(false),
+    },
+    OptionSpec {
         name: "sub-color",
         kind: ValueKind::Text,
         owner: "subtitles.color",
@@ -823,8 +829,9 @@ pub fn subtitle_size_and_color_options(
 pub fn subtitle_font_and_border_options(
     font: &str,
     border_size: i32,
+    bold: bool,
 ) -> Result<Vec<ValidatedOption>, MpvOptionError> {
-    let mut options = Vec::with_capacity(2);
+    let mut options = Vec::with_capacity(3);
     let font = font.trim();
     if !font.is_empty() {
         options.push(validate("sub-font", OptionValue::Text(font))?);
@@ -835,6 +842,7 @@ pub fn subtitle_font_and_border_options(
             OptionValue::Int(i64::from(border_size)),
         )?);
     }
+    options.push(validate("sub-bold", OptionValue::Flag(bold))?);
     Ok(options)
 }
 
@@ -1366,31 +1374,41 @@ mod tests {
 
     #[test]
     fn subtitle_font_and_border_follow_the_setting_defaults() {
-        let written = |font: &str, border: i32| {
-            subtitle_font_and_border_options(font, border)
+        let written = |font: &str, border: i32, bold: bool| {
+            subtitle_font_and_border_options(font, border, bold)
                 .expect("valid")
                 .into_iter()
                 .map(|option| (option.name, option.value))
                 .collect::<Vec<_>>()
         };
-        // The defaults: the font is written, the outline is left to the player.
+        // Bold is always written; the font and outline follow their defaults.
         assert_eq!(
-            written("sans-serif", -1),
-            [("sub-font", "sans-serif".to_owned())]
-        );
-        assert_eq!(
-            written(" Noto Sans ", 3),
+            written("sans-serif", -1, false),
             [
-                ("sub-font", "Noto Sans".to_owned()),
-                ("sub-border-size", "3".to_owned())
+                ("sub-font", "sans-serif".to_owned()),
+                ("sub-bold", "no".to_owned())
             ]
         );
-        assert_eq!(written("", -1), []);
-        assert_eq!(written("", 0), [("sub-border-size", "0".to_owned())]);
-        assert!(subtitle_font_and_border_options("Arial", 11).is_err());
-        assert!(subtitle_font_and_border_options("Arial", -2).is_err());
-        assert!(subtitle_font_and_border_options("-Arial", -1).is_err());
-        assert!(subtitle_font_and_border_options("A\nB", -1).is_err());
+        assert_eq!(
+            written(" Noto Sans ", 3, true),
+            [
+                ("sub-font", "Noto Sans".to_owned()),
+                ("sub-border-size", "3".to_owned()),
+                ("sub-bold", "yes".to_owned())
+            ]
+        );
+        assert_eq!(written("", -1, false), [("sub-bold", "no".to_owned())]);
+        assert_eq!(
+            written("", 0, true),
+            [
+                ("sub-border-size", "0".to_owned()),
+                ("sub-bold", "yes".to_owned())
+            ]
+        );
+        assert!(subtitle_font_and_border_options("Arial", 11, false).is_err());
+        assert!(subtitle_font_and_border_options("Arial", -2, false).is_err());
+        assert!(subtitle_font_and_border_options("-Arial", -1, false).is_err());
+        assert!(subtitle_font_and_border_options("A\nB", -1, false).is_err());
     }
 
     #[test]

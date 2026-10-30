@@ -242,7 +242,11 @@ fn subtitle_layout_options(
         ),
         (
             "subtitles.font_and_border",
-            subtitle_font_and_border_options(&subtitles.font, subtitles.border_size),
+            subtitle_font_and_border_options(
+                &subtitles.font,
+                subtitles.border_size,
+                subtitles.bold,
+            ),
         ),
         (
             "subtitles.placement",
@@ -4372,7 +4376,8 @@ mod pre_load_tests {
                     "sub-ass-style-overrides",
                     "ScaledBorderAndShadow=yes".to_owned()
                 ),
-                &("sub-font", "sans-serif".to_owned())
+                &("sub-font", "sans-serif".to_owned()),
+                &("sub-bold", "no".to_owned())
             ],
             "unexpected subtitle writes in {got:?}"
         );

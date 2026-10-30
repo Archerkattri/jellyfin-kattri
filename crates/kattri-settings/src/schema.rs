@@ -811,6 +811,8 @@ pub enum ImageFormat {
 pub struct SubtitleSettings {
     /// Legacy `subtitles.font`.
     pub font: String,
+    /// Render subtitles in bold (`sub-bold`). Off by default.
+    pub bold: bool,
     /// Legacy `subtitles.size`. -1 means player default.
     pub size: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -842,6 +844,7 @@ impl Default for SubtitleSettings {
     fn default() -> Self {
         Self {
             font: "sans-serif".to_owned(),
+            bold: false,
             size: -1,
             color: None,
             border_color: None,
