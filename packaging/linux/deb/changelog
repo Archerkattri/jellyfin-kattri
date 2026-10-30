@@ -1,10 +1,17 @@
+kattri (0.5.1-1) unstable; urgency=medium
+
+  * SF Pro Display typeface with an Inter fallback.
+  * Automated click-through QA driver and refreshed README screenshots.
+
+ -- Jellyfin Kattri <krishiattriwork@gmail.com>  Sat, 31 Oct 2026 00:00:00 +0000
+
 kattri (0.5.0-1) unstable; urgency=medium
 
   * Private CA certificates and client certificates (mutual TLS) in Settings >
     Server.
   * Sign-in Quit button and fullscreen mouse-wheel seeking.
 
- -- Jellyfin Kattri <krishiattriwork@gmail.com>  Sat, 31 Oct 2026 00:00:00 +0000
+ -- Jellyfin Kattri <krishiattriwork@gmail.com>  Fri, 30 Oct 2026 00:00:00 +0000
 
 kattri (0.4.1-1) unstable; urgency=medium
 

@@ -39,6 +39,14 @@ in a real desktop window.
 | --- | --- |
 | ![Movies library](assets/screenshots/library.jpg) | ![Item details](assets/screenshots/detail.jpg) |
 
+| Player | Settings |
+| --- | --- |
+| ![Player controls](assets/screenshots/player.jpg) | ![Settings](assets/screenshots/settings.jpg) |
+
+These are framebuffer captures from the running application against a real Jellyfin
+12.4.0 server, produced by `scripts/qa_clickthrough.ps1` on 2026-10-30. No mock data
+is used.
+
 ## Features
 
 | | |
@@ -57,36 +65,36 @@ in a real desktop window.
 | **Administration** | Edit metadata, Identify, Edit images, Add to collection, Refresh metadata and confirmed Delete for administrators |
 | **Settings** | General, playback, audio, subtitles (including bold), video, input, server (private CA and client certificate), About; versioned TOML per profile |
 | **Input** | Rebindable keyboard map, gamepad menus and player control, full focus navigation |
-| **Interface** | Inter typeface, ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu |
+| **Interface** | SF Pro Display typeface (Inter fallback), ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu |
 
 ## Install
 
 Download the installer for your platform from the
 [releases page](https://github.com/Archerkattri/jellyfin-kattri/releases). The current
-prerelease is **v0.5.0**.
+prerelease is **v0.5.1**.
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows x64 | `JellyfinKattri-0.5.0-x64.msi` or `-x64-portable.zip` | libmpv is bundled; the portable zip runs `jellyfin-kattri.exe` |
-| Windows ARM64 | `JellyfinKattri-0.5.0-arm64.msi` or `-arm64-portable.zip` | libmpv is bundled |
-| macOS (universal) | `kattri-0.5.0-macos-universal.dmg` | libmpv is bundled; ad-hoc signed |
-| Linux x64 | `kattri_0.5.0-1_amd64.deb`, `kattri-0.5.0-1.x86_64.rpm`, `kattri-0.5.0-linux-x64.AppImage`, `kattri-0.5.0-linux-x64.flatpak` | deb/rpm use the distro libmpv; AppImage and Flatpak bundle it |
+| Windows x64 | `JellyfinKattri-0.5.1-x64.msi` or `-x64-portable.zip` | libmpv is bundled; the portable zip runs `jellyfin-kattri.exe` |
+| Windows ARM64 | `JellyfinKattri-0.5.1-arm64.msi` or `-arm64-portable.zip` | libmpv is bundled |
+| macOS (universal) | `kattri-0.5.1-macos-universal.dmg` | libmpv is bundled; ad-hoc signed |
+| Linux x64 | `kattri_0.5.1-1_amd64.deb`, `kattri-0.5.1-1.x86_64.rpm`, `kattri-0.5.1-linux-x64.AppImage`, `kattri-0.5.1-linux-x64.flatpak` | deb/rpm use the distro libmpv; AppImage and Flatpak bundle it |
 
 Every download has a matching `.sha256` file.
 
 ```sh
 # Debian / Ubuntu (needs libmpv2 or libmpv1 installed)
-sudo apt install ./kattri_0.5.0-1_amd64.deb
+sudo apt install ./kattri_0.5.1-1_amd64.deb
 
 # Fedora (needs libmpv)
-sudo dnf install ./kattri-0.5.0-1.x86_64.rpm
+sudo dnf install ./kattri-0.5.1-1.x86_64.rpm
 
 # AppImage, no install needed
-chmod +x kattri-0.5.0-linux-x64.AppImage
-./kattri-0.5.0-linux-x64.AppImage
+chmod +x kattri-0.5.1-linux-x64.AppImage
+./kattri-0.5.1-linux-x64.AppImage
 
 # Flatpak
-flatpak install --user --bundle kattri-0.5.0-linux-x64.flatpak
+flatpak install --user --bundle kattri-0.5.1-linux-x64.flatpak
 ```
 
 Windows SmartScreen and macOS Gatekeeper will warn because the packages are not
@@ -199,13 +207,24 @@ The full gate also runs credential-helper, live-runner and release-target checks
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 ```
 
+The automated click-through QA drives the real window through Windows UI Automation,
+clicks every top-level page and settings category, opens item details and the player,
+and writes a screenshot and report per step:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/qa_clickthrough.ps1
+```
+
 Live-server tests are opt-in and ignored by default; point them at a test server with
 `JELLYFIN_TEST_URL`, `JELLYFIN_TEST_USER` and `JELLYFIN_TEST_PASSWORD`. Never commit
 credentials, tokens or live output.
 
 ## License
 
-GPL-3.0-only. See `LICENSE` and `NOTICE`. The bundled Inter typeface is under the SIL Open Font License (`assets/fonts/OFL.txt`). Bundled native libraries and codecs keep
+GPL-3.0-only. See `LICENSE` and `NOTICE`. SF Pro Display is Apple's typeface, bundled
+here for this personal build at the owner's request; do not redistribute it in a
+commercial build. The Inter fallback is under the SIL Open Font License
+(`assets/fonts/OFL.txt`). Bundled native libraries and codecs keep
 their own licenses; the libmpv packaging notice is under
 `packaging/libmpv/NOTICE.txt`. Jellyfin Kattri is an independent client and is not
 affiliated with the Jellyfin project.

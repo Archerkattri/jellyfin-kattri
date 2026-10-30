@@ -58,18 +58,25 @@ pub fn palette(high_contrast: bool) -> Palette {
     }
 }
 
-/// The UI typeface. Inter is the closest open-licensed match to Apple TV's San Francisco: the
-/// app cannot bundle SF Pro, which Apple licenses only for its own platforms.
-const UI_FONT: &[u8] = include_bytes!("../../../assets/fonts/Inter.ttf");
+/// The Apple TV typeface: SF Pro Display. Bundled for this personal build at the owner's
+/// request; Apple's font licence does not permit redistribution, so a public build should swap
+/// this for the Inter fallback below.
+const UI_FONT: &[u8] = include_bytes!("../../../assets/fonts/SF-Pro-Display-Regular.otf");
+/// Open-licensed fallback for glyphs SF Pro does not carry and for public redistribution.
+const FALLBACK_UI_FONT: &[u8] = include_bytes!("../../../assets/fonts/Inter.ttf");
 
-/// Install the fonts once at start-up. Inter is the primary proportional face, then egui's own
-/// proportional font, then the monospace family for arrows and geometric shapes (`◌`, `▾`) that
-/// Inter lacks. Without the last fallback those characters render as empty boxes.
+/// Install the fonts once at start-up: SF Pro Display, then Inter, then egui's own proportional
+/// font, then the monospace family for arrows and geometric shapes (`◌`, `▾`) that neither
+/// proportional face carries. Without the last fallback those characters render as boxes.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
-        "inter".to_owned(),
+        "sf-pro".to_owned(),
         std::sync::Arc::new(egui::FontData::from_static(UI_FONT)),
+    );
+    fonts.font_data.insert(
+        "inter".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(FALLBACK_UI_FONT)),
     );
     let monospace = fonts
         .families
@@ -77,6 +84,7 @@ pub fn install_fonts(ctx: &egui::Context) {
         .and_then(|family| family.first().cloned());
     if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
         proportional.insert(0, "inter".to_owned());
+        proportional.insert(0, "sf-pro".to_owned());
         if let Some(fallback) = monospace
             && !proportional.contains(&fallback)
         {
