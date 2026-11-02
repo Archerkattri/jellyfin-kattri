@@ -27,6 +27,98 @@ const NEW_VERSION: &str = "2.1.0";
 const OLD_BYTES: &[u8] = b"fake 2.0.0 build bytes for the on-disk store tests";
 const NEW_BYTES: &[u8] = b"fake 2.1.0 build bytes for the on-disk store tests";
 
+#[test]
+fn oversized_journal_is_refused_without_changing_the_file() {
+    let root = TempDir::new("journal-bound");
+    let store = FsInstallStore::open(root.path()).expect("open store");
+    let path = root.path().join("journal.json");
+    let original = vec![b' '; 64 * 1024 + 1];
+    fs::write(&path, &original).expect("write oversized journal");
+    let error = store.journal().expect_err("bounded journal input");
+    assert!(error.to_string().contains("size limit"));
+    assert_eq!(fs::read(path).expect("preserved journal"), original);
+}
+
+#[test]
+fn overlong_slot_header_is_refused_before_reading_a_payload() {
+    let root = TempDir::new("header-bound");
+    let store = FsInstallStore::open(root.path()).expect("open store");
+    for name in ["installed.slot", "previous.slot", "staging/staged.slot"] {
+        let path = root.path().join(name);
+        let original = vec![b'x'; 257];
+        fs::write(&path, &original).expect("write overlong header");
+        let result = match name {
+            "installed.slot" => store.installed(),
+            "previous.slot" => store.previous(),
+            _ => store.staged(),
+        };
+        assert!(
+            result
+                .expect_err("bounded header")
+                .to_string()
+                .contains("header")
+        );
+        assert_eq!(fs::read(path).expect("preserved slot"), original);
+    }
+}
+
+#[test]
+fn oversized_journal_and_header_writes_preserve_existing_state() {
+    let root = TempDir::new("write-bounds");
+    let mut store = FsInstallStore::open(root.path()).expect("open store");
+    store
+        .set_journal(Journal::default())
+        .expect("initial journal");
+    let journal_path = root.path().join("journal.json");
+    let before = fs::read(&journal_path).expect("journal bytes");
+    assert!(
+        store
+            .set_journal(Journal {
+                failed_targets: vec!["1.0.0".repeat(14_000)],
+                ..Journal::default()
+            })
+            .is_err()
+    );
+    assert_eq!(fs::read(journal_path).expect("journal unchanged"), before);
+
+    store
+        .stage(slot(OLD_VERSION, OLD_BYTES))
+        .expect("initial stage");
+    assert!(store.stage(slot(&"1".repeat(256), NEW_BYTES)).is_err());
+    assert_eq!(
+        store.staged().expect("stage unchanged"),
+        Some(slot(OLD_VERSION, OLD_BYTES))
+    );
+}
+
+#[test]
+fn corrupt_installed_header_cannot_replace_the_kept_rollback_copy() {
+    let root = TempDir::new("commit-input-validation");
+    let mut store = FsInstallStore::open(root.path()).expect("open store");
+    store
+        .stage(slot(OLD_VERSION, OLD_BYTES))
+        .expect("stage old build");
+    store.commit_staged().expect("install old build");
+    store
+        .stage(slot(NEW_VERSION, NEW_BYTES))
+        .expect("stage new build");
+    let previous_path = root.path().join("previous.slot");
+    fs::write(&previous_path, b"kept rollback copy").expect("kept copy");
+    fs::write(root.path().join("installed.slot"), vec![b'x'; 257])
+        .expect("corrupt installed header");
+
+    assert!(store.commit_staged().is_err());
+
+    assert_eq!(
+        fs::read(previous_path).expect("previous unchanged"),
+        b"kept rollback copy"
+    );
+    assert_eq!(
+        store.staged().expect("staging retained"),
+        Some(slot(NEW_VERSION, NEW_BYTES))
+    );
+}
+
 /// A temp directory that is removed when the test ends.
 struct TempDir(PathBuf);
 

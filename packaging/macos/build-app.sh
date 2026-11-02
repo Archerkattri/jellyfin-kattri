@@ -126,6 +126,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>$VERSION</string>
     <key>CFBundleVersion</key>
     <string>$VERSION</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>org.kattri.jellyfin</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>jellyfin</string>
+            </array>
+        </dict>
+    </array>
 $ICON_KEY
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.entertainment</string>

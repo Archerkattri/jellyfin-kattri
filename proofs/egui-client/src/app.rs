@@ -1431,12 +1431,7 @@ impl KattriApp {
         crate::theme::install_fonts(&ctx);
         let settings = SettingsState::open(default_profiles_dir().as_deref(), requested);
         crate::theme::set_current_preset(settings.settings().general.theme_preset);
-        crate::theme::apply_with_preset(
-            &ctx,
-            settings.settings().general.theme_preset,
-            settings.settings().general.high_contrast,
-            settings.settings().general.reduce_motion,
-        );
+        crate::theme::apply_with_general_settings(&ctx, &settings.settings().general);
         let tls = ClientTlsFiles {
             custom_ca: settings.settings().general.custom_ca_path.clone(),
             client_cert: settings.settings().general.client_cert_path.clone(),
@@ -10674,12 +10669,7 @@ impl KattriApp {
         }
         self.poll_search_debounce(now);
         self.poll_keymap_file(ctx, now);
-        crate::theme::apply_with_preset(
-            ctx,
-            self.settings.settings().general.theme_preset,
-            self.high_contrast,
-            self.reduce_motion,
-        );
+        crate::theme::apply_with_general_settings(ctx, &self.settings.settings().general);
         crate::theme::apply_interface_size(ctx, self.interface_size);
     }
 

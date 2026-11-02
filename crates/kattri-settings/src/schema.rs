@@ -184,6 +184,17 @@ pub struct GeneralSettings {
     pub reduce_motion: bool,
     /// UI color scheme. Missing keys in older settings documents use Jellyfin Dark.
     pub theme_preset: ThemePreset,
+    /// Apply the optional RGB overrides below to this profile's theme.
+    pub custom_theme_enabled: bool,
+    /// Opaque sRGB channels, serialized as exactly three integers from 0 through 255.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_accent: Option<[u8; 3]>,
+    /// Optional page background override for this profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_background: Option<[u8; 3]>,
+    /// Optional panel/surface override for this profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_surface: Option<[u8; 3]>,
     /// Preferred layout for library catalogs.
     pub library_layout: LibraryLayout,
     /// Preferred poster size for library artwork.
@@ -221,6 +232,10 @@ impl Default for GeneralSettings {
             high_contrast: false,
             reduce_motion: true,
             theme_preset: ThemePreset::default(),
+            custom_theme_enabled: false,
+            custom_accent: None,
+            custom_background: None,
+            custom_surface: None,
             library_layout: LibraryLayout::default(),
             library_artwork_size: LibraryArtworkSize::default(),
             backdrop: BackdropPreference::Server,

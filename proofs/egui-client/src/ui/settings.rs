@@ -17,7 +17,7 @@ use egui::{RichText, Ui};
 use kattri_client_core::focus::NavAction;
 use kattri_i18n::ids;
 use kattri_settings::{
-    HdrPreference, ImageFormat, InterfaceSize, LogDetail, Settings, ThemePreset,
+    GeneralSettings, HdrPreference, ImageFormat, InterfaceSize, LogDetail, Settings, ThemePreset,
 };
 
 use crate::app::{KattriApp, Page};
@@ -672,6 +672,20 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             ],
         );
         crate::theme::set_current_preset(general.theme_preset);
+        let default_preset = if general.theme_preset == ThemePreset::System {
+            match ui.ctx().system_theme() {
+                Some(egui::Theme::Light) => ThemePreset::Light,
+                _ => ThemePreset::JellyfinDark,
+            }
+        } else {
+            general.theme_preset
+        };
+        custom_theme_controls(
+            ui,
+            general,
+            crate::theme::palette_for(default_preset, false),
+            colors,
+        );
         choice(
             ui,
             ui_text(ids::SETTINGS_GENERAL_LIBRARY_LAYOUT),
@@ -965,6 +979,79 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
     if switch_profile {
         app.open_profile_picker();
     }
+}
+
+fn custom_theme_controls(
+    ui: &mut Ui,
+    general: &mut GeneralSettings,
+    defaults: Palette,
+    colors: Palette,
+) {
+    subsection_heading(ui, "Custom theme colors", colors);
+    ui.horizontal(|ui| {
+        let enabled = general.custom_theme_enabled;
+        let enable = ui.checkbox(&mut general.custom_theme_enabled, "Use custom theme colors");
+        enable.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::CheckBox, enabled, "Use custom theme colors")
+        });
+        let reset = ui.button("Reset to preset colors");
+        reset.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, true, "Reset to preset colors")
+        });
+        if reset.clicked() {
+            general.custom_theme_enabled = false;
+            general.custom_accent = None;
+            general.custom_background = None;
+            general.custom_surface = None;
+        }
+    });
+    if !general.custom_theme_enabled {
+        return;
+    }
+    if general.high_contrast {
+        muted(
+            ui,
+            colors,
+            "High contrast keeps its accessible palette while custom colors are saved.",
+            12.0,
+        );
+    }
+    custom_color_control(
+        ui,
+        "Accent color",
+        &mut general.custom_accent,
+        defaults.accent,
+    );
+    custom_color_control(
+        ui,
+        "Background color",
+        &mut general.custom_background,
+        defaults.background,
+    );
+    custom_color_control(
+        ui,
+        "Surface color",
+        &mut general.custom_surface,
+        defaults.panel,
+    );
+}
+
+fn custom_color_control(
+    ui: &mut Ui,
+    label: &'static str,
+    value: &mut Option<[u8; 3]>,
+    default: egui::Color32,
+) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let mut rgb = value.unwrap_or([default.r(), default.g(), default.b()]);
+        let response = ui.color_edit_button_srgb(&mut rgb);
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label.to_owned()));
+        if response.changed() {
+            *value = Some(rgb);
+        }
+    });
 }
 
 fn home_section_label(section: &str) -> String {
@@ -1444,10 +1531,11 @@ pub(super) fn muted(ui: &mut Ui, colors: Palette, text: &str, size: f32) {
 mod tests {
     use super::{
         AboutInfo, SettingsPageState, SettingsSection, about_rows, activate_gamepad_focus,
-        focus_direction, list_action, move_gamepad_focus, move_home_section, next_focus_index,
-        normalized_home_section_order, page_back, server_address_text,
+        custom_theme_controls, focus_direction, list_action, move_gamepad_focus, move_home_section,
+        next_focus_index, normalized_home_section_order, page_back, server_address_text,
     };
     use kattri_client_core::focus::NavAction;
+    use kattri_settings::{GeneralSettings, ThemePreset};
 
     const LEN: usize = SettingsSection::ALL.len();
 
@@ -1780,5 +1868,51 @@ mod tests {
     #[test]
     fn the_dashboard_switch_bound_by_the_checkbox_is_off_by_default() {
         assert!(!kattri_settings::Settings::default().admin.dashboard);
+    }
+
+    #[test]
+    fn custom_theme_controls_expose_headless_accessible_names() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut general = GeneralSettings {
+            custom_theme_enabled: true,
+            ..GeneralSettings::default()
+        };
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let palette = crate::theme::palette_for(ThemePreset::JellyfinDark, false);
+                custom_theme_controls(ui, &mut general, palette, palette);
+            },
+        );
+        output.textures_delta.clear();
+        let tree = output
+            .platform_output
+            .accesskit_update
+            .expect("custom theme controls produce an accessibility tree");
+        for (role, label) in [
+            (egui::accesskit::Role::CheckBox, "Use custom theme colors"),
+            (egui::accesskit::Role::Button, "Accent color"),
+            (egui::accesskit::Role::Button, "Background color"),
+            (egui::accesskit::Role::Button, "Surface color"),
+            (egui::accesskit::Role::Button, "Reset to preset colors"),
+        ] {
+            assert!(
+                tree.nodes
+                    .iter()
+                    .any(|(_, node)| node.role() == role && node.label() == Some(label)),
+                "missing accessible {role:?} named {label:?}; nodes={:?}",
+                tree.nodes
+                    .iter()
+                    .map(|(_, node)| (node.role(), node.label()))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 }

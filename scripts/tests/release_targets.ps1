@@ -158,6 +158,10 @@ try {
         $macosScript -notmatch '(?s)BINARY_NAME=\"\$\{BINARY_NAME:-jellyfin-kattri\}') {
         throw 'macOS release workflow and build script must target the jellyfin-kattri host binary.'
     }
+    if ($macosScript -notmatch '(?s)<key>CFBundleURLTypes</key>\s*<array>\s*<dict>' -or
+        $macosScript -notmatch '(?s)<key>CFBundleURLSchemes</key>\s*<array>\s*<string>jellyfin</string>') {
+        throw 'macOS app bundle must register the jellyfin URL scheme.'
+    }
 
     if ($macosWorkflow -notmatch 'codesign --force --deep -s - "dist/macos/Jellyfin Kattri\.app"' -or
         $macosWorkflow -notmatch 'suffix=-ad-hoc' -or
@@ -308,6 +312,27 @@ try {
 
     $appSource = Get-Content 'proofs/egui-client/src/app.rs' -Raw
     $hostSource = Get-Content 'proofs/egui-gl-host/src/main.rs' -Raw
+    $macosLinks = Get-Content 'proofs/egui-gl-host/src/macos_links.rs' -Raw
+    foreach ($requiredMacLinkTest in @(
+        'accepts_a_valid_review_intent_without_interpreting_playback_actions',
+        'rejects_credential_bearing_urls',
+        'rejects_oversized_and_malformed_urls_without_echoing_input',
+        'gate_allows_only_one_pre_window_event_until_startup_consumes_it',
+        'a_command_line_intent_blocks_a_second_startup_url',
+        'startup_routing_never_overwrites_an_existing_intent'
+    )) {
+        if ($macosLinks -notmatch [regex]::Escape("fn $requiredMacLinkTest")) {
+            throw "macOS URL-dispatch regression test is missing: $requiredMacLinkTest"
+        }
+    }
+    if ($macosLinks -notmatch 'application:openURLs:' -or
+        $macosLinks -notmatch 'send_event\(HostEvent::MacOpenUrl\(intent\)\)' -or
+        $macosLinks -notmatch 'catch_unwind\(AssertUnwindSafe' -or
+        $macosLinks -notmatch 'application\.delegate\(\)' -or
+        $hostSource -notmatch 'HostEvent::MacOpenUrl\(intent\)' -or
+        $hostSource -notmatch 'host\.kattri_app\.apply_launch_intent\(intent\)') {
+        throw 'macOS URL dispatch must validate, bound, preserve AppKit lifecycle, and reuse the launch-intent flow.'
+    }
     $dispatchStart = $hostSource.IndexOf('if let Some(intent) = launch_intent {')
     if ($dispatchStart -lt 0) {
         throw 'Could not locate the host launch-intent dispatch.'

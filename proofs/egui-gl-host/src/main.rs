@@ -52,6 +52,8 @@ use winit::window::{Window, WindowAttributes, WindowId};
 mod display_switch;
 mod gl_adapter;
 mod launch_intent;
+#[cfg(any(target_os = "macos", test))]
+mod macos_links;
 mod media_info_panel;
 mod mpv_host;
 mod player_controls;
@@ -76,6 +78,8 @@ pub(crate) enum HostEvent {
     EguiRepaint(Duration),
     MpvRepaint,
     AccessKit(egui_winit::accesskit_winit::Event),
+    #[cfg(target_os = "macos")]
+    MacOpenUrl(DeepLinkIntent),
 }
 
 impl From<egui_winit::accesskit_winit::Event> for HostEvent {
@@ -2101,6 +2105,8 @@ struct HostApp<'session> {
     local_media: Result<Option<String>, String>,
     profile: Option<String>,
     launch_intent: Option<DeepLinkIntent>,
+    #[cfg(target_os = "macos")]
+    mac_link_gate: macos_links::MacLinkGate,
     proxy: EventLoopProxy<HostEvent>,
     redraw_at: Option<Instant>,
     failed: bool,
@@ -2120,6 +2126,7 @@ impl<'session> HostApp<'session> {
         local_media: Result<Option<String>, String>,
         profile: Option<String>,
         launch_intent: Option<DeepLinkIntent>,
+        #[cfg(target_os = "macos")] mac_link_gate: macos_links::MacLinkGate,
         proxy: EventLoopProxy<HostEvent>,
     ) -> Self {
         Self {
@@ -2129,6 +2136,8 @@ impl<'session> HostApp<'session> {
             local_media,
             profile,
             launch_intent,
+            #[cfg(target_os = "macos")]
+            mac_link_gate,
             proxy,
             redraw_at: None,
             failed: false,
@@ -2161,6 +2170,8 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
         match created {
             Ok(Ok(host)) => {
                 host.window.request_redraw();
+                #[cfg(target_os = "macos")]
+                self.mac_link_gate.window_started();
                 self.host = Some(host);
             }
             Ok(Err(error)) => {
@@ -2238,6 +2249,27 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: HostEvent) {
+        #[cfg(target_os = "macos")]
+        let event = match event {
+            HostEvent::MacOpenUrl(intent) => {
+                if let Some(host) = self.host.as_mut() {
+                    host.kattri_app.apply_launch_intent(intent);
+                    host.window.request_redraw();
+                    self.mac_link_gate.event_applied_to_window();
+                } else if macos_links::defer_startup_intent(
+                    &mut self.launch_intent,
+                    intent,
+                    &self.mac_link_gate,
+                )
+                .is_err()
+                {
+                    eprintln!("rejected macOS Jellyfin URL while startup intent is pending");
+                }
+                return;
+            }
+            event => event,
+        };
+
         let Some(host) = self.host.as_mut() else {
             return;
         };
@@ -2275,6 +2307,8 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
                 }
             }
             HostEvent::AccessKit(_) => {}
+            #[cfg(target_os = "macos")]
+            HostEvent::MacOpenUrl(_) => {}
         }
     }
 
@@ -2431,10 +2465,66 @@ fn apply_log_detail(detail: kattri_settings::LogDetail) {
     }
 }
 
+/// CI-only launch check: create the real window and exit without OpenGL. The GPU-less Windows
+/// runners cannot create a WGL context, but they can still prove the installed binary starts,
+/// shows a titled window and closes normally.
+fn run_window_smoke() -> Result<(), Box<dyn Error>> {
+    struct Smoke {
+        window: Option<Window>,
+        deadline: Instant,
+    }
+
+    impl ApplicationHandler for Smoke {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            if self.window.is_some() {
+                return;
+            }
+            let attributes = Window::default_attributes()
+                .with_title("Jellyfin Kattri")
+                .with_inner_size(LogicalSize::new(640.0, 360.0))
+                .with_visible(true);
+            match event_loop.create_window(attributes) {
+                Ok(window) => self.window = Some(window),
+                Err(_) => event_loop.exit(),
+            }
+        }
+
+        fn window_event(
+            &mut self,
+            event_loop: &ActiveEventLoop,
+            _id: WindowId,
+            event: WindowEvent,
+        ) {
+            if matches!(event, WindowEvent::CloseRequested | WindowEvent::Destroyed) {
+                event_loop.exit();
+            }
+        }
+
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            if Instant::now() >= self.deadline {
+                event_loop.exit();
+            } else {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(self.deadline));
+            }
+        }
+    }
+
+    let event_loop = EventLoop::<()>::with_user_event().build()?;
+    let mut smoke = Smoke {
+        window: None,
+        deadline: Instant::now() + Duration::from_secs(8),
+    };
+    event_loop.run_app(&mut smoke)?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(debug_assertions)]
     qa_metrics::start(Instant::now());
     let _log_guard = init_logging();
+    if std::env::args_os().any(|argument| argument == "--window-smoke") {
+        return run_window_smoke();
+    }
     // A bad command line is reported through the same status line as a bad media path.
     let (profile, local_media, launch_intent) = match parse_host_args(std::env::args_os().skip(1)) {
         Ok(args) => (
@@ -2446,6 +2536,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let event_loop = EventLoop::<HostEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
+    #[cfg(target_os = "macos")]
+    let mac_link_gate = macos_links::MacLinkGate::new(launch_intent.is_some());
+    #[cfg(target_os = "macos")]
+    let _macos_url_registration = match macos_links::register(proxy.clone(), mac_link_gate.clone())
+    {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            eprintln!("macOS Jellyfin URL dispatch unavailable: {error}");
+            None
+        }
+    };
     let runtime = MpvRuntime::load();
     let runtime_error = runtime.as_ref().err().cloned();
     let runtime = runtime.ok();
@@ -2456,6 +2557,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         local_media,
         profile,
         launch_intent,
+        #[cfg(target_os = "macos")]
+        mac_link_gate,
         proxy,
     );
     event_loop.run_app(&mut app)?;

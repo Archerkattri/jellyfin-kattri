@@ -84,7 +84,11 @@ jobs:
           Get-FileHash -LiteralPath $exe, $libmpv -Algorithm SHA256 |
             Format-Table -AutoSize | Out-File smoke-logs\installed-hashes.txt
           try {
-            $process = Start-Process -FilePath $exe -WorkingDirectory $installDir -PassThru `
+            # GPU-less runners cannot create a WGL context. The window-smoke mode creates the
+            # real window and exits without OpenGL, so install, window, close and uninstall are
+            # still exercised; the full GL path stays covered on GPU machines.
+            $process = Start-Process -FilePath $exe -ArgumentList '--window-smoke' `
+              -WorkingDirectory $installDir -PassThru `
               -RedirectStandardOutput smoke-logs\app-stdout.txt `
               -RedirectStandardError smoke-logs\app-stderr.txt
             $deadline = [DateTime]::UtcNow.AddSeconds(60)

@@ -153,7 +153,7 @@ pub struct ClientConfig {
 impl ClientConfig {
     /// Create a config from a server URL and stable app/device identifiers.
     /// HTTP is allowed for user-configured private-network, loopback, and
-    /// `.local` servers. Public HTTP requires explicit opt-in with
+    /// `.localhost` names. Public HTTP requires explicit opt-in with
     /// [`ClientConfig::with_insecure_remote_http`].
     pub fn new(
         base_url: &str,
@@ -838,10 +838,9 @@ fn is_local_host(host: &str) -> bool {
         .strip_prefix('[')
         .and_then(|value| value.strip_suffix(']'))
         .unwrap_or(host);
-    if host.eq_ignore_ascii_case("localhost")
-        || host.to_ascii_lowercase().ends_with(".localhost")
-        || host.to_ascii_lowercase().ends_with(".local")
-    {
+    // `.localhost` is reserved by RFC 6761 and cannot be claimed by mDNS. A `.local` name can be
+    // answered by any LAN peer, so plain HTTP to it needs the explicit public-host opt-in.
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
         return true;
     }
     match host.parse::<IpAddr>() {
@@ -1267,6 +1266,14 @@ mod error_classification_tests {
             .await
             .expect_err("nothing listens");
         let classified = transport_error(error);
+        // macOS blackholes a just-released loopback port, so its connect reports a timeout.
+        // Both are transport failures to a dead endpoint; other platforms refuse immediately.
+        #[cfg(target_os = "macos")]
+        assert!(
+            matches!(classified, ApiError::Unreachable | ApiError::Timeout),
+            "{classified:?}"
+        );
+        #[cfg(not(target_os = "macos"))]
         assert!(
             matches!(classified, ApiError::Unreachable),
             "{classified:?}"
@@ -1321,6 +1328,8 @@ mod connection_security_tests {
             "http://8.8.8.8",
             "http://0.0.0.0:8096",
             "http://[2001:db8::1]:8096",
+            // A spoofable mDNS name must not receive credentials over cleartext.
+            "http://jellyfin.local:8096",
         ] {
             let result = client_result(url);
             assert!(
@@ -1375,7 +1384,7 @@ mod connection_security_tests {
     }
 
     #[test]
-    fn plain_http_to_loopback_private_and_local_names_is_accepted() {
+    fn plain_http_to_loopback_and_private_names_is_accepted() {
         for url in [
             "http://127.0.0.1:8096",
             "http://127.1.2.3:8096",
@@ -1389,7 +1398,6 @@ mod connection_security_tests {
             "http://169.254.10.1:8096",
             "http://[fd00::5]:8096",
             "http://[fe80::1]:8096",
-            "http://jellyfin.local:8096",
         ] {
             assert!(client_result(url).is_ok(), "{url} should be accepted");
         }
@@ -1738,6 +1746,13 @@ impl UserDto {
             .as_ref()
             .is_some_and(|policy| policy.is_administrator || policy.enable_subtitle_management)
     }
+
+    /// Downloads need an explicit server policy grant, including for administrators.
+    pub fn can_download_content(&self) -> bool {
+        self.policy
+            .as_ref()
+            .is_some_and(|policy| policy.enable_content_downloading)
+    }
 }
 
 /// The part of Jellyfin's `UserPolicy` the client reads.
@@ -1748,6 +1763,35 @@ pub struct UserPolicy {
     pub is_administrator: bool,
     #[serde(default)]
     pub enable_subtitle_management: bool,
+    #[serde(default)]
+    pub enable_content_downloading: bool,
+}
+
+#[cfg(test)]
+mod download_policy_tests {
+    use super::UserDto;
+
+    #[test]
+    fn downloading_requires_an_explicit_true_policy_field() {
+        for policy in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"EnableContentDownloading":false}),
+            serde_json::json!({"IsAdministrator":true,"EnableContentDownloading":false}),
+        ] {
+            let user: UserDto = serde_json::from_value(serde_json::json!({
+                "Id":"fixture-user", "Name":"Fixture", "Policy":policy
+            }))
+            .expect("user fixture");
+            assert!(!user.can_download_content());
+        }
+        let user: UserDto = serde_json::from_value(serde_json::json!({
+            "Id":"fixture-user", "Name":"Fixture",
+            "Policy":{"EnableContentDownloading":true}
+        }))
+        .expect("explicit download grant");
+        assert!(user.can_download_content());
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]

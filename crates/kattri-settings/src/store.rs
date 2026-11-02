@@ -168,6 +168,10 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
                 "high_contrast",
                 "reduce_motion",
                 "theme_preset",
+                "custom_theme_enabled",
+                "custom_accent",
+                "custom_background",
+                "custom_surface",
                 "library_layout",
                 "library_artwork_size",
                 "backdrop",
@@ -605,11 +609,62 @@ mod tests {
         let loaded = load_from_str("[general]\nhigh_contrast = true\n").expect("load");
         assert!(loaded.general.high_contrast);
         assert_eq!(loaded.general.theme_preset, ThemePreset::JellyfinDark);
+        assert!(!loaded.general.custom_theme_enabled);
+        assert_eq!(loaded.general.custom_accent, None);
+        assert_eq!(loaded.general.custom_background, None);
+        assert_eq!(loaded.general.custom_surface, None);
         assert_eq!(loaded.general.library_layout, LibraryLayout::Grid);
         assert_eq!(
             loaded.general.library_artwork_size,
             LibraryArtworkSize::Medium
         );
+    }
+
+    #[test]
+    fn custom_theme_colors_round_trip_as_bounded_rgb_arrays_per_profile() {
+        let mut settings = Settings::default();
+        settings.general.custom_theme_enabled = true;
+        settings.general.custom_accent = Some([0, 164, 220]);
+        settings.general.custom_background = Some([0, 0, 0]);
+        settings.general.custom_surface = Some([255, 255, 255]);
+
+        let encoded = to_toml_string(&settings).expect("serialize custom theme");
+        let parsed: toml::Table = encoded.parse().expect("parse custom theme");
+        let general = parsed
+            .get("general")
+            .and_then(toml::Value::as_table)
+            .expect("general table");
+        let rgb = |key: &str| -> Vec<i64> {
+            general
+                .get(key)
+                .and_then(toml::Value::as_array)
+                .unwrap_or_else(|| panic!("{key} array"))
+                .iter()
+                .map(|value| value.as_integer().expect("integer channel"))
+                .collect()
+        };
+        assert_eq!(rgb("custom_accent"), [0, 164, 220]);
+        assert_eq!(rgb("custom_background"), [0, 0, 0]);
+        assert_eq!(rgb("custom_surface"), [255, 255, 255]);
+        assert_eq!(
+            load_from_str(&encoded).expect("load custom theme"),
+            settings
+        );
+    }
+
+    #[test]
+    fn malformed_or_out_of_range_custom_theme_colors_are_rejected() {
+        for invalid in [
+            "custom_accent = \"rgba(0, 0, 0, 0.5)\"",
+            "custom_background = [0, 0, 256]",
+            "custom_surface = [1, 2]",
+        ] {
+            let text = format!("[general]\ncustom_theme_enabled = true\n{invalid}\n");
+            assert!(
+                load_from_str(&text).is_err(),
+                "invalid RGB setting should be rejected: {invalid}"
+            );
+        }
     }
 
     #[test]

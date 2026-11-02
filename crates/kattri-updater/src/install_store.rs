@@ -29,7 +29,7 @@
 //! Error messages name the operation and the OS error, never file contents.
 
 use std::fs::{self, File};
-use std::io::{ErrorKind, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,8 @@ const STAGED_FILE: &str = "staged.slot";
 const JOURNAL_FILE: &str = "journal.json";
 const SLOT_HEADER: &str = "kattri-slot v1 ";
 const JOURNAL_VERSION: u32 = 1;
+const MAX_JOURNAL_BYTES: u64 = 64 * 1024;
+const MAX_SLOT_HEADER_BYTES: usize = 256;
 
 /// An [`InstallStore`] that keeps its builds and journal in one directory on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,10 +103,8 @@ impl InstallStore for FsInstallStore {
         }
         let installed_path = self.file(INSTALLED_FILE);
         // Keep the old installed build first, so a failed second rename still leaves it intact.
-        match fs::read(&installed_path) {
-            Ok(raw) => write_atomic(&self.file(PREVIOUS_FILE), &raw)?,
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(io_error("read the installed build", &e)),
+        if let Some(installed) = read_slot(&installed_path)? {
+            write_slot(&self.file(PREVIOUS_FILE), &installed)?;
         }
         fs::rename(&staged_path, &installed_path)
             .map_err(|e| io_error("switch to the staged build", &e))?;
@@ -124,11 +124,10 @@ impl InstallStore for FsInstallStore {
     }
 
     fn journal(&self) -> Result<Journal, StoreError> {
-        match fs::read(self.file(JOURNAL_FILE)) {
-            Ok(raw) => decode_journal(&raw),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Journal::default()),
-            Err(e) => Err(io_error("read the update journal", &e)),
-        }
+        let Some(raw) = read_bounded_file(&self.file(JOURNAL_FILE), MAX_JOURNAL_BYTES)? else {
+            return Ok(Journal::default());
+        };
+        decode_journal(&raw)
     }
 
     fn set_journal(&mut self, journal: Journal) -> Result<(), StoreError> {
@@ -138,11 +137,56 @@ impl InstallStore for FsInstallStore {
 }
 
 fn read_slot(path: &Path) -> Result<Option<Slot>, StoreError> {
-    match fs::read(path) {
-        Ok(raw) => decode_slot(&raw).map(Some),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(io_error("read a stored build", &e)),
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_error("open a stored build", &e)),
+    };
+    let max_file_bytes = crate::manifest::MAX_ARTIFACT_BYTES + MAX_SLOT_HEADER_BYTES as u64;
+    if file
+        .metadata()
+        .map_err(|e| io_error("inspect a stored build", &e))?
+        .len()
+        > max_file_bytes
+    {
+        return Err(corrupt("a stored build exceeds the size limit"));
     }
+    let mut reader = BufReader::new(file);
+    let mut header = Vec::new();
+    Read::take(&mut reader, MAX_SLOT_HEADER_BYTES as u64 + 1)
+        .read_until(b'\n', &mut header)
+        .map_err(|e| io_error("read a stored build header", &e))?;
+    if header.len() > MAX_SLOT_HEADER_BYTES || header.last() != Some(&b'\n') {
+        return Err(corrupt(
+            "a stored build header is missing or exceeds the size limit",
+        ));
+    }
+    // Validate the small header before allocating space for any artifact bytes.
+    let mut slot = decode_slot(&header)?;
+    reader
+        .take(crate::manifest::MAX_ARTIFACT_BYTES + 1)
+        .read_to_end(&mut slot.bytes)
+        .map_err(|e| io_error("read a stored build", &e))?;
+    if slot.bytes.len() as u64 > crate::manifest::MAX_ARTIFACT_BYTES {
+        return Err(corrupt("a stored build exceeds the size limit"));
+    }
+    Ok(Some(slot))
+}
+
+fn read_bounded_file(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, StoreError> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_error("open the update journal", &e)),
+    };
+    let mut raw = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut raw)
+        .map_err(|e| io_error("read the update journal", &e))?;
+    if raw.len() as u64 > limit {
+        return Err(corrupt("the update journal exceeds the size limit"));
+    }
+    Ok(Some(raw))
 }
 
 fn write_slot(path: &Path, slot: &Slot) -> Result<(), StoreError> {
@@ -210,6 +254,11 @@ fn encode_slot(slot: &Slot) -> Result<Vec<u8>, StoreError> {
     if slot.version.is_empty() || slot.version.contains('\n') {
         return Err(StoreError("slot version is not a single line".to_owned()));
     }
+    if SLOT_HEADER.len() + slot.version.len() + 1 > MAX_SLOT_HEADER_BYTES
+        || slot.bytes.len() as u64 > crate::manifest::MAX_ARTIFACT_BYTES
+    {
+        return Err(corrupt("a stored build exceeds the size limit"));
+    }
     let mut out = Vec::with_capacity(SLOT_HEADER.len() + slot.version.len() + 1 + slot.bytes.len());
     out.extend_from_slice(SLOT_HEADER.as_bytes());
     out.extend_from_slice(slot.version.as_bytes());
@@ -271,8 +320,12 @@ fn encode_journal(journal: &Journal) -> Result<Vec<u8>, StoreError> {
         failed_targets: journal.failed_targets.clone(),
         clean_shutdown: journal.clean_shutdown,
     };
-    serde_json::to_vec_pretty(&file)
-        .map_err(|_| StoreError("could not encode the journal".to_owned()))
+    let raw = serde_json::to_vec_pretty(&file)
+        .map_err(|_| StoreError("could not encode the journal".to_owned()))?;
+    if raw.len() as u64 > MAX_JOURNAL_BYTES {
+        return Err(corrupt("the update journal exceeds the size limit"));
+    }
+    Ok(raw)
 }
 
 fn decode_journal(raw: &[u8]) -> Result<Journal, StoreError> {
