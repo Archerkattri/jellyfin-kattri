@@ -101,6 +101,38 @@ where
     }
 }
 
+/// Plan any concrete media entries (playlist rows), without an item-type filter: a playlist
+/// entry is already a media item rather than a folder card.
+pub(crate) fn plan_entries(items: Vec<(String, String)>) -> Result<BatchPlan, BatchPlanError> {
+    if items.len() > MAX_BATCH_ITEMS {
+        return Err(BatchPlanError::TooManyItems);
+    }
+    let total = items.len();
+    let mut skipped = 0;
+    let mut seen = HashSet::new();
+    let mut candidates = VecDeque::new();
+    let mut titles = Vec::new();
+    for (item_id, title) in items {
+        if !valid_item_id(&item_id) {
+            skipped += 1;
+            continue;
+        }
+        if !seen.insert(item_id.to_ascii_lowercase()) {
+            skipped += 1;
+            continue;
+        }
+        let title = bounded_title(&title);
+        titles.push((item_id.clone(), title.clone()));
+        candidates.push_back(DownloadCandidate { item_id, title });
+    }
+    Ok(BatchPlan {
+        total,
+        skipped,
+        candidates,
+        titles,
+    })
+}
+
 /// Minimal item data needed for eligibility and in-memory display names.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CollectionItem {

@@ -51,6 +51,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 mod display_switch;
 mod gl_adapter;
+mod global_shortcuts;
 mod launch_intent;
 #[cfg(any(target_os = "macos", test))]
 mod macos_links;
@@ -78,6 +79,7 @@ pub(crate) enum HostEvent {
     EguiRepaint(Duration),
     MpvRepaint,
     AccessKit(egui_winit::accesskit_winit::Event),
+    GlobalShortcut(global_shortcuts::GlobalAction),
     #[cfg(target_os = "macos")]
     MacOpenUrl(DeepLinkIntent),
 }
@@ -1537,6 +1539,11 @@ impl<'session> GlHost<'session> {
         }
     }
 
+    /// Read once at start-up; changing the setting takes effect on the next launch.
+    fn global_shortcuts_enabled(&self) -> bool {
+        self.kattri_app.global_shortcuts_enabled()
+    }
+
     fn set_shell_notice(&mut self, text: String) {
         self.shell_notice = Some((text, self.osd_clock.elapsed()));
     }
@@ -2303,6 +2310,8 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
         }));
         match created {
             Ok(Ok(host)) => {
+                #[cfg(windows)]
+                global_shortcuts::install(self.proxy.clone(), host.global_shortcuts_enabled());
                 host.window.request_redraw();
                 #[cfg(target_os = "macos")]
                 self.mac_link_gate.window_started();
@@ -2441,6 +2450,17 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
                 }
             }
             HostEvent::AccessKit(_) => {}
+            HostEvent::GlobalShortcut(action) => {
+                if let Some(host) = self.host.as_mut() {
+                    match action {
+                        global_shortcuts::GlobalAction::TogglePause => host.mpv.toggle_paused(),
+                        global_shortcuts::GlobalAction::SeekBackward => host.mpv.seek_relative(-10),
+                        global_shortcuts::GlobalAction::SeekForward => host.mpv.seek_relative(10),
+                        global_shortcuts::GlobalAction::ToggleMute => host.mpv.toggle_mute(),
+                    }
+                    host.window.request_redraw();
+                }
+            }
             #[cfg(target_os = "macos")]
             HostEvent::MacOpenUrl(_) => {}
         }

@@ -12,7 +12,8 @@ use crate::ui::profile_picker::{self, PickerOutcome, PickerState};
 use crate::ui::{ui_text, ui_text_args};
 use crate::worker::downloads::DownloadsState;
 use crate::worker::downloads_batch::{
-    BatchIdentity, BatchQueue, CollectionItem, CollectionKind, DispatchResult, plan_batch,
+    BatchIdentity, BatchPlan, BatchQueue, CollectionItem, CollectionKind, DispatchResult,
+    plan_batch, plan_entries,
 };
 use crate::worker::update::{ApplyRequest, UpdateState, UpdateStatus, prepare};
 use crate::worker::{
@@ -1891,6 +1892,11 @@ impl KattriApp {
     /// Playback settings of the running profile: skip switches and the outro delay (M2-08).
     pub fn playback_settings(&self) -> &kattri_settings::PlaybackSettings {
         &self.settings.settings().playback
+    }
+
+    /// Whether the profile asks for OS-wide playback shortcuts. Read once at start-up.
+    pub fn global_shortcuts_enabled(&self) -> bool {
+        self.settings.settings().input.global_shortcuts
     }
 
     /// Subtitle settings of the running profile, including the secondary position (M2-09).
@@ -5680,6 +5686,7 @@ impl KattriApp {
     pub(crate) fn apply_playlist_intent(&mut self, intent: PlaylistIntent) {
         match intent {
             PlaylistIntent::OpenPlaylist { playlist_id } => self.select_item(playlist_id),
+            PlaylistIntent::DownloadAll { items, .. } => self.download_playlist_items(items),
             PlaylistIntent::SubmitCreateName { name } => {
                 let Ok(name) = crate::ui::playlists::validate_playlist_name(&name) else {
                     self.playlist_mutation_error = Some(ErrorClass::Unexpected);
@@ -6312,6 +6319,21 @@ impl KattriApp {
                 return;
             }
         };
+        self.start_download_plan(plan, "catalog-selection");
+    }
+
+    /// Downloads every media entry of the opened playlist in order.
+    fn download_playlist_items(&mut self, items: Vec<(String, String)>) {
+        match plan_entries(items) {
+            Ok(plan) => self.start_download_plan(plan, "playlist"),
+            Err(_) => {
+                self.show_toast(ui_text(ids::BROWSE_SELECTION_DOWNLOAD_TOO_MANY).to_owned());
+            }
+        }
+    }
+
+    /// Starts a packed batch under `parent_id`, three transfers at a time.
+    fn start_download_plan(&mut self, plan: BatchPlan, parent_id: &str) {
         let queued = plan.candidates.len();
         if queued == 0 {
             self.show_toast(ui_text(ids::BROWSE_SELECTION_DOWNLOAD_TOO_MANY).to_owned());
@@ -6320,7 +6342,7 @@ impl KattriApp {
         let identity = BatchIdentity {
             request_id: self.allocate_request_id(),
             connection_generation: self.connection_generation(),
-            parent_id: "catalog-selection".to_owned(),
+            parent_id: parent_id.to_owned(),
             kind: CollectionKind::Playlist,
         };
         if self.batch_downloads.begin(identity, plan).is_err() {

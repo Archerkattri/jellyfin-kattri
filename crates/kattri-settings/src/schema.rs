@@ -1070,6 +1070,8 @@ pub struct InputSettings {
     pub sdl_gamepad_enabled: bool,
     /// Legacy `main.enableWebGamepad`.
     pub web_gamepad_enabled: bool,
+    /// Register system-wide playback shortcuts. Off by default.
+    pub global_shortcuts: bool,
     /// Legacy `main.enableInputRepeat`.
     pub key_repeat: bool,
     /// Optional user keymap file that overrides the bundled defaults.
@@ -1084,6 +1086,7 @@ impl Default for InputSettings {
         Self {
             sdl_gamepad_enabled: true,
             web_gamepad_enabled: true,
+            global_shortcuts: false,
             key_repeat: true,
             keymap_path: None,
             unknown: toml::Table::new(),

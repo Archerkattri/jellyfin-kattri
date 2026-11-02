@@ -109,6 +109,11 @@ pub enum PlaylistIntent {
     SubmitCreateName { name: String },
     /// Start playback of the opened playlist.
     PlayPlaylist { playlist_id: String },
+    /// Queue every entry of the opened playlist for download, in order.
+    DownloadAll {
+        playlist_id: String,
+        items: Vec<(String, String)>,
+    },
     /// Add the selected media IDs to the opened playlist, in candidate order.
     AddSelectedMedia {
         playlist_id: String,
@@ -401,6 +406,18 @@ fn playlist_entries(ui: &mut egui::Ui, opened: OpenPlaylist<'_>, response: &mut 
     if shown == 0 {
         ui.label(ui_text(ids::PLAYLISTS_EMPTY_ENTRIES));
         return;
+    }
+    if ui
+        .button(ui_text(ids::PLAYLISTS_BUTTON_DOWNLOAD_ALL))
+        .clicked()
+    {
+        response.intents.push(PlaylistIntent::DownloadAll {
+            playlist_id: opened.playlist_id.to_owned(),
+            items: entries
+                .iter()
+                .map(|entry| (entry.media_id.clone(), entry.title.clone()))
+                .collect(),
+        });
     }
     egui::ScrollArea::vertical()
         .id_salt("playlist_ordered_entries")

@@ -106,6 +106,7 @@ fn populated() -> Settings {
     s.input = InputSettings {
         sdl_gamepad_enabled: false,
         web_gamepad_enabled: false,
+        global_shortcuts: true,
         key_repeat: false,
         keymap_path: Some(PathBuf::from("C:/Users/me/keys.json")),
         unknown: toml::Table::new(),

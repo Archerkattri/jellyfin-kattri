@@ -276,6 +276,7 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
                 "sdl_gamepad_enabled",
                 "web_gamepad_enabled",
                 "key_repeat",
+                "global_shortcuts",
                 "keymap_path",
             ][..],
         ),

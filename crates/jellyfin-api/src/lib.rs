@@ -1513,11 +1513,20 @@ mod connection_security_tests {
             result,
             Err(ApiError::HttpStatus(StatusCode::FOUND))
         ));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), target_listener.accept())
-                .await
-                .is_err()
-        );
+        // A stray TCP connect (security software, a port probe) is not a followed redirect; only
+        // a request sent to the target proves the client followed it. A redirect follow sends a
+        // request line immediately, so a short read is enough to tell the two apart.
+        if let Ok(Ok((mut socket, _))) =
+            tokio::time::timeout(Duration::from_millis(100), target_listener.accept()).await
+        {
+            let mut probe = [0_u8; 64];
+            let read =
+                tokio::time::timeout(Duration::from_millis(100), socket.read(&mut probe)).await;
+            assert!(
+                !matches!(read, Ok(Ok(count)) if count > 0),
+                "the redirect was followed to another origin"
+            );
+        }
         redirect_server.await.expect("redirect server task");
     }
 }

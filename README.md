@@ -65,7 +65,7 @@ is used.
 | **Extras** | Item menu (play, mark watched, favorite, download, add to playlist or queue), multi-select toolbar with bulk watched/favorite/queue/download, playlists, collections, favorites, photo slideshow, admin-lite dashboard, parental PIN |
 | **Administration** | Edit metadata, Identify, Edit images, Add to collection, Refresh metadata and confirmed Delete; administrator user listing, creation, rename and access-policy editing with confirmation |
 | **Settings** | General, playback, audio, subtitles (including bold), video, input, server (private CA and client certificate), About; versioned TOML per profile |
-| **Input** | Rebindable keyboard map, gamepad menus and player control, full focus navigation |
+| **Input** | Rebindable keyboard map, gamepad menus and player control, full focus navigation, optional OS-wide playback shortcuts (Ctrl+Alt+Space / Left / Right / M) |
 | **Interface** | Jellyfin Dark, Warm Dark, Light and system themes with optional custom accent, background and surface colors; SF Pro Display typeface (Inter fallback); ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu |
 
 ## Install

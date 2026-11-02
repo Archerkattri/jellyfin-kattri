@@ -390,6 +390,7 @@ pub const PLAYLISTS_HEADING_YOURS: &str = "playlists.heading.yours";
 pub const PLAYLISTS_EMPTY_NONE: &str = "playlists.empty.none";
 pub const PLAYLISTS_NOUN_PLAYLISTS: &str = "playlists.noun.playlists";
 pub const PLAYLISTS_BUTTON_PLAY: &str = "playlists.button.play";
+pub const PLAYLISTS_BUTTON_DOWNLOAD_ALL: &str = "playlists.button.download_all";
 pub const PLAYLISTS_HEADING_ADD_MEDIA: &str = "playlists.heading.add_media";
 pub const PLAYLISTS_BUTTON_ADD_SELECTED: &str = "playlists.button.add_selected";
 pub const PLAYLISTS_HEADING_ENTRIES: &str = "playlists.heading.entries";
@@ -555,6 +556,8 @@ pub const PARENTAL_ERROR_LOCK_NOT_WRITTEN: &str = "parental.error.lock_not_writt
 pub const PARENTAL_ERROR_REMOVED_LOCK_NOT_DELETED: &str = "parental.error.removed_lock_not_deleted";
 pub const PARENTAL_ERROR_LOCK_READ: &str = "parental.error.lock_read";
 pub const SETTINGS_INPUT_KEY_REPEAT: &str = "settings.input.key_repeat";
+pub const SETTINGS_INPUT_GLOBAL_SHORTCUTS: &str = "settings.input.global_shortcuts";
+pub const SETTINGS_INPUT_GLOBAL_SHORTCUTS_HELP: &str = "settings.input.global_shortcuts_help";
 pub const SETTINGS_INPUT_GAMEPAD: &str = "settings.input.gamepad";
 pub const SETTINGS_INPUT_GAMEPAD_HELP: &str = "settings.input.gamepad_help";
 pub const SETTINGS_INPUT_KEYBOARD_HEADING: &str = "settings.input.keyboard_heading";
@@ -1419,6 +1422,7 @@ pub const ALL: &[&str] = &[
     PLAYLISTS_EMPTY_NONE,
     PLAYLISTS_NOUN_PLAYLISTS,
     PLAYLISTS_BUTTON_PLAY,
+    PLAYLISTS_BUTTON_DOWNLOAD_ALL,
     PLAYLISTS_HEADING_ADD_MEDIA,
     PLAYLISTS_BUTTON_ADD_SELECTED,
     PLAYLISTS_HEADING_ENTRIES,
@@ -1582,6 +1586,8 @@ pub const ALL: &[&str] = &[
     PARENTAL_ERROR_REMOVED_LOCK_NOT_DELETED,
     PARENTAL_ERROR_LOCK_READ,
     SETTINGS_INPUT_KEY_REPEAT,
+    SETTINGS_INPUT_GLOBAL_SHORTCUTS,
+    SETTINGS_INPUT_GLOBAL_SHORTCUTS_HELP,
     SETTINGS_INPUT_GAMEPAD,
     SETTINGS_INPUT_GAMEPAD_HELP,
     SETTINGS_INPUT_KEYBOARD_HEADING,

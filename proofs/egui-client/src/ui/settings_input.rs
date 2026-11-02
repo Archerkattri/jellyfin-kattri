@@ -63,6 +63,16 @@ pub(super) fn input_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             ui_text(ids::SETTINGS_INPUT_GAMEPAD),
         );
         muted(ui, colors, ui_text(ids::SETTINGS_INPUT_GAMEPAD_HELP), 12.0);
+        ui.checkbox(
+            &mut input.global_shortcuts,
+            ui_text(ids::SETTINGS_INPUT_GLOBAL_SHORTCUTS),
+        );
+        muted(
+            ui,
+            colors,
+            ui_text(ids::SETTINGS_INPUT_GLOBAL_SHORTCUTS_HELP),
+            12.0,
+        );
     });
     ui.add_space(12.0);
     settings_card(ui, |ui| {
