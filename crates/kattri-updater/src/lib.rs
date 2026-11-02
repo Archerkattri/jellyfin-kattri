@@ -13,14 +13,15 @@
 //! - Implemented (M4-16, pure): [`gate::playback_gate`] defers an update while media is open;
 //!   [`space::check_staging_space`] refuses the staging write when free space is short. The
 //!   caller supplies the playback state and the free space; this crate reads neither.
-//! - Not here yet: fetching the manifest and downloading artifacts (network). The release
-//!   keyring is empty until the owner's release key exists (D3), so a release build refuses
-//!   every manifest.
+//! - Manifest fetching is available as a bounded, HTTPS-origin-pinned library component. No
+//!   release endpoint or signing key is configured here; the empty release keyring rejects
+//!   fetch-and-verify before making a network request. Artifact downloading remains unimplemented.
 //!
 //! Trust rule: an artifact is installed only after its manifest envelope passes
 //! [`open_envelope`] and the downloaded bytes pass [`verify_artifact_bytes`].
 
 pub mod apply;
+pub mod fetch;
 pub mod gate;
 pub mod install_store;
 pub mod keyring;
@@ -31,6 +32,7 @@ pub mod state_store;
 pub mod verify;
 pub mod version;
 
+pub use fetch::ManifestFetcher;
 pub use install_store::FsInstallStore;
 pub use keyring::{KeyState, Keyring, StaticKey};
 pub use manifest::{Artifact, Channel, UpdateManifest};
@@ -46,6 +48,18 @@ use thiserror::Error;
 pub enum UpdateError {
     #[error("update manifest could not be parsed: {0}")]
     Json(String),
+    #[error("no trusted update signing keys are configured")]
+    NoTrustedKeys,
+    #[error("manifest transport initialization or request failed")]
+    ManifestTransport,
+    #[error("manifest request timed out")]
+    ManifestTimeout,
+    #[error("manifest endpoint is not on the configured HTTPS origin")]
+    ManifestOrigin,
+    #[error("manifest request was redirected")]
+    ManifestRedirect,
+    #[error("manifest request returned HTTP status {status}")]
+    ManifestHttpStatus { status: u16 },
     #[error("invalid update manifest field `{field}`: {reason}")]
     Invalid { field: &'static str, reason: String },
     #[error("`{text}` is not a valid semver version")]
