@@ -801,12 +801,22 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
         ] {
             ui.checkbox(value, ui_text(label));
         }
+        ui.checkbox(
+            &mut general.home_combine_continue_next_up,
+            "Combine Continue Watching and Next Up into one row",
+        );
+        muted(
+            ui,
+            colors,
+            "When combined, the row uses the earliest enabled source position in the saved order.",
+            12.0,
+        );
         let order = normalized_home_section_order(&general.home_section_order);
         for (index, section) in order.iter().enumerate() {
             let label = home_section_label(section);
             let mut moved = false;
             ui.horizontal(|ui| {
-                ui.label(ui_text(label));
+                ui.label(label.as_str());
                 ui.add_space(4.0);
                 if reorder_button(
                     ui,
@@ -814,7 +824,7 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
                     index > 0,
                     &ui_text_args(
                         ids::SETTINGS_GENERAL_HOME_MOVE_EARLIER,
-                        &[("section", ui_text(label))],
+                        &[("section", label.as_str())],
                     ),
                 ) {
                     move_home_section(&mut general.home_section_order, section, -1);
@@ -826,7 +836,7 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
                     index + 1 < order.len(),
                     &ui_text_args(
                         ids::SETTINGS_GENERAL_HOME_MOVE_LATER,
-                        &[("section", ui_text(label))],
+                        &[("section", label.as_str())],
                     ),
                 ) {
                     move_home_section(&mut general.home_section_order, section, 1);
@@ -838,6 +848,48 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             }
         }
     });
+    if app.settings.running_name().is_some() {
+        let hidden_records = app.settings.settings().home_hidden_series.clone();
+        let mut unhide = Vec::new();
+        settings_card(ui, |ui| {
+            subsection_heading(ui, "Hidden Home series", colors);
+            if hidden_records.is_empty() {
+                muted(ui, colors, "No series are hidden for this profile.", 12.0);
+            }
+            for record in &hidden_records {
+                ui.horizontal(|ui| {
+                    muted(
+                        ui,
+                        colors,
+                        &format!(
+                            "Profile {} · server {} · series {}",
+                            record.profile, record.server_id, record.series_id
+                        ),
+                        12.0,
+                    );
+                    if ui.button("Unhide").clicked() {
+                        unhide.push((
+                            record.profile.clone(),
+                            record.server_id.clone(),
+                            record.series_id.clone(),
+                        ));
+                    }
+                });
+            }
+        });
+        if !unhide.is_empty() {
+            app.settings
+                .settings_mut()
+                .home_hidden_series
+                .retain(|record| {
+                    !unhide.iter().any(|(profile, server_id, series_id)| {
+                        record.profile == profile.as_str()
+                            && record.server_id == server_id.as_str()
+                            && record.series_id == series_id.as_str()
+                    })
+                });
+        }
+    }
     ui.add_space(12.0);
     settings_card(ui, |ui| {
         subsection_heading(ui, "Profiles", colors);
@@ -915,24 +967,43 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
     }
 }
 
-fn home_section_label(section: &str) -> &'static str {
+fn home_section_label(section: &str) -> String {
     match section {
-        kattri_settings::HOME_SECTION_CONTINUE_WATCHING => ids::HOME_ROW_CONTINUE_WATCHING,
-        kattri_settings::HOME_SECTION_NEXT_UP => ids::HOME_ROW_NEXT_UP,
-        kattri_settings::HOME_SECTION_LATEST => ids::HOME_ROW_LATEST,
-        kattri_settings::HOME_SECTION_MY_MEDIA => ids::HOME_HEADING_MY_MEDIA,
-        kattri_settings::HOME_SECTION_COLLECTIONS => ids::HOME_HEADING_COLLECTIONS,
-        _ => ids::SETTINGS_GENERAL_HOME_SECTIONS,
+        kattri_settings::HOME_SECTION_CONTINUE_WATCHING => {
+            ui_text(ids::HOME_ROW_CONTINUE_WATCHING).to_owned()
+        }
+        kattri_settings::HOME_SECTION_NEXT_UP => ui_text(ids::HOME_ROW_NEXT_UP).to_owned(),
+        kattri_settings::HOME_SECTION_LATEST => ui_text(ids::HOME_ROW_LATEST).to_owned(),
+        kattri_settings::HOME_SECTION_MY_MEDIA => ui_text(ids::HOME_HEADING_MY_MEDIA).to_owned(),
+        kattri_settings::HOME_SECTION_COLLECTIONS => {
+            ui_text(ids::HOME_HEADING_COLLECTIONS).to_owned()
+        }
+        _ => ui_text(ids::SETTINGS_GENERAL_HOME_SECTIONS).to_owned(),
+    }
+}
+
+fn canonical_home_section(section: &str) -> Option<&'static str> {
+    match section {
+        kattri_settings::HOME_SECTION_CONTINUE_WATCHING => {
+            Some(kattri_settings::HOME_SECTION_CONTINUE_WATCHING)
+        }
+        kattri_settings::HOME_SECTION_NEXT_UP => Some(kattri_settings::HOME_SECTION_NEXT_UP),
+        kattri_settings::HOME_SECTION_LATEST => Some(kattri_settings::HOME_SECTION_LATEST),
+        kattri_settings::HOME_SECTION_MY_MEDIA => Some(kattri_settings::HOME_SECTION_MY_MEDIA),
+        kattri_settings::HOME_SECTION_COLLECTIONS => {
+            Some(kattri_settings::HOME_SECTION_COLLECTIONS)
+        }
+        _ => None,
     }
 }
 
 fn normalized_home_section_order(order: &[String]) -> Vec<String> {
     let mut normalized = Vec::with_capacity(kattri_settings::DEFAULT_HOME_SECTION_ORDER.len());
     for section in order {
-        if kattri_settings::DEFAULT_HOME_SECTION_ORDER.contains(&section.as_str())
-            && !normalized.iter().any(|existing| existing == section)
+        if let Some(canonical) = canonical_home_section(section)
+            && !normalized.iter().any(|existing| existing == canonical)
         {
-            normalized.push(section.clone());
+            normalized.push(canonical.to_owned());
         }
     }
     for section in kattri_settings::DEFAULT_HOME_SECTION_ORDER {
@@ -944,31 +1015,37 @@ fn normalized_home_section_order(order: &[String]) -> Vec<String> {
 }
 
 fn move_home_section(order: &mut Vec<String>, section: &str, direction: isize) {
-    for default in kattri_settings::DEFAULT_HOME_SECTION_ORDER {
-        if !order.iter().any(|existing| existing == default) {
-            order.push(default.to_owned());
+    let mut normalized = Vec::with_capacity(kattri_settings::DEFAULT_HOME_SECTION_ORDER.len());
+    for existing in order
+        .iter()
+        .filter_map(|value| canonical_home_section(value))
+    {
+        if !normalized.iter().any(|known| known == existing) {
+            normalized.push(existing.to_owned());
         }
     }
-    let normalized = normalized_home_section_order(order);
+    for default in kattri_settings::DEFAULT_HOME_SECTION_ORDER {
+        if !normalized.iter().any(|known| known == default) {
+            normalized.push(default.to_owned());
+        }
+    }
     let Some(current_index) = normalized.iter().position(|existing| *existing == section) else {
         return;
     };
     let Some(neighbor) = current_index.checked_add_signed(direction) else {
         return;
     };
-    let Some(neighbor_section) = normalized.get(neighbor) else {
+    if neighbor >= normalized.len() {
         return;
-    };
-    let Some(current_position) = order.iter().position(|existing| existing == section) else {
-        return;
-    };
-    let Some(neighbor_position) = order
-        .iter()
-        .position(|existing| existing == neighbor_section)
-    else {
-        return;
-    };
-    order.swap(current_position, neighbor_position);
+    }
+    normalized.swap(current_index, neighbor);
+    normalized.extend(
+        order
+            .iter()
+            .filter(|existing| canonical_home_section(existing).is_none())
+            .cloned(),
+    );
+    *order = normalized;
 }
 
 /// Local crash reports (M4-21). Off by default. The hook reads this switch at startup only.
@@ -1380,11 +1457,13 @@ mod tests {
             "latest".to_owned(),
             "latest".to_owned(),
             "future_row".to_owned(),
+            kattri_settings::HOME_SECTION_CONTINUE_WATCHING.to_owned(),
+            kattri_settings::HOME_SECTION_NEXT_UP.to_owned(),
         ]);
         assert_eq!(
             order,
             vec![
-                "latest".to_owned(),
+                kattri_settings::HOME_SECTION_LATEST.to_owned(),
                 kattri_settings::HOME_SECTION_CONTINUE_WATCHING.to_owned(),
                 kattri_settings::HOME_SECTION_NEXT_UP.to_owned(),
                 kattri_settings::HOME_SECTION_MY_MEDIA.to_owned(),
@@ -1424,6 +1503,29 @@ mod tests {
 
         move_home_section(&mut order, "future_row", -1);
         assert_eq!(order, before, "an unknown section is ignored");
+
+        let mut legacy = vec![
+            kattri_settings::HOME_SECTION_CONTINUE_WATCHING.to_owned(),
+            "future_row".to_owned(),
+            kattri_settings::HOME_SECTION_NEXT_UP.to_owned(),
+            kattri_settings::HOME_SECTION_LATEST.to_owned(),
+        ];
+        move_home_section(
+            &mut legacy,
+            kattri_settings::HOME_SECTION_CONTINUE_WATCHING,
+            1,
+        );
+        assert_eq!(
+            legacy,
+            vec![
+                kattri_settings::HOME_SECTION_NEXT_UP.to_owned(),
+                kattri_settings::HOME_SECTION_CONTINUE_WATCHING.to_owned(),
+                kattri_settings::HOME_SECTION_LATEST.to_owned(),
+                kattri_settings::HOME_SECTION_MY_MEDIA.to_owned(),
+                kattri_settings::HOME_SECTION_COLLECTIONS.to_owned(),
+                "future_row".to_owned(),
+            ]
+        );
     }
 
     #[test]

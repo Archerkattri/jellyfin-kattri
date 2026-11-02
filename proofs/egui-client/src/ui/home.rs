@@ -5,6 +5,8 @@
 //! [`HomeAction`]; the caller applies it after drawing, so no app borrow is held
 //! while the frame is built.
 
+use std::collections::BTreeSet;
+
 use super::{ui_text, ui_text_args};
 use egui::{CornerRadius, RichText, Stroke, load::SizedTexture};
 use jellyfin_api::{BaseItemDto, UserView};
@@ -31,9 +33,11 @@ pub enum RowStatus {
 }
 
 /// One home-screen item with the derived text and progress the card shows.
+#[derive(Clone)]
 pub struct HomeCard {
     pub media: MediaItem,
     pub subtitle: Option<String>,
+    pub series_name: Option<String>,
     pub progress: Option<f32>,
     /// The server's `OfficialRating`, used by the profile rating ceiling.
     pub official_rating: Option<String>,
@@ -150,6 +154,7 @@ impl HomeSection {
 pub struct HomeSections {
     pub continue_watching: bool,
     pub next_up: bool,
+    pub combine_continue_next_up: bool,
     pub latest: bool,
     pub my_media: bool,
     pub collections: bool,
@@ -161,6 +166,7 @@ impl Default for HomeSections {
         Self {
             continue_watching: true,
             next_up: true,
+            combine_continue_next_up: false,
             latest: true,
             my_media: true,
             collections: true,
@@ -174,6 +180,7 @@ impl HomeSections {
         Self {
             continue_watching: general.home_continue_watching,
             next_up: general.home_next_up,
+            combine_continue_next_up: general.home_combine_continue_next_up,
             latest: general.home_latest,
             my_media: general.home_my_media,
             collections: general.home_collections,
@@ -204,6 +211,21 @@ impl HomeSections {
         }
     }
 
+    pub fn shows_continue_next_up(self) -> bool {
+        self.continue_watching || self.next_up
+    }
+
+    fn combined_row_slot(self) -> Option<HomeSection> {
+        if !self.combine_continue_next_up {
+            return None;
+        }
+        self.order.iter().copied().find(|section| match section {
+            HomeSection::ContinueWatching => self.continue_watching,
+            HomeSection::NextUp => self.next_up,
+            HomeSection::Latest | HomeSection::MyMedia | HomeSection::Collections => false,
+        })
+    }
+
     pub fn shows_catalog(self, kind: HomeCatalogKind) -> bool {
         match kind {
             HomeCatalogKind::Libraries => self.my_media,
@@ -217,6 +239,8 @@ pub struct HomeState {
     /// The sections drawn; hidden ones are neither drawn nor loaded.
     pub sections: HomeSections,
     rows: [HomeRowState; 3],
+    suppressed_series_ids: BTreeSet<String>,
+    can_hide_series: bool,
     hero: HeroBanner,
     libraries_status: RowStatus,
     libraries_request_id: u64,
@@ -232,6 +256,8 @@ impl Default for HomeState {
         Self {
             sections: HomeSections::default(),
             rows: HomeRowKind::ALL.map(HomeRowState::new),
+            suppressed_series_ids: BTreeSet::new(),
+            can_hide_series: false,
             hero: HeroBanner::default(),
             libraries_status: RowStatus::Idle,
             libraries_request_id: 0,
@@ -251,6 +277,8 @@ pub enum HomeAction {
     Select(String),
     /// Start playing this item now (resuming where it was left).
     Play(String),
+    /// Hide a series from the Home episode shelf(s) for this server and profile.
+    HideSeries(String),
     /// Reload all three rows.
     Refresh,
     /// Reload one row after a failure.
@@ -270,6 +298,82 @@ impl HomeState {
 
     fn row_mut(&mut self, kind: HomeRowKind) -> &mut HomeRowState {
         &mut self.rows[row_index(kind)]
+    }
+
+    /// Applies only GUIDs from the current server/profile scope. Missing identity disables hide.
+    pub fn set_series_suppressions(
+        &mut self,
+        can_hide_series: bool,
+        series_ids: impl IntoIterator<Item = String>,
+    ) {
+        self.can_hide_series = can_hide_series;
+        self.suppressed_series_ids = if can_hide_series {
+            series_ids
+                .into_iter()
+                .filter_map(|id| canonical_guid(&id))
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+    }
+
+    fn combined_cards(&self) -> Vec<&HomeCard> {
+        combined_home_cards(
+            &self.rows[row_index(HomeRowKind::ContinueWatching)].cards,
+            &self.rows[row_index(HomeRowKind::NextUp)].cards,
+            self.sections.continue_watching,
+            self.sections.next_up,
+            &self.suppressed_series_ids,
+        )
+    }
+
+    fn hero_card(&self) -> Option<&HomeCard> {
+        let combined_slot = self.sections.combined_row_slot();
+        for section in self.sections.order {
+            if combined_slot == Some(section) {
+                if let Some(card) = self.combined_cards().first().copied() {
+                    return Some(card);
+                }
+                continue;
+            }
+            let card = match section {
+                HomeSection::ContinueWatching
+                    if !self.sections.combine_continue_next_up
+                        && self.sections.continue_watching =>
+                {
+                    visible_row_cards(
+                        HomeRowKind::ContinueWatching,
+                        &self.rows[row_index(HomeRowKind::ContinueWatching)].cards,
+                        &self.suppressed_series_ids,
+                    )
+                    .into_iter()
+                    .next()
+                }
+                HomeSection::NextUp
+                    if !self.sections.combine_continue_next_up && self.sections.next_up =>
+                {
+                    visible_row_cards(
+                        HomeRowKind::NextUp,
+                        &self.rows[row_index(HomeRowKind::NextUp)].cards,
+                        &self.suppressed_series_ids,
+                    )
+                    .into_iter()
+                    .next()
+                }
+                HomeSection::Latest if self.sections.latest => {
+                    self.rows[row_index(HomeRowKind::Latest)].cards.first()
+                }
+                HomeSection::ContinueWatching
+                | HomeSection::NextUp
+                | HomeSection::Latest
+                | HomeSection::MyMedia
+                | HomeSection::Collections => None,
+            };
+            if card.is_some() {
+                return card;
+            }
+        }
+        None
     }
 
     /// Marks a row as loading under `request_id`; only the matching response is applied.
@@ -450,22 +554,73 @@ impl HomeState {
 impl HomeState {
     /// Id of the item the hero shows, so the app can fetch its backdrop.
     pub fn hero_item_id(&self) -> Option<String> {
-        hero_card(&self.rows).map(|card| card.media.backdrop_id.clone())
+        self.hero_card().map(|card| card.media.backdrop_id.clone())
     }
 
     pub fn hero_artwork(&self) -> Option<egui::load::SizedTexture> {
-        hero_card(&self.rows)
-            .map(card_view)
-            .and_then(|card| card.image)
+        self.hero_card().map(card_view).and_then(|card| card.image)
     }
 }
 
-/// The hero shows the first Continue Watching item, else the first Latest item.
-fn hero_card(rows: &[HomeRowState; 3]) -> Option<&HomeCard> {
-    rows[row_index(HomeRowKind::ContinueWatching)]
-        .cards
-        .first()
-        .or_else(|| rows[row_index(HomeRowKind::Latest)].cards.first())
+/// Builds the combined shelf in source order, keeping the first item for each item and series.
+fn combined_home_cards<'a>(
+    continue_watching: &'a [HomeCard],
+    next_up: &'a [HomeCard],
+    include_continue_watching: bool,
+    include_next_up: bool,
+    suppressed_series_ids: &BTreeSet<String>,
+) -> Vec<&'a HomeCard> {
+    let mut item_ids = BTreeSet::new();
+    let mut series_ids = BTreeSet::new();
+    let mut combined = Vec::new();
+    for card in continue_watching
+        .iter()
+        .filter(|_| include_continue_watching)
+        .chain(next_up.iter().filter(|_| include_next_up))
+    {
+        let series_id = card.media.series_id.as_deref().and_then(canonical_guid);
+        if card_is_suppressed(card, suppressed_series_ids) {
+            continue;
+        }
+        let item_id = canonical_guid(&card.media.id).unwrap_or_else(|| card.media.id.clone());
+        if !item_ids.insert(item_id) {
+            continue;
+        }
+        if let Some(series_id) = series_id
+            && !series_ids.insert(series_id)
+        {
+            continue;
+        }
+        combined.push(card);
+    }
+    combined
+}
+
+fn card_is_suppressed(card: &HomeCard, suppressed_series_ids: &BTreeSet<String>) -> bool {
+    card.media
+        .series_id
+        .as_deref()
+        .and_then(canonical_guid)
+        .is_some_and(|series_id| suppressed_series_ids.contains(&series_id))
+}
+
+fn visible_row_cards<'a>(
+    kind: HomeRowKind,
+    cards: &'a [HomeCard],
+    suppressed_series_ids: &BTreeSet<String>,
+) -> Vec<&'a HomeCard> {
+    cards
+        .iter()
+        .filter(|card| {
+            !matches!(kind, HomeRowKind::ContinueWatching | HomeRowKind::NextUp)
+                || !card_is_suppressed(card, suppressed_series_ids)
+        })
+        .collect()
+}
+
+fn canonical_guid(raw: &str) -> Option<String> {
+    let id = uuid::Uuid::parse_str(raw).ok()?;
+    (!id.is_nil()).then(|| id.to_string())
 }
 
 fn row_index(kind: HomeRowKind) -> usize {
@@ -511,11 +666,113 @@ pub fn card_from_item(item: BaseItemDto) -> HomeCard {
         item.production_year,
     );
     let official_rating = item.official_rating.clone();
+    let series_name = item.series_name.clone();
     HomeCard {
         media: MediaItem::from_api(item),
         subtitle,
+        series_name,
         progress,
         official_rating,
+    }
+}
+
+fn combined_home_title(sections: HomeSections) -> String {
+    match (sections.continue_watching, sections.next_up) {
+        (true, true) => format!(
+            "{} + {}",
+            ui_text(ids::HOME_ROW_CONTINUE_WATCHING),
+            ui_text(ids::HOME_ROW_NEXT_UP)
+        ),
+        (true, false) => ui_text(ids::HOME_ROW_CONTINUE_WATCHING).to_owned(),
+        (false, true) => ui_text(ids::HOME_ROW_NEXT_UP).to_owned(),
+        (false, false) => String::new(),
+    }
+}
+
+fn series_hide_choices<'a>(
+    cards: impl IntoIterator<Item = &'a HomeCard>,
+    suppressed_series_ids: &BTreeSet<String>,
+) -> Vec<(String, String)> {
+    let mut seen = BTreeSet::new();
+    cards
+        .into_iter()
+        .filter_map(|card| {
+            let id = canonical_guid(card.media.series_id.as_deref()?)?;
+            if suppressed_series_ids.contains(&id) || !seen.insert(id.clone()) {
+                return None;
+            }
+            let label = card
+                .series_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or("Series")
+                .to_owned();
+            Some((id, label))
+        })
+        .collect()
+}
+
+fn render_series_hide_menu<'a>(
+    ui: &mut egui::Ui,
+    cards: impl IntoIterator<Item = &'a HomeCard>,
+    suppressed_series_ids: &BTreeSet<String>,
+    can_hide_series: bool,
+    action: &mut Option<HomeAction>,
+) {
+    if !can_hide_series {
+        return;
+    }
+    let choices = series_hide_choices(cards, suppressed_series_ids);
+    if choices.is_empty() {
+        return;
+    }
+    ui.menu_button("Hide a series from this row", |ui| {
+        for (series_id, label) in &choices {
+            if ui
+                .button(format!("Hide {label} ({})", &series_id[..8]))
+                .clicked()
+            {
+                *action = Some(HomeAction::HideSeries(series_id.clone()));
+                ui.close();
+            }
+        }
+    });
+}
+
+fn render_combined_source_status(
+    ui: &mut egui::Ui,
+    kind: HomeRowKind,
+    status: &RowStatus,
+    colors: Palette,
+    action: &mut Option<HomeAction>,
+) {
+    let title = title_for(kind);
+    match status {
+        RowStatus::Loading => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    RichText::new(ui_text(ids::HOME_STATUS_REFRESHING))
+                        .size(11.0)
+                        .color(colors.muted),
+                );
+            });
+        }
+        RowStatus::Failed(message) => {
+            failure_line(ui, title, message, colors);
+            if ui
+                .button(ui_text_args(
+                    ids::HOME_BUTTON_RETRY_TITLE,
+                    &[("title", title)],
+                ))
+                .clicked()
+                && action.is_none()
+            {
+                *action = Some(HomeAction::Retry(kind));
+            }
+        }
+        RowStatus::Idle | RowStatus::Ready => {}
     }
 }
 
@@ -598,10 +855,18 @@ pub(super) fn show(
     hero_backdrop: Option<SizedTexture>,
 ) -> Option<HomeAction> {
     let mut action = None;
+    let suppressed_series_ids = state.suppressed_series_ids.clone();
+    let can_hide_series = state.can_hide_series;
+    let sections = state.sections;
+    let combined_cards: Vec<HomeCard> = if sections.combine_continue_next_up {
+        state.combined_cards().into_iter().cloned().collect()
+    } else {
+        Vec::new()
+    };
+    let hero_card = state.hero_card().cloned();
     let library_tiles = state.my_media_tiles();
     let library_empty_message = state.my_media_empty_message();
     let show_collections = state.collections_are_visible();
-    let sections = state.sections;
     let HomeState {
         rows,
         hero,
@@ -613,7 +878,7 @@ pub(super) fn show(
         ..
     } = state;
 
-    if let Some(card) = hero_card(rows) {
+    if let Some(card) = hero_card.as_ref() {
         let overview = card
             .media
             .overview
@@ -649,9 +914,17 @@ pub(super) fn show(
             {
                 let kind = row.kind;
                 let title = title_for(kind);
+                let visible_cards = visible_row_cards(kind, &row.cards, &suppressed_series_ids);
+                if matches!(kind, HomeRowKind::ContinueWatching | HomeRowKind::NextUp)
+                    && !row.cards.is_empty()
+                    && visible_cards.is_empty()
+                    && row.status == RowStatus::Ready
+                {
+                    continue;
+                }
                 ui.add_space(26.0);
 
-                if row.cards.is_empty() {
+                if visible_cards.is_empty() {
                     ui.label(RichText::new(title).size(22.0).color(colors.text));
                     ui.add_space(8.0);
                     match &row.status {
@@ -686,7 +959,8 @@ pub(super) fn show(
                     continue;
                 }
 
-                let cards: Vec<RowCard> = row.cards.iter().map(card_view).collect();
+                let cards: Vec<RowCard> =
+                    visible_cards.iter().map(|card| card_view(card)).collect();
                 let options = RowOptions {
                     card_width: if kind == HomeRowKind::Latest {
                         190.0
@@ -702,11 +976,14 @@ pub(super) fn show(
                     ..RowOptions::default()
                 };
                 let response = row.poster.show(ui, title, &cards, &options);
-                if let Some(card) = response.menu_card.and_then(|index| row.cards.get(index)) {
+                if let Some(card) = response
+                    .menu_card
+                    .and_then(|index| visible_cards.get(index).copied())
+                {
                     super::item_menu::attach(&response.focus_response, &card.media);
                 }
                 let focus_row = $focus_row;
-                for (index, card) in row.cards.iter().enumerate() {
+                for (index, card) in visible_cards.iter().enumerate() {
                     let focus_response = response.focus_response.clone();
                     focus_entries.push(CardFocus {
                         row: focus_row,
@@ -719,14 +996,14 @@ pub(super) fn show(
                     });
                 }
                 for index in response.visible.clone() {
-                    if let Some(card) = row.cards.get(index)
+                    if let Some(card) = visible_cards.get(index)
                         && let Some(tag) = card.media.primary_image_tag.as_deref()
                     {
                         visible_artwork.push((card.media.artwork_id.clone(), tag.to_owned()));
                     }
                 }
                 if let Some(index) = response.activated
-                    && let Some(card) = row.cards.get(index)
+                    && let Some(card) = visible_cards.get(index)
                 {
                     action = action.or_else(|| Some(HomeAction::Select(card.media.id.clone())));
                 }
@@ -755,6 +1032,15 @@ pub(super) fn show(
                         }
                     }
                     RowStatus::Idle | RowStatus::Ready => {}
+                }
+                if matches!(kind, HomeRowKind::ContinueWatching | HomeRowKind::NextUp) {
+                    render_series_hide_menu(
+                        ui,
+                        visible_cards.iter().copied(),
+                        &suppressed_series_ids,
+                        can_hide_series,
+                        &mut action,
+                    );
                 }
             }
         }};
@@ -842,6 +1128,130 @@ pub(super) fn show(
                         {
                             action = action
                                 .or(Some(HomeAction::RetryCatalog(HomeCatalogKind::Libraries)));
+                        }
+                    }
+                }
+            }
+        }};
+    }
+
+    macro_rules! render_continue_next_up {
+        ($focus_row:expr) => {{
+            if sections.shows_continue_next_up() {
+                let title = combined_home_title(sections);
+                let active_kinds: Vec<HomeRowKind> = [
+                    (HomeRowKind::ContinueWatching, sections.continue_watching),
+                    (HomeRowKind::NextUp, sections.next_up),
+                ]
+                .into_iter()
+                .filter_map(|(kind, enabled)| enabled.then_some(kind))
+                .collect();
+                let active_statuses: Vec<(HomeRowKind, RowStatus)> = active_kinds
+                    .iter()
+                    .map(|kind| (*kind, rows[row_index(*kind)].status.clone()))
+                    .collect();
+
+                if !combined_cards.is_empty() {
+                    let cards: Vec<RowCard> = combined_cards.iter().map(card_view).collect();
+                    ui.add_space(26.0);
+                    let response = rows[row_index(HomeRowKind::ContinueWatching)].poster.show(
+                        ui,
+                        &title,
+                        &cards,
+                        &RowOptions {
+                            card_width: 216.0,
+                            image_aspect: 2.0 / 3.0,
+                            palette: colors,
+                            ..RowOptions::default()
+                        },
+                    );
+                    if let Some(card) = response
+                        .menu_card
+                        .and_then(|index| combined_cards.get(index))
+                    {
+                        super::item_menu::attach(&response.focus_response, &card.media);
+                    }
+                    for (index, card) in combined_cards.iter().enumerate() {
+                        let focus_response = response.focus_response.clone();
+                        focus_entries.push(CardFocus {
+                            row: $focus_row,
+                            id: FocusId::new(format!(
+                                "home:row:continue_next_up:{}",
+                                card.media.id
+                            )),
+                            center_x: response.card_centers[index],
+                            focused: focus_response.has_focus() && response.focused == Some(index),
+                            response: focus_response,
+                            home_poster: Some((
+                                HomePosterGroup::Row(HomeRowKind::ContinueWatching),
+                                index,
+                            )),
+                            selection: HomeAction::Select(card.media.id.clone()),
+                        });
+                    }
+                    for index in response.visible.clone() {
+                        if let Some(card) = combined_cards.get(index)
+                            && let Some(tag) = card.media.primary_image_tag.as_deref()
+                        {
+                            visible_artwork.push((card.media.artwork_id.clone(), tag.to_owned()));
+                        }
+                    }
+                    if let Some(index) = response.activated
+                        && let Some(card) = combined_cards.get(index)
+                    {
+                        action = action.or_else(|| Some(HomeAction::Select(card.media.id.clone())));
+                    }
+
+                    for (kind, status) in &active_statuses {
+                        render_combined_source_status(ui, *kind, status, colors, &mut action);
+                    }
+
+                    render_series_hide_menu(
+                        ui,
+                        combined_cards.iter(),
+                        &suppressed_series_ids,
+                        can_hide_series,
+                        &mut action,
+                    );
+                } else {
+                    let mut laid_out = false;
+                    for (kind, status) in &active_statuses {
+                        match status {
+                            RowStatus::Idle | RowStatus::Loading => {
+                                if !laid_out {
+                                    ui.add_space(26.0);
+                                }
+                                ui.label(RichText::new(&title).size(22.0).color(colors.text));
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(
+                                        RichText::new(ui_text_args(
+                                            ids::HOME_STATUS_LOADING_TITLE,
+                                            &[("title", title.as_str())],
+                                        ))
+                                        .color(colors.muted),
+                                    );
+                                });
+                                break;
+                            }
+                            RowStatus::Failed(message) => {
+                                if !laid_out {
+                                    ui.add_space(26.0);
+                                    laid_out = true;
+                                }
+                                let source_title = title_for(*kind);
+                                failure_line(ui, source_title, message, colors);
+                                if ui
+                                    .button(ui_text_args(
+                                        ids::HOME_BUTTON_RETRY_TITLE,
+                                        &[("title", source_title)],
+                                    ))
+                                    .clicked()
+                                {
+                                    action = action.or(Some(HomeAction::Retry(*kind)));
+                                }
+                            }
+                            RowStatus::Ready => {}
                         }
                     }
                 }
@@ -941,8 +1351,19 @@ pub(super) fn show(
         }};
     }
 
+    let combined_row_slot = sections.combined_row_slot();
     for (section_index, section) in sections.order.iter().enumerate() {
         match section {
+            HomeSection::ContinueWatching if sections.combine_continue_next_up => {
+                if combined_row_slot == Some(HomeSection::ContinueWatching) {
+                    render_continue_next_up!(section_index);
+                }
+            }
+            HomeSection::NextUp if sections.combine_continue_next_up => {
+                if combined_row_slot == Some(HomeSection::NextUp) {
+                    render_continue_next_up!(section_index);
+                }
+            }
             HomeSection::ContinueWatching => {
                 render_row!(HomeRowKind::ContinueWatching, section_index)
             }
@@ -990,6 +1411,18 @@ mod tests {
         card_from_item(item(json!({ "Id": id, "Name": format!("Title {id}") })))
     }
 
+    fn episode(id: &str, series_id: &str, series_name: &str) -> HomeCard {
+        card_from_item(item(json!({
+            "Id": id,
+            "Name": format!("Episode {id}"),
+            "Type": "Episode",
+            "SeriesId": series_id,
+            "SeriesName": series_name,
+            "RunTimeTicks": 1200,
+            "UserData": { "PlaybackPositionTicks": 300 },
+        })))
+    }
+
     #[test]
     fn hidden_home_sections_are_not_loaded() {
         let mut state = HomeState {
@@ -1023,6 +1456,7 @@ mod tests {
         general.home_section_order = vec![
             kattri_settings::HOME_SECTION_COLLECTIONS.to_owned(),
             "future_row".to_owned(),
+            kattri_settings::HOME_SECTION_NEXT_UP.to_owned(),
             kattri_settings::HOME_SECTION_CONTINUE_WATCHING.to_owned(),
             kattri_settings::HOME_SECTION_COLLECTIONS.to_owned(),
         ];
@@ -1031,12 +1465,202 @@ mod tests {
             sections.order,
             [
                 HomeSection::Collections,
-                HomeSection::ContinueWatching,
                 HomeSection::NextUp,
+                HomeSection::ContinueWatching,
                 HomeSection::Latest,
                 HomeSection::MyMedia,
             ],
-            "saved order first, unknown and duplicate ids dropped, the rest in default order"
+            "the existing source ids keep their independent order slots"
+        );
+        assert!(!sections.combine_continue_next_up);
+        assert_eq!(sections.combined_row_slot(), None);
+
+        general.home_combine_continue_next_up = true;
+        assert_eq!(
+            HomeSections::from_settings(&general).combined_row_slot(),
+            Some(HomeSection::NextUp),
+            "the combined row occupies the earliest enabled source slot"
+        );
+
+        general.home_continue_watching = false;
+        general.home_next_up = true;
+        general.home_combine_continue_next_up = false;
+        let sections = HomeSections::from_settings(&general);
+        assert!(sections.shows_continue_next_up());
+        assert!(!sections.shows_row(HomeRowKind::ContinueWatching));
+        assert!(sections.shows_row(HomeRowKind::NextUp));
+        assert_eq!(sections.combined_row_slot(), None);
+
+        general.home_combine_continue_next_up = true;
+        let sections = HomeSections::from_settings(&general);
+        assert_eq!(sections.combined_row_slot(), Some(HomeSection::NextUp));
+
+        general.home_next_up = false;
+        let sections = HomeSections::from_settings(&general);
+        assert!(!sections.shows_continue_next_up());
+        assert_eq!(sections.combined_row_slot(), None);
+
+        general.home_continue_watching = true;
+        assert_eq!(
+            HomeSections::from_settings(&general).combined_row_slot(),
+            Some(HomeSection::ContinueWatching)
+        );
+    }
+
+    #[test]
+    fn combined_home_cards_keep_continue_watching_first_and_deduplicate_items_and_series() {
+        let series_one = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let series_two = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let continue_watching = vec![
+            episode("resume-1", series_one, "First Show"),
+            card("movie-1"),
+        ];
+        let next_up = vec![
+            episode("resume-1", series_one, "First Show"),
+            episode("next-1", series_one, "First Show"),
+            episode("next-2", series_two, "Second Show"),
+        ];
+        let hidden = BTreeSet::new();
+
+        let ids: Vec<_> = combined_home_cards(&continue_watching, &next_up, true, true, &hidden)
+            .into_iter()
+            .map(|card| card.media.id.as_str())
+            .collect();
+        assert_eq!(ids, ["resume-1", "movie-1", "next-2"]);
+        let resumed = combined_home_cards(&continue_watching, &next_up, true, true, &hidden);
+        assert_eq!(resumed[0].progress, Some(0.25));
+
+        let repeated_ids: Vec<_> =
+            combined_home_cards(&continue_watching, &next_up, true, true, &hidden)
+                .into_iter()
+                .map(|card| card.media.id.as_str())
+                .collect();
+        assert_eq!(
+            repeated_ids, ids,
+            "source order and first-item precedence are stable"
+        );
+    }
+
+    #[test]
+    fn combined_home_cards_obey_source_visibility_and_hide_only_the_scoped_series() {
+        let series_one = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let series_two = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let continue_watching = vec![card("movie-1"), episode("resume-1", series_one, "Show")];
+        let next_up = vec![episode("next-2", series_two, "Hidden Show")];
+        let hidden = [canonical_guid(series_two).expect("valid GUID")]
+            .into_iter()
+            .collect();
+
+        let visible = combined_home_cards(&continue_watching, &next_up, false, true, &hidden);
+        assert!(visible.is_empty());
+
+        let visible = combined_home_cards(&continue_watching, &next_up, true, false, &hidden);
+        assert_eq!(
+            visible
+                .iter()
+                .map(|card| card.media.id.as_str())
+                .collect::<Vec<_>>(),
+            ["movie-1", "resume-1"]
+        );
+    }
+
+    #[test]
+    fn separate_shelves_filter_the_same_scoped_series_and_preserve_other_items() {
+        let hidden_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let visible_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let hidden = [canonical_guid(hidden_id).expect("valid GUID")]
+            .into_iter()
+            .collect();
+        let continue_watching = vec![
+            episode("hidden-resume", hidden_id, "Hidden Show"),
+            episode("visible-resume", visible_id, "Visible Show"),
+            card("movie"),
+        ];
+        let next_up = vec![
+            episode("hidden-next", hidden_id, "Hidden Show"),
+            episode("visible-next", visible_id, "Visible Show"),
+        ];
+
+        for (kind, cards, expected) in [
+            (
+                HomeRowKind::ContinueWatching,
+                continue_watching.as_slice(),
+                vec!["visible-resume", "movie"],
+            ),
+            (
+                HomeRowKind::NextUp,
+                next_up.as_slice(),
+                vec!["visible-next"],
+            ),
+        ] {
+            assert_eq!(
+                visible_row_cards(kind, cards, &hidden)
+                    .into_iter()
+                    .map(|card| card.media.id.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn hero_follows_visible_order_and_combined_shelf_first_card() {
+        let hidden_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let next_up_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let continue_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        let mut state = HomeState::default();
+        state.sections.order = [
+            HomeSection::NextUp,
+            HomeSection::ContinueWatching,
+            HomeSection::Latest,
+            HomeSection::MyMedia,
+            HomeSection::Collections,
+        ];
+        state.set_series_suppressions(true, vec![hidden_id.to_owned()]);
+        state.begin_load(HomeRowKind::ContinueWatching, 1);
+        state.apply_items(
+            HomeRowKind::ContinueWatching,
+            1,
+            vec![episode("resume", continue_id, "Continue Show")],
+        );
+        state.begin_load(HomeRowKind::NextUp, 2);
+        state.apply_items(
+            HomeRowKind::NextUp,
+            2,
+            vec![
+                episode("hidden", hidden_id, "Hidden Show"),
+                episode("next", next_up_id, "Next Show"),
+            ],
+        );
+
+        assert_eq!(
+            state.hero_card().map(|card| card.media.id.as_str()),
+            Some("next")
+        );
+
+        state.sections.combine_continue_next_up = true;
+        assert_eq!(
+            state.sections.combined_row_slot(),
+            Some(HomeSection::NextUp)
+        );
+        assert_eq!(
+            state.hero_card().map(|card| card.media.id.as_str()),
+            Some("resume"),
+            "the combined hero follows the combined shelf's Continue Watching-first order"
+        );
+    }
+
+    #[test]
+    fn combined_episode_navigation_keeps_the_episode_id() {
+        let next_up = vec![episode(
+            "episode-42",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "Show",
+        )];
+        let selected = combined_home_cards(&[], &next_up, false, true, &BTreeSet::new());
+        assert_eq!(
+            HomeAction::Select(selected[0].media.id.clone()),
+            HomeAction::Select("episode-42".to_owned())
         );
     }
 
@@ -1388,20 +2012,63 @@ mod tests {
     #[test]
     fn hero_prefers_continue_watching_then_latest() {
         let mut state = HomeState::default();
-        assert!(hero_card(&state.rows).is_none());
+        assert!(state.hero_item_id().is_none());
 
         state.begin_load(HomeRowKind::Latest, 1);
         state.apply_items(HomeRowKind::Latest, 1, vec![card("latest")]);
-        assert_eq!(
-            hero_card(&state.rows).map(|c| c.media.id.as_str()),
-            Some("latest")
-        );
+        assert_eq!(state.hero_item_id().as_deref(), Some("latest"));
 
         state.begin_load(HomeRowKind::ContinueWatching, 2);
         state.apply_items(HomeRowKind::ContinueWatching, 2, vec![card("resume")]);
+        assert_eq!(state.hero_item_id().as_deref(), Some("resume"));
+    }
+
+    #[test]
+    fn hero_skips_disabled_and_suppressed_sources_before_later_visible_rows() {
+        let next_up_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let continue_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let mut state = HomeState::default();
+        state.sections.order = [
+            HomeSection::NextUp,
+            HomeSection::ContinueWatching,
+            HomeSection::Latest,
+            HomeSection::MyMedia,
+            HomeSection::Collections,
+        ];
+        state.begin_load(HomeRowKind::NextUp, 1);
+        state.apply_items(
+            HomeRowKind::NextUp,
+            1,
+            vec![episode("next", next_up_id, "Next Show")],
+        );
+        state.begin_load(HomeRowKind::ContinueWatching, 2);
+        state.apply_items(
+            HomeRowKind::ContinueWatching,
+            2,
+            vec![episode("resume", continue_id, "Continue Show")],
+        );
+        state.begin_load(HomeRowKind::Latest, 3);
+        state.apply_items(HomeRowKind::Latest, 3, vec![card("latest")]);
+
+        state.sections.next_up = false;
         assert_eq!(
-            hero_card(&state.rows).map(|c| c.media.id.as_str()),
-            Some("resume")
+            state.hero_card().map(|card| card.media.id.as_str()),
+            Some("resume"),
+            "a disabled first source cannot drive the hero"
+        );
+
+        state.sections.next_up = true;
+        state.set_series_suppressions(true, vec![next_up_id.to_owned()]);
+        assert_eq!(
+            state.hero_card().map(|card| card.media.id.as_str()),
+            Some("resume"),
+            "a suppressed first row falls through to the next enabled row"
+        );
+
+        state.set_series_suppressions(true, vec![next_up_id.to_owned(), continue_id.to_owned()]);
+        assert_eq!(
+            state.hero_card().map(|card| card.media.id.as_str()),
+            Some("latest")
         );
     }
 

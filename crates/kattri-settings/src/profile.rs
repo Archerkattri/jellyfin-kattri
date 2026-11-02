@@ -23,7 +23,7 @@
 //! - No file locking. Two processes writing the same index: last writer wins (M2-01).
 
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,7 +33,7 @@ use toml::{Table, Value};
 use crate::error::SettingsError;
 use crate::migrate::SCHEMA_VERSION_KEY;
 use crate::schema::Settings;
-use crate::store::{self, LoadWarning};
+use crate::store::{self, LoadWarning, MAX_SETTINGS_BYTES};
 
 /// Version of the profile index format written and accepted by this build.
 pub const PROFILE_INDEX_VERSION: u32 = 1;
@@ -361,9 +361,23 @@ impl ProfileStore {
                 name: new.to_owned(),
             });
         }
+        let settings_path = from.join(PROFILE_SETTINGS_FILE);
+        let settings_rebind = if from.exists() {
+            prepare_home_suppression_rebind(&settings_path, old, new)?
+        } else {
+            None
+        };
         let moved = from.exists();
         if moved {
             fs::rename(&from, &to)?;
+        }
+        if let Some(rebind) = &settings_rebind
+            && let Err(err) = write_atomic(&to.join(PROFILE_SETTINGS_FILE), &rebind.rewritten)
+        {
+            if moved {
+                let _ = fs::rename(&to, &from);
+            }
+            return Err(err.into());
         }
         let mut next = self.index.clone();
         next.profiles[pos] = new.to_owned();
@@ -374,6 +388,9 @@ impl ProfileStore {
             next.active = new.to_owned();
         }
         if let Err(err) = self.commit(next) {
+            if let Some(rebind) = &settings_rebind {
+                let _ = write_atomic(&to.join(PROFILE_SETTINGS_FILE), &rebind.original);
+            }
             if moved {
                 // Put the folder back so the index and the disk agree again.
                 let _ = fs::rename(&to, &from);
@@ -498,6 +515,82 @@ impl ProfileStore {
         fs::rename(from, &target)?;
         Ok(target)
     }
+}
+
+/// Prepare a bounded raw TOML edit without deserializing and reserializing `Settings`.
+/// The original bytes are retained so a later index-write failure can roll the edit back.
+struct HomeSuppressionRebind {
+    original: Vec<u8>,
+    rewritten: Vec<u8>,
+}
+
+fn prepare_home_suppression_rebind(
+    path: &Path,
+    old: &str,
+    new: &str,
+) -> Result<Option<HomeSuppressionRebind>, ProfileError> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let mut original = Vec::new();
+    file.take((MAX_SETTINGS_BYTES + 1) as u64)
+        .read_to_end(&mut original)?;
+    if original.len() > MAX_SETTINGS_BYTES {
+        return Err(SettingsError::TooLarge {
+            max_bytes: MAX_SETTINGS_BYTES,
+        }
+        .into());
+    }
+    let text = std::str::from_utf8(&original)
+        .map_err(|_| SettingsError::Syntax("settings file is not UTF-8".to_owned()))?;
+    let mut table: Table = text
+        .parse()
+        .map_err(|error: toml::de::Error| SettingsError::Syntax(error.to_string()))?;
+    let version = crate::migrate::read_version(&table)?;
+    if version > crate::schema::CURRENT_SCHEMA_VERSION {
+        return Err(SettingsError::FutureVersion {
+            found: version,
+            supported: crate::schema::CURRENT_SCHEMA_VERSION,
+        }
+        .into());
+    }
+    // Apply the same type and credential-key checks as normal settings loads before rewriting.
+    store::load_from_str_with_report(text)?;
+
+    let Some(Value::Array(records)) = table.get_mut("home_hidden_series") else {
+        return Ok(None);
+    };
+    let mut changed = false;
+    for record in records {
+        let Some(record) = record.as_table_mut() else {
+            continue;
+        };
+        if matches!(record.get("profile"), Some(Value::String(profile)) if profile == old) {
+            record.insert("profile".to_owned(), Value::String(new.to_owned()));
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(None);
+    }
+    let rewritten = toml::to_string(&Value::Table(table))
+        .map_err(SettingsError::Serialize)?
+        .into_bytes();
+    if rewritten.len() > MAX_SETTINGS_BYTES {
+        return Err(SettingsError::TooLarge {
+            max_bytes: MAX_SETTINGS_BYTES,
+        }
+        .into());
+    }
+    let rewritten_text = std::str::from_utf8(&rewritten)
+        .map_err(|_| SettingsError::Syntax("rewritten settings are not UTF-8".to_owned()))?;
+    store::load_from_str_with_report(rewritten_text)?;
+    Ok(Some(HomeSuppressionRebind {
+        original,
+        rewritten,
+    }))
 }
 
 /// Write `bytes` to `path` through a temporary file in the same folder: write, flush to disk,

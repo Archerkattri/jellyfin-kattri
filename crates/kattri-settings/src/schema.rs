@@ -43,6 +43,8 @@ pub struct Settings {
     pub admin: AdminSettings,
     /// Per-series language choices (M2-10), never track IDs or paths.
     pub series_languages: Vec<SeriesLanguageSetting>,
+    /// Local Home suppressions, scoped to one server, profile, and series GUID.
+    pub home_hidden_series: Vec<HomeSeriesSuppressionSetting>,
 }
 
 /// One validated persisted per-series language preference (M2-10).
@@ -57,8 +59,20 @@ pub struct SeriesLanguageSetting {
     pub subtitle_disabled: bool,
 }
 
+/// A locally hidden Home series. This stores identifiers only; titles and server URLs are not
+/// persisted here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HomeSeriesSuppressionSetting {
+    pub server_id: String,
+    pub profile: String,
+    pub series_id: String,
+}
+
 /// Maximum series-language records kept by the settings schema, matching client-core.
 pub const MAX_SERIES_LANGUAGE_ENTRIES: usize = 500;
+/// Maximum server/profile/series suppression records retained in one settings document.
+pub const MAX_HOME_SERIES_SUPPRESSIONS: usize = 500;
 
 /// Smallest allowed playback cache, in MiB (M2-06).
 ///
@@ -157,6 +171,7 @@ impl Default for Settings {
             parental: ParentalSettings::default(),
             admin: AdminSettings::default(),
             series_languages: Vec::new(),
+            home_hidden_series: Vec::new(),
         }
     }
 }
@@ -189,6 +204,8 @@ pub struct GeneralSettings {
     /// Home screen sections. Each is shown, and loaded, only when on.
     pub home_continue_watching: bool,
     pub home_next_up: bool,
+    /// Combine Continue Watching and Next Up into one row. Off by default for compatibility.
+    pub home_combine_continue_next_up: bool,
     pub home_latest: bool,
     pub home_my_media: bool,
     pub home_collections: bool,
@@ -214,6 +231,7 @@ impl Default for GeneralSettings {
             interface_size: InterfaceSize::Standard,
             home_continue_watching: true,
             home_next_up: true,
+            home_combine_continue_next_up: false,
             home_latest: true,
             home_my_media: true,
             home_collections: true,
@@ -393,6 +411,46 @@ impl Settings {
             }
         }
 
+        if self.home_hidden_series.len() > MAX_HOME_SERIES_SUPPRESSIONS {
+            return Err(invalid(
+                "home_hidden_series",
+                "must contain at most 500 entries",
+            ));
+        }
+        let mut suppression_scopes = BTreeSet::new();
+        for record in &self.home_hidden_series {
+            let Some(server_id) = canonical_guid_key(&record.server_id) else {
+                return Err(invalid(
+                    "home_hidden_series.server_id",
+                    "must be a non-zero Jellyfin GUID",
+                ));
+            };
+            let Some(series_id) = canonical_guid_key(&record.series_id) else {
+                return Err(invalid(
+                    "home_hidden_series.series_id",
+                    "must be a non-zero Jellyfin GUID",
+                ));
+            };
+            if record.profile.is_empty()
+                || record.profile.len() > 32
+                || !record
+                    .profile
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            {
+                return Err(invalid(
+                    "home_hidden_series.profile",
+                    "must be a profile identifier of at most 32 lowercase ASCII letters, digits, or hyphens",
+                ));
+            }
+            if !suppression_scopes.insert((server_id, record.profile.as_str(), series_id)) {
+                return Err(invalid(
+                    "home_hidden_series",
+                    "server, profile, and series scopes must be unique",
+                ));
+            }
+        }
+
         let speed = self.playback.default_speed;
         if !speed.is_finite() || !(0.25..=4.0).contains(&speed) {
             return Err(invalid(
@@ -484,6 +542,18 @@ fn valid_series_guid(raw: &str) -> bool {
     compact.len() == 32
         && compact.bytes().all(|byte| byte.is_ascii_hexdigit())
         && compact.bytes().any(|byte| byte != b'0')
+}
+
+fn canonical_guid_key(raw: &str) -> Option<String> {
+    if !valid_series_guid(raw) {
+        return None;
+    }
+    Some(
+        raw.bytes()
+            .filter(|byte| *byte != b'-')
+            .map(|byte| byte.to_ascii_lowercase() as char)
+            .collect(),
+    )
 }
 
 // ---------------------------------------------------------------------------

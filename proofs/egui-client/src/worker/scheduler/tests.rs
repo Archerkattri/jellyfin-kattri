@@ -492,6 +492,15 @@ fn scheduler_caps_reads_at_three_and_keeps_control_and_queued_read_moving() {
 
     server.control.entered.lock().expect("entered lock").clear();
     let gate = server.pause("READ");
+    // Make background work available before filling the foreground slots. Sending
+    // it last races the real worker: all three slots can legitimately be occupied
+    // before this test thread submits it.
+    queue
+        .send(WorkerCommand::LoadHomeRow {
+            request_id: 14,
+            row: HomeRowKind::Latest,
+        })
+        .expect("queue background read");
     queue.send(fetch(10, "slow-a")).expect("enqueue first read");
     queue
         .send(WorkerCommand::CheckServer {
@@ -513,12 +522,6 @@ fn scheduler_caps_reads_at_three_and_keeps_control_and_queued_read_moving() {
             item_id: "fixture-item".into(),
         })
         .expect("queue fourth foreground read");
-    queue
-        .send(WorkerCommand::LoadHomeRow {
-            request_id: 14,
-            row: HomeRowKind::Latest,
-        })
-        .expect("queue background read");
     let paths = server.wait_entered(3);
     // A home request gets a reserved slot; the fourth foreground request waits.
     let started = server.control.entered.lock().expect("entered lock").len();

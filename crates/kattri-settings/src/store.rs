@@ -158,6 +158,7 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
             "parental",
             "admin",
             "series_languages",
+            "home_hidden_series",
         ],
     );
     for (section, known) in [
@@ -177,6 +178,7 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
                 "interface_size",
                 "home_continue_watching",
                 "home_next_up",
+                "home_combine_continue_next_up",
                 "home_latest",
                 "home_my_media",
                 "home_collections",
@@ -433,8 +435,8 @@ mod tests {
     use crate::schema::LogDetail;
     use crate::schema::{
         AspectMode, AudioOutput, BACKBUFFER_MB_MAX, CACHE_MB_MAX, CACHE_MB_MIN,
-        CURRENT_SCHEMA_VERSION, ChannelLayout, DecodeMode, READAHEAD_SECS_MAX,
-        SeriesLanguageSetting, SyncMode, WindowGeometry,
+        CURRENT_SCHEMA_VERSION, ChannelLayout, DecodeMode, HomeSeriesSuppressionSetting,
+        READAHEAD_SECS_MAX, SeriesLanguageSetting, SyncMode, WindowGeometry,
     };
     use std::path::PathBuf;
 
@@ -536,6 +538,11 @@ mod tests {
                 ..SeriesLanguageSetting::default()
             },
         ];
+        s.home_hidden_series = vec![HomeSeriesSuppressionSetting {
+            server_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            profile: "default".to_owned(),
+            series_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_owned(),
+        }];
         s
     }
 
@@ -855,6 +862,122 @@ mod tests {
     }
 
     #[test]
+    fn home_series_suppressions_round_trip_only_scoped_identifiers() {
+        let settings = Settings {
+            home_hidden_series: vec![HomeSeriesSuppressionSetting {
+                server_id: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA".to_owned(),
+                profile: "kids".to_owned(),
+                series_id: "bbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb".to_owned(),
+            }],
+            ..Settings::default()
+        };
+        let text = to_toml_string(&settings).expect("serialize scoped suppression");
+        let document: toml::Table = text.parse().expect("serialized settings document");
+        let record = document["home_hidden_series"][0]
+            .as_table()
+            .expect("suppression record");
+        let mut keys: Vec<_> = record.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["profile", "series_id", "server_id"]);
+        assert_eq!(
+            load_from_str(&text).expect("reload scoped suppression"),
+            settings
+        );
+    }
+
+    #[test]
+    fn older_home_visibility_and_order_keys_remain_readable() {
+        let old = format!(
+            "schema_version = {CURRENT_SCHEMA_VERSION}\n[general]\nhome_continue_watching = false\nhome_next_up = true\nhome_section_order = [\"next_up\", \"latest\"]\n"
+        );
+        let loaded = load_from_str(&old).expect("load settings from before the combined row");
+        assert!(!loaded.general.home_continue_watching);
+        assert!(loaded.general.home_next_up);
+        assert!(!loaded.general.home_combine_continue_next_up);
+        assert_eq!(loaded.general.home_section_order, ["next_up", "latest"]);
+
+        let saved = to_toml_string(&loaded).expect("save compatible settings");
+        assert_eq!(
+            load_from_str(&saved).expect("reload compatible settings"),
+            loaded
+        );
+
+        let mut combined = loaded;
+        combined.general.home_combine_continue_next_up = true;
+        let saved = to_toml_string(&combined).expect("save combine preference");
+        assert!(
+            load_from_str(&saved)
+                .expect("reload combine preference")
+                .general
+                .home_combine_continue_next_up
+        );
+    }
+
+    #[test]
+    fn home_series_suppressions_require_bounded_unique_guid_scopes() {
+        let valid = HomeSeriesSuppressionSetting {
+            server_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            profile: "default".to_owned(),
+            series_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_owned(),
+        };
+
+        for (records, field) in [
+            (
+                vec![
+                    valid.clone(),
+                    HomeSeriesSuppressionSetting {
+                        server_id: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA".to_owned(),
+                        ..valid.clone()
+                    },
+                ],
+                "home_hidden_series",
+            ),
+            (
+                vec![HomeSeriesSuppressionSetting {
+                    server_id: "not-a-guid".to_owned(),
+                    ..valid.clone()
+                }],
+                "home_hidden_series.server_id",
+            ),
+            (
+                vec![HomeSeriesSuppressionSetting {
+                    profile: "profile/name".to_owned(),
+                    ..valid.clone()
+                }],
+                "home_hidden_series.profile",
+            ),
+            (
+                vec![HomeSeriesSuppressionSetting {
+                    series_id: "not-a-guid".to_owned(),
+                    ..valid.clone()
+                }],
+                "home_hidden_series.series_id",
+            ),
+        ] {
+            let settings = Settings {
+                home_hidden_series: records,
+                ..Settings::default()
+            };
+            assert!(matches!(
+                settings.validate(),
+                Err(SettingsError::Invalid { field: found, .. }) if found == field
+            ));
+        }
+
+        let settings = Settings {
+            home_hidden_series: vec![valid; crate::schema::MAX_HOME_SERIES_SUPPRESSIONS + 1],
+            ..Settings::default()
+        };
+        assert!(matches!(
+            settings.validate(),
+            Err(SettingsError::Invalid {
+                field: "home_hidden_series",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn empty_document_loads_defaults() {
         assert_eq!(load_from_str("").unwrap(), Settings::default());
     }
@@ -869,10 +992,12 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_preserved_for_forward_compatibility() {
-        let s =
-            load_from_str("future_top = 1\n[playback]\nfuture_flag = true\nskip_intro = true\n")
-                .unwrap();
+        let s = load_from_str(
+            "future_top = 1\n[[home_hidden_series]]\nserver_id = \"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"\nprofile = \"default\"\nseries_id = \"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\"\n[playback]\nfuture_flag = true\nskip_intro = true\n",
+        )
+        .unwrap();
         assert!(s.playback.skip_intro);
+        assert_eq!(s.home_hidden_series.len(), 1);
         assert_eq!(s.unknown.get("future_top"), Some(&toml::Value::Integer(1)));
         assert_eq!(
             s.playback.unknown.get("future_flag"),

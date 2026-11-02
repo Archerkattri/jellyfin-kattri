@@ -346,6 +346,78 @@ fn music_queue_report_context(
     Some((queue.repeat(), queue.playback_order(), ordered_items))
 }
 
+fn canonical_home_guid(raw: &str) -> Option<String> {
+    let id = uuid::Uuid::parse_str(raw).ok()?;
+    (!id.is_nil()).then(|| id.to_string())
+}
+
+fn home_suppression_scope(
+    server_id: Option<&str>,
+    profile: Option<&str>,
+) -> Option<(String, String)> {
+    let server_id = canonical_home_guid(server_id?)?;
+    let profile = profile?;
+    if profile.is_empty()
+        || profile.len() > 32
+        || !profile
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return None;
+    }
+    Some((server_id, profile.to_owned()))
+}
+
+fn scoped_home_series_suppressions(
+    settings: &kattri_settings::Settings,
+    server_id: Option<&str>,
+    profile: Option<&str>,
+) -> Option<Vec<String>> {
+    let (server_id, profile) = home_suppression_scope(server_id, profile)?;
+    Some(
+        settings
+            .home_hidden_series
+            .iter()
+            .filter(|record| {
+                record.profile.as_str() == profile.as_str()
+                    && canonical_home_guid(&record.server_id).as_deref() == Some(server_id.as_str())
+            })
+            .filter_map(|record| canonical_home_guid(&record.series_id))
+            .collect(),
+    )
+}
+
+fn add_home_series_suppression(
+    settings: &mut kattri_settings::Settings,
+    server_id: Option<&str>,
+    profile: Option<&str>,
+    series_id: &str,
+) -> bool {
+    let Some((server_id, profile)) = home_suppression_scope(server_id, profile) else {
+        return false;
+    };
+    let Some(series_id) = canonical_home_guid(series_id) else {
+        return false;
+    };
+    if settings.home_hidden_series.iter().any(|record| {
+        record.profile.as_str() == profile.as_str()
+            && canonical_home_guid(&record.server_id).as_deref() == Some(server_id.as_str())
+            && canonical_home_guid(&record.series_id).as_deref() == Some(series_id.as_str())
+    }) || settings.home_hidden_series.len()
+        >= kattri_settings::schema::MAX_HOME_SERIES_SUPPRESSIONS
+    {
+        return false;
+    }
+    settings
+        .home_hidden_series
+        .push(kattri_settings::schema::HomeSeriesSuppressionSetting {
+            server_id,
+            profile,
+            series_id,
+        });
+    true
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum CatalogSort {
     #[default]
@@ -2185,6 +2257,13 @@ impl KattriApp {
         }
     }
 
+    /// Whether playback speed must remain locked to the SyncPlay rate.
+    ///
+    /// Membership stays active until the server confirms a leave.
+    pub fn sync_play_speed_locked(&self) -> bool {
+        self.joined_sync_play_group_id().is_some()
+    }
+
     pub(crate) fn sync_play_join_pending(&self) -> bool {
         self.sync_play_pending_join.is_some()
     }
@@ -3921,6 +4000,7 @@ impl KattriApp {
     fn sync_home_sections(&mut self) {
         self.home.sections =
             crate::ui::home::HomeSections::from_settings(&self.settings.settings().general);
+        self.sync_home_series_suppressions();
         if self.user_name.is_none() {
             return;
         }
@@ -3931,6 +4011,17 @@ impl KattriApp {
         for kind in catalogs {
             self.request_home_catalog(kind);
         }
+    }
+
+    fn sync_home_series_suppressions(&mut self) {
+        let server_id = self.server.as_ref().and_then(|server| server.id.as_deref());
+        let scoped = scoped_home_series_suppressions(
+            self.settings.settings(),
+            server_id,
+            self.settings.running_name(),
+        );
+        self.home
+            .set_series_suppressions(scoped.is_some(), scoped.unwrap_or_default());
     }
 
     /// Refreshes the playlists (and, for administrators, the collections) the card menu offers.
@@ -4662,6 +4753,20 @@ impl KattriApp {
         match action {
             HomeAction::Select(item_id) => self.select_item(item_id),
             HomeAction::Play(item_id) => self.play_item(item_id, false),
+            HomeAction::HideSeries(series_id) => {
+                let server_id = self.server.as_ref().and_then(|server| server.id.as_deref());
+                let profile = self.settings.running_name().map(str::to_owned);
+                let before = self.settings.settings().clone();
+                if add_home_series_suppression(
+                    self.settings.settings_mut(),
+                    server_id,
+                    profile.as_deref(),
+                    &series_id,
+                ) {
+                    self.commit_settings(&before);
+                }
+                self.sync_home_series_suppressions();
+            }
             HomeAction::Refresh => self.refresh_home(),
             HomeAction::Retry(kind) => self.request_home_row(kind),
             HomeAction::RetryCatalog(kind) => self.request_home_catalog(kind),
@@ -11256,10 +11361,14 @@ mod page_query_tests {
 
 #[cfg(test)]
 mod home_navigation_tests {
-    use super::{AppView, BrowseContext, KattriApp, Page};
+    use super::{
+        AppView, BrowseContext, KattriApp, Page, ServerIdentity, scoped_home_series_suppressions,
+    };
     use crate::catalog::MediaItem;
+    use crate::settings_state::SettingsState;
     use crate::ui::home::{HomeAction, HomeViewTarget, MyMediaTile};
     use jellyfin_api::BaseItemDto;
+    use kattri_settings::{Settings, schema::HomeSeriesSuppressionSetting};
 
     fn catalog_item(id: &str, item_type: &str) -> BaseItemDto {
         BaseItemDto {
@@ -11304,6 +11413,15 @@ mod home_navigation_tests {
                 is_collection: false,
             })
         );
+    }
+
+    #[test]
+    fn selecting_a_combined_home_episode_opens_the_episode_id() {
+        let mut app = KattriApp::new(egui::Context::default());
+
+        app.apply_home_action(HomeAction::Select("episode-42".into()));
+
+        assert_eq!(app.selected_item_id.as_deref(), Some("episode-42"));
     }
 
     #[test]
@@ -11398,6 +11516,124 @@ mod home_navigation_tests {
 
         app.navigate_back();
         assert_eq!(app.view, AppView::Home);
+    }
+
+    #[test]
+    fn home_series_suppressions_match_exact_server_and_profile() {
+        let settings = Settings {
+            home_hidden_series: vec![
+                HomeSeriesSuppressionSetting {
+                    server_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                    profile: "default".into(),
+                    series_id: "11111111-1111-4111-8111-111111111111".into(),
+                },
+                HomeSeriesSuppressionSetting {
+                    server_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                    profile: "kids".into(),
+                    series_id: "22222222-2222-4222-8222-222222222222".into(),
+                },
+                HomeSeriesSuppressionSetting {
+                    server_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+                    profile: "default".into(),
+                    series_id: "33333333-3333-4333-8333-333333333333".into(),
+                },
+            ],
+            ..Settings::default()
+        };
+
+        assert_eq!(
+            scoped_home_series_suppressions(
+                &settings,
+                Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                Some("default")
+            ),
+            Some(vec!["11111111-1111-4111-8111-111111111111".into()])
+        );
+        assert_eq!(
+            scoped_home_series_suppressions(
+                &settings,
+                Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                Some("kids")
+            ),
+            Some(vec!["22222222-2222-4222-8222-222222222222".into()])
+        );
+        assert_eq!(
+            scoped_home_series_suppressions(
+                &settings,
+                Some("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                Some("default")
+            ),
+            Some(vec!["33333333-3333-4333-8333-333333333333".into()])
+        );
+        assert_eq!(
+            scoped_home_series_suppressions(&settings, None, Some("default")),
+            None
+        );
+    }
+
+    #[test]
+    fn hiding_a_home_series_is_local_and_preserves_the_current_queue() {
+        let directory =
+            std::env::temp_dir().join(format!("kattri-home-suppression-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).expect("temporary settings directory");
+        let mut app = KattriApp::new(egui::Context::default());
+        app.settings = SettingsState::open(Some(&directory), Some("default"));
+        app.server = Some(ServerIdentity {
+            name: "Test server".into(),
+            version: None,
+            id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into()),
+        });
+        for item_id in ["track-1", "track-2"] {
+            app.music_queue
+                .add(jellyfin_api::session_reporting::QueueItem::new(item_id))
+                .expect("add queue item");
+        }
+        app.music_queue
+            .select(1)
+            .expect("select current queue item");
+        app.music_queue
+            .set_repeat(jellyfin_api::session_reporting::RepeatMode::All);
+        app.music_queue.set_shuffle(true);
+        let queue_ids: Vec<_> = app
+            .music_queue
+            .items()
+            .iter()
+            .map(|item| item.id.clone())
+            .collect();
+        let current = app.music_queue.current().map(|item| item.id.clone());
+
+        app.apply_home_action(HomeAction::HideSeries(
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into(),
+        ));
+
+        assert_eq!(
+            app.settings.settings().home_hidden_series,
+            [HomeSeriesSuppressionSetting {
+                server_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                profile: "default".into(),
+                series_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into(),
+            }]
+        );
+        assert_eq!(
+            app.music_queue
+                .items()
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>(),
+            queue_ids
+        );
+        assert_eq!(
+            app.music_queue.current().map(|item| item.id.clone()),
+            current
+        );
+        assert_eq!(
+            app.music_queue.repeat(),
+            jellyfin_api::session_reporting::RepeatMode::All
+        );
+        assert!(app.music_queue.is_shuffled());
+        drop(app);
+        assert_eq!(directory.parent(), Some(std::env::temp_dir().as_path()));
+        std::fs::remove_dir_all(&directory).expect("remove the test-owned settings directory");
     }
 }
 
@@ -13075,6 +13311,30 @@ mod remote_and_sync_play_tests {
             server_ms: 1_000_000,
         });
         app
+    }
+
+    #[test]
+    fn sync_play_speed_stays_locked_until_leave_is_confirmed() {
+        let mut app = joined_app_with_clock();
+        assert!(app.sync_play_speed_locked());
+
+        app.worker = Some(ApiWorker::queued_for_test());
+        app.leave_sync_play_group()
+            .expect("leave request is queued");
+        assert!(app.sync_play_leave_pending());
+        assert!(app.sync_play_speed_locked());
+
+        app.apply_sync_play_group_update(SyncPlayGroupUpdate::Left {
+            group_id: Some("different-group".into()),
+        });
+        assert!(app.sync_play_speed_locked());
+        assert!(app.sync_play_leave_pending());
+
+        app.apply_sync_play_group_update(SyncPlayGroupUpdate::Left {
+            group_id: Some("group-1".into()),
+        });
+        assert!(!app.sync_play_speed_locked());
+        assert!(!app.sync_play_leave_pending());
     }
 
     #[test]

@@ -170,6 +170,177 @@ fn rename_moves_folder_and_keeps_settings() {
 }
 
 #[test]
+fn rename_rebinds_only_matching_home_suppressions_and_keeps_unknown_fields() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open_in(root.path());
+    store.create("kids").unwrap();
+    let path = root
+        .path()
+        .join("profiles/kids")
+        .join(kattri_settings::profile::PROFILE_SETTINGS_FILE);
+    let original = r#"schema_version = 3
+future_top = { nested = { keep = "value" } }
+
+[[home_hidden_series]]
+server_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+profile = "kids"
+series_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+future_record = { keep = [1, 2, 3] }
+
+[[home_hidden_series]]
+server_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+profile = "work"
+series_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+"#;
+    fs::write(&path, original).unwrap();
+
+    store.rename("kids", "family").unwrap();
+
+    let rewritten = fs::read_to_string(
+        root.path()
+            .join("profiles/family")
+            .join(kattri_settings::profile::PROFILE_SETTINGS_FILE),
+    )
+    .unwrap();
+    let value: toml::Table = rewritten.parse().unwrap();
+    assert_eq!(
+        value["future_top"]["nested"]["keep"].as_str(),
+        Some("value")
+    );
+    let records = value["home_hidden_series"].as_array().unwrap();
+    assert_eq!(records[0]["profile"].as_str(), Some("family"));
+    assert_eq!(records[0]["future_record"]["keep"][2].as_integer(), Some(3));
+    assert_eq!(records[1]["profile"].as_str(), Some("work"));
+    assert_eq!(
+        records[1]["server_id"].as_str(),
+        Some("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+    );
+}
+
+#[test]
+fn rename_index_write_failure_restores_settings_folder_and_index() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open_in(root.path());
+    store.create("kids").unwrap();
+    let profiles = root.path().join("profiles");
+    let settings_path = profiles.join("kids/settings.toml");
+    let original = "schema_version = 3\n[[home_hidden_series]]\nserver_id = \"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"\nprofile = \"kids\"\nseries_id = \"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\"\n";
+    fs::write(&settings_path, original).unwrap();
+    let index_path = profiles.join(kattri_settings::profile::PROFILE_INDEX_FILE);
+    let index_before = fs::read(&index_path).unwrap();
+    // `write_atomic` creates this sibling temp path before replacing the index.
+    let temp_blocker = profiles.join(format!("index.tmp-{}", std::process::id()));
+    fs::create_dir(&temp_blocker).unwrap();
+
+    assert!(store.rename("kids", "family").is_err());
+
+    assert!(profiles.join("kids").is_dir());
+    assert!(!profiles.join("family").exists());
+    assert_eq!(fs::read(settings_path).unwrap(), original.as_bytes());
+    assert_eq!(fs::read(index_path).unwrap(), index_before);
+}
+
+#[test]
+fn rename_missing_settings_does_not_create_a_file() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open_in(root.path());
+    store.create("kids").unwrap();
+    let settings_path = root.path().join("profiles/kids/settings.toml");
+    fs::remove_file(&settings_path).unwrap();
+
+    store.rename("kids", "family").unwrap();
+
+    assert!(!root.path().join("profiles/family/settings.toml").exists());
+}
+
+#[test]
+fn rename_settings_write_failure_restores_the_original_folder_and_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open_in(root.path());
+    store.create("kids").unwrap();
+    let profiles = root.path().join("profiles");
+    let settings_path = profiles.join("kids/settings.toml");
+    let original = "schema_version = 3\n[[home_hidden_series]]\nserver_id = \"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"\nprofile = \"kids\"\nseries_id = \"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\"\n";
+    fs::write(&settings_path, original).unwrap();
+    let index_path = profiles.join(kattri_settings::profile::PROFILE_INDEX_FILE);
+    let index_before = fs::read(&index_path).unwrap();
+    fs::create_dir(profiles.join(format!("kids/settings.tmp-{}", std::process::id()))).unwrap();
+
+    assert!(store.rename("kids", "family").is_err());
+
+    assert!(profiles.join("kids").is_dir());
+    assert!(!profiles.join("family").exists());
+    assert_eq!(fs::read(settings_path).unwrap(), original.as_bytes());
+    assert_eq!(fs::read(index_path).unwrap(), index_before);
+}
+
+#[test]
+fn rename_refuses_oversized_settings_without_rewriting_them() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open_in(root.path());
+    store.create("kids").unwrap();
+    let profiles = root.path().join("profiles");
+    let settings_path = profiles.join("kids/settings.toml");
+    let original = vec![b'#'; kattri_settings::store::MAX_SETTINGS_BYTES + 1];
+    fs::write(&settings_path, &original).unwrap();
+    let index_path = profiles.join(kattri_settings::profile::PROFILE_INDEX_FILE);
+    let index_before = fs::read(&index_path).unwrap();
+
+    assert!(store.rename("kids", "family").is_err());
+
+    assert!(profiles.join("kids").is_dir());
+    assert!(!profiles.join("family").exists());
+    assert_eq!(fs::read(settings_path).unwrap(), original);
+    assert_eq!(fs::read(index_path).unwrap(), index_before);
+}
+
+#[test]
+fn refused_rename_leaves_settings_bytes_and_layout_unchanged() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open_in(root.path());
+    store.create("kids").unwrap();
+    store.create("work").unwrap();
+    let profiles = root.path().join("profiles");
+    let settings_path = profiles.join("kids/settings.toml");
+    let original = "schema_version = 3\nfuture_setting = { value = \"keep\" }\n";
+    fs::write(&settings_path, original).unwrap();
+    let index_before =
+        fs::read(profiles.join(kattri_settings::profile::PROFILE_INDEX_FILE)).unwrap();
+
+    assert!(store.rename("kids", "work").is_err());
+    assert!(store.rename("kids", "NUL").is_err());
+
+    assert!(profiles.join("kids").is_dir());
+    assert!(!profiles.join("NUL").exists());
+    assert_eq!(fs::read(settings_path).unwrap(), original.as_bytes());
+    assert_eq!(
+        fs::read(profiles.join(kattri_settings::profile::PROFILE_INDEX_FILE)).unwrap(),
+        index_before
+    );
+}
+
+#[test]
+fn rename_refuses_corrupt_and_future_settings_without_changing_anything() {
+    for original in ["not = [valid TOML", "schema_version = 999\nfuture = true\n"] {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open_in(root.path());
+        store.create("kids").unwrap();
+        let profiles = root.path().join("profiles");
+        let settings_path = profiles.join("kids/settings.toml");
+        fs::write(&settings_path, original).unwrap();
+        let index_path = profiles.join(kattri_settings::profile::PROFILE_INDEX_FILE);
+        let index_before = fs::read(&index_path).unwrap();
+
+        assert!(store.rename("kids", "family").is_err());
+
+        assert!(profiles.join("kids").is_dir());
+        assert!(!profiles.join("family").exists());
+        assert_eq!(fs::read(settings_path).unwrap(), original.as_bytes());
+        assert_eq!(fs::read(index_path).unwrap(), index_before);
+    }
+}
+
+#[test]
 fn rename_default_moves_the_default_pointer() {
     let root = tempfile::tempdir().unwrap();
     let mut store = open_in(root.path());
