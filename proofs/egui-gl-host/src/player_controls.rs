@@ -173,6 +173,10 @@ pub enum PlayerControlAction {
     },
     /// Enter or leave fullscreen.
     ToggleFullscreen,
+    /// Resize the window client area so one video pixel is one physical screen pixel.
+    FitWindowToVideo,
+    /// Switch between normal and double playback speed.
+    ToggleDoubleSpeed,
 }
 
 /// Segment skip for the current item. The caller keeps `skipper` loaded with the item's
@@ -977,6 +981,35 @@ pub fn screenshot_key_pressed(events: &[egui::Event]) -> bool {
     })
 }
 
+/// The player action for a Ctrl shortcut in one frame of input, if one was pressed.
+///
+/// Ctrl+1 asks for a 1:1 window and Ctrl+2 toggles normal and double speed. Repeats are ignored so
+/// a held key fires once. Like [`screenshot_key_pressed`], the caller must skip this while a text
+/// field has focus. The host does not depend on kattri-input yet, so these defaults are repeated
+/// here; keep them equal to that crate's player map.
+pub fn player_shortcut_action(events: &[egui::Event]) -> Option<PlayerControlAction> {
+    events.iter().find_map(|event| {
+        let egui::Event::Key {
+            key,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        if !modifiers.ctrl || modifiers.shift || modifiers.alt || modifiers.mac_cmd {
+            return None;
+        }
+        match key {
+            egui::Key::Num1 => Some(PlayerControlAction::FitWindowToVideo),
+            egui::Key::Num2 => Some(PlayerControlAction::ToggleDoubleSpeed),
+            _ => None,
+        }
+    })
+}
+
 /// Handle one unmodified arrow press only when egui has no focused widget or popup.
 /// This leaves text editing, focused controls, and menu navigation to egui.
 fn keyboard_seek_actions(ctx: &egui::Context, seek_available: bool) -> Vec<PlayerControlAction> {
@@ -1191,8 +1224,8 @@ mod tests {
         PlayerControlsView, SecondarySubtitleChoice, SkipControls, TrackChoice, TrackControl,
         auto_skip_action, compact_label, draw, draw_inner, draw_inner_with_skip, draw_with_skip,
         duration_to_ticks, format_time, gamepad_player_action, keyboard_seek_actions,
-        screenshot_key_pressed, skip_settings, speed_label, ticks_to_duration, track_menu_contents,
-        track_section_inner,
+        player_shortcut_action, screenshot_key_pressed, skip_settings, speed_label,
+        ticks_to_duration, track_menu_contents, track_section_inner,
     };
     use crate::player_icons::OsdIcon;
 
@@ -1751,6 +1784,51 @@ mod tests {
             false,
             ctrl | egui::Modifiers::ALT
         )]));
+    }
+
+    #[test]
+    fn ctrl_number_shortcuts_select_the_player_actions() {
+        let key = |key, pressed, repeat, modifiers| egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat,
+            modifiers,
+        };
+        let ctrl = egui::Modifiers::CTRL;
+        assert_eq!(
+            player_shortcut_action(&[key(egui::Key::Num1, true, false, ctrl)]),
+            Some(PlayerControlAction::FitWindowToVideo)
+        );
+        assert_eq!(
+            player_shortcut_action(&[key(egui::Key::Num2, true, false, ctrl)]),
+            Some(PlayerControlAction::ToggleDoubleSpeed)
+        );
+        assert_eq!(
+            player_shortcut_action(&[key(egui::Key::Num1, false, false, ctrl)]),
+            None,
+            "release"
+        );
+        assert_eq!(
+            player_shortcut_action(&[key(egui::Key::Num2, true, true, ctrl)]),
+            None,
+            "repeat"
+        );
+        assert_eq!(
+            player_shortcut_action(&[key(egui::Key::Num1, true, false, egui::Modifiers::NONE)]),
+            None,
+            "Ctrl is required"
+        );
+        assert_eq!(
+            player_shortcut_action(&[key(
+                egui::Key::Num2,
+                true,
+                false,
+                ctrl | egui::Modifiers::SHIFT
+            )]),
+            None,
+            "other chords do not toggle speed"
+        );
     }
 
     #[test]

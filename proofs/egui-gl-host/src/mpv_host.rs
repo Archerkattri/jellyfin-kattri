@@ -53,9 +53,9 @@ use mpv_render_proof::{
     BackendSelection, CalibrationMarker, CapabilityUnavailable, CapabilityValue, ChapterStep,
     CommandId, EndFileReason, EventKind, FboTarget, FrameDecision, MpvError, MpvRenderer,
     MpvSession, MpvTrack, ObservationId, PlaybackProperty, PlaybackPropertyValue, RepaintNotifier,
-    SubtitleDelayError, SubtitleSelectionError, SubtitleSyncController, SubtitleSyncFailure,
-    SubtitleSyncUpdate, TrackInventory, TrackInventoryError, TrackKind, TrackSelection,
-    TrackSelectionError, TrackSelectionState,
+    StreamSnapshot, SubtitleDelayError, SubtitleSelectionError, SubtitleSyncController,
+    SubtitleSyncFailure, SubtitleSyncUpdate, TrackInventory, TrackInventoryError, TrackKind,
+    TrackSelection, TrackSelectionError, TrackSelectionState,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -932,6 +932,12 @@ pub(crate) struct MpvHost<'session> {
     content_rate_request: Option<u64>,
     /// The frame rate found for the current file, taken once by the host.
     content_rate: Option<(f64, bool)>,
+    /// The stream snapshot read that finds the native video frame size for 1:1 sizing.
+    video_frame_request: Option<u64>,
+    /// The native frame size of the current file, once read. Cleared when a file starts.
+    video_frame_size: Option<(u32, u32)>,
+    /// A completed frame-size read the host has not taken; `Some(None)` means it was unknown.
+    video_frame_result: Option<Option<(u32, u32)>>,
     device_profile: Option<DeviceProfile>,
     /// Output devices mpv listed in the capability probe, handed to the Settings page once.
     audio_devices: Option<Vec<String>>,
@@ -975,6 +981,17 @@ impl PlaybackPolicyState {
         self.secondary_subtitle = None;
         self.pending_sid_restore = None;
     }
+}
+
+/// The answer to a request for the native video frame size used by 1:1 window sizing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VideoFrameSizeRequest {
+    /// The current file's decoded frame size, in pixels.
+    Known((u32, u32)),
+    /// libmpv is reading the size; the result arrives through the event queue.
+    Pending,
+    /// Nothing is loaded, or the size cannot be read.
+    Unavailable,
 }
 
 impl<'session> MpvHost<'session> {
@@ -1046,6 +1063,9 @@ impl<'session> MpvHost<'session> {
                 display_match: None,
                 content_rate_request: None,
                 content_rate: None,
+                video_frame_request: None,
+                video_frame_size: None,
+                video_frame_result: None,
                 device_profile: None,
                 audio_devices: None,
                 audio_filter_ledger: OptionWriteLedger::new(),
@@ -1151,6 +1171,9 @@ impl<'session> MpvHost<'session> {
                     display_match: None,
                     content_rate_request: None,
                     content_rate: None,
+                    video_frame_request: None,
+                    video_frame_size: None,
+                    video_frame_result: None,
                     device_profile: None,
                     audio_devices: None,
                     audio_filter_ledger: OptionWriteLedger::new(),
@@ -1224,6 +1247,9 @@ impl<'session> MpvHost<'session> {
             display_match: None,
             content_rate_request: None,
             content_rate: None,
+            video_frame_request: None,
+            video_frame_size: None,
+            video_frame_result: None,
             device_profile: None,
             audio_devices: None,
             audio_filter_ledger: OptionWriteLedger::new(),
@@ -1450,6 +1476,16 @@ impl<'session> MpvHost<'session> {
         while let Some(event) = session.try_event() {
             match event.kind {
                 EventKind::StreamSnapshotReady
+                    if Some(event.request_id) == self.video_frame_request =>
+                {
+                    self.video_frame_request = None;
+                    self.video_frame_size = session
+                        .take_stream_snapshot(event.request_id)
+                        .as_ref()
+                        .and_then(stream_video_frame_size);
+                    self.video_frame_result = Some(self.video_frame_size);
+                }
+                EventKind::StreamSnapshotReady
                     if Some(event.request_id) == self.content_rate_request =>
                 {
                     self.content_rate_request = None;
@@ -1523,6 +1559,10 @@ impl<'session> MpvHost<'session> {
                     self.media_info.clear_snapshot();
                     self.content_rate_request = None;
                     self.content_rate = None;
+                    // The frame size belongs to one file; never size the next window with it.
+                    self.video_frame_request = None;
+                    self.video_frame_size = None;
+                    self.video_frame_result = None;
                     self.playback_restart_seen = false;
                     self.stop_playback_report(false);
                     if let Some(load) = self.media_load.started(playlist_entry_id) {
@@ -1924,6 +1964,40 @@ impl<'session> MpvHost<'session> {
 
     pub(crate) fn controls_snapshot(&self) -> PlaybackControlsSnapshot<'_> {
         self.controls.snapshot()
+    }
+
+    /// Ask for the decoded video frame size so the host can size its window 1:1. The size comes
+    /// from the same stream snapshot the media info panel uses; a read is queued only once per
+    /// file and the reply is collected by [`Self::take_video_frame_size_result`].
+    pub(crate) fn request_video_frame_size(&mut self) -> VideoFrameSizeRequest {
+        if let Some(size) = self.video_frame_size {
+            return VideoFrameSizeRequest::Known(size);
+        }
+        // Before FileLoaded most video properties are unavailable, so a read would only waste a
+        // queue slot and produce a misleading notice.
+        if !self.file_loaded {
+            return VideoFrameSizeRequest::Unavailable;
+        }
+        if let Some(size) = self.media_info.snapshot().and_then(stream_video_frame_size) {
+            self.video_frame_size = Some(size);
+            return VideoFrameSizeRequest::Known(size);
+        }
+        if self.video_frame_request.is_none() {
+            let Some(session) = self.session else {
+                return VideoFrameSizeRequest::Unavailable;
+            };
+            match session.request_stream_snapshot() {
+                Ok(request_id) => self.video_frame_request = Some(request_id),
+                Err(_) => return VideoFrameSizeRequest::Unavailable,
+            }
+        }
+        VideoFrameSizeRequest::Pending
+    }
+
+    /// Take a completed frame-size read. `None` means no read finished yet; `Some(None)` means
+    /// libmpv did not report a usable size.
+    pub(crate) fn take_video_frame_size_result(&mut self) -> Option<Option<(u32, u32)>> {
+        self.video_frame_result.take()
     }
 
     pub(crate) fn controls_feedback(&self) -> Option<&str> {
@@ -3483,6 +3557,19 @@ fn observed_subtitle_offset(seconds: Option<f64>) -> SubtitleOffset {
         .filter(|value| value.is_finite())
         .map_or(0, |value| (value * 1000.0).round() as i64);
     SubtitleOffset::from_millis_clamped(millis)
+}
+
+/// The decoded frame size from a stream snapshot, when both dimensions are positive integers.
+/// mpv reports them as `video-params/w` and `video-params/h` strings.
+fn stream_video_frame_size(snapshot: &StreamSnapshot) -> Option<(u32, u32)> {
+    let dimension = |value: &CapabilityValue<String>| {
+        mpv_render_proof::available_text(value)?
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|value| *value > 0)
+    };
+    Some((dimension(&snapshot.width)?, dimension(&snapshot.height)?))
 }
 
 /// A playback control reached from a key press.

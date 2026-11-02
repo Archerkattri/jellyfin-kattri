@@ -25,7 +25,7 @@ use glutin::surface::{SwapInterval, WindowSurface};
 use glutin_winit::{ApiPreference, DisplayBuilder};
 use jellyfin_egui_client::KattriApp;
 use kattri_client_core::PlaybackPhase;
-use kattri_client_core::controls::OsdVisibility;
+use kattri_client_core::controls::{OsdVisibility, PlaybackSpeed};
 use kattri_client_core::deep_link::DeepLinkIntent;
 use kattri_client_core::pip::{PipController, PipError, PipSize, PipTransition, can_show_video};
 use kattri_client_core::screenshot::{
@@ -36,7 +36,7 @@ use kattri_platform::{PowerGuard, PowerInhibitor, PowerStatus, default_power_inh
 use kattri_plugins::discord::{IpcTransport, PresenceBinding};
 use mpv_host::{
     ItemLoadSettings, MpvHost, SYNC_MARKER_BUTTONS, SyncFeedbackTone, TrackMemoryEvent,
-    TrackMenuKind, local_media_path,
+    TrackMenuKind, VideoFrameSizeRequest, local_media_path,
 };
 use mpv_render_proof::{
     FboTarget, FrameDecision, MpvLibrary, MpvSession, PROVISIONAL_SCREENSHOT_MODE,
@@ -432,6 +432,7 @@ impl<'session> GlHost<'session> {
         self.mpv
             .set_sync_play_speed_locked(self.kattri_app.sync_play_speed_locked());
         self.mpv.poll_events();
+        self.apply_pending_video_frame_size();
         self.poll_sync_play_status();
         #[cfg(debug_assertions)]
         debug_harness::log_if_changed("mpv status", self.mpv.status());
@@ -565,6 +566,9 @@ impl<'session> GlHost<'session> {
             }
         }
         let screenshot_requested = !typing && screenshot_key_pressed(&input.events);
+        let player_shortcut = (!typing)
+            .then(|| player_controls::player_shortcut_action(&input.events))
+            .flatten();
         let mut video_size_points = egui::vec2(640.0, 360.0);
         let video_texture_id = self.video_texture_id;
         let playback_status = self.mpv.status().to_owned();
@@ -654,6 +658,9 @@ impl<'session> GlHost<'session> {
         }
         if screenshot_requested {
             self.take_screenshot();
+        }
+        if let Some(action) = player_shortcut {
+            self.apply_player_shortcut(action);
         }
         let pip_active = self.pip.is_pip();
         let pip_available = renderer_available && media_active;
@@ -1329,6 +1336,80 @@ impl<'session> GlHost<'session> {
         }
     }
 
+    /// Perform the player actions reached from a Ctrl shortcut (Ctrl+1 and Ctrl+2). These are
+    /// keyboard-only, so no button is added to the control bar.
+    fn apply_player_shortcut(&mut self, action: PlayerControlAction) {
+        match action {
+            PlayerControlAction::FitWindowToVideo => self.fit_window_to_video(),
+            PlayerControlAction::ToggleDoubleSpeed => self.toggle_double_speed(),
+            // Other actions arrive through the on-screen controls or the gamepad, not here.
+            _ => {}
+        }
+    }
+
+    /// Ctrl+2: switch between normal and double speed. The current speed comes from mpv's own
+    /// observation, and the change goes back through the speed menu's setter, so the menu remains
+    /// the source of truth.
+    fn toggle_double_speed(&mut self) {
+        if !self.mpv.has_media() {
+            self.set_shell_notice("Playback speed needs a loaded video.".to_owned());
+            return;
+        }
+        let speed = self.mpv.controls_snapshot().speed_multiplier;
+        let target = double_speed_target(speed);
+        self.mpv.set_playback_speed(target);
+    }
+
+    /// Ctrl+1: ask for the decoded frame size, then resize the window when it arrives. A read is
+    /// asynchronous because libmpv properties are serialized on its owner thread.
+    fn fit_window_to_video(&mut self) {
+        match self.mpv.request_video_frame_size() {
+            VideoFrameSizeRequest::Known(size) => self.apply_one_to_one_size(size),
+            VideoFrameSizeRequest::Pending => {}
+            VideoFrameSizeRequest::Unavailable => self.set_shell_notice(
+                "The video frame size is not known yet, so the window was not resized.".to_owned(),
+            ),
+        }
+    }
+
+    /// Collect a frame-size read that finished since the previous frame.
+    fn apply_pending_video_frame_size(&mut self) {
+        let Some(size) = self.mpv.take_video_frame_size_result() else {
+            return;
+        };
+        match size {
+            Some(size) => self.apply_one_to_one_size(size),
+            None => self.set_shell_notice(
+                "The video frame size could not be read, so the window was not resized.".to_owned(),
+            ),
+        }
+    }
+
+    /// Resize the window client area for a 1:1 video frame. `request_inner_size` with a
+    /// `PhysicalSize` takes physical pixels, so the monitor scale is already accounted for: one
+    /// decoded pixel becomes one screen pixel at any scale. Fullscreen and PiP own the window,
+    /// so they keep their sizes and say why.
+    fn apply_one_to_one_size(&mut self, frame: (u32, u32)) {
+        if self.window.fullscreen().is_some() {
+            self.set_shell_notice(
+                "Leave fullscreen before fitting the window to the video.".to_owned(),
+            );
+            return;
+        }
+        if self.pip.is_pip() {
+            self.set_shell_notice(
+                "Leave picture-in-picture before fitting the window to the video.".to_owned(),
+            );
+            return;
+        }
+        let (width, height) = one_to_one_window_size(frame);
+        self.window.set_maximized(false);
+        let _ = self
+            .window
+            .request_inner_size(PhysicalSize::new(width, height));
+        self.set_shell_notice(format!("Window sized to {width}x{height} for 1:1 video."));
+    }
+
     /// Queue an mpv screenshot of the current frame (M2-15). The name comes from the settings
     /// template. The command is queued; the write is not confirmed here.
     /// Apply the gamepad presses the app collected while the video filled the window (M6-18).
@@ -1946,6 +2027,8 @@ fn osd_controls(
             PlayerControlAction::ToggleMute => mpv.toggle_mute(),
             PlayerControlAction::StepChapter { forward } => mpv.step_chapter_control(forward),
             PlayerControlAction::ToggleFullscreen => *fullscreen_toggle_requested = true,
+            // Ctrl+1 and Ctrl+2 are global shortcuts handled before the OSD is drawn.
+            PlayerControlAction::FitWindowToVideo | PlayerControlAction::ToggleDoubleSpeed => {}
         }
     }
     if let Some(feedback) = osd.feedback {
@@ -1956,6 +2039,35 @@ fn osd_controls(
 /// Keep keyboard focus and open player menus visible beyond the pointer inactivity timer.
 fn player_controls_visible(timed: bool, focused: bool, popup_open: bool) -> bool {
     timed || focused || popup_open
+}
+
+/// The window client size that shows a decoded frame at 1:1. The theater draws the video into a
+/// 16:9 box, so the window must be the smallest 16:9 box that contains the frame; a wide film
+/// then has black bars above and below rather than being scaled down. Integer arithmetic keeps
+/// the box exact at the common 16:9 sizes.
+fn one_to_one_window_size((width, height): (u32, u32)) -> (u32, u32) {
+    let width = u64::from(width.max(1));
+    let height = u64::from(height.max(1));
+    let (outer_width, outer_height) = if width * 9 >= height * 16 {
+        (width, (width * 9).div_ceil(16))
+    } else {
+        ((height * 16).div_ceil(9), height)
+    };
+    (
+        u32::try_from(outer_width).unwrap_or(u32::MAX),
+        u32::try_from(outer_height).unwrap_or(u32::MAX),
+    )
+}
+
+/// The speed Ctrl+2 selects: double unless the player is already there, in which case normal.
+/// Anything else, including an unknown speed, goes to double as the shortcut promises.
+fn double_speed_target(current: Option<f64>) -> PlaybackSpeed {
+    let double = PlaybackSpeed::Double.multiplier();
+    if current.is_some_and(|value| (value - double).abs() < 0.001) {
+        PlaybackSpeed::Normal
+    } else {
+        PlaybackSpeed::Double
+    }
 }
 
 /// The largest 16:9 box that fits `available`.
@@ -2020,7 +2132,29 @@ mod shell_tests {
         assert!(super::player_controls_visible(false, true, false));
         assert!(super::player_controls_visible(false, false, true));
     }
-    use super::{playback_panel_visible, screenshot_directory, status_bar_visible};
+    use super::{
+        double_speed_target, one_to_one_window_size, playback_panel_visible, screenshot_directory,
+        status_bar_visible,
+    };
+    use kattri_client_core::controls::PlaybackSpeed;
+
+    #[test]
+    fn one_to_one_window_size_keeps_the_frame_pixels_in_a_16_9_client() {
+        assert_eq!(one_to_one_window_size((1920, 1080)), (1920, 1080));
+        assert_eq!(one_to_one_window_size((640, 360)), (640, 360));
+        // A wide film gets a taller 16:9 client so its pixels are not scaled down.
+        assert_eq!(one_to_one_window_size((1920, 800)), (1920, 1080));
+        // A 4:3 frame gets a wider client for the same reason.
+        assert_eq!(one_to_one_window_size((1440, 1080)), (1920, 1080));
+    }
+
+    #[test]
+    fn ctrl_2_returns_to_normal_only_from_double_speed() {
+        assert_eq!(double_speed_target(Some(2.0)), PlaybackSpeed::Normal);
+        assert_eq!(double_speed_target(Some(1.0)), PlaybackSpeed::Double);
+        assert_eq!(double_speed_target(Some(1.5)), PlaybackSpeed::Double);
+        assert_eq!(double_speed_target(None), PlaybackSpeed::Double);
+    }
 
     #[test]
     fn the_status_bar_hides_while_browsing_with_a_working_player() {

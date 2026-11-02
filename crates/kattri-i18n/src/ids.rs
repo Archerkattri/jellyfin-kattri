@@ -118,6 +118,20 @@ pub const SHELL_COUNT_ITEMS: &str = "shell.count.items";
 pub const BROWSE_SUMMARY_RUNTIME: &str = "browse.summary.runtime";
 pub const BROWSE_SUMMARY_RUNTIME_HINT: &str = "browse.summary.runtime_hint";
 pub const BROWSE_FILTER_FAVORITES_ONLY: &str = "browse.filter.favorites_only";
+pub const BROWSE_SELECTION_COUNT: &str = "browse.selection.count";
+pub const BROWSE_SELECTION_CLEAR: &str = "browse.selection.clear";
+pub const BROWSE_SELECTION_MARK_WATCHED: &str = "browse.selection.mark_watched";
+pub const BROWSE_SELECTION_MARK_UNWATCHED: &str = "browse.selection.mark_unwatched";
+pub const BROWSE_SELECTION_ADD_FAVORITE: &str = "browse.selection.add_favorite";
+pub const BROWSE_SELECTION_REMOVE_FAVORITE: &str = "browse.selection.remove_favorite";
+pub const BROWSE_SELECTION_ADD_TO_QUEUE: &str = "browse.selection.add_to_queue";
+pub const BROWSE_SELECTION_DOWNLOAD: &str = "browse.selection.download";
+pub const BROWSE_SELECTION_HINT: &str = "browse.selection.hint";
+pub const BROWSE_SELECTION_QUEUED: &str = "browse.selection.queued";
+pub const BROWSE_SELECTION_DOWNLOAD_STARTED: &str = "browse.selection.download_started";
+pub const BROWSE_SELECTION_DOWNLOAD_BUSY: &str = "browse.selection.download_busy";
+pub const BROWSE_SELECTION_DOWNLOAD_DONE: &str = "browse.selection.download_done";
+pub const BROWSE_SELECTION_DOWNLOAD_TOO_MANY: &str = "browse.selection.download_too_many";
 pub const DETAIL_STATUS_LOADING: &str = "detail.status.loading";
 pub const MUSIC_QUEUE_ADD: &str = "music.queue.add";
 pub const MUSIC_QUEUE_PLAY_NEXT: &str = "music.queue.play_next";
@@ -1048,6 +1062,20 @@ pub const ALL: &[&str] = &[
     BROWSE_SUMMARY_RUNTIME,
     BROWSE_SUMMARY_RUNTIME_HINT,
     BROWSE_FILTER_FAVORITES_ONLY,
+    BROWSE_SELECTION_COUNT,
+    BROWSE_SELECTION_CLEAR,
+    BROWSE_SELECTION_MARK_WATCHED,
+    BROWSE_SELECTION_MARK_UNWATCHED,
+    BROWSE_SELECTION_ADD_FAVORITE,
+    BROWSE_SELECTION_REMOVE_FAVORITE,
+    BROWSE_SELECTION_ADD_TO_QUEUE,
+    BROWSE_SELECTION_DOWNLOAD,
+    BROWSE_SELECTION_HINT,
+    BROWSE_SELECTION_QUEUED,
+    BROWSE_SELECTION_DOWNLOAD_STARTED,
+    BROWSE_SELECTION_DOWNLOAD_BUSY,
+    BROWSE_SELECTION_DOWNLOAD_DONE,
+    BROWSE_SELECTION_DOWNLOAD_TOO_MANY,
     DETAIL_STATUS_LOADING,
     MUSIC_QUEUE_ADD,
     MUSIC_QUEUE_PLAY_NEXT,

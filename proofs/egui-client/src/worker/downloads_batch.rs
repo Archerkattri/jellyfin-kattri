@@ -1,10 +1,14 @@
 //! Bounded collection-download planning and dispatch state.
+//!
+//! The paged collection-fetch helpers and the Album kind are kept for the collection pages'
+//! "Download all" action; the catalog selection batch uses the rest today.
+#![allow(dead_code)]
 
 use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 
 use jellyfin_api::BaseItemDto;
-use kattri_client_core::queue::MAX_QUEUE_LEN;
+use kattri_downloads::batch::MAX_BATCH_ITEMS;
 
 pub(crate) const COLLECTION_PAGE_SIZE: u32 = 100;
 pub(crate) const MAX_BATCH_DOWNLOADS_IN_FLIGHT: usize = 3;
@@ -43,6 +47,7 @@ pub(crate) struct CollectionPage<T> {
 }
 
 /// Failure while fetching or bounding a paged collection.
+#[derive(Debug)]
 pub(crate) enum CollectionPageError<E> {
     Fetch(E),
     TooManyItems,
@@ -76,8 +81,8 @@ where
         {
             return Err(CollectionPageError::TooManyItems);
         }
-        let received = u32::try_from(page.items.len())
-            .map_err(|_| CollectionPageError::InvalidPaging)?;
+        let received =
+            u32::try_from(page.items.len()).map_err(|_| CollectionPageError::InvalidPaging)?;
         if items.len().saturating_add(page.items.len()) > max_items {
             return Err(CollectionPageError::TooManyItems);
         }
@@ -120,6 +125,7 @@ pub(crate) struct DownloadCandidate {
     pub title: String,
 }
 
+#[derive(Debug)]
 pub(crate) struct BatchPlan {
     pub total: usize,
     pub skipped: usize,
@@ -129,7 +135,7 @@ pub(crate) struct BatchPlan {
 
 /// Reject an over-limit collection and make deterministic, first-occurrence audio candidates.
 pub(crate) fn plan_batch(items: Vec<CollectionItem>) -> Result<BatchPlan, BatchPlanError> {
-    if items.len() > MAX_QUEUE_LEN {
+    if items.len() > MAX_BATCH_ITEMS {
         return Err(BatchPlanError::TooManyItems);
     }
 
@@ -139,7 +145,7 @@ pub(crate) fn plan_batch(items: Vec<CollectionItem>) -> Result<BatchPlan, BatchP
     let mut candidates = VecDeque::new();
     let mut titles = Vec::new();
     for item in items {
-        if item.item_type.as_deref() != Some("Audio") {
+        if !downloadable_in_batch(item.item_type.as_deref()) {
             skipped += 1;
             continue;
         }
@@ -167,6 +173,12 @@ pub(crate) fn plan_batch(items: Vec<CollectionItem>) -> Result<BatchPlan, BatchP
     })
 }
 
+/// Audio is not a catalog single-file type, but an album or playlist track downloads the same
+/// `/Items/{id}/Download` route.
+fn downloadable_in_batch(item_type: Option<&str>) -> bool {
+    item_type == Some("Audio") || crate::ui::is_downloadable_item_type(item_type)
+}
+
 fn valid_item_id(item_id: &str) -> bool {
     !item_id.trim().is_empty()
         && item_id.len() <= MAX_ITEM_ID_BYTES
@@ -177,7 +189,7 @@ fn bounded_title(title: &str) -> String {
     let title = title.trim();
     let title: String = title.chars().take(MAX_TITLE_CHARS).collect();
     if title.is_empty() {
-        "Untitled audio".to_owned()
+        "Untitled item".to_owned()
     } else {
         title
     }
@@ -333,9 +345,9 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        BatchIdentity, BatchQueue, CollectionItem, CollectionPage, CollectionPageError,
-        CollectionKind, DispatchResult, MAX_BATCH_DOWNLOADS_IN_FLIGHT, authorize, collect_pages,
-        plan_batch,
+        BatchIdentity, BatchQueue, CollectionItem, CollectionKind, CollectionPage,
+        CollectionPageError, DispatchResult, MAX_BATCH_DOWNLOADS_IN_FLIGHT, authorize,
+        collect_pages, plan_batch,
     };
 
     fn item(id: &str, item_type: &str, title: &str) -> CollectionItem {
@@ -384,8 +396,14 @@ mod tests {
         assert_eq!(plan.total, 102);
         assert_eq!(plan.skipped, 1);
         assert_eq!(plan.candidates.len(), 101);
-        assert_eq!(plan.candidates.front().map(|track| track.item_id.as_str()), Some("track-0"));
-        assert_eq!(plan.candidates.back().map(|track| track.item_id.as_str()), Some("track-100"));
+        assert_eq!(
+            plan.candidates.front().map(|track| track.item_id.as_str()),
+            Some("track-0")
+        );
+        assert_eq!(
+            plan.candidates.back().map(|track| track.item_id.as_str()),
+            Some("track-100")
+        );
     }
 
     #[tokio::test]
@@ -395,7 +413,7 @@ mod tests {
                 CollectionPage {
                     items: vec![
                         item("audio-1", "Audio", "One"),
-                        item("movie-1", "Movie", "Skipped movie"),
+                        item("folder-1", "Folder", "Skipped folder"),
                     ],
                     total_record_count: Some(5),
                 }
@@ -454,7 +472,10 @@ mod tests {
             calls += 1;
             std::future::ready(if start == 0 {
                 Ok(CollectionPage {
-                    items: vec![item("audio-1", "Audio", "One"), item("audio-2", "Audio", "Two")],
+                    items: vec![
+                        item("audio-1", "Audio", "One"),
+                        item("audio-2", "Audio", "Two"),
+                    ],
                     total_record_count: Some(4),
                 })
             } else {
@@ -462,7 +483,10 @@ mod tests {
             })
         })
         .await;
-        assert!(matches!(result, Err(CollectionPageError::Fetch("page unavailable"))));
+        assert!(matches!(
+            result,
+            Err(CollectionPageError::Fetch("page unavailable"))
+        ));
         assert_eq!(calls, 2);
     }
 
@@ -517,36 +541,41 @@ mod tests {
                 }
             })
             .expect("partial dispatch emits a summary");
-        assert_eq!(starts.len(), 3);
+        // A refused dispatch does not take a slot, so the queue attempts the fourth candidate
+        // in the same pump: three start and one is counted failed.
+        assert_eq!(starts.len(), 4);
         assert_eq!(partial.summary.failed, 1);
-        assert_eq!(partial.summary.queued, 2);
-        assert_eq!(partial.summary.waiting, 1);
+        assert_eq!(partial.summary.queued, 3);
+        assert_eq!(partial.summary.waiting, 0);
 
-        let running = HashSet::from(["two".to_owned(), "three".to_owned()]);
-        let last = queue
-            .pump(&running, &HashSet::new(), |candidate| {
-                assert_eq!(candidate.item_id, "four");
-                DispatchResult::Started
-            })
-            .expect("last candidate dispatches when a slot opens");
-        assert_eq!(last.summary.queued, 3);
-        assert_eq!(last.summary.waiting, 0);
-        assert_eq!(last.summary.active, 3);
-        assert!(!last.summary.complete);
+        let running = HashSet::from(["two".to_owned(), "three".to_owned(), "four".to_owned()]);
+        let busy = queue
+            .pump(&running, &HashSet::new(), |_| DispatchResult::Started)
+            .expect("busy batch emits waiting state");
+        assert_eq!(busy.summary.queued, 3);
+        assert_eq!(busy.summary.active, 3);
+        assert!(!busy.summary.complete);
     }
 
     #[test]
     fn logout_cancels_the_bounded_pending_batch() {
-        let plan = plan_batch(vec![item("one", "Audio", "One"), item("two", "Audio", "Two")])
-            .expect("small batch is within the bound");
+        let plan = plan_batch(vec![
+            item("one", "Audio", "One"),
+            item("two", "Audio", "Two"),
+        ])
+        .expect("small batch is within the bound");
         let mut queue = BatchQueue::default();
         queue
             .begin(identity(CollectionKind::Album), plan)
             .expect("batch starts");
         queue.cancel();
         assert!(!queue.is_active());
-        assert!(queue
-            .pump(&HashSet::new(), &HashSet::new(), |_| DispatchResult::Started)
-            .is_none());
+        assert!(
+            queue
+                .pump(&HashSet::new(), &HashSet::new(), |_| {
+                    DispatchResult::Started
+                })
+                .is_none()
+        );
     }
 }

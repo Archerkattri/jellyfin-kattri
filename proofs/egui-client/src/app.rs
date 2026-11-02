@@ -11,6 +11,9 @@ use crate::ui::playlists::{MoveDirection, PlaylistIntent, PlaylistUiState};
 use crate::ui::profile_picker::{self, PickerOutcome, PickerState};
 use crate::ui::{ui_text, ui_text_args};
 use crate::worker::downloads::DownloadsState;
+use crate::worker::downloads_batch::{
+    BatchIdentity, BatchQueue, CollectionItem, CollectionKind, DispatchResult, plan_batch,
+};
 use crate::worker::update::{ApplyRequest, UpdateState, UpdateStatus, prepare};
 use crate::worker::{
     AdminUserOperation, ApiWorker, ClientTlsFiles, HomeCatalogData, HomeCatalogKind, HomeRowKind,
@@ -30,6 +33,7 @@ use jellyfin_api::{
     SyncPlayPlaybackStatus, baseline_device_profile, collection_runtime,
     connectivity::OfflineTracker,
 };
+use kattri_client_core::downloads::DownloadState;
 use kattri_client_core::epg::{EpgProgram, EpgWindow};
 use kattri_client_core::focus::FocusGraph;
 use kattri_client_core::language_memory::{RecordOutcome, SeriesLanguageMemory, TrackLanguage};
@@ -902,6 +906,11 @@ pub struct KattriApp {
     pub(crate) worker: Option<ApiWorker>,
     /// Download list and page state. The worker owns the jobs; this copy is what the page reads.
     pub(crate) downloads: DownloadsState,
+    /// Bounded three-at-a-time dispatch for a bulk download.
+    batch_downloads: BatchQueue,
+    /// When each batch item was handed to the worker, so an empty rows snapshot does not count
+    /// a just-started job as finished.
+    batch_started: HashMap<String, Instant>,
     /// Last update result for the update panel. Only the UI thread writes it.
     pub(crate) update: UpdateState,
     pub(crate) connection: ConnectionStatus,
@@ -957,6 +966,8 @@ pub struct KattriApp {
     /// Dialog previews in flight: request id to preview key.
     metadata_thumbnail_requests: HashMap<u64, String>,
     pub(crate) items: Vec<crate::catalog::MediaItem>,
+    /// Multi-select state for the catalog grid. Bounded to the loaded page; UI code owns it.
+    pub(crate) catalog_selection: crate::ui::selection::LibrarySelection,
     pub(crate) total_record_count: Option<u32>,
     pub(crate) collection_runtime: CollectionRuntime,
     pub(crate) start_index: u32,
@@ -1518,6 +1529,7 @@ impl KattriApp {
             metadata_editor_request: 0,
             metadata_thumbnail_requests: HashMap::new(),
             items: Vec::new(),
+            catalog_selection: crate::ui::selection::LibrarySelection::default(),
             total_record_count: None,
             collection_runtime: CollectionRuntime::default(),
             start_index: 0,
@@ -1528,6 +1540,8 @@ impl KattriApp {
             catalog_loading: false,
             catalog_error: None,
             downloads: DownloadsState::default(),
+            batch_downloads: BatchQueue::default(),
+            batch_started: HashMap::new(),
             update: UpdateState::default(),
             catalog_filter_notice: None,
             unsupported_catalog_filters: Vec::new(),
@@ -3378,6 +3392,7 @@ impl KattriApp {
         self.user_is_admin = false;
         self.clear_subtitle_management();
         self.items.clear();
+        self.catalog_selection.clear();
         self.selected_item_id = None;
         self.selected_details = None;
         self.selected_artwork_texture = None;
@@ -4889,6 +4904,12 @@ impl KattriApp {
     }
 
     pub(crate) fn next_page(&mut self) {
+        // A user-chosen page change starts a new selection. Auto-prefetch below keeps it.
+        self.catalog_selection.clear();
+        self.request_next_page();
+    }
+
+    fn request_next_page(&mut self) {
         let next_start = self.catalog_next_index;
         if !self.catalog_loading && !self.catalog_end_reached {
             self.request_catalog(next_start, self.submitted_search.clone());
@@ -4908,7 +4929,7 @@ impl KattriApp {
         }
         if PagingState::focus_within_prefetch_range(focused_index, self.items.len(), items_per_row)
         {
-            self.next_page();
+            self.request_next_page();
         }
     }
 
@@ -6170,6 +6191,219 @@ impl KattriApp {
         self.downloads.remember_title(item_id, title);
     }
 
+    /// Applies a played-state change to every selected catalog item. This mirrors the card
+    /// menu's optimistic update, and the pending map lets a server rejection revert each card.
+    pub(crate) fn bulk_set_played(&mut self, played: bool) {
+        let item_ids: Vec<String> = self
+            .catalog_selection
+            .selected_ids()
+            .map(str::to_owned)
+            .collect();
+        for item_id in item_ids {
+            let Some(previous) = self
+                .items
+                .iter()
+                .find(|item| item.id == item_id)
+                .map(|item| item.played)
+            else {
+                continue;
+            };
+            let request_id = self.allocate_request_id();
+            let sent = self.worker.as_ref().is_some_and(|worker| {
+                worker
+                    .set_played(request_id, item_id.clone(), played)
+                    .is_ok()
+            });
+            if !sent {
+                continue;
+            }
+            for item in self.items.iter_mut().chain(self.home.media_mut()) {
+                if item.id == item_id {
+                    item.played = played;
+                }
+            }
+            self.menu_watched_pending
+                .insert(request_id, (item_id, previous));
+        }
+    }
+
+    /// Applies a favorite change to every selected catalog item, reusing the card menu's
+    /// optimistic and rollback path.
+    pub(crate) fn bulk_set_favorite(&mut self, favorite: bool) {
+        let item_ids: Vec<String> = self
+            .catalog_selection
+            .selected_ids()
+            .map(str::to_owned)
+            .collect();
+        for item_id in item_ids {
+            let Some(previous) = self
+                .items
+                .iter()
+                .find(|item| item.id == item_id)
+                .map(|item| item.favorite)
+            else {
+                continue;
+            };
+            let request_id = self.allocate_request_id();
+            let sent = self.worker.as_ref().is_some_and(|worker| {
+                worker
+                    .set_favorite(request_id, item_id.clone(), favorite)
+                    .is_ok()
+            });
+            if !sent {
+                continue;
+            }
+            for item in self.items.iter_mut().chain(self.home.media_mut()) {
+                if item.id == item_id {
+                    item.favorite = favorite;
+                }
+            }
+            self.menu_favorite_pending
+                .insert(request_id, (item_id, previous));
+        }
+    }
+
+    /// Appends every selected single track to the play queue, as the card menu does one at a
+    /// time. The queue itself bounds the result and reports a full queue per item.
+    pub(crate) fn bulk_add_to_queue(&mut self) {
+        let tracks: Vec<(String, String)> = self
+            .items
+            .iter()
+            .filter(|item| {
+                self.catalog_selection.contains(&item.id) && crate::ui::item_menu::is_track(item)
+            })
+            .map(|item| (item.id.clone(), item.title.clone()))
+            .collect();
+        let mut added = 0usize;
+        for (item_id, title) in tracks {
+            if self
+                .music_queue
+                .add(QueueItem::new(item_id.clone()))
+                .is_ok()
+            {
+                self.music_track_names.insert(item_id, title);
+                added += 1;
+            }
+        }
+        if added > 0 {
+            self.show_toast(ui_text_args(
+                ids::BROWSE_SELECTION_QUEUED,
+                &[("count", &added.to_string())],
+            ));
+        }
+    }
+
+    /// Starts a download for every selected item the single-item download path accepts.
+    pub(crate) fn bulk_download(&mut self) {
+        let items: Vec<CollectionItem> = self
+            .items
+            .iter()
+            .filter(|item| self.catalog_selection.contains(&item.id))
+            .map(|item| CollectionItem {
+                item_id: item.id.clone(),
+                item_type: item.remote_type.clone(),
+                title: item.title.clone(),
+            })
+            .collect();
+        let plan = match plan_batch(items) {
+            Ok(plan) => plan,
+            Err(_) => {
+                self.show_toast(ui_text(ids::BROWSE_SELECTION_DOWNLOAD_TOO_MANY).to_owned());
+                return;
+            }
+        };
+        let queued = plan.candidates.len();
+        if queued == 0 {
+            self.show_toast(ui_text(ids::BROWSE_SELECTION_DOWNLOAD_TOO_MANY).to_owned());
+            return;
+        }
+        let identity = BatchIdentity {
+            request_id: self.allocate_request_id(),
+            connection_generation: self.connection_generation(),
+            parent_id: "catalog-selection".to_owned(),
+            kind: CollectionKind::Playlist,
+        };
+        if self.batch_downloads.begin(identity, plan).is_err() {
+            self.show_toast(ui_text(ids::BROWSE_SELECTION_DOWNLOAD_BUSY).to_owned());
+            return;
+        }
+        self.pump_batch_downloads();
+        self.show_toast(ui_text_args(
+            ids::BROWSE_SELECTION_DOWNLOAD_STARTED,
+            &[("count", &queued.to_string())],
+        ));
+    }
+
+    /// Starts the next batch items while fewer than three transfers run. The queue keeps its
+    /// in-flight set across refreshes so an empty rows snapshot cannot over-dispatch.
+    fn pump_batch_downloads(&mut self) {
+        if !self.batch_downloads.is_active() {
+            return;
+        }
+        let mut running: HashSet<String> = self
+            .downloads
+            .rows
+            .iter()
+            .filter(|row| row.running)
+            .map(|row| row.item_id.clone())
+            .collect();
+        for (item_id, started_at) in &self.batch_started {
+            if started_at.elapsed() < Duration::from_secs(3) {
+                running.insert(item_id.clone());
+            }
+        }
+        let failed: HashSet<String> = self
+            .downloads
+            .rows
+            .iter()
+            .filter(|row| row.job.snapshot().state == DownloadState::Failed)
+            .map(|row| row.item_id.clone())
+            .collect();
+        let tracked: HashSet<String> = self
+            .downloads
+            .rows
+            .iter()
+            .filter(|row| row.job.snapshot().state != DownloadState::Failed)
+            .map(|row| row.item_id.clone())
+            .collect();
+
+        let mut batch = std::mem::take(&mut self.batch_downloads);
+        let mut started = Vec::new();
+        let event = batch.pump(&running, &failed, |candidate| {
+            if tracked.contains(&candidate.item_id) {
+                return DispatchResult::AlreadyTracked;
+            }
+            self.start_download(&candidate.item_id, &candidate.title);
+            started.push(candidate.item_id.clone());
+            DispatchResult::Started
+        });
+        self.batch_downloads = batch;
+
+        let now = Instant::now();
+        for item_id in started {
+            self.batch_started.insert(item_id, now);
+        }
+        let rows = &self.downloads.rows;
+        self.batch_started.retain(|item_id, started_at| {
+            started_at.elapsed() < Duration::from_secs(3)
+                || rows
+                    .iter()
+                    .any(|row| &row.item_id == item_id && row.running)
+        });
+
+        if let Some(event) = event
+            && event.summary.complete
+        {
+            self.batch_started.clear();
+            if event.summary.failed > 0 {
+                self.show_toast(ui_text_args(
+                    ids::BROWSE_SELECTION_DOWNLOAD_DONE,
+                    &[("failed", &event.summary.failed.to_string())],
+                ));
+            }
+        }
+    }
+
     /// Sends a pause or resume the user chose on the Downloads page.
     pub fn download_intent(&mut self, intent: &DownloadIntent) {
         let base_url = self.server_url.trim().to_owned();
@@ -6204,7 +6438,8 @@ impl KattriApp {
     /// While a transfer runs, re-reads the list about twice a second so the page shows it
     /// moving. The worker does not push progress.
     fn tick_downloads(&mut self, ctx: &egui::Context) {
-        if !self.downloads.has_running() {
+        let batch_active = self.batch_downloads.is_active();
+        if !self.downloads.has_running() && !batch_active {
             return;
         }
         let due = self
@@ -6213,6 +6448,10 @@ impl KattriApp {
             .is_none_or(|last| last.elapsed() >= DOWNLOAD_REFRESH);
         if due {
             self.refresh_downloads();
+        }
+        if batch_active {
+            self.pump_batch_downloads();
+            ctx.request_repaint_after(Duration::from_millis(250));
         }
         ctx.request_repaint_after(DOWNLOAD_REFRESH);
     }
@@ -7511,6 +7750,8 @@ impl KattriApp {
         // An admin dialog must not survive a sign-out: its next Save would otherwise go to
         // whatever session the worker holds.
         self.metadata_editor = None;
+        self.batch_downloads.cancel();
+        self.batch_started.clear();
         if let Some(worker) = self.worker.as_ref() {
             worker.cancel_reads();
         }

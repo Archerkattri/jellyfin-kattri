@@ -96,7 +96,7 @@ pub(crate) fn entries(item: &MediaItem) -> Vec<ItemMenuAction> {
 }
 
 /// A single music track; albums share [`MediaKind::Audio`] but cannot join the queue as one.
-fn is_track(item: &MediaItem) -> bool {
+pub(crate) fn is_track(item: &MediaItem) -> bool {
     item.kind == MediaKind::Audio && item.remote_type.as_deref() == Some("Audio")
 }
 

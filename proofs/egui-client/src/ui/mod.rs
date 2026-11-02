@@ -22,6 +22,7 @@ pub mod playlists;
 pub mod profile_picker;
 pub mod row;
 pub(crate) mod search;
+pub(crate) mod selection;
 mod series;
 mod series_memory;
 mod server_discovery;
@@ -42,6 +43,7 @@ use crate::catalog::{MediaItem, MediaKind};
 use crate::sign_in::{pending_code, status_text};
 use crate::theme::{self, Palette};
 use crate::ui::home::HomeAction;
+use crate::ui::selection::LibrarySelection;
 use crate::worker::HomeRowKind;
 use egui::{self, Align, Align2, Color32, CornerRadius, FontId, RichText, Stroke};
 use jellyfin_api::{ItemFilter, ItemSortOrder};
@@ -169,6 +171,34 @@ struct ShelfContent<'a, I> {
     row: usize,
 }
 
+/// The fixed All items grouping, before the loaded items are filtered into it.
+struct ShelfGroup {
+    title: &'static str,
+    description: &'static str,
+    matches: fn(MediaKind) -> bool,
+}
+
+/// One All items shelf collected before it is drawn. Grouping first gives Shift extension and
+/// Ctrl+A one displayed order across every shelf.
+struct ShelfPlan<'a> {
+    title: &'a str,
+    description: &'a str,
+    items: Vec<&'a MediaItem>,
+    focus_row: usize,
+}
+
+/// Shared per-frame drawing state and the selection bookkeeping a shelf needs.
+struct ShelfContext<'a> {
+    entries: &'a mut Vec<CardFocus>,
+    selected_item_id: Option<&'a str>,
+    visible_artwork: &'a mut Vec<(String, String)>,
+    selection: &'a mut LibrarySelection,
+    /// Every displayed item id on the page, in shelf order, for Shift extension.
+    selection_ids: &'a [&'a str],
+    first_index: usize,
+    focused_card: &'a mut Option<(usize, String)>,
+}
+
 struct CatalogView<'a> {
     colors: Palette,
     entries: &'a mut Vec<CardFocus>,
@@ -176,6 +206,8 @@ struct CatalogView<'a> {
     visible_artwork: &'a mut Vec<(String, String)>,
     list_layout: bool,
     artwork_scale: f32,
+    /// Ctrl/Space and Shift clicks update this model instead of opening a card.
+    selection: &'a mut LibrarySelection,
 }
 
 pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
@@ -375,6 +407,14 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
             FocusActivation::Home(action) => app.apply_home_action(action),
             FocusActivation::SearchShowAll(group) => app.show_all_search_group(group),
         }
+    }
+    // Esc leaves selection mode instead of navigating back while a bulk selection is up.
+    // Backspace still follows the profile's Back binding.
+    if app.catalog_selection.is_active()
+        && !ctx.egui_wants_keyboard_input()
+        && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+    {
+        app.catalog_selection.clear();
     }
     handle_shell_action(&ctx, app, &mut gamepad_actions);
 }
@@ -1890,6 +1930,17 @@ fn render_connected(
 
     if app.page == Page::Home {
         home_header(ui, app, colors);
+        // All items groups the same loaded catalog into shelves, so the selection is bound to
+        // this page before any shelf draws and is pruned to the kinds the page can show.
+        app.catalog_selection
+            .bind_scope(&catalog_selection_scope(app));
+        app.catalog_selection.retain_loaded(
+            app.items
+                .iter()
+                .filter(|item| home_shelf_kind(item.kind))
+                .map(|item| item.id.as_str()),
+        );
+        catalog_selection_toolbar(ui, app, colors);
         if app.items.is_empty() {
             if app.catalog_error.is_some() {
                 return;
@@ -1931,83 +1982,116 @@ fn render_connected(
             return;
         }
         let groups = [
-            (
-                ui_text(ids::CATEGORY_MOVIES_TITLE),
-                ui_text(ids::CATEGORY_MOVIES_DESCRIPTION),
-                MediaKind::Movie,
-            ),
-            (
-                ui_text(ids::CATEGORY_SERIES_TITLE),
-                ui_text(ids::CATEGORY_SERIES_DESCRIPTION),
-                MediaKind::Series,
-            ),
-            (
-                ui_text(ids::CATEGORY_MUSIC_TITLE),
-                ui_text(ids::CATEGORY_MUSIC_DESCRIPTION),
-                MediaKind::Audio,
-            ),
-            (
-                ui_text(ids::CATEGORY_PLAYLISTS_TITLE),
-                ui_text(ids::CATEGORY_PLAYLISTS_DESCRIPTION),
-                MediaKind::Playlist,
-            ),
+            ShelfGroup {
+                title: ui_text(ids::CATEGORY_MOVIES_TITLE),
+                description: ui_text(ids::CATEGORY_MOVIES_DESCRIPTION),
+                matches: |kind: MediaKind| kind == MediaKind::Movie,
+            },
+            ShelfGroup {
+                title: ui_text(ids::CATEGORY_SERIES_TITLE),
+                description: ui_text(ids::CATEGORY_SERIES_DESCRIPTION),
+                matches: |kind: MediaKind| matches!(kind, MediaKind::Series | MediaKind::Episode),
+            },
+            ShelfGroup {
+                title: ui_text(ids::CATEGORY_MUSIC_TITLE),
+                description: ui_text(ids::CATEGORY_MUSIC_DESCRIPTION),
+                matches: |kind: MediaKind| kind == MediaKind::Audio,
+            },
+            ShelfGroup {
+                title: ui_text(ids::CATEGORY_PLAYLISTS_TITLE),
+                description: ui_text(ids::CATEGORY_PLAYLISTS_DESCRIPTION),
+                matches: |kind: MediaKind| kind == MediaKind::Playlist,
+            },
         ];
-        let mut row = 0;
-        for (title, description, kind) in groups {
-            let mut items = app
-                .items
-                .iter()
-                .filter(|item| match kind {
-                    MediaKind::Series => {
-                        matches!(item.kind, MediaKind::Series | MediaKind::Episode)
-                    }
-                    other => item.kind == other,
-                })
-                .peekable();
-            if items.peek().is_some() {
-                ui.add_space(26.0);
-                let selected_item_id = app.selected_item_id.clone();
-                if let Some(item_id) = shelf(
-                    ui,
-                    ShelfContent {
-                        title,
-                        description,
-                        items,
-                        row,
-                    },
-                    colors,
-                    entries,
-                    selected_item_id.as_deref(),
-                    visible_artwork,
-                ) {
-                    app.activate_catalog_item(item_id);
+        let mut clicked_item_id = None;
+        let mut focused_card = None;
+        {
+            let mut grouped: Vec<ShelfPlan<'_>> = Vec::new();
+            let mut displayed_ids: Vec<&str> = Vec::new();
+            let mut row = 0;
+            for group in groups {
+                let items: Vec<&MediaItem> = app
+                    .items
+                    .iter()
+                    .filter(|item| (group.matches)(item.kind))
+                    .collect();
+                if items.is_empty() {
+                    continue;
                 }
+                displayed_ids.extend(items.iter().map(|item| item.id.as_str()));
+                grouped.push(ShelfPlan {
+                    title: group.title,
+                    description: group.description,
+                    items,
+                    focus_row: row,
+                });
                 row += 1;
             }
-        }
-        let mut other_items = app
-            .items
-            .iter()
-            .filter(|item| matches!(item.kind, MediaKind::Folder | MediaKind::Other))
-            .peekable();
-        if other_items.peek().is_some() {
-            ui.add_space(26.0);
-            let selected_item_id = app.selected_item_id.clone();
-            if let Some(item_id) = shelf(
-                ui,
-                ShelfContent {
+            let other_items: Vec<&MediaItem> = app
+                .items
+                .iter()
+                .filter(|item| matches!(item.kind, MediaKind::Folder | MediaKind::Other))
+                .collect();
+            if !other_items.is_empty() {
+                displayed_ids.extend(other_items.iter().map(|item| item.id.as_str()));
+                grouped.push(ShelfPlan {
                     title: ui_text(ids::CATEGORY_OTHER_TITLE),
                     description: ui_text(ids::CATEGORY_OTHER_DESCRIPTION),
                     items: other_items,
-                    row,
-                },
-                colors,
-                entries,
-                selected_item_id.as_deref(),
-                visible_artwork,
-            ) {
-                app.activate_catalog_item(item_id);
+                    focus_row: row,
+                });
             }
+            if !displayed_ids.is_empty()
+                && !ui.ctx().egui_wants_keyboard_input()
+                && !egui::Popup::is_any_open(ui.ctx())
+                && ui
+                    .ctx()
+                    .input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::A))
+            {
+                app.catalog_selection
+                    .select_all(displayed_ids.iter().copied());
+            }
+            let mut first_index = 0;
+            for plan in grouped {
+                ui.add_space(26.0);
+                let item_count = plan.items.len();
+                let selected_item_id = app.selected_item_id.clone();
+                let mut context = ShelfContext {
+                    entries,
+                    selected_item_id: selected_item_id.as_deref(),
+                    visible_artwork,
+                    selection: &mut app.catalog_selection,
+                    selection_ids: &displayed_ids,
+                    first_index,
+                    focused_card: &mut focused_card,
+                };
+                if let Some(item_id) = shelf(
+                    ui,
+                    ShelfContent {
+                        title: plan.title,
+                        description: plan.description,
+                        items: plan.items.into_iter(),
+                        row: plan.focus_row,
+                    },
+                    colors,
+                    &mut context,
+                ) {
+                    clicked_item_id = Some(item_id);
+                }
+                first_index += item_count;
+            }
+        }
+        if let Some((index, item_id)) = focused_card
+            && !ui.ctx().egui_wants_keyboard_input()
+            && !egui::Popup::is_any_open(ui.ctx())
+            && ui
+                .ctx()
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Space))
+        {
+            app.catalog_selection.toggle(&item_id, index);
+        }
+        if let Some(item_id) = clicked_item_id {
+            app.activate_catalog_item(item_id);
         }
         return;
     }
@@ -2036,6 +2120,17 @@ fn render_connected(
         | Page::SyncPlay
         | Page::Settings => |_| false,
     };
+    // Selection is bounded to the grid on screen: a page/library change clears it and a
+    // reloaded list drops ids that are no longer loaded.
+    app.catalog_selection
+        .bind_scope(&catalog_selection_scope(app));
+    app.catalog_selection.retain_loaded(
+        app.items
+            .iter()
+            .filter(|item| matches_item(item.kind))
+            .map(|item| item.id.as_str()),
+    );
+    catalog_selection_toolbar(ui, app, colors);
     let mut items = app
         .items
         .iter()
@@ -2090,6 +2185,7 @@ fn render_connected(
         visible_artwork,
         list_layout,
         artwork_scale,
+        selection: &mut app.catalog_selection,
     };
     if let Some(item_id) = poster_grid(ui, &grid_title, &items, &mut catalog_view) {
         if app.page == Page::Collections {
@@ -2362,6 +2458,166 @@ mod catalog_label_tests {
     }
 }
 
+/// Identifies the grid a selection belongs to. Search, library page, library folder and music
+/// sub-view all change this string, so the model can drop ids from the previous grid even if a
+/// navigation path forgets to clear them explicitly.
+fn catalog_selection_scope(app: &KattriApp) -> String {
+    let parent_id = app
+        .browse_context
+        .as_ref()
+        .map_or("", |context| context.parent_id.as_str());
+    let search = app.submitted_search.as_deref().unwrap_or("");
+    format!(
+        "{:?}:{:?}:{parent_id}:{search}:{:?}",
+        app.view, app.page, app.music_view
+    )
+}
+
+/// Whether the All items page has a shelf for this kind. The selection must not keep ids the
+/// page cannot show.
+fn home_shelf_kind(kind: MediaKind) -> bool {
+    matches!(
+        kind,
+        MediaKind::Movie
+            | MediaKind::Series
+            | MediaKind::Episode
+            | MediaKind::Audio
+            | MediaKind::Playlist
+            | MediaKind::Folder
+            | MediaKind::Other
+    )
+}
+
+/// What the bulk toolbar asked for, applied after the borrow of the item list ends.
+#[derive(Clone, Copy)]
+enum SelectionToolbarAction {
+    Clear,
+    Watched(bool),
+    Favorite(bool),
+    Queue,
+    Download,
+}
+
+/// The bulk-action bar shown while the grid has a selection. Actions are offered only when at
+/// least one selected item supports the same worker command the single-item menu uses.
+fn catalog_selection_toolbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
+    if !app.catalog_selection.is_active() {
+        return;
+    }
+    let (can_update_user_data, can_queue, can_download) = {
+        let mut can_update_user_data = false;
+        let mut can_queue = false;
+        let mut can_download = false;
+        for item in app
+            .items
+            .iter()
+            .filter(|item| app.catalog_selection.contains(&item.id))
+        {
+            if !matches!(
+                item.kind,
+                MediaKind::Folder | MediaKind::Playlist | MediaKind::Other
+            ) {
+                can_update_user_data = true;
+            }
+            can_queue |= item_menu::is_track(item);
+            can_download |= is_downloadable_item_type(item.remote_type.as_deref());
+        }
+        (can_update_user_data, can_queue, can_download)
+    };
+    let count = app.catalog_selection.len();
+    let count_label = ui_text_args(
+        ids::BROWSE_SELECTION_COUNT,
+        &[("count", &count.to_string())],
+    );
+    let mut action = None;
+    egui::Frame::new()
+        .fill(colors.raised)
+        .stroke(Stroke::new(1.0, colors.accent))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(count_label)
+                        .size(15.0)
+                        .strong()
+                        .color(colors.text),
+                );
+                if ui
+                    .add_enabled(
+                        can_update_user_data,
+                        egui::Button::new(ui_text(ids::BROWSE_SELECTION_MARK_WATCHED)),
+                    )
+                    .clicked()
+                {
+                    action = Some(SelectionToolbarAction::Watched(true));
+                }
+                if ui
+                    .add_enabled(
+                        can_update_user_data,
+                        egui::Button::new(ui_text(ids::BROWSE_SELECTION_MARK_UNWATCHED)),
+                    )
+                    .clicked()
+                {
+                    action = Some(SelectionToolbarAction::Watched(false));
+                }
+                if ui
+                    .add_enabled(
+                        can_update_user_data,
+                        egui::Button::new(ui_text(ids::BROWSE_SELECTION_ADD_FAVORITE)),
+                    )
+                    .clicked()
+                {
+                    action = Some(SelectionToolbarAction::Favorite(true));
+                }
+                if ui
+                    .add_enabled(
+                        can_update_user_data,
+                        egui::Button::new(ui_text(ids::BROWSE_SELECTION_REMOVE_FAVORITE)),
+                    )
+                    .clicked()
+                {
+                    action = Some(SelectionToolbarAction::Favorite(false));
+                }
+                if ui
+                    .add_enabled(
+                        can_queue,
+                        egui::Button::new(ui_text(ids::BROWSE_SELECTION_ADD_TO_QUEUE)),
+                    )
+                    .clicked()
+                {
+                    action = Some(SelectionToolbarAction::Queue);
+                }
+                if ui
+                    .add_enabled(
+                        can_download,
+                        egui::Button::new(ui_text(ids::BROWSE_SELECTION_DOWNLOAD)),
+                    )
+                    .clicked()
+                {
+                    action = Some(SelectionToolbarAction::Download);
+                }
+                if ui.button(ui_text(ids::BROWSE_SELECTION_CLEAR)).clicked() {
+                    action = Some(SelectionToolbarAction::Clear);
+                }
+                ui.label(
+                    RichText::new(ui_text(ids::BROWSE_SELECTION_HINT))
+                        .size(11.0)
+                        .color(colors.muted),
+                );
+            });
+        });
+    ui.add_space(10.0);
+    match action {
+        Some(SelectionToolbarAction::Clear) => app.catalog_selection.clear(),
+        Some(SelectionToolbarAction::Watched(played)) => app.bulk_set_played(played),
+        Some(SelectionToolbarAction::Favorite(favorite)) => app.bulk_set_favorite(favorite),
+        Some(SelectionToolbarAction::Queue) => app.bulk_add_to_queue(),
+        Some(SelectionToolbarAction::Download) => app.bulk_download(),
+        None => {}
+    }
+}
+
 fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     let mut sort = app.catalog_sort;
     let mut order = app.catalog_sort_order;
@@ -2562,7 +2818,7 @@ fn alphabet_picker(ui: &mut egui::Ui, prefix: &mut Option<char>, colors: Palette
 
 /// Only a movie or an episode is one file the server can return from `/Items/{id}/Download`.
 /// Series, seasons, folders, and collections have no single file, so they get no button.
-fn is_downloadable_item_type(item_type: Option<&str>) -> bool {
+pub(crate) fn is_downloadable_item_type(item_type: Option<&str>) -> bool {
     matches!(
         item_type,
         Some("Movie" | "Episode" | "Video" | "MusicVideo" | "Book" | "AudioBook")
@@ -3736,9 +3992,7 @@ fn shelf<'a, I>(
     ui: &mut egui::Ui,
     content: ShelfContent<'a, I>,
     colors: Palette,
-    entries: &mut Vec<CardFocus>,
-    selected_item_id: Option<&str>,
-    visible_artwork: &mut Vec<(String, String)>,
+    context: &mut ShelfContext<'_>,
 ) -> Option<String>
 where
     I: Iterator<Item = &'a MediaItem>,
@@ -3770,10 +4024,30 @@ where
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                for item in items {
-                    let selected = selected_item_id == Some(item.id.as_str());
-                    if catalog_card(ui, item, row, colors, entries, selected, visible_artwork) {
-                        clicked_item_id = Some(item.id.clone());
+                for (offset, item) in items.enumerate() {
+                    let index = context.first_index + offset;
+                    let selected = context.selected_item_id == Some(item.id.as_str())
+                        || context.selection.contains(&item.id);
+                    if catalog_card(
+                        ui,
+                        item,
+                        row,
+                        colors,
+                        context.entries,
+                        selected,
+                        context.visible_artwork,
+                    ) {
+                        apply_catalog_card_click(
+                            ui,
+                            context.selection,
+                            context.selection_ids,
+                            index,
+                            item,
+                            &mut clicked_item_id,
+                        );
+                    }
+                    if context.entries.last().is_some_and(|entry| entry.focused) {
+                        *context.focused_card = Some((index, item.id.clone()));
                     }
                     ui.add_space(6.0);
                 }
@@ -3927,13 +4201,37 @@ fn poster_grid(
         );
     });
     ui.add_space(18.0);
+    // Ctrl+A selects the items loaded for this grid. The shortcut is consumed here so it only
+    // acts where the selection is actually bounded to the visible catalog.
+    if !items.is_empty()
+        && !ui.ctx().egui_wants_keyboard_input()
+        && !egui::Popup::is_any_open(ui.ctx())
+        && ui
+            .ctx()
+            .input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::A))
+    {
+        view.selection
+            .select_all(items.iter().map(|item| item.id.as_str()));
+    }
     let mut clicked_item_id = None;
+    let mut focused_card: Option<(usize, String)> = None;
+    let selection_ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
     if view.list_layout {
         let previous_spacing = ui.spacing().item_spacing.y;
         ui.spacing_mut().item_spacing.y = LIST_ROW_GAP;
         for (row, item) in items.iter().enumerate() {
             if catalog_list_row(ui, item, row, view) {
-                clicked_item_id = Some(item.id.clone());
+                apply_catalog_card_click(
+                    ui,
+                    &mut *view.selection,
+                    &selection_ids,
+                    row,
+                    item,
+                    &mut clicked_item_id,
+                );
+            }
+            if view.entries.last().is_some_and(|entry| entry.focused) {
+                focused_card = Some((row, item.id.clone()));
             }
         }
         ui.spacing_mut().item_spacing.y = previous_spacing;
@@ -3943,17 +4241,61 @@ fn poster_grid(
         for (line, chunk) in items.chunks(columns).enumerate() {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = GRID_GAP;
-                for item in chunk {
-                    let selected = view.selected_item_id == Some(item.id.as_str());
+                for (offset, item) in chunk.iter().enumerate() {
+                    let index = line * columns + offset;
+                    let selected = view.selected_item_id == Some(item.id.as_str())
+                        || view.selection.contains(&item.id);
                     if catalog_card_scaled(ui, item, line, selected, view) {
-                        clicked_item_id = Some(item.id.clone());
+                        apply_catalog_card_click(
+                            ui,
+                            &mut *view.selection,
+                            &selection_ids,
+                            index,
+                            item,
+                            &mut clicked_item_id,
+                        );
+                    }
+                    if view.entries.last().is_some_and(|entry| entry.focused) {
+                        focused_card = Some((index, item.id.clone()));
                     }
                 }
             });
             ui.add_space(14.0);
         }
     }
+    // Space mirrors Ctrl+click on the focused card. Consuming it here keeps Enter as the
+    // activation key and stops the navigation adapter from turning Space into Select.
+    if let Some((index, item_id)) = focused_card
+        && !ui.ctx().egui_wants_keyboard_input()
+        && !egui::Popup::is_any_open(ui.ctx())
+        && ui
+            .ctx()
+            .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Space))
+    {
+        view.selection.toggle(&item_id, index);
+    }
     clicked_item_id
+}
+
+/// Applies the modifiers of a click on one grid card. Ctrl/Cmd and plain clicks while the
+/// toolbar is up toggle selection; Shift extends from the last toggled card; a plain click with
+/// no selection keeps opening the item.
+fn apply_catalog_card_click(
+    ui: &egui::Ui,
+    selection: &mut LibrarySelection,
+    selection_ids: &[&str],
+    index: usize,
+    item: &MediaItem,
+    clicked_item_id: &mut Option<String>,
+) {
+    let modifiers = ui.input(|input| input.modifiers);
+    if modifiers.shift {
+        selection.extend(selection_ids.iter().copied(), index);
+    } else if modifiers.command || modifiers.ctrl || modifiers.mac_cmd || selection.is_active() {
+        selection.toggle(&item.id, index);
+    } else {
+        *clicked_item_id = Some(item.id.clone());
+    }
 }
 
 fn catalog_list_row(
@@ -3971,7 +4313,8 @@ fn catalog_list_row(
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter_at(rect);
-        let selected = view.selected_item_id == Some(item.id.as_str());
+        let selected =
+            view.selected_item_id == Some(item.id.as_str()) || view.selection.contains(&item.id);
         let highlighted = selected || response.hovered();
         // List rows sit on a card: the library page has a full-bleed backdrop behind it, and
         // plain text over artwork is unreadable.
@@ -4106,7 +4449,7 @@ fn catalog_list_row(
         egui::WidgetInfo::selected(
             egui::Role::Button,
             true,
-            view.selected_item_id == Some(item.id.as_str()),
+            view.selected_item_id == Some(item.id.as_str()) || view.selection.contains(&item.id),
             accessible.clone(),
         )
     });

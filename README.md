@@ -58,11 +58,11 @@ is used.
 | **Details** | Metadata, overview, cast, similar titles, seasons and episodes, series Next Up, media info, version picker, trailers and extras, lyrics, play and download |
 | **Search** | Debounced cross-type search grouped by movies, series, episodes, music, playlists, photos, people and channels; subtitle search |
 | **Playback** | Direct play, direct stream and transcode through the relay; resume with optional rewind; playback reporting; audio and subtitle tracks; subtitle delay; chapters; speed; segment skip; bounded mid-stream recovery |
-| **Player** | Transport bar, 10-second seek, frame step, chapter step and menu, volume and mute, speed, A-B loop, picture-in-picture, fullscreen; previous/next; Up Next card and auto-play; fullscreen mouse-wheel seek; track menus; media info (`I`); equalizer and loudness filters; HDR-to-SDR tone mapping; refresh-rate matching on Windows; open a stream address |
+| **Player** | Transport bar, 10-second seek, frame step, chapter step and menu, volume and mute, speed, A-B loop, picture-in-picture, fullscreen; previous/next; Up Next card and auto-play; fullscreen mouse-wheel seek (`Ctrl+1` 1:1 window, `Ctrl+2` 2x speed); track menus; media info (`I`); equalizer and loudness filters; HDR-to-SDR tone mapping; refresh-rate matching on Windows; open a stream address |
 | **Music** | Album and playlist browsing, queue with shuffle and repeat, queue restored after restart |
 | **Live TV** | Channel list, 24-hour guide, tune through the relay, record the current program, recordings and scheduled recordings |
 | **Offline** | Download manager with pause, resume, range fallback, checksum verification and external subtitles |
-| **Extras** | Item menu (play, mark watched, favorite, download, add to playlist or queue), playlists, collections, favorites, photo slideshow, admin-lite dashboard, parental PIN |
+| **Extras** | Item menu (play, mark watched, favorite, download, add to playlist or queue), multi-select toolbar with bulk watched/favorite/queue/download, playlists, collections, favorites, photo slideshow, admin-lite dashboard, parental PIN |
 | **Administration** | Edit metadata, Identify, Edit images, Add to collection, Refresh metadata and confirmed Delete; administrator user listing, creation, rename and access-policy editing with confirmation |
 | **Settings** | General, playback, audio, subtitles (including bold), video, input, server (private CA and client certificate), About; versioned TOML per profile |
 | **Input** | Rebindable keyboard map, gamepad menus and player control, full focus navigation |
@@ -170,7 +170,7 @@ rendering, which the GPU-less runners cannot provide.
 
 Private CA and client certificates are available in Server settings. Known gaps
 include in-app automatic updates (the signed fetch and apply path is built but no host
-is configured), multi-select, and theme media or lyrics synced to playback. SyncPlay shared queues and native player status
+is configured), global OS shortcuts, and theme media or lyrics synced to playback. SyncPlay shared queues and native player status
 are implemented but still need a two-client runtime acceptance run. macOS URI dispatch
 and platform accessibility acceptance also remain open. This source tree includes
 changes newer than the published v0.6.0 installers.

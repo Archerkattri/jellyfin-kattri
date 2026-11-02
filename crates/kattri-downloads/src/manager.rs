@@ -421,7 +421,7 @@ fn restore(shared: &mut Shared, item_id: &str, previous: Option<Entry>) {
     }
 }
 
-fn is_valid_id(value: &str) -> bool {
+pub(crate) fn is_valid_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_ID_CHARS
         && value

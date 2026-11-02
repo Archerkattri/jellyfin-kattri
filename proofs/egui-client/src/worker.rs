@@ -8,6 +8,7 @@ use tokio::sync::{Semaphore, mpsc};
 mod clock_sampler;
 mod custom_backdrop;
 pub(crate) mod downloads;
+pub(crate) mod downloads_batch;
 mod saved_sign_in;
 mod scheduler;
 mod session_socket;
