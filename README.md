@@ -66,36 +66,36 @@ is used.
 | **Administration** | Edit metadata, Identify, Edit images, Add to collection, Refresh metadata and confirmed Delete; administrator user listing, creation, rename and access-policy editing with confirmation |
 | **Settings** | General, playback, audio, subtitles (including bold), video, input, server (private CA and client certificate), About; versioned TOML per profile |
 | **Input** | Rebindable keyboard map, gamepad menus and player control, full focus navigation |
-| **Interface** | Jellyfin Dark, Warm Dark, Light and system themes, Inter typeface, ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu |
+| **Interface** | Jellyfin Dark, Warm Dark, Light and system themes with optional custom accent, background and surface colors; SF Pro Display typeface (Inter fallback); ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu |
 
 ## Install
 
 Download the installer for your platform from the
 [releases page](https://github.com/Archerkattri/jellyfin-kattri/releases). The current
-prerelease is **v0.5.1**.
+prerelease is **v0.6.0**.
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows x64 | `JellyfinKattri-0.5.1-x64.msi` or `-x64-portable.zip` | libmpv is bundled; the portable zip runs `jellyfin-kattri.exe` |
-| Windows ARM64 | `JellyfinKattri-0.5.1-arm64.msi` or `-arm64-portable.zip` | libmpv is bundled |
-| macOS (universal) | `kattri-0.5.1-macos-universal.dmg` | libmpv is bundled; ad-hoc signed |
-| Linux x64 | `kattri_0.5.1-1_amd64.deb`, `kattri-0.5.1-1.x86_64.rpm`, `kattri-0.5.1-linux-x64.AppImage`, `kattri-0.5.1-linux-x64.flatpak` | deb/rpm use the distro libmpv; AppImage and Flatpak bundle it |
+| Windows x64 | `JellyfinKattri-0.6.0-x64.msi` or `-x64-portable.zip` | libmpv is bundled; the portable zip runs `jellyfin-kattri.exe` |
+| Windows ARM64 | `JellyfinKattri-0.6.0-arm64.msi` or `-arm64-portable.zip` | libmpv is bundled |
+| macOS (universal) | `kattri-0.6.0-macos-universal.dmg` | libmpv is bundled; ad-hoc signed |
+| Linux x64 | `kattri_0.6.0-1_amd64.deb`, `kattri-0.6.0-1.x86_64.rpm`, `kattri-0.6.0-linux-x64.AppImage`, `kattri-0.6.0-linux-x64.flatpak` | deb/rpm use the distro libmpv; AppImage and Flatpak bundle it |
 
 Every download has a matching `.sha256` file.
 
 ```sh
 # Debian / Ubuntu (needs libmpv2 or libmpv1 installed)
-sudo apt install ./kattri_0.5.1-1_amd64.deb
+sudo apt install ./kattri_0.6.0-1_amd64.deb
 
 # Fedora (needs libmpv)
-sudo dnf install ./kattri-0.5.1-1.x86_64.rpm
+sudo dnf install ./kattri-0.6.0-1.x86_64.rpm
 
 # AppImage, no install needed
-chmod +x kattri-0.5.1-linux-x64.AppImage
-./kattri-0.5.1-linux-x64.AppImage
+chmod +x kattri-0.6.0-linux-x64.AppImage
+./kattri-0.6.0-linux-x64.AppImage
 
 # Flatpak
-flatpak install --user --bundle kattri-0.5.1-linux-x64.flatpak
+flatpak install --user --bundle kattri-0.6.0-linux-x64.flatpak
 ```
 
 Windows SmartScreen and macOS Gatekeeper will warn because the packages are not
@@ -144,7 +144,7 @@ player.
 ## Status and limitations
 
 Kattri is an early development build, not a production release. The build and test
-workflows passed for the v0.5.1 head on Windows x64/ARM64, macOS and Linux x64/ARM64; the default
+workflows passed for the v0.6.0 head on Windows x64/ARM64, macOS and Linux x64/ARM64; the default
 workspace suite runs more than 2,800 tests against local fixtures and an in-process
 mock Jellyfin server.
 
@@ -164,16 +164,16 @@ Validated so far:
 Not yet validated: visible and audible playback on macOS and Linux, GPU decode across
 hardware, HDR passthrough, long HLS sessions, SyncPlay with two clients, physical
 controllers, and screen-reader walks on each platform. The Windows MSI clean-runner
-check failed with startup exit code 1; its cause has not been established. New runs
-capture stderr, installed hashes and display-adapter diagnostics. Installation alone
-does not prove the application starts.
+check now passes on all four per-user and per-machine legs using a window-only launch
+mode; it proves install, window creation, normal close and clean uninstall, not OpenGL
+rendering, which the GPU-less runners cannot provide.
 
 Private CA and client certificates are available in Server settings. Known gaps
-include automatic updates, full server/library administration, multi-select, theme
-media and lyrics synced to playback. SyncPlay shared queues and native player status
+include in-app automatic updates (the signed fetch and apply path is built but no host
+is configured), multi-select, and theme media or lyrics synced to playback. SyncPlay shared queues and native player status
 are implemented but still need a two-client runtime acceptance run. macOS URI dispatch
 and platform accessibility acceptance also remain open. This source tree includes
-changes newer than the published v0.5.1 installers.
+changes newer than the published v0.6.0 installers.
 
 ## Build from source
 
@@ -249,5 +249,5 @@ their own licenses; the libmpv packaging notice is under
 `packaging/libmpv/NOTICE.txt`. Jellyfin Kattri is an independent client and is not
 affiliated with the Jellyfin project.
 
-The published v0.5.1 binaries predate the switch to Inter; the font description above
+The published v0.6.0 binaries predate the switch to Inter; the font description above
 applies to current source.

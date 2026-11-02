@@ -1,3 +1,20 @@
+kattri (0.6.0-1) unstable; urgency=medium
+
+  * LAN server discovery, jellyfin:// deep links, administrator user
+    management and SyncPlay/shared playback.
+  * Custom request headers bound to the server origin; optional combined home
+    shelves and per-series hiding.
+  * Signed update manifest fetch with bounded transport; Wasmtime advisories
+    patched.
+  * Custom accent, background and surface theme colors.
+  * Download permission follows the server policy; batched download worker.
+  * Playback redraw, control and group-speed hardening; macOS URL dispatch.
+  * Plain HTTP to .local names is refused; only .localhost and literal
+    loopback/private addresses are trusted.
+  * Windows installation smoke uses a window-only launch mode and passes.
+
+ -- Jellyfin Kattri <krishiattriwork@gmail.com>  Mon, 02 Nov 2026 00:00:00 +0000
+
 kattri (0.5.1-1) unstable; urgency=medium
 
   * SF Pro Display typeface with an Inter fallback.
