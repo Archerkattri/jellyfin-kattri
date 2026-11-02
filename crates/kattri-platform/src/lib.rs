@@ -2,9 +2,10 @@
 //! directories, media keys, sleep inhibition, window control and notifications.
 //!
 //! Status: the traits, the value types and the in-memory test doubles in [`memory`] are
-//! implemented and tested. [`OsCredentialStore`] is the one OS backend so far (Windows
-//! Credential Manager, macOS Keychain, Linux Secret Service). Window control, media keys and
-//! the other services have no OS backend yet.
+//! implemented and tested. [`OsCredentialStore`] uses Windows Credential Manager, macOS
+//! Keychain and Linux Secret Service. Sleep inhibition has Windows, macOS and Linux backends
+//! (macOS/Linux runtime unvalidated); window control, media keys and notifications do not yet
+//! have OS backends.
 //!
 //! Layering rules:
 //! - UI and app crates depend on these traits only, never on a concrete OS backend.
@@ -15,6 +16,7 @@
 
 pub mod memory;
 mod os_credentials;
+mod power;
 
 pub use os_credentials::OsCredentialStore;
 
@@ -140,17 +142,51 @@ pub trait MediaKeys {
 // Power
 // ---------------------------------------------------------------------------
 
-/// Keeps the system or display awake while the guard is alive. Dropping the guard releases it.
+/// Lifecycle of an OS-backed playback inhibition request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PowerStatus {
+    /// The backend accepted the request and is acquiring the OS lease.
+    Pending,
+    /// The OS lease is currently held.
+    Active,
+    /// The OS service rejected the request or acquisition failed.
+    Failed(PlatformError),
+    /// The guard was dropped; acquisition is cancelled or lease cleanup is underway.
+    Released,
+}
+
+/// Owns a system or display inhibition request. Dropping it cancels acquisition or releases its lease.
+/// Backends that acquire asynchronously expose their current lifecycle through [`Self::status`].
 pub struct PowerGuard {
     release: Option<Box<dyn FnOnce() + Send>>,
+    status: std::sync::Arc<std::sync::Mutex<PowerStatus>>,
 }
 
 impl PowerGuard {
     /// Build a guard that runs `release` exactly once, on drop.
     pub fn new(release: impl FnOnce() + Send + 'static) -> Self {
+        Self::with_status(
+            release,
+            std::sync::Arc::new(std::sync::Mutex::new(PowerStatus::Active)),
+        )
+    }
+
+    pub(crate) fn with_status(
+        release: impl FnOnce() + Send + 'static,
+        status: std::sync::Arc<std::sync::Mutex<PowerStatus>>,
+    ) -> Self {
         Self {
             release: Some(Box::new(release)),
+            status,
         }
+    }
+
+    /// Current state of the OS inhibition request.
+    pub fn status(&self) -> PowerStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -159,32 +195,48 @@ impl Drop for PowerGuard {
         if let Some(release) = self.release.take() {
             release();
         }
+        *self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = PowerStatus::Released;
     }
 }
 
 impl fmt::Debug for PowerGuard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PowerGuard").finish_non_exhaustive()
+        f.debug_struct("PowerGuard")
+            .field("status", &self.status())
+            .finish_non_exhaustive()
     }
 }
 
 /// Sleep and display-off inhibition during playback.
 pub trait PowerInhibitor {
     /// Ask the OS not to sleep. `reason` is shown in OS diagnostics, for example "Playing video".
+    /// An asynchronous backend may return a guard whose status is initially [`PowerStatus::Pending`].
     fn inhibit_sleep(&mut self, reason: &str) -> Result<PowerGuard, PlatformError>;
 }
 
-/// The platform's sleep inhibitor. Windows uses the thread execution state; other platforms
-/// have no backend yet, so the caller keeps playing and logs the refusal once.
+/// The platform's sleep inhibitor. The returned guard reports asynchronous acquisition status
+/// where the platform API cannot safely block the calling thread.
+#[cfg(windows)]
 pub fn default_power_inhibitor() -> Box<dyn PowerInhibitor> {
-    #[cfg(windows)]
-    {
-        Box::new(WindowsPowerInhibitor)
-    }
-    #[cfg(not(windows))]
-    {
-        Box::new(UnsupportedPowerInhibitor)
-    }
+    Box::new(WindowsPowerInhibitor)
+}
+
+#[cfg(target_os = "macos")]
+pub fn default_power_inhibitor() -> Box<dyn PowerInhibitor> {
+    Box::new(power::MacOsPowerInhibitor::default())
+}
+
+#[cfg(target_os = "linux")]
+pub fn default_power_inhibitor() -> Box<dyn PowerInhibitor> {
+    Box::new(power::LinuxPowerInhibitor::default())
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+pub fn default_power_inhibitor() -> Box<dyn PowerInhibitor> {
+    Box::new(UnsupportedPowerInhibitor)
 }
 
 /// Windows implementation backed by `SetThreadExecutionState`.
@@ -227,11 +279,11 @@ impl PowerInhibitor for WindowsPowerInhibitor {
 }
 
 /// Fallback for platforms without a sleep-inhibition backend.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 #[derive(Debug, Default)]
 pub struct UnsupportedPowerInhibitor;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 impl PowerInhibitor for UnsupportedPowerInhibitor {
     fn inhibit_sleep(&mut self, _reason: &str) -> Result<PowerGuard, PlatformError> {
         Err(PlatformError::Unsupported("sleep inhibition"))

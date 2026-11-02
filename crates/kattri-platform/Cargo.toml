@@ -19,3 +19,9 @@ apple-native-keyring-store = { version = "=1.0.2", default-features = false, fea
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "=1.0.1", features = ["crypto-rust"] }
+# zbus is shared with the credential backend; keep its async-io runtime selection.
+zbus = { version = "=5.19.0", default-features = false, features = ["async-io"] }
+async-channel = "=2.5.0"
+async-executor = "=1.14.0"
+async-io = "=2.6.0"
+futures-lite = "=2.6.1"

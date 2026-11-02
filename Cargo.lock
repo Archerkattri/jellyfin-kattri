@@ -2784,9 +2784,14 @@ name = "kattri-platform"
 version = "0.5.1"
 dependencies = [
  "apple-native-keyring-store",
+ "async-channel",
+ "async-executor",
+ "async-io",
+ "futures-lite",
  "keyring-core",
  "thiserror 2.0.21",
  "windows-native-keyring-store",
+ "zbus",
  "zbus-secret-service-keyring-store",
  "zeroize",
 ]
