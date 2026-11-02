@@ -167,8 +167,18 @@ struct ShelfContent<'a, I> {
     row: usize,
 }
 
+struct CatalogView<'a> {
+    colors: Palette,
+    entries: &'a mut Vec<CardFocus>,
+    selected_item_id: Option<&'a str>,
+    visible_artwork: &'a mut Vec<(String, String)>,
+    list_layout: bool,
+    artwork_scale: f32,
+}
+
 pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
     let ctx = root.ctx().clone();
+    theme::set_current_preset(app.settings.settings().general.theme_preset);
     let colors = theme::palette(app.high_contrast);
     let mut gamepad_actions = if app.settings.settings().input.sdl_gamepad_enabled {
         crate::input::poll_gamepad(app.gamepad.as_mut()).unwrap_or_default()
@@ -993,7 +1003,7 @@ fn sign_in_form(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: 
                 ui.add_space(12.0);
             }
             if let Some(notice) = app.saved_servers.notice() {
-                ui.label(RichText::new(notice).color(Color32::from_rgb(0xE8, 0xB9, 0x77)));
+                ui.label(RichText::new(notice).color(colors.warning));
                 ui.add_space(8.0);
             }
             ui.label(
@@ -1034,9 +1044,9 @@ fn sign_in_form(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: 
                 .starts_with("http://");
             if is_http {
                 ui.add_space(16.0);
-                let warning = Color32::from_rgb(0xE8, 0xB9, 0x77);
+                let warning = colors.warning;
                 egui::Frame::new()
-                    .fill(Color32::from_rgba_unmultiplied(232, 185, 119, 18))
+                    .fill(warning.gamma_multiply(0.09))
                     .stroke(Stroke::new(1.0, warning))
                     .corner_radius(CornerRadius::same(8))
                     .inner_margin(egui::Margin::same(12))
@@ -1154,13 +1164,13 @@ fn sign_in_form(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: 
                     app.check_current_server();
                 }
                 if let Some(message) = app.server_check_error.as_deref() {
-                    ui.label(RichText::new(message).color(Color32::from_rgb(0xF0, 0xA0, 0x99)));
+                    ui.label(RichText::new(message).color(colors.danger));
                 }
             }
 
             if let Some(error) = error {
                 ui.add_space(14.0);
-                ui.label(RichText::new(error).color(Color32::from_rgb(0xF0, 0xA0, 0x99)));
+                ui.label(RichText::new(error).color(colors.danger));
             }
             if let Some(notice) = app.forgot_password_notice.as_deref() {
                 ui.add_space(10.0);
@@ -1239,10 +1249,7 @@ fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
         return;
     }
     if let Some(error) = app.live_tv_error {
-        ui.label(
-            RichText::new(crate::ui::status::message(error))
-                .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
-        );
+        ui.label(RichText::new(crate::ui::status::message(error)).color(colors.danger));
         if ui
             .button(ui_text(ids::LIVE_TV_BUTTON_RETRY_CHANNELS))
             .clicked()
@@ -1303,7 +1310,7 @@ fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                     ids::LIVE_TV_ERROR_GUIDE_FAILED,
                     &[("detail", crate::ui::status::message(error))],
                 ))
-                .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
+                .color(colors.danger),
             );
             if ui
                 .button(ui_text(ids::LIVE_TV_BUTTON_RETRY_GUIDE))
@@ -1464,7 +1471,7 @@ fn downloads_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
         downloads::show(ui, &rows, colors)
     };
     if let Some(message) = app.downloads.error.as_deref() {
-        ui.label(RichText::new(message).color(Color32::from_rgb(0xF0, 0xA0, 0x99)));
+        ui.label(RichText::new(message).color(colors.danger));
     }
     for intent in intents {
         app.download_intent(&intent);
@@ -2021,20 +2028,27 @@ fn render_connected(
     }
     let items: Vec<&MediaItem> = items.collect();
     let selected_item_id = app.selected_item_id.clone();
+    let general = &app.settings.settings().general;
+    let list_layout = matches!(general.library_layout, kattri_settings::LibraryLayout::List);
+    let artwork_scale = match general.library_artwork_size {
+        kattri_settings::LibraryArtworkSize::Small => 0.78,
+        kattri_settings::LibraryArtworkSize::Medium => 1.0,
+        kattri_settings::LibraryArtworkSize::Large => 1.28,
+    };
     // An open collection's grid holds its items, not more collections.
     let grid_title = match app.browse_context.as_ref() {
         Some(context) if open_collection => context.title.clone(),
         _ => app.page.label().to_owned(),
     };
-    if let Some(item_id) = poster_grid(
-        ui,
-        &grid_title,
-        &items,
+    let mut catalog_view = CatalogView {
         colors,
         entries,
-        selected_item_id.as_deref(),
+        selected_item_id: selected_item_id.as_deref(),
         visible_artwork,
-    ) {
+        list_layout,
+        artwork_scale,
+    };
+    if let Some(item_id) = poster_grid(ui, &grid_title, &items, &mut catalog_view) {
         if app.page == Page::Collections {
             // A collection opens as its own page of items.
             app.activate_catalog_item(item_id);
@@ -2634,7 +2648,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                 ids::MUSIC_ALBUM_LOAD_FAILED,
                                 &[("error", crate::ui::status::message(error))],
                             ))
-                            .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
+                            .color(colors.danger),
                         );
                     }
                 }
@@ -2732,7 +2746,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                 ids::SERIES_ERROR_LOAD_SEASONS,
                                 &[("error", error)],
                             ))
-                            .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
+                            .color(colors.danger),
                         );
                     } else if app.series_seasons.is_empty() {
                         ui.label(
@@ -2776,7 +2790,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                     ids::SERIES_ERROR_LOAD_SEASON,
                                     &[("error", error)],
                                 ))
-                                .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
+                                .color(colors.danger),
                             );
                         }
                     }
@@ -2868,18 +2882,10 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                     }
                 });
                 if let Some(message) = watched.error.as_deref() {
-                    ui.label(
-                        RichText::new(message)
-                            .size(12.0)
-                            .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
-                    );
+                    ui.label(RichText::new(message).size(12.0).color(colors.danger));
                 }
                 if let Some(message) = favorite.error.as_deref() {
-                    ui.label(
-                        RichText::new(message)
-                            .size(12.0)
-                            .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
-                    );
+                    ui.label(RichText::new(message).size(12.0).color(colors.danger));
                 }
                 if let Some(message) = app.playback_error.as_deref() {
                     ui.label(
@@ -2888,7 +2894,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                             &[("message", message)],
                         ))
                         .size(12.0)
-                        .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
+                        .color(colors.danger),
                     );
                 }
                 if let Some(info) = app.playback_info.as_ref() {
@@ -2907,11 +2913,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                 ui_text(ids::PLAYBACK_ERROR_UNKNOWN)
                             }
                         };
-                        ui.label(
-                            RichText::new(message)
-                                .size(12.0)
-                                .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
-                        );
+                        ui.label(RichText::new(message).size(12.0).color(colors.danger));
                     } else if info.media_sources.is_empty() {
                         ui.label(
                             RichText::new(ui_text(ids::PLAYBACK_ERROR_NO_SOURCE))
@@ -3008,11 +3010,11 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                             &[("message", message)],
                         ))
                         .size(12.0)
-                        .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
+                        .color(colors.danger),
                     );
                 }
             } else if let Some(message) = app.details_error.clone() {
-                detail_error_action = detail_error_panel(ui, &message);
+                detail_error_action = detail_error_panel(ui, &message, colors);
             } else if !app.details_loading {
                 ui.add_space(6.0);
                 ui.label(RichText::new(ui_text(ids::DETAIL_EMPTY_DETAILS)).color(colors.muted));
@@ -3153,6 +3155,30 @@ pub(crate) fn episode_display_label(episode: &jellyfin_api::BaseItemDto) -> Stri
         (Some(season), Some(number)) => format!("S{season}:E{number} · {}", episode.name),
         (None, Some(number)) => format!("E{number} · {}", episode.name),
         _ => episode.name.clone(),
+    }
+}
+
+#[cfg(test)]
+mod catalog_layout_tests {
+    use super::{GRID_GAP, grid_columns};
+
+    #[test]
+    fn grid_columns_fits_whole_posters_and_never_returns_zero() {
+        let card = 160.0;
+        assert_eq!(grid_columns(card, card), 1);
+        assert_eq!(grid_columns(card * 2.0 + GRID_GAP, card), 2);
+        assert_eq!(grid_columns(card * 3.0 + GRID_GAP * 2.0, card), 3);
+        // A window narrower than one poster still gets one column.
+        assert_eq!(grid_columns(10.0, card), 1);
+    }
+
+    #[test]
+    fn smaller_artwork_fits_more_columns_in_the_same_window() {
+        let card = 160.0;
+        let small = card * 0.78;
+        let large = card * 1.28;
+        assert!(grid_columns(1400.0, small) > grid_columns(1400.0, card));
+        assert!(grid_columns(1400.0, card) > grid_columns(1400.0, large));
     }
 }
 
@@ -3308,7 +3334,7 @@ fn person_page_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
             } else if let Some(error) = app.person_items_error.as_deref() {
                 ui.label(
                     RichText::new(ui_text_args(ids::PERSON_ERROR_LOAD, &[("error", error)]))
-                        .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
+                        .color(colors.danger),
                 );
             } else if app.person_items.is_empty() {
                 ui.label(RichText::new(ui_text(ids::PERSON_EMPTY)).color(colors.muted));
@@ -3339,7 +3365,11 @@ enum DetailErrorAction {
     Retry,
 }
 
-fn detail_error_panel(ui: &mut egui::Ui, message: &str) -> Option<DetailErrorAction> {
+fn detail_error_panel(
+    ui: &mut egui::Ui,
+    message: &str,
+    colors: Palette,
+) -> Option<DetailErrorAction> {
     let unavailable = message == ui_text(ids::DETAIL_ERROR_UNAVAILABLE);
     let label = if unavailable {
         message.to_owned()
@@ -3347,11 +3377,7 @@ fn detail_error_panel(ui: &mut egui::Ui, message: &str) -> Option<DetailErrorAct
         ui_text_args(ids::DETAIL_ERROR_LOAD, &[("message", message)])
     };
     ui.add_space(6.0);
-    ui.label(
-        RichText::new(label)
-            .size(12.0)
-            .color(Color32::from_rgb(0xF0, 0xA0, 0x99)),
-    );
+    ui.label(RichText::new(label).size(12.0).color(colors.danger));
     let button = if unavailable {
         ui_text(ids::DETAIL_BUTTON_BACK)
     } else {
@@ -3415,7 +3441,7 @@ mod detail_error_panel_tests {
                 ..Default::default()
             },
             |ui| {
-                action = detail_error_panel(ui, NOT_AVAILABLE);
+                action = detail_error_panel(ui, NOT_AVAILABLE, crate::theme::palette(false));
             },
         );
         output.textures_delta.clear();
@@ -3725,6 +3751,28 @@ fn catalog_card(
     visible_artwork: &mut Vec<(String, String)>,
 ) -> bool {
     let response = artwork::media_card(ui, item, colors, selected);
+    catalog_card_response(ui, item, row, entries, visible_artwork, response)
+}
+
+fn catalog_card_scaled(
+    ui: &mut egui::Ui,
+    item: &MediaItem,
+    row: usize,
+    selected: bool,
+    view: &mut CatalogView<'_>,
+) -> bool {
+    let response = artwork::media_card_scaled(ui, item, view.colors, selected, view.artwork_scale);
+    catalog_card_response(ui, item, row, view.entries, view.visible_artwork, response)
+}
+
+fn catalog_card_response(
+    ui: &mut egui::Ui,
+    item: &MediaItem,
+    row: usize,
+    entries: &mut Vec<CardFocus>,
+    visible_artwork: &mut Vec<(String, String)>,
+    response: egui::Response,
+) -> bool {
     item_menu::attach(&response, item);
     if ui.clip_rect().intersects(response.rect)
         && let Some(tag) = item.primary_image_tag.as_deref()
@@ -3802,12 +3850,16 @@ fn resolve_focus_activation(
 }
 
 /// Horizontal space one poster takes in a grid line, including the gap after it.
-const GRID_CARD_STRIDE: f32 = artwork::CARD_WIDTH + GRID_GAP;
 const GRID_GAP: f32 = 20.0;
 
+/// Vertical space between two catalog list row cards.
+const LIST_ROW_GAP: f32 = 8.0;
+
 /// How many posters fit on one grid line at `width`.
-fn grid_columns(width: f32) -> usize {
-    ((width + GRID_GAP) / GRID_CARD_STRIDE).floor().max(1.0) as usize
+fn grid_columns(width: f32, card_width: f32) -> usize {
+    ((width + GRID_GAP) / (card_width + GRID_GAP))
+        .floor()
+        .max(1.0) as usize
 }
 
 /// A library page: the title with its item count, then the posters in wrapping lines. Each line
@@ -3816,35 +3868,223 @@ fn poster_grid(
     ui: &mut egui::Ui,
     title: &str,
     items: &[&MediaItem],
-    colors: Palette,
-    entries: &mut Vec<CardFocus>,
-    selected_item_id: Option<&str>,
-    visible_artwork: &mut Vec<(String, String)>,
+    view: &mut CatalogView<'_>,
 ) -> Option<String> {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(title).size(26.0).strong().color(colors.text));
+        ui.label(
+            RichText::new(title)
+                .size(26.0)
+                .strong()
+                .color(view.colors.text),
+        );
         ui.label(
             RichText::new(items.len().to_string())
                 .size(16.0)
-                .color(colors.muted),
+                .color(view.colors.muted),
         );
     });
     ui.add_space(18.0);
-    let columns = grid_columns(ui.available_width());
     let mut clicked_item_id = None;
-    for (line, chunk) in items.chunks(columns).enumerate() {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = GRID_GAP;
-            for item in chunk {
-                let selected = selected_item_id == Some(item.id.as_str());
-                if catalog_card(ui, item, line, colors, entries, selected, visible_artwork) {
-                    clicked_item_id = Some(item.id.clone());
-                }
+    if view.list_layout {
+        let previous_spacing = ui.spacing().item_spacing.y;
+        ui.spacing_mut().item_spacing.y = LIST_ROW_GAP;
+        for (row, item) in items.iter().enumerate() {
+            if catalog_list_row(ui, item, row, view) {
+                clicked_item_id = Some(item.id.clone());
             }
-        });
-        ui.add_space(14.0);
+        }
+        ui.spacing_mut().item_spacing.y = previous_spacing;
+    } else {
+        let scale = view.artwork_scale.clamp(0.65, 1.55);
+        let columns = grid_columns(ui.available_width(), artwork::CARD_WIDTH * scale);
+        for (line, chunk) in items.chunks(columns).enumerate() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = GRID_GAP;
+                for item in chunk {
+                    let selected = view.selected_item_id == Some(item.id.as_str());
+                    if catalog_card_scaled(ui, item, line, selected, view) {
+                        clicked_item_id = Some(item.id.clone());
+                    }
+                }
+            });
+            ui.add_space(14.0);
+        }
     }
     clicked_item_id
+}
+
+fn catalog_list_row(
+    ui: &mut egui::Ui,
+    item: &MediaItem,
+    row: usize,
+    view: &mut CatalogView<'_>,
+) -> bool {
+    let width = ui.available_width().max(1.0);
+    let scale = view.artwork_scale.clamp(0.65, 1.55);
+    let thumb_width = 58.0 * scale;
+    let thumb_height = 80.0 * scale;
+    let padding = 10.0;
+    let height = (thumb_height + padding * 2.0).max(84.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter_at(rect);
+        let selected = view.selected_item_id == Some(item.id.as_str());
+        let highlighted = selected || response.hovered();
+        // List rows sit on a card: the library page has a full-bleed backdrop behind it, and
+        // plain text over artwork is unreadable.
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(10),
+            if highlighted {
+                view.colors.raised
+            } else {
+                view.colors.panel
+            },
+        );
+        let thumb = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + padding, rect.center().y - thumb_height * 0.5),
+            egui::vec2(thumb_width, thumb_height),
+        );
+        if let Some(texture) = item.artwork_texture.as_ref() {
+            painter.add(
+                egui::epaint::RectShape::filled(
+                    thumb,
+                    egui::CornerRadius::same(6),
+                    egui::Color32::WHITE,
+                )
+                .with_texture(
+                    texture.id(),
+                    artwork::cover_uv(texture.size_vec2(), thumb.size()),
+                ),
+            );
+        } else {
+            artwork::paint_artwork(&painter, thumb, item.artwork);
+        }
+        let text_x = thumb.right() + 16.0;
+        // The right-hand type label gets its own strip so long titles elide before it.
+        let text_width = (rect.right() - text_x - 14.0 - 110.0).max(24.0);
+        let meta = item.meta_line();
+        let secondary = if meta.is_empty() {
+            item.subtitle().to_owned()
+        } else {
+            meta
+        };
+        let mut lines = vec![
+            row::layout_text(
+                &painter,
+                &item.title,
+                FontId::proportional(16.0),
+                view.colors.text,
+                text_width,
+                1,
+            ),
+            row::layout_text(
+                &painter,
+                &secondary,
+                FontId::proportional(12.5),
+                view.colors.muted,
+                text_width,
+                1,
+            ),
+        ];
+        if let Some(overview) = item
+            .overview
+            .as_deref()
+            .map(str::trim)
+            .filter(|overview| !overview.is_empty())
+        {
+            lines.push(row::layout_text(
+                &painter,
+                overview,
+                FontId::proportional(12.5),
+                view.colors.muted,
+                text_width,
+                1,
+            ));
+        }
+        // The three lines are centred as one block against the poster.
+        let gap = 4.0;
+        let total = lines.iter().map(|galley| galley.size().y).sum::<f32>()
+            + gap * (lines.len().saturating_sub(1)) as f32;
+        let mut y = rect.center().y - total * 0.5;
+        for galley in lines {
+            let height = galley.size().y;
+            painter.galley(egui::pos2(text_x, y), galley, view.colors.text);
+            y += height + gap;
+        }
+        // The type sits at the right edge, so a wide row does not read as one long empty band.
+        painter.text(
+            egui::pos2(rect.right() - 16.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            item.subtitle(),
+            FontId::proportional(12.5),
+            view.colors.muted,
+        );
+        if item.played {
+            let badge = egui::Rect::from_center_size(
+                egui::pos2(thumb.right() - 2.0, thumb.bottom() - 2.0),
+                egui::vec2(18.0, 18.0),
+            );
+            painter.circle_filled(badge.center(), 9.0, view.colors.accent);
+            let check = Stroke::new(2.0, view.colors.background);
+            painter.line_segment(
+                [
+                    egui::pos2(badge.center().x - 4.0, badge.center().y),
+                    egui::pos2(badge.center().x - 1.0, badge.center().y + 3.5),
+                ],
+                check,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(badge.center().x - 1.0, badge.center().y + 3.5),
+                    egui::pos2(badge.center().x + 4.5, badge.center().y - 3.5),
+                ],
+                check,
+            );
+        }
+        if response.has_focus() {
+            painter.rect_stroke(
+                rect,
+                CornerRadius::same(10),
+                Stroke::new(2.0, view.colors.focus),
+                egui::StrokeKind::Inside,
+            );
+        } else if selected {
+            painter.rect_stroke(
+                rect,
+                CornerRadius::same(10),
+                Stroke::new(1.5, view.colors.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+    let accessible = format!("{}, {}", item.title, item.subtitle());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::Role::Button,
+            true,
+            view.selected_item_id == Some(item.id.as_str()),
+            accessible.clone(),
+        )
+    });
+    item_menu::attach(&response, item);
+    if ui.clip_rect().intersects(rect)
+        && let Some(tag) = item.primary_image_tag.as_deref()
+    {
+        view.visible_artwork
+            .push((item.artwork_id.clone(), tag.to_owned()));
+    }
+    let clicked = response.clicked();
+    view.entries.push(CardFocus {
+        row,
+        id: FocusId::new(format!("catalog:{}", item.id)),
+        center_x: rect.center().x,
+        focused: response.has_focus(),
+        response,
+        home_poster: None,
+        selection: HomeAction::Select(item.id.clone()),
+    });
+    clicked
 }
 
 fn error_banner(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, message: &str) {

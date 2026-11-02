@@ -37,12 +37,15 @@ pub use profile::{
 };
 pub use schema::{
     AspectMode, AudioOutput, AudioSettings, BACKBUFFER_MB_MAX, BackdropPreference, CACHE_MB_MAX,
-    CACHE_MB_MIN, CURRENT_SCHEMA_VERSION, ChannelLayout, DecodeMode, EQUALIZER_BANDS,
-    EQUALIZER_GAIN_LIMIT_DB, GeneralSettings, HdrPreference, ImageFormat, InputSettings,
-    InterfaceSize, LOUDNESS_TARGET_LUFS_RANGE, LogDetail, MAX_SERIES_LANGUAGE_ENTRIES, Passthrough,
-    PlaybackSettings, PluginSettings, READAHEAD_SECS_MAX, ScreenshotSettings,
-    SeriesLanguageSetting, Settings, SubtitleSettings, SyncMode, ToneMapping, TranscodePreferences,
-    UpdateSettings, VideoSettings, WindowGeometry, WindowSettings,
+    CACHE_MB_MIN, CURRENT_SCHEMA_VERSION, ChannelLayout, DEFAULT_HOME_SECTION_ORDER, DecodeMode,
+    EQUALIZER_BANDS, EQUALIZER_GAIN_LIMIT_DB, GeneralSettings, HOME_SECTION_COLLECTIONS,
+    HOME_SECTION_CONTINUE_WATCHING, HOME_SECTION_LATEST, HOME_SECTION_MY_MEDIA,
+    HOME_SECTION_NEXT_UP, HdrPreference, ImageFormat, InputSettings, InterfaceSize,
+    LOUDNESS_TARGET_LUFS_RANGE, LibraryArtworkSize, LibraryLayout, LogDetail,
+    MAX_SERIES_LANGUAGE_ENTRIES, Passthrough, PlaybackSettings, PluginSettings, READAHEAD_SECS_MAX,
+    ScreenshotSettings, SeriesLanguageSetting, Settings, SubtitleSettings, SyncMode, ThemePreset,
+    ToneMapping, TranscodePreferences, UpdateSettings, VideoSettings, WindowGeometry,
+    WindowSettings,
 };
 pub use store::{
     LoadWarning, load, load_from_str, load_from_str_with_report, load_with_report, save,

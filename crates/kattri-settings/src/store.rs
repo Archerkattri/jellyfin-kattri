@@ -166,6 +166,9 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
             &[
                 "high_contrast",
                 "reduce_motion",
+                "theme_preset",
+                "library_layout",
+                "library_artwork_size",
                 "backdrop",
                 "custom_backdrop_path",
                 "custom_ca_path",
@@ -177,6 +180,7 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
                 "home_latest",
                 "home_my_media",
                 "home_collections",
+                "home_section_order",
             ][..],
         ),
         (
@@ -544,6 +548,97 @@ mod tests {
                 max_bytes: MAX_SETTINGS_BYTES
             })
         ));
+    }
+
+    #[test]
+    fn appearance_preferences_default_and_round_trip() {
+        use crate::{LibraryArtworkSize, LibraryLayout, ThemePreset};
+        let defaults = Settings::default();
+        assert_eq!(defaults.general.theme_preset, ThemePreset::JellyfinDark);
+        assert_eq!(defaults.general.library_layout, LibraryLayout::Grid);
+        assert_eq!(
+            defaults.general.library_artwork_size,
+            LibraryArtworkSize::Medium
+        );
+
+        for (preset, spelling) in [
+            (ThemePreset::JellyfinDark, "jellyfin-dark"),
+            (ThemePreset::WarmDark, "warm-dark"),
+        ] {
+            let mut settings = Settings::default();
+            settings.general.theme_preset = preset;
+            let text = to_toml_string(&settings).unwrap();
+            assert!(
+                text.contains(&format!("theme_preset = \"{spelling}\"")),
+                "missing {spelling} in {text}"
+            );
+            assert_eq!(load_from_str(&text).unwrap().general, settings.general);
+        }
+
+        for layout in [LibraryLayout::Grid, LibraryLayout::List] {
+            for size in [
+                LibraryArtworkSize::Small,
+                LibraryArtworkSize::Medium,
+                LibraryArtworkSize::Large,
+            ] {
+                let mut settings = Settings::default();
+                settings.general.library_layout = layout;
+                settings.general.library_artwork_size = size;
+                let text = to_toml_string(&settings).unwrap();
+                assert_eq!(load_from_str(&text).unwrap().general, settings.general);
+            }
+        }
+    }
+
+    #[test]
+    fn missing_appearance_keys_use_the_documented_defaults() {
+        use crate::{LibraryArtworkSize, LibraryLayout, ThemePreset};
+        let loaded = load_from_str("[general]\nhigh_contrast = true\n").expect("load");
+        assert!(loaded.general.high_contrast);
+        assert_eq!(loaded.general.theme_preset, ThemePreset::JellyfinDark);
+        assert_eq!(loaded.general.library_layout, LibraryLayout::Grid);
+        assert_eq!(
+            loaded.general.library_artwork_size,
+            LibraryArtworkSize::Medium
+        );
+    }
+
+    #[test]
+    fn home_section_order_round_trips_and_keeps_unknown_ids() {
+        let loaded = load_from_str(
+            "[general]\nhome_section_order = [\"latest\", \"future_row\", \"continue_watching\"]\n",
+        )
+        .expect("load");
+        assert_eq!(
+            loaded.general.home_section_order,
+            vec![
+                "latest".to_owned(),
+                "future_row".to_owned(),
+                "continue_watching".to_owned(),
+            ]
+        );
+
+        let saved = to_toml_string(&loaded).expect("save");
+        assert_eq!(
+            load_from_str(&saved)
+                .expect("reload")
+                .general
+                .home_section_order,
+            loaded.general.home_section_order
+        );
+
+        // The default order lists every known section exactly once.
+        let defaults = Settings::default().general.home_section_order;
+        for section in crate::DEFAULT_HOME_SECTION_ORDER {
+            assert_eq!(
+                defaults
+                    .iter()
+                    .filter(|entry| entry.as_str() == section)
+                    .count(),
+                1,
+                "{section} should appear once"
+            );
+        }
     }
 
     #[test]

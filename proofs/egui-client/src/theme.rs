@@ -1,4 +1,30 @@
 use egui::{self, Color32, Stroke};
+use kattri_settings::ThemePreset;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+static CURRENT_PRESET: AtomicU8 = AtomicU8::new(0);
+static CURRENT_HIGH_CONTRAST: AtomicBool = AtomicBool::new(false);
+
+fn current_preset() -> ThemePreset {
+    match CURRENT_PRESET.load(Ordering::Relaxed) {
+        1 => ThemePreset::WarmDark,
+        _ => ThemePreset::JellyfinDark,
+    }
+}
+
+/// Set the preset used by the existing shared palette and apply entry points.
+pub fn set_current_preset(preset: ThemePreset) {
+    let value = match preset {
+        ThemePreset::JellyfinDark => 0,
+        ThemePreset::WarmDark => 1,
+    };
+    CURRENT_PRESET.store(value, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn apply(ctx: &egui::Context, high_contrast: bool, reduce_motion: bool) {
+    apply_with_preset(ctx, current_preset(), high_contrast, reduce_motion);
+}
 
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -10,6 +36,10 @@ pub struct Palette {
     pub accent: Color32,
     pub focus: Color32,
     pub divider: Color32,
+    /// Warning copy that stays legible on this page.
+    pub warning: Color32,
+    /// Failure copy that stays legible on this page.
+    pub danger: Color32,
 }
 
 pub const NIGHT_SLATE: Color32 = Color32::from_rgb(0x0A, 0x0A, 0x0C);
@@ -18,6 +48,9 @@ pub const RAISED: Color32 = Color32::from_rgb(0x2A, 0x2A, 0x2D);
 pub const PRIMARY_TEXT: Color32 = Color32::from_rgb(0xF5, 0xF5, 0xF7);
 pub const MUTED_TEXT: Color32 = Color32::from_rgb(0xA1, 0xA1, 0xA6);
 pub const JELLYFIN_BLUE: Color32 = Color32::from_rgb(0x00, 0xA4, 0xDC);
+/// Warning and failure copy on the interface pages.
+pub const WARNING_TEXT: Color32 = Color32::from_rgb(0xE8, 0xB9, 0x77);
+pub const DANGER_TEXT: Color32 = Color32::from_rgb(0xF0, 0xA0, 0x99);
 const SELECTION_BLUE: Color32 = Color32::from_rgb(0x48, 0x48, 0x4C);
 const ACTIVE_FILL_HIGH_CONTRAST: Color32 = Color32::from_rgb(0x00, 0x68, 0x90);
 const HOVER_FILL: Color32 = Color32::from_rgb(0x3A, 0x3A, 0x3E);
@@ -33,6 +66,21 @@ const BODY_SIZE: f32 = 14.0;
 const HEADING_SIZE: f32 = 22.0;
 
 pub fn palette(high_contrast: bool) -> Palette {
+    palette_for(current_preset(), high_contrast)
+}
+
+/// The palette the app last applied, for chrome drawn outside the client's own draw pass (the
+/// host's status bar and notices), which never sees the app's settings directly.
+pub fn active_palette() -> Palette {
+    palette_for(
+        current_preset(),
+        CURRENT_HIGH_CONTRAST.load(Ordering::Relaxed),
+    )
+}
+
+/// Resolve a preset to the shared semantic palette. High contrast keeps its own foreground,
+/// surface and focus tokens regardless of the selected color preset.
+pub fn palette_for(preset: ThemePreset, high_contrast: bool) -> Palette {
     if high_contrast {
         Palette {
             background: NIGHT_SLATE,
@@ -43,40 +91,49 @@ pub fn palette(high_contrast: bool) -> Palette {
             accent: JELLYFIN_BLUE,
             focus: Color32::WHITE,
             divider: Color32::from_rgb(0x8A, 0x8A, 0x8A),
+            warning: WARNING_TEXT,
+            danger: DANGER_TEXT,
         }
     } else {
-        Palette {
-            background: NIGHT_SLATE,
-            panel: PANEL,
-            raised: RAISED,
-            text: PRIMARY_TEXT,
-            muted: MUTED_TEXT,
-            accent: Color32::from_rgb(0xF5, 0xF5, 0xF7),
-            focus: Color32::WHITE,
-            divider: Color32::from_rgb(0x2C, 0x2C, 0x2F),
+        match preset {
+            ThemePreset::JellyfinDark => Palette {
+                background: NIGHT_SLATE,
+                panel: PANEL,
+                raised: RAISED,
+                text: PRIMARY_TEXT,
+                muted: MUTED_TEXT,
+                accent: Color32::from_rgb(0xF5, 0xF5, 0xF7),
+                focus: Color32::WHITE,
+                divider: Color32::from_rgb(0x2C, 0x2C, 0x2F),
+                warning: WARNING_TEXT,
+                danger: DANGER_TEXT,
+            },
+            ThemePreset::WarmDark => Palette {
+                background: Color32::from_rgb(0x18, 0x12, 0x10),
+                panel: Color32::from_rgb(0x27, 0x1B, 0x16),
+                raised: Color32::from_rgb(0x3B, 0x29, 0x20),
+                text: Color32::from_rgb(0xFF, 0xF3, 0xE5),
+                muted: Color32::from_rgb(0xD2, 0xB9, 0xA5),
+                accent: Color32::from_rgb(0xFF, 0xB4, 0x5C),
+                focus: Color32::from_rgb(0xFF, 0xD1, 0x7A),
+                divider: Color32::from_rgb(0x55, 0x3B, 0x2E),
+                warning: WARNING_TEXT,
+                danger: DANGER_TEXT,
+            },
         }
     }
 }
 
-/// The Apple TV typeface: SF Pro Display. Bundled for this personal build at the owner's
-/// request; Apple's font licence does not permit redistribution, so a public build should swap
-/// this for the Inter fallback below.
-const UI_FONT: &[u8] = include_bytes!("../../../assets/fonts/SF-Pro-Display-Regular.otf");
-/// Open-licensed fallback for glyphs SF Pro does not carry and for public redistribution.
-const FALLBACK_UI_FONT: &[u8] = include_bytes!("../../../assets/fonts/Inter.ttf");
+/// Open-licensed interface font.
+const UI_FONT: &[u8] = include_bytes!("../../../assets/fonts/Inter.ttf");
 
-/// Install the fonts once at start-up: SF Pro Display, then Inter, then egui's own proportional
-/// font, then the monospace family for arrows and geometric shapes (`◌`, `▾`) that neither
-/// proportional face carries. Without the last fallback those characters render as boxes.
+/// Install Inter, egui's proportional font, and the monospace fallback used for arrows and
+/// geometric shapes (`◌`, `▾`).
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
-        "sf-pro".to_owned(),
-        std::sync::Arc::new(egui::FontData::from_static(UI_FONT)),
-    );
-    fonts.font_data.insert(
         "inter".to_owned(),
-        std::sync::Arc::new(egui::FontData::from_static(FALLBACK_UI_FONT)),
+        std::sync::Arc::new(egui::FontData::from_static(UI_FONT)),
     );
     let monospace = fonts
         .families
@@ -84,7 +141,6 @@ pub fn install_fonts(ctx: &egui::Context) {
         .and_then(|family| family.first().cloned());
     if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
         proportional.insert(0, "inter".to_owned());
-        proportional.insert(0, "sf-pro".to_owned());
         if let Some(fallback) = monospace
             && !proportional.contains(&fallback)
         {
@@ -94,26 +150,41 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-pub fn apply(ctx: &egui::Context, high_contrast: bool, reduce_motion: bool) {
+/// Apply the selected preset together with the persistent accessibility overrides.
+pub fn apply_with_preset(
+    ctx: &egui::Context,
+    preset: ThemePreset,
+    high_contrast: bool,
+    reduce_motion: bool,
+) {
     // The whole style is rebuilt only when the flags change. Reassigning every Visuals field on
     // every frame is pure waste: the draw loop calls this before each pass.
     let applied = egui::Id::unique("kattri-theme-applied");
-    let wanted = (high_contrast, reduce_motion);
-    if ctx.data(|data| data.get_temp::<(bool, bool)>(applied)) == Some(wanted) {
+    let wanted = (preset, high_contrast, reduce_motion);
+    if ctx.data(|data| data.get_temp::<(ThemePreset, bool, bool)>(applied)) == Some(wanted) {
         return;
     }
     ctx.data_mut(|data| data.insert_temp(applied, wanted));
-    let colors = palette(high_contrast);
+    CURRENT_HIGH_CONTRAST.store(high_contrast, Ordering::Relaxed);
+    let colors = palette_for(preset, high_contrast);
     ctx.global_style_mut(|style| {
         style.visuals = egui::Visuals::dark();
         style.visuals.panel_fill = colors.background;
         style.visuals.window_fill = colors.panel;
         style.visuals.extreme_bg_color = colors.background;
-        style.visuals.text_edit_bg_color = Some(FIELD);
+        style.visuals.text_edit_bg_color = Some(if preset == ThemePreset::WarmDark {
+            Color32::from_rgb(0x30, 0x22, 0x1B)
+        } else {
+            FIELD
+        });
         style.visuals.faint_bg_color = colors.panel;
         // A global text override would mask the dark foreground on blue active controls.
         style.visuals.override_text_color = None;
-        style.visuals.selection.bg_fill = SELECTION_BLUE;
+        style.visuals.selection.bg_fill = match (high_contrast, preset) {
+            (true, _) => ACTIVE_FILL_HIGH_CONTRAST,
+            (false, ThemePreset::JellyfinDark) => SELECTION_BLUE,
+            (false, ThemePreset::WarmDark) => Color32::from_rgb(0x4A, 0x35, 0x28),
+        };
         style.visuals.selection.stroke = Stroke::new(1.0, colors.text);
         style.visuals.widgets.noninteractive.bg_fill = colors.panel;
         style.visuals.widgets.noninteractive.fg_stroke.color = colors.text;
@@ -128,14 +199,18 @@ pub fn apply(ctx: &egui::Context, high_contrast: bool, reduce_motion: bool) {
                 HAIRLINE
             },
         );
-        style.visuals.widgets.hovered.bg_fill = HOVER_FILL;
+        style.visuals.widgets.hovered.bg_fill = if preset == ThemePreset::WarmDark {
+            Color32::from_rgb(0x4A, 0x35, 0x28)
+        } else {
+            HOVER_FILL
+        };
         style.visuals.widgets.hovered.fg_stroke.color = colors.text;
         // egui draws `strong()` text, and the text of a pressed widget, in this foreground, so it
         // must be light. Pressed widgets get a mid-grey fill (a deep blue in high contrast).
-        style.visuals.widgets.active.bg_fill = if high_contrast {
-            ACTIVE_FILL_HIGH_CONTRAST
-        } else {
-            SELECTION_BLUE
+        style.visuals.widgets.active.bg_fill = match (high_contrast, preset) {
+            (true, _) => ACTIVE_FILL_HIGH_CONTRAST,
+            (false, ThemePreset::JellyfinDark) => SELECTION_BLUE,
+            (false, ThemePreset::WarmDark) => Color32::from_rgb(0x4A, 0x35, 0x28),
         };
         style.visuals.widgets.active.fg_stroke.color = colors.text;
         // egui 0.36 resolves keyboard-focused widgets through the active visual state.
@@ -407,6 +482,49 @@ mod tests {
             output.textures_delta.clear();
             assert_eq!(ctx.zoom_factor(), size.zoom_factor());
         }
+    }
+
+    #[test]
+    fn every_preset_keeps_text_and_focus_contrast_on_its_surfaces() {
+        for preset in [ThemePreset::JellyfinDark, ThemePreset::WarmDark] {
+            let colors = palette_for(preset, false);
+            for surface in [colors.background, colors.panel, colors.raised] {
+                assert!(
+                    contrast_ratio(colors.text, surface) >= 7.0,
+                    "{preset:?} text is below 7:1 on {surface:?}"
+                );
+                assert!(
+                    contrast_ratio(colors.muted, surface) >= AA_TEXT_MIN,
+                    "{preset:?} muted text is below AA on {surface:?}"
+                );
+                assert!(
+                    contrast_ratio(colors.focus, surface) >= 3.0,
+                    "{preset:?} focus ring is below 3:1 on {surface:?}"
+                );
+                assert!(
+                    contrast_ratio(colors.danger, surface) >= AA_TEXT_MIN,
+                    "{preset:?} failure copy is below AA on {surface:?}"
+                );
+                assert!(
+                    contrast_ratio(colors.warning, surface) >= AA_TEXT_MIN,
+                    "{preset:?} warning copy is below AA on {surface:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn presets_have_distinct_surfaces_and_high_contrast_overrides_them() {
+        let dark = palette_for(ThemePreset::JellyfinDark, false);
+        let warm = palette_for(ThemePreset::WarmDark, false);
+        assert_ne!(dark.background, warm.background);
+        assert_ne!(dark.accent, warm.accent);
+
+        // High contrast keeps one palette whatever preset is selected.
+        let forced = palette_for(ThemePreset::WarmDark, true);
+        assert_eq!(forced.background, dark.background);
+        assert_eq!(forced.accent, JELLYFIN_BLUE);
+        assert_eq!(forced.focus, Color32::WHITE);
     }
 
     #[test]

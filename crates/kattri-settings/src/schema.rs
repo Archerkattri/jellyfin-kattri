@@ -79,6 +79,21 @@ pub const OUTRO_DELAY_MS_MAX: u32 = 60_000;
 /// `kattri_client_core::volume::MAX_VOLUME_PERCENT_CHOICES`; keep the two in step by hand.
 pub const MAX_VOLUME_PERCENT_CHOICES: [u32; 4] = [100, 150, 200, 300];
 
+/// Stable identifiers for the configurable Home sections.
+pub const HOME_SECTION_CONTINUE_WATCHING: &str = "continue_watching";
+pub const HOME_SECTION_NEXT_UP: &str = "next_up";
+pub const HOME_SECTION_LATEST: &str = "latest";
+pub const HOME_SECTION_MY_MEDIA: &str = "my_media";
+pub const HOME_SECTION_COLLECTIONS: &str = "collections";
+/// Default display order for Home sections.
+pub const DEFAULT_HOME_SECTION_ORDER: [&str; 5] = [
+    HOME_SECTION_CONTINUE_WATCHING,
+    HOME_SECTION_NEXT_UP,
+    HOME_SECTION_LATEST,
+    HOME_SECTION_MY_MEDIA,
+    HOME_SECTION_COLLECTIONS,
+];
+
 impl PlaybackSettings {
     /// Clamp the buffer fields into their M2-06 ranges. Returns the dotted names of the fields
     /// that changed, so the caller can log one warning per field.
@@ -152,6 +167,12 @@ impl Default for Settings {
 pub struct GeneralSettings {
     pub high_contrast: bool,
     pub reduce_motion: bool,
+    /// UI color scheme. Missing keys in older settings documents use Jellyfin Dark.
+    pub theme_preset: ThemePreset,
+    /// Preferred layout for library catalogs.
+    pub library_layout: LibraryLayout,
+    /// Preferred poster size for library artwork.
+    pub library_artwork_size: LibraryArtworkSize,
     pub backdrop: BackdropPreference,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_backdrop_path: Option<PathBuf>,
@@ -171,6 +192,8 @@ pub struct GeneralSettings {
     pub home_latest: bool,
     pub home_my_media: bool,
     pub home_collections: bool,
+    /// Stable section IDs in display order. Unknown IDs are retained for forward compatibility.
+    pub home_section_order: Vec<String>,
     #[serde(rename = "_unknown", skip_serializing_if = "toml::Table::is_empty")]
     pub unknown: toml::Table,
 }
@@ -180,6 +203,9 @@ impl Default for GeneralSettings {
         Self {
             high_contrast: false,
             reduce_motion: true,
+            theme_preset: ThemePreset::default(),
+            library_layout: LibraryLayout::default(),
+            library_artwork_size: LibraryArtworkSize::default(),
             backdrop: BackdropPreference::Server,
             custom_backdrop_path: None,
             custom_ca_path: None,
@@ -191,9 +217,43 @@ impl Default for GeneralSettings {
             home_latest: true,
             home_my_media: true,
             home_collections: true,
+            home_section_order: DEFAULT_HOME_SECTION_ORDER
+                .iter()
+                .map(|section| (*section).to_owned())
+                .collect(),
             unknown: toml::Table::new(),
         }
     }
+}
+
+/// Persisted color scheme for the client interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemePreset {
+    /// The existing dark interface, preserving its established palette.
+    #[default]
+    JellyfinDark,
+    /// A dark brown and amber color scheme.
+    WarmDark,
+}
+
+/// Preferred catalog arrangement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LibraryLayout {
+    #[default]
+    Grid,
+    List,
+}
+
+/// Preferred artwork size in library catalogs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LibraryArtworkSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

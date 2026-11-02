@@ -75,10 +75,7 @@ pub(crate) fn show(ctx: &Context, state: &mut Option<OpenUrlState>) -> Option<St
             }
             if let Some(error) = open.error {
                 ui.add_space(6.0);
-                ui.label(
-                    RichText::new(error.to_string())
-                        .color(egui::Color32::from_rgb(0xF0, 0xA0, 0x99)),
-                );
+                ui.label(RichText::new(error.to_string()).color(crate::theme::DANGER_TEXT));
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {

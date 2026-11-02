@@ -656,9 +656,21 @@ impl<'session> GlHost<'session> {
             }
             #[cfg(debug_assertions)]
             if !mpv.reporting_enabled() {
-                egui::Panel::top("stream_only_validation_notice").show(root, |ui| {
-                    ui.label("Stream-only validation — session reporting is disabled.");
-                });
+                let chrome = jellyfin_egui_client::active_palette();
+                egui::Panel::top("stream_only_validation_notice")
+                    .frame(
+                        egui::Frame::new()
+                            .fill(chrome.panel)
+                            .inner_margin(egui::Margin::symmetric(16, 2)),
+                    )
+                    .show(root, |ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "Stream-only validation — session reporting is disabled.",
+                            )
+                            .color(chrome.muted),
+                        );
+                    });
             }
             if let Some(delay) = osd_hide_after {
                 root.request_repaint_after(delay);
@@ -762,11 +774,12 @@ impl<'session> GlHost<'session> {
                 shell_notice.is_some(),
                 *show_player_details,
             ) {
+                let chrome = jellyfin_egui_client::active_palette();
                 egui::Panel::bottom("player_status_bar")
                     .exact_size(34.0)
                     .frame(
                         egui::Frame::new()
-                            .fill(egui::Color32::from_rgb(0x15, 0x15, 0x17))
+                            .fill(chrome.panel)
                             .inner_margin(egui::Margin::symmetric(16, 0)),
                     )
                     .show(root, |ui| {
@@ -776,16 +789,12 @@ impl<'session> GlHost<'session> {
                                     egui::vec2(8.0, 8.0),
                                     egui::Sense::hover(),
                                 );
-                                ui.painter().circle_filled(
-                                    dot.center(),
-                                    4.0,
-                                    egui::Color32::from_rgb(0xF2, 0xB1, 0x34),
-                                );
+                                ui.painter().circle_filled(dot.center(), 4.0, chrome.warning);
                                 ui.label(
                                     egui::RichText::new(
                                         "Video playback is unavailable on this computer",
                                     )
-                                    .color(egui::Color32::from_rgb(0xA1, 0xA1, 0xA6)),
+                                    .color(chrome.muted),
                                 );
                             }
                             if let Some((text, _)) = &shell_notice {

@@ -1078,8 +1078,14 @@ impl KattriApp {
 
     fn with_launch_profile_inner(ctx: egui::Context, requested: Option<&str>) -> Self {
         crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx, false, true);
         let settings = SettingsState::open(default_profiles_dir().as_deref(), requested);
+        crate::theme::set_current_preset(settings.settings().general.theme_preset);
+        crate::theme::apply_with_preset(
+            &ctx,
+            settings.settings().general.theme_preset,
+            settings.settings().general.high_contrast,
+            settings.settings().general.reduce_motion,
+        );
         let tls = ClientTlsFiles {
             custom_ca: settings.settings().general.custom_ca_path.clone(),
             client_cert: settings.settings().general.client_cert_path.clone(),
@@ -9374,7 +9380,12 @@ impl KattriApp {
         }
         self.poll_search_debounce(now);
         self.poll_keymap_file(ctx, now);
-        crate::theme::apply(ctx, self.high_contrast, self.reduce_motion);
+        crate::theme::apply_with_preset(
+            ctx,
+            self.settings.settings().general.theme_preset,
+            self.high_contrast,
+            self.reduce_motion,
+        );
         crate::theme::apply_interface_size(ctx, self.interface_size);
     }
 
@@ -11539,6 +11550,9 @@ mod artwork_cache_tests {
                 overview: None,
                 kind: MediaKind::Movie,
                 artwork,
+                production_year: None,
+                official_rating: None,
+                run_time_ticks: None,
                 primary_image_tag: Some(tag),
                 artwork_texture: Some(texture),
             });
@@ -11597,6 +11611,9 @@ mod artwork_cache_tests {
                     detail: [70, 60, 50],
                     motif: ArtworkMotif::Orbit,
                 },
+                production_year: None,
+                official_rating: None,
+                run_time_ticks: None,
                 primary_image_tag: Some(tag),
                 artwork_texture: Some(texture),
             });

@@ -86,6 +86,11 @@ pub struct MediaItem {
     pub favorite: bool,
     /// Has a saved position, so "Play from beginning" differs from "Play".
     pub resumable: bool,
+    /// Release year, rating and runtime, when the server sent them. They are part of the
+    /// default item payload, so listing pages get them without asking for extra fields.
+    pub production_year: Option<i32>,
+    pub official_rating: Option<String>,
+    pub run_time_ticks: Option<i64>,
     pub artwork_texture: Option<egui::TextureHandle>,
 }
 
@@ -128,6 +133,14 @@ impl MediaItem {
             played,
             favorite,
             resumable,
+            production_year: item.production_year,
+            official_rating: item
+                .official_rating
+                .as_deref()
+                .map(str::trim)
+                .filter(|rating| !rating.is_empty())
+                .map(str::to_owned),
+            run_time_ticks: item.run_time_ticks,
             artwork_id,
             backdrop_id,
             id: item.id,
@@ -168,6 +181,22 @@ impl MediaItem {
             .as_deref()
             .filter(|item_type| !item_type.is_empty())
             .unwrap_or("Jellyfin item")
+    }
+
+    /// One muted line of facts for a list row: year, runtime and rating, in the same order the
+    /// details page shows them. Empty when the server sent none of them.
+    pub fn meta_line(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(year) = self.production_year.filter(|year| *year > 0) {
+            parts.push(year.to_string());
+        }
+        if let Some(runtime) = crate::ui::detail::format_runtime(self.run_time_ticks) {
+            parts.push(runtime);
+        }
+        if let Some(rating) = self.official_rating.as_deref() {
+            parts.push(rating.to_owned());
+        }
+        parts.join(" · ")
     }
 }
 
@@ -223,6 +252,25 @@ mod tests {
 
     fn item(json: serde_json::Value) -> MediaItem {
         MediaItem::from_api(serde_json::from_value(json).expect("item fixture"))
+    }
+
+    #[test]
+    fn meta_line_lists_year_runtime_and_rating_in_details_order() {
+        let movie = item(serde_json::json!({
+            "Id": "m", "Name": "Film", "Type": "Movie",
+            "ProductionYear": 2015, "RunTimeTicks": 84_600_000_000i64, "OfficialRating": "PG-13"
+        }));
+        assert_eq!(movie.meta_line(), "2015 · 2h 21m · PG-13");
+
+        // Missing or blank facts are dropped instead of leaving separators behind.
+        let bare = item(serde_json::json!({
+            "Id": "b", "Name": "Bare", "Type": "Movie", "OfficialRating": "  "
+        }));
+        assert_eq!(bare.meta_line(), "");
+        let rating_only = item(serde_json::json!({
+            "Id": "r", "Name": "Rated", "Type": "Movie", "OfficialRating": "R"
+        }));
+        assert_eq!(rating_only.meta_line(), "R");
     }
 
     #[test]

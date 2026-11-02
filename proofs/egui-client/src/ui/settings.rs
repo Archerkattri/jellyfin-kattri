@@ -16,7 +16,9 @@ use super::{ui_text, ui_text_args};
 use egui::{RichText, Ui};
 use kattri_client_core::focus::NavAction;
 use kattri_i18n::ids;
-use kattri_settings::{HdrPreference, ImageFormat, InterfaceSize, LogDetail, Settings};
+use kattri_settings::{
+    HdrPreference, ImageFormat, InterfaceSize, LogDetail, Settings, ThemePreset,
+};
 
 use crate::app::{KattriApp, Page};
 use crate::theme::Palette;
@@ -595,6 +597,42 @@ pub(super) fn choice<T: PartialEq + Copy>(
     });
 }
 
+/// A small painter-drawn triangle button for reordering a fixed list. Shapes instead of glyphs,
+/// so no font fallback can turn the arrow into a box.
+fn reorder_button(ui: &mut Ui, up: bool, enabled: bool, accessible_name: &str) -> bool {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), sense);
+    let visuals = ui.style().interact(&response);
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(6), visuals.weak_bg_fill);
+    let color = if enabled {
+        visuals.text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let centre = rect.center();
+    let tip = if up { centre.y - 4.0 } else { centre.y + 4.0 };
+    let base = if up { centre.y + 3.0 } else { centre.y - 3.0 };
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(centre.x - 5.0, base),
+            egui::pos2(centre.x + 5.0, base),
+            egui::pos2(centre.x, tip),
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::Role::Button, enabled, accessible_name.to_owned())
+    });
+    let response = response.on_hover_text(accessible_name.to_owned());
+    enabled && response.clicked()
+}
+
 fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
     let before = app.settings.settings().clone();
     let mut switch_profile = false;
@@ -608,6 +646,59 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
         ui.checkbox(
             &mut general.reduce_motion,
             ui_text(ids::SETTINGS_GENERAL_REDUCE_MOTION),
+        );
+        choice(
+            ui,
+            ui_text(ids::SETTINGS_GENERAL_THEME),
+            "general_theme_preset",
+            &mut general.theme_preset,
+            &[
+                (
+                    ThemePreset::JellyfinDark,
+                    ui_text(ids::SETTINGS_GENERAL_THEME_JELLYFIN_DARK),
+                ),
+                (
+                    ThemePreset::WarmDark,
+                    ui_text(ids::SETTINGS_GENERAL_THEME_WARM_DARK),
+                ),
+            ],
+        );
+        crate::theme::set_current_preset(general.theme_preset);
+        choice(
+            ui,
+            ui_text(ids::SETTINGS_GENERAL_LIBRARY_LAYOUT),
+            "general_library_layout",
+            &mut general.library_layout,
+            &[
+                (
+                    kattri_settings::LibraryLayout::Grid,
+                    ui_text(ids::SETTINGS_GENERAL_LIBRARY_LAYOUT_GRID),
+                ),
+                (
+                    kattri_settings::LibraryLayout::List,
+                    ui_text(ids::SETTINGS_GENERAL_LIBRARY_LAYOUT_LIST),
+                ),
+            ],
+        );
+        choice(
+            ui,
+            ui_text(ids::SETTINGS_GENERAL_ARTWORK_SIZE),
+            "general_library_artwork_size",
+            &mut general.library_artwork_size,
+            &[
+                (
+                    kattri_settings::LibraryArtworkSize::Small,
+                    ui_text(ids::SETTINGS_GENERAL_ARTWORK_SIZE_SMALL),
+                ),
+                (
+                    kattri_settings::LibraryArtworkSize::Medium,
+                    ui_text(ids::SETTINGS_GENERAL_ARTWORK_SIZE_MEDIUM),
+                ),
+                (
+                    kattri_settings::LibraryArtworkSize::Large,
+                    ui_text(ids::SETTINGS_GENERAL_ARTWORK_SIZE_LARGE),
+                ),
+            ],
         );
         choice(
             ui,
@@ -702,6 +793,42 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
         ] {
             ui.checkbox(value, ui_text(label));
         }
+        let order = normalized_home_section_order(&general.home_section_order);
+        for (index, section) in order.iter().enumerate() {
+            let label = home_section_label(section);
+            let mut moved = false;
+            ui.horizontal(|ui| {
+                ui.label(ui_text(label));
+                ui.add_space(4.0);
+                if reorder_button(
+                    ui,
+                    true,
+                    index > 0,
+                    &ui_text_args(
+                        ids::SETTINGS_GENERAL_HOME_MOVE_EARLIER,
+                        &[("section", ui_text(label))],
+                    ),
+                ) {
+                    move_home_section(&mut general.home_section_order, section, -1);
+                    moved = true;
+                }
+                if reorder_button(
+                    ui,
+                    false,
+                    index + 1 < order.len(),
+                    &ui_text_args(
+                        ids::SETTINGS_GENERAL_HOME_MOVE_LATER,
+                        &[("section", ui_text(label))],
+                    ),
+                ) {
+                    move_home_section(&mut general.home_section_order, section, 1);
+                    moved = true;
+                }
+            });
+            if moved {
+                break;
+            }
+        }
     });
     ui.add_space(12.0);
     settings_card(ui, |ui| {
@@ -776,6 +903,62 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
     if switch_profile {
         app.open_profile_picker();
     }
+}
+
+fn home_section_label(section: &str) -> &'static str {
+    match section {
+        kattri_settings::HOME_SECTION_CONTINUE_WATCHING => ids::HOME_ROW_CONTINUE_WATCHING,
+        kattri_settings::HOME_SECTION_NEXT_UP => ids::HOME_ROW_NEXT_UP,
+        kattri_settings::HOME_SECTION_LATEST => ids::HOME_ROW_LATEST,
+        kattri_settings::HOME_SECTION_MY_MEDIA => ids::HOME_HEADING_MY_MEDIA,
+        kattri_settings::HOME_SECTION_COLLECTIONS => ids::HOME_HEADING_COLLECTIONS,
+        _ => ids::SETTINGS_GENERAL_HOME_SECTIONS,
+    }
+}
+
+fn normalized_home_section_order(order: &[String]) -> Vec<String> {
+    let mut normalized = Vec::with_capacity(kattri_settings::DEFAULT_HOME_SECTION_ORDER.len());
+    for section in order {
+        if kattri_settings::DEFAULT_HOME_SECTION_ORDER.contains(&section.as_str())
+            && !normalized.iter().any(|existing| existing == section)
+        {
+            normalized.push(section.clone());
+        }
+    }
+    for section in kattri_settings::DEFAULT_HOME_SECTION_ORDER {
+        if !normalized.iter().any(|existing| existing == section) {
+            normalized.push(section.to_owned());
+        }
+    }
+    normalized
+}
+
+fn move_home_section(order: &mut Vec<String>, section: &str, direction: isize) {
+    for default in kattri_settings::DEFAULT_HOME_SECTION_ORDER {
+        if !order.iter().any(|existing| existing == default) {
+            order.push(default.to_owned());
+        }
+    }
+    let normalized = normalized_home_section_order(order);
+    let Some(current_index) = normalized.iter().position(|existing| *existing == section) else {
+        return;
+    };
+    let Some(neighbor) = current_index.checked_add_signed(direction) else {
+        return;
+    };
+    let Some(neighbor_section) = normalized.get(neighbor) else {
+        return;
+    };
+    let Some(current_position) = order.iter().position(|existing| existing == section) else {
+        return;
+    };
+    let Some(neighbor_position) = order
+        .iter()
+        .position(|existing| existing == neighbor_section)
+    else {
+        return;
+    };
+    order.swap(current_position, neighbor_position);
 }
 
 /// Local crash reports (M4-21). Off by default. The hook reads this switch at startup only.
@@ -1157,12 +1340,80 @@ pub(super) fn muted(ui: &mut Ui, colors: Palette, text: &str, size: f32) {
 mod tests {
     use super::{
         AboutInfo, SettingsPageState, SettingsSection, about_rows, activate_gamepad_focus,
-        focus_direction, list_action, move_gamepad_focus, next_focus_index, page_back,
-        server_address_text,
+        focus_direction, list_action, move_gamepad_focus, move_home_section, next_focus_index,
+        normalized_home_section_order, page_back, server_address_text,
     };
     use kattri_client_core::focus::NavAction;
 
     const LEN: usize = SettingsSection::ALL.len();
+
+    #[test]
+    fn home_section_order_drops_duplicates_and_unknown_ids() {
+        let order = normalized_home_section_order(&[
+            "latest".to_owned(),
+            "latest".to_owned(),
+            "future_row".to_owned(),
+        ]);
+        assert_eq!(
+            order,
+            vec![
+                "latest".to_owned(),
+                kattri_settings::HOME_SECTION_CONTINUE_WATCHING.to_owned(),
+                kattri_settings::HOME_SECTION_NEXT_UP.to_owned(),
+                kattri_settings::HOME_SECTION_MY_MEDIA.to_owned(),
+                kattri_settings::HOME_SECTION_COLLECTIONS.to_owned(),
+            ]
+        );
+        assert_eq!(
+            normalized_home_section_order(&[]),
+            kattri_settings::DEFAULT_HOME_SECTION_ORDER
+                .iter()
+                .map(|section| (*section).to_owned())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn move_home_section_swaps_neighbors_and_stops_at_the_edges() {
+        let mut order = kattri_settings::DEFAULT_HOME_SECTION_ORDER
+            .iter()
+            .map(|section| (*section).to_owned())
+            .collect::<Vec<_>>();
+
+        move_home_section(&mut order, kattri_settings::HOME_SECTION_COLLECTIONS, -1);
+        assert_eq!(
+            order.last().map(String::as_str),
+            Some(kattri_settings::HOME_SECTION_MY_MEDIA)
+        );
+
+        let before = order.clone();
+        move_home_section(
+            &mut order,
+            kattri_settings::HOME_SECTION_CONTINUE_WATCHING,
+            -1,
+        );
+        move_home_section(&mut order, kattri_settings::HOME_SECTION_MY_MEDIA, 1);
+        assert_eq!(order, before, "moving past an edge is a no-op");
+
+        move_home_section(&mut order, "future_row", -1);
+        assert_eq!(order, before, "an unknown section is ignored");
+    }
+
+    #[test]
+    fn move_home_section_fills_a_partial_order_before_swapping() {
+        let mut order = vec!["latest".to_owned()];
+        move_home_section(&mut order, "latest", 1);
+        assert_eq!(
+            order,
+            vec![
+                kattri_settings::HOME_SECTION_CONTINUE_WATCHING.to_owned(),
+                "latest".to_owned(),
+                kattri_settings::HOME_SECTION_NEXT_UP.to_owned(),
+                kattri_settings::HOME_SECTION_MY_MEDIA.to_owned(),
+                kattri_settings::HOME_SECTION_COLLECTIONS.to_owned(),
+            ]
+        );
+    }
 
     #[test]
     fn gamepad_navigation_moves_egui_focus_and_select_reaches_focused_control() {

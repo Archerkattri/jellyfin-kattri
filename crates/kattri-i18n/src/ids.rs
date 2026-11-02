@@ -466,6 +466,16 @@ pub const SETTINGS_GENERAL_INTERFACE_SIZE_LARGE: &str = "settings.general.interf
 pub const SETTINGS_GENERAL_INTERFACE_SIZE_TEN_FOOT: &str =
     "settings.general.interface_size.ten_foot";
 pub const SETTINGS_GENERAL_INTERFACE_SIZE_HELP: &str = "settings.general.interface_size_help";
+pub const SETTINGS_GENERAL_THEME: &str = "settings.general.theme";
+pub const SETTINGS_GENERAL_THEME_JELLYFIN_DARK: &str = "settings.general.theme.jellyfin_dark";
+pub const SETTINGS_GENERAL_THEME_WARM_DARK: &str = "settings.general.theme.warm_dark";
+pub const SETTINGS_GENERAL_LIBRARY_LAYOUT: &str = "settings.general.library_layout";
+pub const SETTINGS_GENERAL_LIBRARY_LAYOUT_GRID: &str = "settings.general.library_layout.grid";
+pub const SETTINGS_GENERAL_LIBRARY_LAYOUT_LIST: &str = "settings.general.library_layout.list";
+pub const SETTINGS_GENERAL_ARTWORK_SIZE: &str = "settings.general.artwork_size";
+pub const SETTINGS_GENERAL_ARTWORK_SIZE_SMALL: &str = "settings.general.artwork_size.small";
+pub const SETTINGS_GENERAL_ARTWORK_SIZE_MEDIUM: &str = "settings.general.artwork_size.medium";
+pub const SETTINGS_GENERAL_ARTWORK_SIZE_LARGE: &str = "settings.general.artwork_size.large";
 pub const SETTINGS_HEADING_DIAGNOSTICS: &str = "settings.heading.diagnostics";
 pub const SETTINGS_DIAGNOSTICS_CRASH_REPORTS: &str = "settings.diagnostics.crash_reports";
 pub const SETTINGS_DIAGNOSTICS_HELP: &str = "settings.diagnostics.help";
@@ -821,6 +831,8 @@ pub const FORGOT_PASSWORD_IN_NETWORK: &str = "forgot_password.in_network";
 pub const FORGOT_PASSWORD_CONTACT_ADMIN: &str = "forgot_password.contact_admin";
 pub const FORGOT_PASSWORD_FAILED: &str = "forgot_password.failed";
 pub const SETTINGS_GENERAL_HOME_SECTIONS: &str = "settings.general.home_sections";
+pub const SETTINGS_GENERAL_HOME_MOVE_EARLIER: &str = "settings.general.home.move_earlier";
+pub const SETTINGS_GENERAL_HOME_MOVE_LATER: &str = "settings.general.home.move_later";
 pub const PHOTOS_BUTTON_SLIDESHOW: &str = "photos.button.slideshow";
 pub const PHOTOS_BUTTON_STOP_SLIDESHOW: &str = "photos.button.stop_slideshow";
 pub const DETAIL_MEDIA_INFO: &str = "detail.media_info";
@@ -1092,6 +1104,8 @@ pub const ALL: &[&str] = &[
     FORGOT_PASSWORD_CONTACT_ADMIN,
     FORGOT_PASSWORD_FAILED,
     SETTINGS_GENERAL_HOME_SECTIONS,
+    SETTINGS_GENERAL_HOME_MOVE_EARLIER,
+    SETTINGS_GENERAL_HOME_MOVE_LATER,
     PHOTOS_BUTTON_SLIDESHOW,
     PHOTOS_BUTTON_STOP_SLIDESHOW,
     DETAIL_MEDIA_INFO,
@@ -1457,6 +1471,16 @@ pub const ALL: &[&str] = &[
     SETTINGS_GENERAL_INTERFACE_SIZE_LARGE,
     SETTINGS_GENERAL_INTERFACE_SIZE_TEN_FOOT,
     SETTINGS_GENERAL_INTERFACE_SIZE_HELP,
+    SETTINGS_GENERAL_THEME,
+    SETTINGS_GENERAL_THEME_JELLYFIN_DARK,
+    SETTINGS_GENERAL_THEME_WARM_DARK,
+    SETTINGS_GENERAL_LIBRARY_LAYOUT,
+    SETTINGS_GENERAL_LIBRARY_LAYOUT_GRID,
+    SETTINGS_GENERAL_LIBRARY_LAYOUT_LIST,
+    SETTINGS_GENERAL_ARTWORK_SIZE,
+    SETTINGS_GENERAL_ARTWORK_SIZE_SMALL,
+    SETTINGS_GENERAL_ARTWORK_SIZE_MEDIUM,
+    SETTINGS_GENERAL_ARTWORK_SIZE_LARGE,
     SETTINGS_HEADING_DIAGNOSTICS,
     SETTINGS_DIAGNOSTICS_CRASH_REPORTS,
     SETTINGS_DIAGNOSTICS_HELP,

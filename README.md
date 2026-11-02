@@ -52,8 +52,8 @@ is used.
 | | |
 | --- | --- |
 | **Sign-in** | Password sign-in, Quick Connect, saved servers, multiple profiles, stay signed in, forgot-password flow |
-| **Home** | Continue Watching, Next Up, Latest, My Media and Collections shelves, hero banner, per-section visibility |
-| **Library** | Paging, sorting, play state, favorites, genre and studio filters, alphabet picker, 1,000-item poster and photo grids, music All/Albums/Songs views |
+| **Home** | Continue Watching, Next Up, Latest, My Media and Collections shelves, hero banner, per-section visibility and ordering |
+| **Library** | Paging, sorting, play state, favorites, genre and studio filters, alphabet picker, poster grid or list, adjustable poster size, 1,000-item photo grids, music All/Albums/Songs views |
 | **Details** | Metadata, overview, cast, similar titles, seasons and episodes, series Next Up, media info, version picker, trailers and extras, lyrics, play and download |
 | **Search** | Debounced cross-type search grouped by movies, series, episodes, music, playlists, photos, people and channels; subtitle search |
 | **Playback** | Direct play, direct stream and transcode through the relay; resume with optional rewind; playback reporting; audio and subtitle tracks; subtitle delay; chapters; speed; segment skip; bounded mid-stream recovery |
@@ -65,7 +65,7 @@ is used.
 | **Administration** | Edit metadata, Identify, Edit images, Add to collection, Refresh metadata and confirmed Delete for administrators |
 | **Settings** | General, playback, audio, subtitles (including bold), video, input, server (private CA and client certificate), About; versioned TOML per profile |
 | **Input** | Rebindable keyboard map, gamepad menus and player control, full focus navigation |
-| **Interface** | SF Pro Display typeface (Inter fallback), ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu |
+| **Interface** | Jellyfin Dark and Warm Dark themes, Inter typeface, ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu |
 
 ## Install
 
@@ -221,10 +221,8 @@ credentials, tokens or live output.
 
 ## License
 
-GPL-3.0-only. See `LICENSE` and `NOTICE`. SF Pro Display is Apple's typeface, bundled
-here for this personal build at the owner's request; do not redistribute it in a
-commercial build. The Inter fallback is under the SIL Open Font License
-(`assets/fonts/OFL.txt`). Bundled native libraries and codecs keep
+GPL-3.0-only. See `LICENSE` and `NOTICE`. The bundled Inter typeface is under the
+SIL Open Font License (`assets/fonts/OFL.txt`). Bundled native libraries and codecs keep
 their own licenses; the libmpv packaging notice is under
 `packaging/libmpv/NOTICE.txt`. Jellyfin Kattri is an independent client and is not
 affiliated with the Jellyfin project.

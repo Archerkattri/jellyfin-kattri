@@ -20,7 +20,6 @@ use crate::theme::Palette;
 use crate::worker::{HomeCatalogKind, HomeRowKind};
 
 const HERO_HEIGHT: f32 = 340.0;
-const ERROR_TEXT: egui::Color32 = egui::Color32::from_rgb(0xF0, 0xA0, 0x99);
 
 /// Load state of one row. A row keeps its last good cards while it reloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,12 +117,43 @@ impl HomeRowState {
 
 /// Which home sections the viewer chose to show (General settings).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HomeSection {
+    ContinueWatching,
+    NextUp,
+    Latest,
+    MyMedia,
+    Collections,
+}
+
+impl HomeSection {
+    fn from_setting(value: &str) -> Option<Self> {
+        match value {
+            kattri_settings::HOME_SECTION_CONTINUE_WATCHING => Some(Self::ContinueWatching),
+            kattri_settings::HOME_SECTION_NEXT_UP => Some(Self::NextUp),
+            kattri_settings::HOME_SECTION_LATEST => Some(Self::Latest),
+            kattri_settings::HOME_SECTION_MY_MEDIA => Some(Self::MyMedia),
+            kattri_settings::HOME_SECTION_COLLECTIONS => Some(Self::Collections),
+            _ => None,
+        }
+    }
+
+    const DEFAULT_ORDER: [Self; 5] = [
+        Self::ContinueWatching,
+        Self::NextUp,
+        Self::Latest,
+        Self::MyMedia,
+        Self::Collections,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HomeSections {
     pub continue_watching: bool,
     pub next_up: bool,
     pub latest: bool,
     pub my_media: bool,
     pub collections: bool,
+    pub order: [HomeSection; 5],
 }
 
 impl Default for HomeSections {
@@ -134,6 +164,7 @@ impl Default for HomeSections {
             latest: true,
             my_media: true,
             collections: true,
+            order: HomeSection::DEFAULT_ORDER,
         }
     }
 }
@@ -146,6 +177,22 @@ impl HomeSections {
             latest: general.home_latest,
             my_media: general.home_my_media,
             collections: general.home_collections,
+            order: {
+                let mut order = Vec::with_capacity(HomeSection::DEFAULT_ORDER.len());
+                for section in &general.home_section_order {
+                    if let Some(section) = HomeSection::from_setting(section)
+                        && !order.contains(&section)
+                    {
+                        order.push(section);
+                    }
+                }
+                for section in HomeSection::DEFAULT_ORDER {
+                    if !order.contains(&section) {
+                        order.push(section);
+                    }
+                }
+                order.try_into().unwrap_or(HomeSection::DEFAULT_ORDER)
+            },
         }
     }
 
@@ -594,302 +641,325 @@ pub(super) fn show(
         }
     }
 
-    for row in rows.iter_mut().filter(|row| sections.shows_row(row.kind)) {
-        let kind = row.kind;
-        let title = title_for(kind);
-        ui.add_space(26.0);
-
-        if row.cards.is_empty() {
-            ui.label(RichText::new(title).size(22.0).color(colors.text));
-            ui.add_space(8.0);
-            match &row.status {
-                RowStatus::Idle | RowStatus::Loading => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(
-                            RichText::new(ui_text_args(
-                                ids::HOME_STATUS_LOADING_TITLE,
-                                &[("title", title)],
-                            ))
-                            .color(colors.muted),
-                        );
-                    });
-                }
-                RowStatus::Ready => {
-                    ui.label(RichText::new(empty_message_for(kind)).color(colors.muted));
-                }
-                RowStatus::Failed(message) => {
-                    failure_line(ui, title, message);
-                    if ui
-                        .button(ui_text_args(
-                            ids::HOME_BUTTON_RETRY_TITLE,
-                            &[("title", title)],
-                        ))
-                        .clicked()
-                    {
-                        action = action.or(Some(HomeAction::Retry(kind)));
-                    }
-                }
-            }
-            continue;
-        }
-
-        let cards: Vec<RowCard> = row.cards.iter().map(card_view).collect();
-        let options = RowOptions {
-            card_width: if kind == HomeRowKind::Latest {
-                190.0
-            } else {
-                216.0
-            },
-            image_aspect: if kind == HomeRowKind::Latest {
-                1.5
-            } else {
-                2.0 / 3.0
-            },
-            palette: colors,
-            ..RowOptions::default()
-        };
-        let response = row.poster.show(ui, title, &cards, &options);
-        if let Some(card) = response.menu_card.and_then(|index| row.cards.get(index)) {
-            super::item_menu::attach(&response.focus_response, &card.media);
-        }
-        let focus_row = match kind {
-            HomeRowKind::ContinueWatching => 0,
-            HomeRowKind::NextUp => 1,
-            HomeRowKind::Latest => 2,
-        };
-        for (index, card) in row.cards.iter().enumerate() {
-            let focus_response = response.focus_response.clone();
-            focus_entries.push(CardFocus {
-                row: focus_row,
-                id: FocusId::new(format!("home:row:{kind:?}:{}", card.media.id)),
-                center_x: response.card_centers[index],
-                focused: focus_response.has_focus() && response.focused == Some(index),
-                response: focus_response,
-                home_poster: Some((HomePosterGroup::Row(kind), index)),
-                selection: HomeAction::Select(card.media.id.clone()),
-            });
-        }
-        for index in response.visible.clone() {
-            if let Some(card) = row.cards.get(index)
-                && let Some(tag) = card.media.primary_image_tag.as_deref()
+    macro_rules! render_row {
+        ($selected_kind:expr, $focus_row:expr) => {{
+            for row in rows
+                .iter_mut()
+                .filter(|row| row.kind == $selected_kind && sections.shows_row(row.kind))
             {
-                visible_artwork.push((card.media.artwork_id.clone(), tag.to_owned()));
-            }
-        }
-        if let Some(index) = response.activated
-            && let Some(card) = row.cards.get(index)
-        {
-            action = action.or_else(|| Some(HomeAction::Select(card.media.id.clone())));
-        }
+                let kind = row.kind;
+                let title = title_for(kind);
+                ui.add_space(26.0);
 
-        match &row.status {
-            RowStatus::Loading => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(
-                        RichText::new(ui_text(ids::HOME_STATUS_REFRESHING))
-                            .size(11.0)
-                            .color(colors.muted),
-                    );
-                });
-            }
-            RowStatus::Failed(message) => {
-                failure_line(ui, title, message);
-                if ui
-                    .button(ui_text_args(
-                        ids::HOME_BUTTON_RETRY_TITLE,
-                        &[("title", title)],
-                    ))
-                    .clicked()
-                {
-                    action = action.or(Some(HomeAction::Retry(kind)));
-                }
-            }
-            RowStatus::Idle | RowStatus::Ready => {}
-        }
-    }
-
-    if sections.my_media {
-        ui.add_space(24.0);
-        ui.label(
-            RichText::new(ui_text(ids::HOME_HEADING_MY_MEDIA))
-                .size(22.0)
-                .color(colors.text),
-        );
-        ui.add_space(8.0);
-        if !libraries.is_empty() {
-            egui::ScrollArea::horizontal()
-                .id_salt("home_my_media")
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for tile in library_tiles {
-                            let response = ui.add_sized(
-                                egui::vec2(176.0, 96.0),
-                                egui::Button::new(
-                                    RichText::new(&tile.name)
-                                        .size(18.0)
-                                        .strong()
-                                        .color(colors.text),
-                                )
-                                .fill(colors.panel)
-                                .stroke(Stroke::new(1.0, colors.divider))
-                                .corner_radius(CornerRadius::same(16)),
-                            );
-                            focus_entries.push(CardFocus {
-                                row: 3,
-                                id: FocusId::new(format!("home:library:{}", tile.id)),
-                                center_x: response.rect.center().x,
-                                focused: response.has_focus(),
-                                response: response.clone(),
-                                home_poster: None,
-                                selection: HomeAction::OpenLibrary(tile.clone()),
+                if row.cards.is_empty() {
+                    ui.label(RichText::new(title).size(22.0).color(colors.text));
+                    ui.add_space(8.0);
+                    match &row.status {
+                        RowStatus::Idle | RowStatus::Loading => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(
+                                    RichText::new(ui_text_args(
+                                        ids::HOME_STATUS_LOADING_TITLE,
+                                        &[("title", title)],
+                                    ))
+                                    .color(colors.muted),
+                                );
                             });
-                            if response.clicked() && action.is_none() {
-                                action = Some(HomeAction::OpenLibrary(tile));
-                            }
-                            ui.add_space(8.0);
                         }
-                    });
-                });
-        }
-        match libraries_status {
-            RowStatus::Idle | RowStatus::Loading if libraries.is_empty() => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(
-                        RichText::new(ui_text(ids::HOME_STATUS_LOADING_LIBRARIES))
-                            .color(colors.muted),
-                    );
-                });
-            }
-            RowStatus::Idle | RowStatus::Loading => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(
-                        RichText::new(ui_text(ids::HOME_STATUS_REFRESHING_LIBRARIES))
-                            .color(colors.muted),
-                    );
-                });
-            }
-            RowStatus::Ready if libraries.is_empty() => {
-                ui.label(
-                    RichText::new(
-                        library_empty_message.unwrap_or(ui_text(ids::HOME_EMPTY_NO_LIBRARIES)),
-                    )
-                    .color(colors.muted),
-                );
-            }
-            RowStatus::Ready => {}
-            RowStatus::Failed(message) => {
-                failure_line(ui, ui_text(ids::HOME_HEADING_MY_MEDIA), message);
-                if ui
-                    .button(ui_text(ids::HOME_BUTTON_RETRY_MY_MEDIA))
-                    .clicked()
-                {
-                    action = action.or(Some(HomeAction::RetryCatalog(HomeCatalogKind::Libraries)));
+                        RowStatus::Ready => {
+                            ui.label(RichText::new(empty_message_for(kind)).color(colors.muted));
+                        }
+                        RowStatus::Failed(message) => {
+                            failure_line(ui, title, message, colors);
+                            if ui
+                                .button(ui_text_args(
+                                    ids::HOME_BUTTON_RETRY_TITLE,
+                                    &[("title", title)],
+                                ))
+                                .clicked()
+                            {
+                                action = action.or(Some(HomeAction::Retry(kind)));
+                            }
+                        }
+                    }
+                    continue;
                 }
-            }
-        }
-    }
 
-    if show_collections && sections.collections {
-        ui.add_space(24.0);
-        if !collections.is_empty() {
-            let cards: Vec<RowCard> = collections.iter().map(card_view).collect();
-            let response = collections_poster.show(
-                ui,
-                ui_text(ids::HOME_HEADING_COLLECTIONS),
-                &cards,
-                &RowOptions {
+                let cards: Vec<RowCard> = row.cards.iter().map(card_view).collect();
+                let options = RowOptions {
+                    card_width: if kind == HomeRowKind::Latest {
+                        190.0
+                    } else {
+                        216.0
+                    },
+                    image_aspect: if kind == HomeRowKind::Latest {
+                        1.5
+                    } else {
+                        2.0 / 3.0
+                    },
                     palette: colors,
                     ..RowOptions::default()
-                },
-            );
-            for (index, card) in collections.iter().enumerate() {
-                let focus_response = response.focus_response.clone();
-                focus_entries.push(CardFocus {
-                    row: 4,
-                    id: FocusId::new(format!("home:collection:{}", card.media.id)),
-                    center_x: response.card_centers[index],
-                    focused: focus_response.has_focus() && response.focused == Some(index),
-                    response: focus_response,
-                    home_poster: Some((HomePosterGroup::Collections, index)),
-                    selection: HomeAction::OpenCollection {
-                        id: card.media.id.clone(),
-                        name: card.media.title.clone(),
-                    },
-                });
-            }
-            for index in response.visible.clone() {
-                if let Some(card) = collections.get(index)
-                    && let Some(tag) = card.media.primary_image_tag.as_deref()
+                };
+                let response = row.poster.show(ui, title, &cards, &options);
+                if let Some(card) = response.menu_card.and_then(|index| row.cards.get(index)) {
+                    super::item_menu::attach(&response.focus_response, &card.media);
+                }
+                let focus_row = $focus_row;
+                for (index, card) in row.cards.iter().enumerate() {
+                    let focus_response = response.focus_response.clone();
+                    focus_entries.push(CardFocus {
+                        row: focus_row,
+                        id: FocusId::new(format!("home:row:{kind:?}:{}", card.media.id)),
+                        center_x: response.card_centers[index],
+                        focused: focus_response.has_focus() && response.focused == Some(index),
+                        response: focus_response,
+                        home_poster: Some((HomePosterGroup::Row(kind), index)),
+                        selection: HomeAction::Select(card.media.id.clone()),
+                    });
+                }
+                for index in response.visible.clone() {
+                    if let Some(card) = row.cards.get(index)
+                        && let Some(tag) = card.media.primary_image_tag.as_deref()
+                    {
+                        visible_artwork.push((card.media.artwork_id.clone(), tag.to_owned()));
+                    }
+                }
+                if let Some(index) = response.activated
+                    && let Some(card) = row.cards.get(index)
                 {
-                    visible_artwork.push((card.media.artwork_id.clone(), tag.to_owned()));
+                    action = action.or_else(|| Some(HomeAction::Select(card.media.id.clone())));
+                }
+
+                match &row.status {
+                    RowStatus::Loading => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(
+                                RichText::new(ui_text(ids::HOME_STATUS_REFRESHING))
+                                    .size(11.0)
+                                    .color(colors.muted),
+                            );
+                        });
+                    }
+                    RowStatus::Failed(message) => {
+                        failure_line(ui, title, message, colors);
+                        if ui
+                            .button(ui_text_args(
+                                ids::HOME_BUTTON_RETRY_TITLE,
+                                &[("title", title)],
+                            ))
+                            .clicked()
+                        {
+                            action = action.or(Some(HomeAction::Retry(kind)));
+                        }
+                    }
+                    RowStatus::Idle | RowStatus::Ready => {}
                 }
             }
-            if let Some(index) = response.activated
-                && let Some(card) = collections.get(index)
-            {
-                action = action.or(Some(HomeAction::OpenCollection {
-                    id: card.media.id.clone(),
-                    name: card.media.title.clone(),
-                }));
-            }
-        }
-        match collections_status {
-            RowStatus::Idle | RowStatus::Loading if collections.is_empty() => {
+        }};
+    }
+    macro_rules! render_my_media {
+        ($focus_row:expr) => {{
+            if sections.my_media {
+                ui.add_space(24.0);
                 ui.label(
-                    RichText::new(ui_text(ids::HOME_HEADING_COLLECTIONS))
+                    RichText::new(ui_text(ids::HOME_HEADING_MY_MEDIA))
                         .size(22.0)
                         .color(colors.text),
                 );
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(
-                        RichText::new(ui_text(ids::HOME_STATUS_LOADING_COLLECTIONS))
-                            .color(colors.muted),
-                    );
-                });
-            }
-            RowStatus::Idle | RowStatus::Loading => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(
-                        RichText::new(ui_text(ids::HOME_STATUS_REFRESHING_COLLECTIONS))
-                            .color(colors.muted),
-                    );
-                });
-            }
-            RowStatus::Ready => {}
-            RowStatus::Failed(message) => {
-                if collections.is_empty() {
-                    ui.label(
-                        RichText::new(ui_text(ids::HOME_HEADING_COLLECTIONS))
-                            .size(22.0)
-                            .color(colors.text),
-                    );
+                ui.add_space(8.0);
+                if !libraries.is_empty() {
+                    egui::ScrollArea::horizontal()
+                        .id_salt("home_my_media")
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for tile in &library_tiles {
+                                    let response = ui.add_sized(
+                                        egui::vec2(176.0, 96.0),
+                                        egui::Button::new(
+                                            RichText::new(&tile.name)
+                                                .size(18.0)
+                                                .strong()
+                                                .color(colors.text),
+                                        )
+                                        .fill(colors.panel)
+                                        .stroke(Stroke::new(1.0, colors.divider))
+                                        .corner_radius(CornerRadius::same(16)),
+                                    );
+                                    focus_entries.push(CardFocus {
+                                        row: $focus_row,
+                                        id: FocusId::new(format!("home:library:{}", tile.id)),
+                                        center_x: response.rect.center().x,
+                                        focused: response.has_focus(),
+                                        response: response.clone(),
+                                        home_poster: None,
+                                        selection: HomeAction::OpenLibrary(tile.clone()),
+                                    });
+                                    if response.clicked() && action.is_none() {
+                                        action = Some(HomeAction::OpenLibrary(tile.clone()));
+                                    }
+                                    ui.add_space(8.0);
+                                }
+                            });
+                        });
                 }
-                failure_line(ui, ui_text(ids::HOME_HEADING_COLLECTIONS), message);
-                if ui
-                    .button(ui_text(ids::HOME_BUTTON_RETRY_COLLECTIONS))
-                    .clicked()
-                {
-                    action =
-                        action.or(Some(HomeAction::RetryCatalog(HomeCatalogKind::Collections)));
+                match libraries_status {
+                    RowStatus::Idle | RowStatus::Loading if libraries.is_empty() => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(
+                                RichText::new(ui_text(ids::HOME_STATUS_LOADING_LIBRARIES))
+                                    .color(colors.muted),
+                            );
+                        });
+                    }
+                    RowStatus::Idle | RowStatus::Loading => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(
+                                RichText::new(ui_text(ids::HOME_STATUS_REFRESHING_LIBRARIES))
+                                    .color(colors.muted),
+                            );
+                        });
+                    }
+                    RowStatus::Ready if libraries.is_empty() => {
+                        ui.label(
+                            RichText::new(
+                                library_empty_message
+                                    .unwrap_or(ui_text(ids::HOME_EMPTY_NO_LIBRARIES)),
+                            )
+                            .color(colors.muted),
+                        );
+                    }
+                    RowStatus::Ready => {}
+                    RowStatus::Failed(message) => {
+                        failure_line(ui, ui_text(ids::HOME_HEADING_MY_MEDIA), message, colors);
+                        if ui
+                            .button(ui_text(ids::HOME_BUTTON_RETRY_MY_MEDIA))
+                            .clicked()
+                        {
+                            action = action
+                                .or(Some(HomeAction::RetryCatalog(HomeCatalogKind::Libraries)));
+                        }
+                    }
                 }
             }
+        }};
+    }
+    macro_rules! render_collections {
+        ($focus_row:expr) => {{
+            if show_collections && sections.collections {
+                ui.add_space(24.0);
+                if !collections.is_empty() {
+                    let cards: Vec<RowCard> = collections.iter().map(card_view).collect();
+                    let response = collections_poster.show(
+                        ui,
+                        ui_text(ids::HOME_HEADING_COLLECTIONS),
+                        &cards,
+                        &RowOptions {
+                            palette: colors,
+                            ..RowOptions::default()
+                        },
+                    );
+                    for (index, card) in collections.iter().enumerate() {
+                        let focus_response = response.focus_response.clone();
+                        focus_entries.push(CardFocus {
+                            row: $focus_row,
+                            id: FocusId::new(format!("home:collection:{}", card.media.id)),
+                            center_x: response.card_centers[index],
+                            focused: focus_response.has_focus() && response.focused == Some(index),
+                            response: focus_response,
+                            home_poster: Some((HomePosterGroup::Collections, index)),
+                            selection: HomeAction::OpenCollection {
+                                id: card.media.id.clone(),
+                                name: card.media.title.clone(),
+                            },
+                        });
+                    }
+                    for index in response.visible.clone() {
+                        if let Some(card) = collections.get(index)
+                            && let Some(tag) = card.media.primary_image_tag.as_deref()
+                        {
+                            visible_artwork.push((card.media.artwork_id.clone(), tag.to_owned()));
+                        }
+                    }
+                    if let Some(index) = response.activated
+                        && let Some(card) = collections.get(index)
+                    {
+                        action = action.or(Some(HomeAction::OpenCollection {
+                            id: card.media.id.clone(),
+                            name: card.media.title.clone(),
+                        }));
+                    }
+                }
+                match collections_status {
+                    RowStatus::Idle | RowStatus::Loading if collections.is_empty() => {
+                        ui.label(
+                            RichText::new(ui_text(ids::HOME_HEADING_COLLECTIONS))
+                                .size(22.0)
+                                .color(colors.text),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(
+                                RichText::new(ui_text(ids::HOME_STATUS_LOADING_COLLECTIONS))
+                                    .color(colors.muted),
+                            );
+                        });
+                    }
+                    RowStatus::Idle | RowStatus::Loading => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(
+                                RichText::new(ui_text(ids::HOME_STATUS_REFRESHING_COLLECTIONS))
+                                    .color(colors.muted),
+                            );
+                        });
+                    }
+                    RowStatus::Ready => {}
+                    RowStatus::Failed(message) => {
+                        if collections.is_empty() {
+                            ui.label(
+                                RichText::new(ui_text(ids::HOME_HEADING_COLLECTIONS))
+                                    .size(22.0)
+                                    .color(colors.text),
+                            );
+                        }
+                        failure_line(ui, ui_text(ids::HOME_HEADING_COLLECTIONS), message, colors);
+                        if ui
+                            .button(ui_text(ids::HOME_BUTTON_RETRY_COLLECTIONS))
+                            .clicked()
+                        {
+                            action = action
+                                .or(Some(HomeAction::RetryCatalog(HomeCatalogKind::Collections)));
+                        }
+                    }
+                }
+            }
+        }};
+    }
+
+    for (section_index, section) in sections.order.iter().enumerate() {
+        match section {
+            HomeSection::ContinueWatching => {
+                render_row!(HomeRowKind::ContinueWatching, section_index)
+            }
+            HomeSection::NextUp => render_row!(HomeRowKind::NextUp, section_index),
+            HomeSection::Latest => render_row!(HomeRowKind::Latest, section_index),
+            HomeSection::MyMedia => render_my_media!(section_index),
+            HomeSection::Collections => render_collections!(section_index),
         }
     }
 
     action
 }
 
-fn failure_line(ui: &mut egui::Ui, title: &str, message: &str) {
+fn failure_line(ui: &mut egui::Ui, title: &str, message: &str, colors: Palette) {
     egui::Frame::new()
-        .fill(egui::Color32::from_rgb(0x3A, 0x25, 0x2A))
-        .stroke(Stroke::new(1.0, egui::Color32::from_rgb(0xD9, 0x7F, 0x78)))
+        .fill(colors.danger.gamma_multiply(0.14))
+        .stroke(Stroke::new(1.0, colors.danger))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(egui::Margin::same(10))
         .show(ui, |ui| {
@@ -899,7 +969,7 @@ fn failure_line(ui: &mut egui::Ui, title: &str, message: &str) {
                     &[("title", title), ("message", message)],
                 ))
                 .size(12.0)
-                .color(ERROR_TEXT),
+                .color(colors.danger),
             );
         });
     ui.add_space(6.0);
@@ -939,6 +1009,34 @@ mod tests {
             rows,
             [HomeRowKind::ContinueWatching],
             "a requested row is not idle"
+        );
+    }
+
+    #[test]
+    fn home_sections_follow_the_saved_order_and_fill_missing_ones() {
+        let mut general = kattri_settings::GeneralSettings::default();
+        assert_eq!(
+            HomeSections::from_settings(&general).order,
+            HomeSection::DEFAULT_ORDER
+        );
+
+        general.home_section_order = vec![
+            kattri_settings::HOME_SECTION_COLLECTIONS.to_owned(),
+            "future_row".to_owned(),
+            kattri_settings::HOME_SECTION_CONTINUE_WATCHING.to_owned(),
+            kattri_settings::HOME_SECTION_COLLECTIONS.to_owned(),
+        ];
+        let sections = HomeSections::from_settings(&general);
+        assert_eq!(
+            sections.order,
+            [
+                HomeSection::Collections,
+                HomeSection::ContinueWatching,
+                HomeSection::NextUp,
+                HomeSection::Latest,
+                HomeSection::MyMedia,
+            ],
+            "saved order first, unknown and duplicate ids dropped, the rest in default order"
         );
     }
 

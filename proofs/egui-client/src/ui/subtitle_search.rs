@@ -132,8 +132,6 @@ fn error_text(error: SubtitleRequestError, download: bool) -> &'static str {
     }
 }
 
-const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(0xF0, 0xA0, 0x99);
-
 /// Draws the dialog while `state` is `Some`. Changing the language starts a new search.
 pub(crate) fn show(
     ctx: &Context,
@@ -142,6 +140,7 @@ pub(crate) fn show(
 ) -> Option<SubtitleSearchAction> {
     let mut action = None;
     let mut open = true;
+    let error_color = crate::theme::DANGER_TEXT;
     egui::Window::new(ui_text_args(
         ids::SUBTITLE_SEARCH_TITLE,
         &[("title", state.title.as_str())],
@@ -257,7 +256,7 @@ pub(crate) fn show(
                         });
                 }
                 Some(Err(error)) => {
-                    ui.label(RichText::new(error_text(*error, false)).color(ERROR_COLOR));
+                    ui.label(RichText::new(error_text(*error, false)).color(error_color));
                 }
                 None => {}
             }
@@ -280,7 +279,7 @@ pub(crate) fn show(
             }
             Some(DownloadNotice::Failed(error)) => {
                 ui.separator();
-                ui.label(RichText::new(error_text(error, true)).color(ERROR_COLOR));
+                ui.label(RichText::new(error_text(error, true)).color(error_color));
             }
             None => {}
         }

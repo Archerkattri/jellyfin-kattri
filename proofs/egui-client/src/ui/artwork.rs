@@ -13,9 +13,21 @@ pub fn media_card(
     colors: Palette,
     selected: bool,
 ) -> egui::Response {
-    let width = CARD_WIDTH;
-    let height = 246.0;
-    let poster_height = 188.0;
+    media_card_scaled(ui, item, colors, selected, 1.0)
+}
+
+/// Poster card scaled for the library's image-size preference.
+pub fn media_card_scaled(
+    ui: &mut egui::Ui,
+    item: &MediaItem,
+    colors: Palette,
+    selected: bool,
+    scale: f32,
+) -> egui::Response {
+    let scale = scale.clamp(0.65, 1.55);
+    let width = CARD_WIDTH * scale;
+    let height = 246.0 * scale;
+    let poster_height = 188.0 * scale;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
     let art_rect = Rect::from_min_size(rect.min, egui::vec2(width, poster_height));
     // A library page can hold a thousand cards; only the ones on screen are painted.
@@ -35,7 +47,7 @@ pub fn media_card(
             super::row::layout_text(
                 &painter,
                 &item.title,
-                FontId::proportional(15.0),
+                FontId::proportional(15.0 * scale),
                 colors.text,
                 width - 2.0,
                 1,
@@ -47,7 +59,7 @@ pub fn media_card(
             super::row::layout_text(
                 &painter,
                 item.subtitle(),
-                FontId::proportional(11.5),
+                FontId::proportional(11.5 * scale),
                 colors.muted,
                 width - 2.0,
                 1,
