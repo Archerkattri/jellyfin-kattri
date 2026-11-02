@@ -6,7 +6,10 @@ use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::{JellyfinClient, JellyfinTicks, MediaSourceInfo, PlayMethod, Session};
+use crate::{
+    JellyfinClient, JellyfinTicks, MediaSourceInfo, PlayMethod, Session,
+    request_headers::is_forbidden_name,
+};
 
 const MAX_PLAYBACK_URL_BYTES: usize = 64 * 1024;
 const MAX_REQUIRED_HEADER_COUNT: usize = 64;
@@ -296,9 +299,24 @@ impl JellyfinClient {
             return Err(PlaybackSourceError::InputTooLarge);
         }
 
-        let required_headers = validate_required_headers(media_source)?;
+        let required_headers =
+            validate_required_headers(media_source, &self.config.extra_request_headers)?;
 
         let authorization = media_browser_authorization(self, &session.access_token);
+        let handoff_header_count = required_headers.len().saturating_add(1);
+        let handoff_header_bytes = required_headers.iter().fold(
+            "Authorization".len().saturating_add(authorization.len()),
+            |total, header| {
+                total
+                    .saturating_add(header.name.as_str().len())
+                    .saturating_add(header.value.len())
+            },
+        );
+        if handoff_header_count > MAX_REQUIRED_HEADER_COUNT
+            || handoff_header_bytes > MAX_REQUIRED_HEADER_BYTES
+        {
+            return Err(PlaybackSourceError::InputTooLarge);
+        }
 
         Ok(PlaybackSourceRequest {
             url: Zeroizing::new(url.into()),
@@ -480,6 +498,7 @@ fn push_encoded_auth_value(output: &mut String, value: &str) {
 
 fn validate_required_headers(
     media_source: &MediaSourceInfo,
+    extra_headers: &[crate::ExtraRequestHeader],
 ) -> Result<Vec<RequiredHeader>, PlaybackSourceError> {
     let mut seen_names = HashSet::new();
     let mut headers = Vec::new();
@@ -523,6 +542,32 @@ fn validate_required_headers(
         headers.push(RequiredHeader {
             name,
             value: Zeroizing::new(value.to_owned()),
+        });
+    }
+    for extra in extra_headers {
+        header_count = header_count.saturating_add(1);
+        total_header_bytes = total_header_bytes
+            .saturating_add(extra.name.as_str().len())
+            .saturating_add(extra.value.len());
+        if header_count > MAX_REQUIRED_HEADER_COUNT
+            || total_header_bytes > MAX_REQUIRED_HEADER_BYTES
+        {
+            return Err(PlaybackSourceError::InputTooLarge);
+        }
+        if is_forbidden_name(&extra.name) {
+            return Err(PlaybackSourceError::UnsafeRequiredHeader);
+        }
+        if !seen_names.insert(extra.name.as_str().to_owned()) {
+            return Err(PlaybackSourceError::DuplicateRequiredHeader);
+        }
+        if extra.value.chars().any(char::is_control)
+            || HeaderValue::from_str(extra.value.as_str()).is_err()
+        {
+            return Err(PlaybackSourceError::InvalidRequiredHeaderValue);
+        }
+        headers.push(RequiredHeader {
+            name: extra.name.clone(),
+            value: extra.value.clone(),
         });
     }
     Ok(headers)

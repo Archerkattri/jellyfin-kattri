@@ -28,6 +28,7 @@ mod quick_connect;
 pub mod remote;
 pub mod remote_command;
 mod remote_subtitles;
+mod request_headers;
 mod search;
 pub mod segments;
 mod series;
@@ -89,6 +90,10 @@ pub use remote_subtitles::{
     CultureDto, ItemSubtitleStream, MAX_REMOTE_SUBTITLES, MAX_SUBTITLE_FILE_BYTES,
     RemoteSubtitleInfo,
 };
+pub use request_headers::{
+    ExtraRequestHeader, MAX_EXTRA_REQUEST_HEADER_BYTES, MAX_EXTRA_REQUEST_HEADER_COUNT,
+    RequestHeadersError,
+};
 pub use search::{SEARCH_ITEM_TYPES, SearchError, SearchGroup, SearchResultGroup, group_by_type};
 pub use segments::{MediaSegment, MediaSegmentType, MediaSegmentsResponse};
 pub use series::AdjacentEpisodes;
@@ -113,6 +118,8 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::request_headers::validate_header_set;
+
 const MAX_PRIMARY_IMAGE_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 /// Maximum dimensions requested for a photo-grid thumbnail.
 pub const PHOTO_THUMBNAIL_MAX_WIDTH: u32 = 480;
@@ -135,6 +142,8 @@ pub struct ClientConfig {
     version: String,
     allow_insecure_remote_http: bool,
     allow_loopback_provider_images: bool,
+    /// Sent only by `add_metadata` on requests to this configured Jellyfin server.
+    extra_request_headers: Vec<ExtraRequestHeader>,
     /// Extra root certificates in PEM form, for a private CA.
     custom_ca_pem: Option<Vec<u8>>,
     /// Client certificate and private key in PEM form, for mutual TLS.
@@ -172,6 +181,7 @@ impl ClientConfig {
             version: version.into(),
             allow_insecure_remote_http: false,
             allow_loopback_provider_images: false,
+            extra_request_headers: Vec::new(),
             custom_ca_pem: None,
             client_identity_pem: None,
         };
@@ -203,6 +213,22 @@ impl ClientConfig {
         self
     }
 
+    /// Add bounded, validated headers to requests sent to this Jellyfin server.
+    ///
+    /// Header values are zeroized on drop and redacted from debug output. This
+    /// setting is held only in memory; callers that persist secrets must use
+    /// the operating-system credential store. Provider-image requests do not
+    /// use these headers. Build entries with [`ExtraRequestHeader::new`];
+    /// duplicate names, reserved names, invalid values, and values over the
+    /// configured bounds are rejected.
+    pub fn with_extra_request_headers<I>(mut self, headers: I) -> Result<Self, RequestHeadersError>
+    where
+        I: IntoIterator<Item = ExtraRequestHeader>,
+    {
+        self.extra_request_headers = validate_header_set(headers)?;
+        Ok(self)
+    }
+
     /// Trust an additional root certificate (one or more PEM blocks) for this server. Used for
     /// private CAs behind a reverse proxy; the bytes never reach logs because `Debug` omits them.
     pub fn with_custom_ca_pem(mut self, pem: Vec<u8>) -> Self {
@@ -232,6 +258,7 @@ impl fmt::Debug for ClientConfig {
             )
             .field("custom_ca", &self.custom_ca_pem.is_some())
             .field("client_identity", &self.client_identity_pem.is_some())
+            .field("extra_request_headers", &self.extra_request_headers)
             .finish()
     }
 }
@@ -796,9 +823,13 @@ impl JellyfinClient {
         token: Option<&str>,
     ) -> reqwest::RequestBuilder {
         let metadata = self.authorization_value(token);
-        request
+        let mut request = request
             .header(header::AUTHORIZATION, metadata.as_str())
-            .header(header::ACCEPT, "application/json")
+            .header(header::ACCEPT, "application/json");
+        for extra in &self.config.extra_request_headers {
+            request = request.header(extra.name.clone(), extra.value.as_str());
+        }
+        request
     }
 }
 
@@ -1216,12 +1247,15 @@ mod error_classification_tests {
 
     #[tokio::test]
     async fn refused_connection_maps_to_unreachable() {
-        // Retain a bound, non-listening socket so another parallel test cannot reuse the port.
+        // Keep the reservation on systems where a bound non-listener promptly refuses connects.
         let reserved = tokio::net::TcpSocket::new_v4().expect("socket");
         reserved
             .bind("127.0.0.1:0".parse().expect("address"))
             .expect("bind");
         let address = reserved.local_addr().expect("address");
+        // macOS may blackhole this port, so release the reservation before connecting.
+        #[cfg(target_os = "macos")]
+        drop(reserved);
         let error = reqwest::Client::builder()
             .no_proxy()
             // Windows can take just over two seconds to return WSAECONNREFUSED.
@@ -1237,6 +1271,7 @@ mod error_classification_tests {
             matches!(classified, ApiError::Unreachable),
             "{classified:?}"
         );
+        #[cfg(not(target_os = "macos"))]
         drop(reserved);
     }
 
