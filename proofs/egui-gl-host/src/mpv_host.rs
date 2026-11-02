@@ -285,6 +285,7 @@ fn pre_load_options(
     audio: &AudioSettings,
     playback: &PlaybackSettings,
     video: &VideoSettings,
+    sync_play_speed_locked: bool,
 ) -> Vec<(&'static str, Result<Vec<ValidatedOption>, MpvOptionError>)> {
     vec![
         (
@@ -329,7 +330,11 @@ fn pre_load_options(
             "playback.default_speed",
             validate(
                 "speed",
-                OptionValue::Float(default_speed_for_setting(playback.default_speed)),
+                OptionValue::Float(default_speed_for_setting(if sync_play_speed_locked {
+                    1.0
+                } else {
+                    playback.default_speed
+                })),
             )
             .map(|option| vec![option]),
         ),
@@ -897,6 +902,7 @@ pub(crate) struct MpvHost<'session> {
     /// libmpv's reply code for the last requested screenshot; taken by the host for its notice.
     screenshot_result: Option<i32>,
     controls_feedback: Option<String>,
+    sync_play_speed_locked: bool,
     track_inventory: Option<TrackInventory>,
     track_inventory_request: Option<u64>,
     track_inventory_attempts: u8,
@@ -1012,6 +1018,7 @@ impl<'session> MpvHost<'session> {
                 screenshot_command: None,
                 screenshot_result: None,
                 controls_feedback: None,
+                sync_play_speed_locked: false,
                 track_inventory: None,
                 track_inventory_request: None,
                 track_inventory_attempts: 0,
@@ -1116,6 +1123,7 @@ impl<'session> MpvHost<'session> {
                     screenshot_command: None,
                     screenshot_result: None,
                     controls_feedback: None,
+                    sync_play_speed_locked: false,
                     track_inventory: None,
                     track_inventory_request: None,
                     track_inventory_attempts: 0,
@@ -1188,6 +1196,7 @@ impl<'session> MpvHost<'session> {
             screenshot_command: None,
             screenshot_result: None,
             controls_feedback: None,
+            sync_play_speed_locked: false,
             track_inventory: None,
             track_inventory_request: None,
             track_inventory_attempts: 0,
@@ -1311,7 +1320,12 @@ impl<'session> MpvHost<'session> {
             }
             Err(error) => tracing::warn!(%error, "video sync mode rejected by the mpv allowlist"),
         }
-        for (setting, options) in pre_load_options(load.audio, load.playback, load.video) {
+        for (setting, options) in pre_load_options(
+            load.audio,
+            load.playback,
+            load.video,
+            self.sync_play_speed_locked,
+        ) {
             queue_validated(session, setting, options);
         }
         for (setting, options) in video_layout_options(load.video) {
@@ -1818,6 +1832,14 @@ impl<'session> MpvHost<'session> {
                 {
                     self.controls
                         .apply_observation(change.property, change.value);
+                    if self.sync_play_speed_locked
+                        && self
+                            .controls
+                            .speed_multiplier
+                            .is_some_and(|speed| (speed - 1.0).abs() > 0.001)
+                    {
+                        self.set_playback_speed(PlaybackSpeed::Normal);
+                    }
                 }
                 EventKind::PropertyChange(change)
                     if change.property == PlaybackProperty::Volume
@@ -2041,7 +2063,24 @@ impl<'session> MpvHost<'session> {
         self.record_control_result(result.map(|_| ()), "A-B loop");
     }
 
+    /// Current SyncPlay timing is based on 1x. Keep the local default and manual
+    /// controls from fighting group drift correction, without changing saved settings.
+    pub(crate) fn set_sync_play_speed_locked(&mut self, locked: bool) {
+        if self.sync_play_speed_locked == locked {
+            return;
+        }
+        self.sync_play_speed_locked = locked;
+        if locked {
+            self.set_playback_speed(PlaybackSpeed::Normal);
+        }
+    }
+
     pub(crate) fn set_playback_speed(&mut self, speed: PlaybackSpeed) {
+        if self.sync_play_speed_locked && speed != PlaybackSpeed::Normal {
+            self.controls_feedback =
+                Some("Playback speed is synchronized by Watch Together.".into());
+            return;
+        }
         let Some(session) = self.session else {
             self.controls_feedback = Some("libmpv is unavailable.".into());
             return;
@@ -4303,13 +4342,33 @@ mod pre_load_tests {
     use kattri_client_core::mpv_options::spec_for;
     use kattri_settings::ChannelLayout;
 
+    #[test]
+    fn sync_play_uses_normal_speed_without_changing_the_saved_default() {
+        let playback = PlaybackSettings {
+            default_speed: 1.5,
+            ..PlaybackSettings::default()
+        };
+        let speed = pre_load_options(
+            &AudioSettings::default(),
+            &playback,
+            &VideoSettings::default(),
+            true,
+        )
+        .into_iter()
+        .flat_map(|(_, options)| options.expect("valid defaults"))
+        .find(|option| option.name == "speed")
+        .expect("pre-load speed");
+        assert_eq!(speed.value, "1");
+        assert_eq!(playback.default_speed, 1.5);
+    }
+
     fn written(
         audio: &AudioSettings,
         playback: &PlaybackSettings,
         video: &VideoSettings,
     ) -> Vec<(&'static str, String)> {
         let mut out = Vec::new();
-        for (setting, options) in pre_load_options(audio, playback, video) {
+        for (setting, options) in pre_load_options(audio, playback, video, false) {
             let options = options.unwrap_or_else(|error| panic!("{setting}: {error}"));
             out.extend(
                 options

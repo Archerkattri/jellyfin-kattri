@@ -297,7 +297,7 @@ fn capture_framebuffer(
     let outcome = std::fs::write(&target, png);
     log(&format!(
         "screenshot {width}x{height} -> {} ({})",
-        target.display(),
+        name,
         if outcome.is_ok() {
             "ok"
         } else {

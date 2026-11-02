@@ -168,6 +168,7 @@ pub struct MpvRenderer<'session> {
     callback_context: Option<Box<RenderCallbackContext>>,
     repaint: RepaintHandle,
     contract: RenderContract,
+    last_rendered_target: Option<FboTarget>,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -284,6 +285,7 @@ impl<'session> MpvRenderer<'session> {
             callback_context: Some(callback_context),
             repaint,
             contract: RenderContract::opengl_candidate(),
+            last_rendered_target: None,
             _not_send: PhantomData,
         })
     }
@@ -330,22 +332,21 @@ impl<'session> MpvRenderer<'session> {
         if info_result < 0 {
             return Err(MpvError::RenderCall(info_result));
         }
-        if frame_info.flags & MPV_RENDER_FRAME_INFO_PRESENT == 0 {
-            return Ok(FrameDecision::NoFrame);
-        }
-
         // mpv_get_time_us is documented safe on render API threads. Compare in
         // libmpv's own clock domain before drawing.
         // SAFETY: The session handle remains valid, and upstream documents this
         // function as safe from a render API thread.
         let now =
             unsafe { (self.session.core.api.functions.get_time_us)(self.session.core.handle()) };
-        if let Some(delay) = frame_wait(frame_info.target_time, now) {
-            return Ok(FrameDecision::WaitUntil {
-                target_time_us: frame_info.target_time,
-                delay,
-            });
-        }
+        let decision = schedule_frame(
+            frame_info.flags,
+            frame_info.target_time,
+            now,
+            self.last_rendered_target != Some(target),
+        );
+        let FrameDecision::Rendered(info) = decision else {
+            return Ok(decision);
+        };
 
         let mut fbo = MpvOpenGlFbo {
             fbo: target.fbo,
@@ -385,11 +386,11 @@ impl<'session> MpvRenderer<'session> {
             return Err(MpvError::RenderCall(render_result));
         }
 
-        Ok(FrameDecision::Rendered(RenderFrameInfo {
-            target_time_us: frame_info.target_time,
-            present: true,
-            block_vsync: frame_info.flags & MPV_RENDER_FRAME_INFO_BLOCK_VSYNC != 0,
-        }))
+        // Texture storage is discarded on resize. libmpv can redraw the previous frame
+        // without a new decode/update, which is essential while playback is paused.
+        // Keep a failed target dirty so a later repaint can retry it.
+        self.last_rendered_target = Some(target);
+        Ok(FrameDecision::Rendered(info))
     }
 
     /// Call after the host actually presents/swaps the rendered frame. Use it
@@ -603,6 +604,29 @@ pub(crate) fn wakeup_callback(gate: &CallbackGate, callback: impl FnOnce()) {
 /// A frame is never really scheduled more than this far ahead.
 const MAX_FRAME_WAIT_US: i64 = 2_000_000;
 
+fn schedule_frame(
+    flags: u64,
+    target_time_us: i64,
+    now_us: i64,
+    target_changed: bool,
+) -> FrameDecision {
+    let present = flags & MPV_RENDER_FRAME_INFO_PRESENT != 0;
+    if !present && !target_changed {
+        return FrameDecision::NoFrame;
+    }
+    if present && let Some(delay) = frame_wait(target_time_us, now_us) {
+        return FrameDecision::WaitUntil {
+            target_time_us,
+            delay,
+        };
+    }
+    FrameDecision::Rendered(RenderFrameInfo {
+        target_time_us,
+        present,
+        block_vsync: flags & MPV_RENDER_FRAME_INFO_BLOCK_VSYNC != 0,
+    })
+}
+
 /// How long to wait before drawing a frame whose libmpv target time is `target`, when libmpv's
 /// microsecond clock reads `now_us`. `None` means draw it now.
 ///
@@ -623,6 +647,36 @@ fn frame_wait(target: i64, now_us: i64) -> Option<Duration> {
 mod frame_wait_tests {
     use super::frame_wait;
     use std::time::Duration;
+
+    #[test]
+    fn resizing_a_paused_target_redraws_the_previous_frame_without_waiting() {
+        assert!(matches!(
+            super::schedule_frame(0, 1_100_000, 1_000_000, true),
+            super::FrameDecision::Rendered(super::RenderFrameInfo { present: false, .. })
+        ));
+        assert_eq!(
+            super::schedule_frame(0, 1_100_000, 1_000_000, false),
+            super::FrameDecision::NoFrame
+        );
+    }
+
+    #[test]
+    fn resizing_does_not_present_a_queued_video_frame_ahead_of_its_deadline() {
+        for changed in [false, true] {
+            assert_eq!(
+                super::schedule_frame(
+                    super::MPV_RENDER_FRAME_INFO_PRESENT,
+                    1_016_000,
+                    1_000_000,
+                    changed
+                ),
+                super::FrameDecision::WaitUntil {
+                    target_time_us: 1_016_000,
+                    delay: Duration::from_millis(16)
+                }
+            );
+        }
+    }
 
     #[test]
     fn due_and_late_frames_draw_now() {

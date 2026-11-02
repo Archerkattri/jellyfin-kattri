@@ -46,6 +46,8 @@ pub struct PlayerControlsView<'a> {
     pub paused: Option<bool>,
     /// Current playback speed; `None` means libmpv has not reported it yet.
     pub speed_multiplier: Option<f64>,
+    /// Whether local playback speed can be changed in the current session.
+    pub speed_enabled: bool,
     /// Whether the current source permits seeking.
     pub seek_enabled: bool,
     /// Whether there is a loaded item the Stop control can stop.
@@ -222,6 +224,7 @@ const OSD_CONTROL_HOVER: Color32 = Color32::from_rgb(66, 70, 75);
 const OSD_FOCUS: Color32 = Color32::from_rgb(0x7D, 0xD8, 0xF4);
 const OSD_TEXT: Color32 = Color32::from_rgb(242, 244, 245);
 const OSD_MUTED: Color32 = Color32::from_rgb(164, 170, 174);
+const SYNCED_SPEED_TOOLTIP: &str = "Playback speed is synchronized by Watch Together.";
 
 /// Draw compact, keyboard-accessible playback controls and return user actions. The automatic
 /// skip seeks without a press. The button seeks on press and appears only while a segment is
@@ -743,36 +746,55 @@ fn draw_controls(
                     actions.push(PlayerControlAction::CycleAbLoop);
                 }
 
-                let speed_menu = egui::ComboBox::from_id_salt("player-control-speed")
-                    .width(78.0)
-                    .selected_text(speed_label(view.speed_multiplier))
-                    .show_ui(ui, |ui| {
-                        for speed in PlaybackSpeed::ALL {
-                            let selected = view
-                                .speed_multiplier
-                                .is_some_and(|value| (value - speed.multiplier()).abs() < 0.001);
-                            let response = ui
-                                .selectable_label(selected, speed_label(Some(speed.multiplier())));
-                            response.widget_info(|| {
-                                WidgetInfo::selected(
-                                    Role::RadioButton,
-                                    true,
+                let speed_menu = ui.add_enabled_ui(view.speed_enabled, |ui| {
+                    egui::ComboBox::from_id_salt("player-control-speed")
+                        .width(78.0)
+                        .selected_text(speed_label(view.speed_multiplier))
+                        .show_ui(ui, |ui| {
+                            for speed in PlaybackSpeed::ALL {
+                                let selected = view.speed_multiplier.is_some_and(|value| {
+                                    (value - speed.multiplier()).abs() < 0.001
+                                });
+                                let response = ui.selectable_label(
                                     selected,
-                                    format!(
-                                        "Playback speed {}",
-                                        speed_label(Some(speed.multiplier()))
-                                    ),
-                                )
-                            });
-                            if response.clicked() && !selected {
-                                actions.push(PlayerControlAction::SetSpeed(speed));
+                                    speed_label(Some(speed.multiplier())),
+                                );
+                                response.widget_info(|| {
+                                    WidgetInfo::selected(
+                                        Role::RadioButton,
+                                        response.enabled(),
+                                        selected,
+                                        format!(
+                                            "Playback speed {}",
+                                            speed_label(Some(speed.multiplier()))
+                                        ),
+                                    )
+                                });
+                                if response.clicked() && !selected {
+                                    actions.push(PlayerControlAction::SetSpeed(speed));
+                                }
                             }
-                        }
-                    });
-                speed_menu.response.widget_info(|| {
-                    WidgetInfo::labeled(Role::ComboBox, true, "Playback speed")
+                        })
                 });
-                observe(ControlId::SpeedMenu, speed_menu.response.rect);
+                let speed_response = speed_menu.inner.response;
+                speed_response.widget_info(|| {
+                    WidgetInfo::labeled(
+                        Role::ComboBox,
+                        speed_response.enabled(),
+                        "Playback speed",
+                    )
+                });
+                let _ = speed_response.ctx.accesskit_node_builder(speed_response.id, |node| {
+                    if view.speed_enabled {
+                        node.clear_description();
+                    } else {
+                        node.set_description(SYNCED_SPEED_TOOLTIP);
+                    }
+                });
+                observe(ControlId::SpeedMenu, speed_response.rect);
+                if !view.speed_enabled {
+                    let _ = speed_response.on_disabled_hover_text(SYNCED_SPEED_TOOLTIP);
+                }
 
                 let (pip_icon, pip_accessible) = if view.pip_active {
                     (OsdIcon::Pip, "Exit picture-in-picture")
@@ -1003,7 +1025,7 @@ fn labeled_button(
     );
     focus_ring(ui, &response, egui::CornerRadius::same(11));
     observe(response.rect);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, accessible_name));
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, response.enabled(), accessible_name));
     response.clicked()
 }
 
@@ -1033,7 +1055,7 @@ fn icon_button(
     player_icons::paint(ui.painter(), icon_area(response.rect, 0.56), icon, color);
     focus_ring(ui, &response, rounding);
     observe(response.rect);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, accessible_name));
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, response.enabled(), accessible_name));
     let clicked = response.clicked();
     response.on_hover_text(accessible_name);
     clicked
@@ -1060,7 +1082,7 @@ fn primary_icon_button(
     player_icons::paint(ui.painter(), icon_area(response.rect, 0.52), icon, color);
     focus_ring(ui, &response, rounding);
     observe(response.rect);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, accessible_name));
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, response.enabled(), accessible_name));
     response.clicked()
 }
 
@@ -1216,6 +1238,7 @@ mod tests {
             duration: Some(Duration::from_secs(120)),
             paused: Some(true),
             speed_multiplier: Some(1.0),
+            speed_enabled: true,
             seek_enabled: true,
             stop_enabled: true,
             previous_track_enabled: true,
@@ -2411,6 +2434,218 @@ mod tests {
     }
 
     #[test]
+    fn accessible_controls_are_named_and_disabled_buttons_report_their_state() {
+        let context = Context::default();
+        context.enable_accesskit();
+        let state = PlayerControlsView {
+            duration: None,
+            paused: None,
+            seek_enabled: false,
+            stop_enabled: false,
+            previous_track_enabled: false,
+            next_track_enabled: false,
+            pip_available: false,
+            ..view(&[])
+        };
+        let mut output = context.run_ui(RawInput::default(), |ui| {
+            CentralPanel::default().show(ui, |ui| {
+                let _ = draw_inner(ui, state, |_, _| {});
+            });
+        });
+        output.textures_delta.clear();
+        let tree = output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree is emitted");
+
+        let interactive_roles = [
+            egui::Role::Button,
+            egui::Role::DefaultButton,
+            egui::Role::ComboBox,
+            egui::Role::Slider,
+            egui::Role::RadioButton,
+            egui::Role::MenuItem,
+        ];
+        for (_, node) in tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| interactive_roles.contains(&node.role()))
+        {
+            assert!(
+                node.label().is_some_and(|label| !label.trim().is_empty())
+                    || !node.labelled_by().is_empty(),
+                "interactive {:?} node has an accessible name",
+                node.role()
+            );
+        }
+
+        for name in [
+            "Playback state unavailable",
+            "Previous (a track restarts after 3 seconds)",
+            "Seek backward 10 seconds",
+            "Seek forward 10 seconds",
+            "Next",
+            "Stop playback",
+            "Step back one frame",
+            "Step forward one frame",
+            "Set A-B loop point A",
+            "Picture-in-picture",
+        ] {
+            let node = tree
+                .nodes
+                .iter()
+                .find(|(_, node)| node.label() == Some(name))
+                .map(|(_, node)| node)
+                .unwrap_or_else(|| panic!("accessibility node {name:?} exists"));
+            assert!(node.is_disabled(), "{name:?} is announced as disabled");
+        }
+    }
+
+    #[test]
+    fn synchronized_speed_is_disabled_and_has_an_accessible_explanation() {
+        let context = Context::default();
+        context.enable_accesskit();
+        let state = PlayerControlsView {
+            speed_enabled: false,
+            ..view(&[])
+        };
+        let mut output = context.run_ui(RawInput::default(), |ui| {
+            CentralPanel::default().show(ui, |ui| {
+                let _ = draw_inner(ui, state, |_, _| {});
+            });
+        });
+        output.textures_delta.clear();
+        let tree = output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree is emitted");
+        let speed = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::Role::ComboBox && node.label() == Some("Playback speed")
+            })
+            .map(|(_, node)| node)
+            .expect("playback speed combo is exposed");
+        assert!(speed.is_disabled());
+        assert_eq!(speed.description(), Some(super::SYNCED_SPEED_TOOLTIP));
+    }
+
+    #[test]
+    fn disabled_speed_menu_cannot_emit_a_speed_change() {
+        let chapters = [];
+        let secondary = [];
+        let state = PlayerControlsView {
+            speed_enabled: false,
+            ..keyboard_view(&chapters, &secondary)
+        };
+        let keyboard_context = Context::default();
+        assert!(
+            !tab_to(&keyboard_context, state, ControlId::SpeedMenu),
+            "Tab skips a speed menu disabled by Watch Together"
+        );
+
+        let pointer_context = Context::default();
+        let frame = overlay_frame(&pointer_context, RawInput::default(), state);
+        let center = frame
+            .rects
+            .iter()
+            .find(|(id, _)| *id == ControlId::SpeedMenu)
+            .map(|(_, rect)| rect.center())
+            .expect("speed menu remains visible");
+        let mut actions = Vec::new();
+        let mut output = pointer_context.run_ui(
+            RawInput {
+                events: click_events(center),
+                ..RawInput::default()
+            },
+            |ui| {
+                CentralPanel::default().show(ui, |ui| {
+                    actions = draw_inner(ui, state, |_, _| {});
+                });
+            },
+        );
+        output.textures_delta.clear();
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, PlayerControlAction::SetSpeed(_))),
+            "clicking a synchronized speed menu cannot change local speed"
+        );
+    }
+
+    #[test]
+    fn live_playback_value_changes_keep_keyboard_focus_on_the_control() {
+        let chapters = [];
+        let secondary = [];
+        for target in [
+            ControlId::PlayPause,
+            ControlId::SeekBar,
+            ControlId::SpeedMenu,
+        ] {
+            let context = Context::default();
+            let state = keyboard_view(&chapters, &secondary);
+            assert!(tab_to(&context, state, target), "Tab reaches {target:?}");
+
+            let updated = match target {
+                ControlId::PlayPause => PlayerControlsView {
+                    paused: Some(false),
+                    ..state
+                },
+                ControlId::SeekBar => PlayerControlsView {
+                    position: Duration::from_secs(30),
+                    ..state
+                },
+                ControlId::SpeedMenu => PlayerControlsView {
+                    speed_multiplier: Some(2.0),
+                    ..state
+                },
+                _ => unreachable!("only controls with changing playback values are covered"),
+            };
+            let frame = overlay_frame(&context, RawInput::default(), updated);
+            assert_eq!(
+                focused_control(&context, &frame.rects),
+                Some(target),
+                "a live playback update keeps focus on {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_controls_do_not_schedule_an_immediate_repaint() {
+        let context = Context::default();
+        let state = keyboard_view(&[], &[]);
+        // egui schedules a follow-up pass for each immediate repaint. Warm the
+        // same layout (without a changing skip button), then require idle frames.
+        for frame in 0..7 {
+            let mut output = context.run_ui(
+                RawInput {
+                    time: Some(f64::from(frame) / 60.0),
+                    ..RawInput::default()
+                },
+                |ui| {
+                    CentralPanel::default().show(ui, |ui| {
+                        let _ = draw_inner(ui, state, |_, _| {});
+                    });
+                },
+            );
+            let repaint_delay = output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .map_or(Duration::MAX, |viewport| viewport.repaint_delay);
+            output.textures_delta.clear();
+            if frame >= 3 {
+                assert_ne!(
+                    repaint_delay,
+                    Duration::ZERO,
+                    "idle control frame {frame} requested an immediate repaint: {:?}",
+                    context.repaint_causes()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn enter_activates_each_button_once_tab_has_focused_it() {
         let chapters = [];
         let secondary = [];
@@ -2701,6 +2936,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn audio_and_subtitle_track_combos_have_accessible_names() {
+        let context = Context::default();
+        context.enable_accesskit();
+        let audio = audio_choices();
+        let subtitle = subtitle_choices();
+        let mut output = context.run_ui(RawInput::default(), |ui| {
+            CentralPanel::default().show(ui, |ui| {
+                let picked = track_menu_contents(ui, Some(&audio), Some(&subtitle), None);
+                assert_eq!(picked, (None, None));
+            });
+        });
+        output.textures_delta.clear();
+        let tree = output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree is emitted");
+        let combos: Vec<_> = tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == egui::Role::ComboBox)
+            .collect();
+        assert_eq!(combos.len(), 2, "audio and subtitle combos are exposed");
+        for (_, node) in combos {
+            assert!(
+                node.label().is_some_and(|label| !label.trim().is_empty())
+                    || !node.labelled_by().is_empty(),
+                "track combo has an accessible name"
+            );
+        }
+    }
+
     /// The section widget that has keyboard focus, matched by egui's id for the widget.
     fn focused_track_control(
         context: &Context,
@@ -2804,6 +3071,35 @@ mod tests {
                 .iter()
                 .any(|(control, _)| *control == TrackControl::Subtitle),
             "Enter on the header draws the subtitle combo"
+        );
+    }
+
+    #[test]
+    fn changing_the_selected_track_keeps_keyboard_focus_on_its_combo() {
+        let mut audio = audio_choices();
+        let subtitle = subtitle_choices();
+        let context = Context::default();
+        assert!(track_tab_to(
+            &context,
+            &audio,
+            &subtitle,
+            TrackControl::Header
+        ));
+        open_track_header(&context, &audio, &subtitle);
+        assert!(track_tab_to(
+            &context,
+            &audio,
+            &subtitle,
+            TrackControl::Audio
+        ));
+
+        audio[0].selected = false;
+        audio[1].selected = true;
+        let frame = track_frame(&context, RawInput::default(), &audio, &subtitle);
+        assert_eq!(
+            focused_track_control(&context, &frame.observed),
+            Some(TrackControl::Audio),
+            "the combo retains focus when playback reports a new track"
         );
     }
 

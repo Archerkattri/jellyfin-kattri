@@ -425,6 +425,8 @@ impl<'session> GlHost<'session> {
         #[cfg(debug_assertions)]
         let qa_frame_started = Instant::now();
         self.sync_report_connection();
+        self.mpv
+            .set_sync_play_speed_locked(self.kattri_app.sync_play_speed_locked());
         self.mpv.poll_events();
         self.poll_sync_play_status();
         #[cfg(debug_assertions)]
@@ -1814,6 +1816,7 @@ fn osd_controls(
             duration: osd.duration,
             paused: osd.paused,
             speed_multiplier: osd.speed_multiplier,
+            speed_enabled: !kattri_app.sync_play_speed_locked(),
             seek_enabled: true,
             stop_enabled: osd.media_active,
             previous_track_enabled: osd.previous_track_enabled,

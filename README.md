@@ -53,7 +53,7 @@ is used.
 | | |
 | --- | --- |
 | **Sign-in** | Password sign-in, Quick Connect, saved servers, LAN discovery, multiple profiles, stay signed in, forgot-password flow |
-| **Home** | Continue Watching, Next Up, Latest, My Media and Collections shelves, hero banner, per-section visibility and ordering |
+| **Home** | Continue Watching, Next Up, Latest, My Media and Collections shelves, hero banner, per-section visibility and ordering, optional combined Continue Watching/Next Up shelf and local show hiding from those shelves |
 | **Library** | Paging, sorting, play state, favorites, genre and studio filters, alphabet picker, poster grid or list, adjustable poster size, 1,000-item photo grids, music All/Albums/Songs views |
 | **Details** | Metadata, overview, cast, similar titles, seasons and episodes, series Next Up, media info, version picker, trailers and extras, lyrics, play and download |
 | **Search** | Debounced cross-type search grouped by movies, series, episodes, music, playlists, photos, people and channels; subtitle search |
@@ -154,6 +154,9 @@ Validated so far:
   details, search, people, similar items and PlaybackInfo negotiation.
 - Stream-only playback through the relay on Windows x64: a 10-minute DirectPlay run
   and a 30-second Transcode run with software/null outputs.
+- A Windows x64 native-window DirectPlay check on November 2: decoded video was
+  visible, pause and seek changed the real player, and stop returned to browsing.
+  Audible output and track switching were not verified in that check.
 - A Windows RTX 4060 run using NVDEC with an HDR10 source tone-mapped to SDR.
 - Packaging: release artifacts for every platform. Clean-runner install, launch and
   normal close pass for the macOS DMG and all four Linux formats.
