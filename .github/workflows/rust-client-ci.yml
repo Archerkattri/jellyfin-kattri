@@ -3,6 +3,9 @@ name: Rust client build and test validation (not runtime QA)
 
 on:
   push:
+    # Branch pushes only: a release tag points at a commit this workflow already validated,
+    # and the duplicate macOS job doubles the hosted-runner queue for no extra signal.
+    branches: ["**"]
     paths:
       - "crates/**"
       - "proofs/**"
