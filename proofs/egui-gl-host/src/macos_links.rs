@@ -5,9 +5,6 @@ use std::rc::Rc;
 
 use kattri_client_core::deep_link::DeepLinkIntent;
 
-#[cfg(target_os = "macos")]
-const MAX_OPEN_URLS: usize = 1;
-
 /// Admission state prevents URL callbacks from creating an unbounded winit user-event queue.
 #[derive(Clone)]
 pub(crate) struct MacLinkGate(Rc<Cell<GateState>>);
@@ -123,7 +120,7 @@ mod appkit {
 
     use kattri_client_core::deep_link::MAX_DEEP_LINK_BYTES;
 
-    use super::{MAX_OPEN_URLS, MacLinkReject, check_url_count, parse_open_url};
+    use super::{MacLinkReject, check_url_count, parse_open_url};
 
     struct UrlDelegateIvars {
         proxy: EventLoopProxy<HostEvent>,
@@ -147,6 +144,7 @@ mod appkit {
 
         unsafe impl NSApplicationDelegate for UrlDelegate {
             #[method(application:openURLs:)]
+            #[allow(non_snake_case)] // AppKit's delegate selector is camelCase by contract.
             fn application_openURLs(&self, _application: &NSApplication, urls: &NSArray<NSURL>) {
                 // A panic must not unwind through AppKit's Objective-C callback boundary.
                 let _ = catch_unwind(AssertUnwindSafe(|| {
@@ -243,7 +241,7 @@ mod appkit {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use appkit::{Registration, RegistrationError, register};
+pub(crate) use appkit::register;
 
 #[cfg(test)]
 mod tests {
