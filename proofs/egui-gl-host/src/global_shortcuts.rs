@@ -107,14 +107,4 @@ mod imp {
     }
 }
 
-#[cfg(windows)]
 pub(crate) use imp::install;
-
-#[cfg(not(windows))]
-use winit::event_loop::EventLoopProxy;
-
-#[cfg(not(windows))]
-use crate::HostEvent;
-
-#[cfg(not(windows))]
-pub(crate) fn install(_proxy: EventLoopProxy<HostEvent>, _enabled: bool) {}

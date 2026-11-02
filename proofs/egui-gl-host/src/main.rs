@@ -51,6 +51,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 mod display_switch;
 mod gl_adapter;
+#[cfg(windows)]
 mod global_shortcuts;
 mod launch_intent;
 #[cfg(any(target_os = "macos", test))]
@@ -79,6 +80,7 @@ pub(crate) enum HostEvent {
     EguiRepaint(Duration),
     MpvRepaint,
     AccessKit(egui_winit::accesskit_winit::Event),
+    #[cfg(windows)]
     GlobalShortcut(global_shortcuts::GlobalAction),
     #[cfg(target_os = "macos")]
     MacOpenUrl(DeepLinkIntent),
@@ -1540,6 +1542,7 @@ impl<'session> GlHost<'session> {
     }
 
     /// Read once at start-up; changing the setting takes effect on the next launch.
+    #[cfg(windows)]
     fn global_shortcuts_enabled(&self) -> bool {
         self.kattri_app.global_shortcuts_enabled()
     }
@@ -2450,6 +2453,7 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
                 }
             }
             HostEvent::AccessKit(_) => {}
+            #[cfg(windows)]
             HostEvent::GlobalShortcut(action) => {
                 if let Some(host) = self.host.as_mut() {
                     match action {
