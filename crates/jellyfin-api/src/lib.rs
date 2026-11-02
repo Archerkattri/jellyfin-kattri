@@ -2,10 +2,12 @@
 //! Rust client's initial connection and library flow.
 
 mod admin;
+mod admin_users;
 pub mod capabilities;
 mod collections;
 pub mod connectivity;
 mod device_profile;
+pub mod discovery;
 mod extras;
 mod favorites;
 mod home;
@@ -36,10 +38,16 @@ pub mod trickplay;
 pub mod websocket;
 
 pub use admin::{MAX_SCHEDULED_TASKS, ScheduledTask, ServerInfo, UserCounts, VirtualFolder};
+pub use admin_users::{AdminUser, AdminUserPolicy, AdminUserPolicyChanges, MAX_ADMIN_USERS};
 pub use collections::{CollectionRuntime, collection_runtime};
 pub use device_profile::{
     CodecProfile, ContainerProfile, DeviceProfile, DirectPlayProfile, ProfileCondition,
     SubtitleProfile, TranscodingProfile,
+};
+pub use discovery::{
+    DISCOVERY_PORT, DISCOVERY_REQUEST, DiscoveryCandidate, DiscoveryError, DiscoveryOptions,
+    MAX_DISCOVERY_CANDIDATES, MAX_DISCOVERY_DATAGRAM_BYTES, MAX_DISCOVERY_DATAGRAMS,
+    MAX_DISCOVERY_TIMEOUT, discover_lan_servers,
 };
 pub use extras::LyricLine;
 pub use favorites::FavoriteToggle;
@@ -1208,19 +1216,28 @@ mod error_classification_tests {
 
     #[tokio::test]
     async fn refused_connection_maps_to_unreachable() {
-        // Bind to get a free port, then drop the listener so connects are refused.
-        let port = {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("bind");
-            listener.local_addr().expect("addr").port()
-        };
-        let error = reqwest::Client::new()
-            .get(format!("http://127.0.0.1:{port}/"))
+        // Retain a bound, non-listening socket so another parallel test cannot reuse the port.
+        let reserved = tokio::net::TcpSocket::new_v4().expect("socket");
+        reserved
+            .bind("127.0.0.1:0".parse().expect("address"))
+            .expect("bind");
+        let address = reserved.local_addr().expect("address");
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            // Windows can take just over two seconds to return WSAECONNREFUSED.
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .expect("client")
+            .get(format!("http://{address}/"))
             .send()
             .await
             .expect_err("nothing listens");
-        assert!(matches!(transport_error(error), ApiError::Unreachable));
+        let classified = transport_error(error);
+        assert!(
+            matches!(classified, ApiError::Unreachable),
+            "{classified:?}"
+        );
+        drop(reserved);
     }
 
     #[tokio::test]

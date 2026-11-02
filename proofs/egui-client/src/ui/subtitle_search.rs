@@ -140,7 +140,7 @@ pub(crate) fn show(
 ) -> Option<SubtitleSearchAction> {
     let mut action = None;
     let mut open = true;
-    let error_color = crate::theme::DANGER_TEXT;
+    let error_color = crate::theme::active_palette().danger;
     egui::Window::new(ui_text_args(
         ids::SUBTITLE_SEARCH_TITLE,
         &[("title", state.title.as_str())],

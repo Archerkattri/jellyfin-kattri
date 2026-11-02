@@ -661,6 +661,14 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
                     ThemePreset::WarmDark,
                     ui_text(ids::SETTINGS_GENERAL_THEME_WARM_DARK),
                 ),
+                (
+                    ThemePreset::Light,
+                    ui_text(ids::SETTINGS_GENERAL_THEME_LIGHT),
+                ),
+                (
+                    ThemePreset::System,
+                    ui_text(ids::SETTINGS_GENERAL_THEME_SYSTEM),
+                ),
             ],
         );
         crate::theme::set_current_preset(general.theme_preset);
@@ -850,23 +858,25 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
         subsection_heading(ui, "Window", colors);
         let window = &mut app.settings.settings_mut().window;
         ui.checkbox(&mut window.fullscreen, "Start in fullscreen");
-        ui.add_enabled(
-            false,
-            egui::Checkbox::new(&mut window.always_on_top, "Keep window on top"),
+        ui.checkbox(
+            &mut window.always_on_top,
+            "Keep window on top (when supported)",
         );
         ui.add_enabled(
-            false,
+            cfg!(windows),
             egui::Checkbox::new(
                 &mut window.minimize_on_defocus,
                 "Minimize when the window loses focus",
             ),
         );
-        muted(
-            ui,
-            colors,
-            "Unavailable: on-top and defocus behaviors are not connected yet.",
-            12.0,
-        );
+        if !cfg!(windows) {
+            muted(
+                ui,
+                colors,
+                "Minimize on defocus is available on Windows. Window stacking is a hint and may be ignored by the desktop compositor.",
+                12.0,
+            );
+        }
         muted(
             ui,
             colors,
@@ -1156,22 +1166,39 @@ fn subtitle_style_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             "Subtitle offset can be adjusted from the player controls.",
             12.0,
         );
-        let mut background_transparency = subtitles
-            .background_transparency
-            .clone()
-            .unwrap_or_default();
-        ui.horizontal(|ui| {
-            let caption = ui.label("Background transparency");
-            ui.add_enabled(
-                false,
-                egui::TextEdit::singleline(&mut background_transparency).desired_width(180.0),
+        let mut background_transparency =
+            kattri_client_core::subtitle_style::subtitle_background_option(
+                None,
+                subtitles.background_transparency.as_deref(),
             )
-            .labelled_by(caption.id);
+            .ok()
+            .and_then(|option| {
+                option
+                    .value
+                    .get(1..3)
+                    .and_then(|alpha| u8::from_str_radix(alpha, 16).ok())
+            })
+            .map(|alpha| ((255 - u32::from(alpha)) * 100 + 127) / 255)
+            .unwrap_or(100);
+        ui.horizontal(|ui| {
+            if ui
+                .add(
+                    egui::Slider::new(&mut background_transparency, 0..=100)
+                        .text("Background transparency")
+                        .suffix("%"),
+                )
+                .changed()
+            {
+                subtitles.background_transparency = Some(format!("{background_transparency}%"));
+            }
+            if ui.button("Use default").clicked() {
+                subtitles.background_transparency = None;
+            }
         });
         muted(
             ui,
             colors,
-            "Unavailable: subtitle background transparency is not connected to mpv.",
+            "0% is opaque and 100% is clear. Changes apply when the next item loads.",
             12.0,
         );
         optional_choice(

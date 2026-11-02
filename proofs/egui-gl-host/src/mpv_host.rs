@@ -33,7 +33,7 @@ use kattri_client_core::playback_reporting::{
 use kattri_client_core::remote::LocalAction as RemoteAction;
 use kattri_client_core::segments::{MediaSegment, SegmentSkipper};
 use kattri_client_core::stream_url::StreamUrl;
-use kattri_client_core::subtitle_style::SubtitleStyle;
+use kattri_client_core::subtitle_style::{SubtitleStyle, subtitle_background_option};
 use kattri_client_core::subtitle_sync::{OffsetDirection, OffsetStep, SubtitleOffset};
 use kattri_client_core::subtitles::{
     ReselectObservation, SecondaryRefusal, SecondarySelection, SelectionOrigin,
@@ -227,11 +227,11 @@ fn video_layout_options(
     ]
 }
 
-/// Subtitle placement, size, and colour writes (M2-20). Both load paths queue these before
-/// loadfile, so a local file starts with the same placement, size, and colour as a stream.
+/// Subtitle layout and background writes (M2-20). Both load paths queue these before loadfile, so
+/// a local file starts with the same placement, size, colour, and background as a stream.
 fn subtitle_layout_options(
     subtitles: &SubtitleSettings,
-) -> [(&'static str, Result<Vec<ValidatedOption>, MpvOptionError>); 4] {
+) -> [(&'static str, Result<Vec<ValidatedOption>, MpvOptionError>); 5] {
     [
         (
             "subtitles.ass",
@@ -256,11 +256,19 @@ fn subtitle_layout_options(
             "subtitles.size_and_color",
             subtitle_size_and_color_options(subtitles.size, subtitles.color.as_deref()),
         ),
+        (
+            "subtitles.background_transparency",
+            subtitle_background_option(
+                subtitles.background_color.as_deref(),
+                subtitles.background_transparency.as_deref(),
+            )
+            .map(|option| vec![option]),
+        ),
     ]
 }
 
 /// The layout writes the local-file path queues before loadfile: video aspect and zoom, then
-/// subtitle placement, size, and colour. The same builders feed `load_relay`.
+/// subtitle placement, size, colour, and background. The same builders feed `load_relay`.
 fn local_file_layout_options(
     video: &VideoSettings,
     subtitles: &SubtitleSettings,
@@ -500,6 +508,7 @@ struct PlaybackControlsState {
     speed_multiplier: Option<f64>,
     volume_percent: Option<f64>,
     muted: Option<bool>,
+    cache_paused: Option<bool>,
     chapters: Vec<PlaybackChapter>,
 }
 
@@ -545,6 +554,9 @@ impl PlaybackControlsState {
             }
             (PlaybackProperty::Mute, PlaybackPropertyValue::Muted(muted)) => {
                 self.muted = muted;
+            }
+            (PlaybackProperty::CachePaused, PlaybackPropertyValue::CachePaused(paused)) => {
+                self.cache_paused = paused;
             }
             _ => {}
         }
@@ -872,6 +884,7 @@ pub(crate) struct MpvHost<'session> {
     playback_speed_observation: Option<ObservationId>,
     playback_volume_observation: Option<ObservationId>,
     playback_mute_observation: Option<ObservationId>,
+    playback_cache_observation: Option<ObservationId>,
     subtitle_track_id: Option<i64>,
     subtitle_delay_seconds: Option<f64>,
     controls: PlaybackControlsState,
@@ -991,6 +1004,7 @@ impl<'session> MpvHost<'session> {
                 playback_speed_observation: None,
                 playback_volume_observation: None,
                 playback_mute_observation: None,
+                playback_cache_observation: None,
                 subtitle_track_id: None,
                 subtitle_delay_seconds: None,
                 controls: PlaybackControlsState::default(),
@@ -1053,6 +1067,8 @@ impl<'session> MpvHost<'session> {
         let playback_speed_observation = session.observe_property(PlaybackProperty::Speed).ok();
         let playback_volume_observation = session.observe_property(PlaybackProperty::Volume).ok();
         let playback_mute_observation = session.observe_property(PlaybackProperty::Mute).ok();
+        let playback_cache_observation =
+            session.observe_property(PlaybackProperty::CachePaused).ok();
         let capability_snapshot_request = session.request_capability_snapshot().ok();
         let capability_warning = capability_snapshot_request
             .is_none()
@@ -1092,6 +1108,7 @@ impl<'session> MpvHost<'session> {
                     playback_speed_observation,
                     playback_volume_observation,
                     playback_mute_observation,
+                    playback_cache_observation,
                     subtitle_track_id: None,
                     subtitle_delay_seconds: None,
                     controls: PlaybackControlsState::default(),
@@ -1163,6 +1180,7 @@ impl<'session> MpvHost<'session> {
             playback_speed_observation,
             playback_volume_observation,
             playback_mute_observation,
+            playback_cache_observation,
             subtitle_track_id: None,
             subtitle_delay_seconds: None,
             controls: PlaybackControlsState::default(),
@@ -1462,6 +1480,7 @@ impl<'session> MpvHost<'session> {
                         PlaybackProperty::Speed,
                         PlaybackProperty::Volume,
                         PlaybackProperty::Mute,
+                        PlaybackProperty::CachePaused,
                     ] {
                         let _ = session.request_property(property);
                     }
@@ -1473,6 +1492,7 @@ impl<'session> MpvHost<'session> {
                             | PlaybackProperty::Speed
                             | PlaybackProperty::Volume
                             | PlaybackProperty::Mute
+                            | PlaybackProperty::CachePaused
                     ) =>
                 {
                     #[cfg(debug_assertions)]
@@ -1809,6 +1829,13 @@ impl<'session> MpvHost<'session> {
                 EventKind::PropertyChange(change)
                     if change.property == PlaybackProperty::Mute
                         && Some(change.observation_id) == self.playback_mute_observation =>
+                {
+                    self.controls
+                        .apply_observation(change.property, change.value);
+                }
+                EventKind::PropertyChange(change)
+                    if change.property == PlaybackProperty::CachePaused
+                        && Some(change.observation_id) == self.playback_cache_observation =>
                 {
                     self.controls
                         .apply_observation(change.property, change.value);
@@ -3118,6 +3145,7 @@ impl<'session> MpvHost<'session> {
             self.playback_speed_observation.take(),
             self.playback_volume_observation.take(),
             self.playback_mute_observation.take(),
+            self.playback_cache_observation.take(),
         ];
         if let Some(session) = self.session {
             drain_observations(&mut observations, |observation| {
@@ -3149,6 +3177,20 @@ impl<'session> MpvHost<'session> {
 
     pub(crate) fn take_playback_loaded(&mut self) -> Option<u64> {
         self.playback_loaded_generation.take()
+    }
+
+    pub(crate) fn sync_play_sample(&self) -> crate::syncplay_bridge::PlaybackSample {
+        crate::syncplay_bridge::PlaybackSample {
+            generation: self.active_generation,
+            loaded: self.file_loaded,
+            restarted: self.playback_restart_seen,
+            resume_pending: self.pending_resume_seconds.is_some(),
+            cache_paused: self.controls.cache_paused,
+            paused: self.controls.paused,
+            position_ticks: self
+                .playback_position_ticks()
+                .and_then(|ticks| u64::try_from(ticks.as_ticks()).ok()),
+        }
     }
 
     pub(crate) fn take_playback_end(&mut self) -> Option<PlaybackEnd> {
@@ -4374,6 +4416,8 @@ mod pre_load_tests {
             placement: Some("left,top".into()),
             size: 40,
             color: Some("#FF8800".into()),
+            background_color: Some("#202020".into()),
+            background_transparency: Some("25%".into()),
             ..SubtitleSettings::default()
         };
         let got = local_file_written(&VideoSettings::default(), &subtitles);
@@ -4381,6 +4425,7 @@ mod pre_load_tests {
             ("sub-align-x", "left".to_owned()),
             ("sub-pos", "10".to_owned()),
             ("sub-color", "#FFFF8800".to_owned()),
+            ("sub-back-color", "#BF202020".to_owned()),
         ] {
             assert!(got.contains(&expected), "{expected:?} not in {got:?}");
         }
@@ -4388,6 +4433,19 @@ mod pre_load_tests {
         for (name, _) in &got {
             assert!(spec_for(name).is_some(), "{name} is not on the allowlist");
         }
+    }
+
+    #[test]
+    fn local_file_preserves_color_only_background_alpha() {
+        let subtitles = SubtitleSettings {
+            background_color: Some("#20202080".into()),
+            ..SubtitleSettings::default()
+        };
+        let got = local_file_written(&VideoSettings::default(), &subtitles);
+        assert!(
+            got.contains(&("sub-back-color", "#80202020".to_owned())),
+            "color-only background alpha was lost: {got:?}"
+        );
     }
 
     #[test]
@@ -4409,7 +4467,8 @@ mod pre_load_tests {
                     "ScaledBorderAndShadow=yes".to_owned()
                 ),
                 &("sub-font", "sans-serif".to_owned()),
-                &("sub-bold", "no".to_owned())
+                &("sub-bold", "no".to_owned()),
+                &("sub-back-color", "#00000000".to_owned())
             ],
             "unexpected subtitle writes in {got:?}"
         );

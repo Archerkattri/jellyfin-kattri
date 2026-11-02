@@ -2716,6 +2716,7 @@ dependencies = [
  "kattri-guard",
  "kattri-settings",
  "serde_json",
+ "url",
 ]
 
 [[package]]

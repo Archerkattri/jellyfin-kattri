@@ -250,6 +250,8 @@ pub enum PlaybackProperty {
     TimePosition,
     Duration,
     Paused,
+    /// Whether playback is paused while waiting for the demuxer cache.
+    CachePaused,
     Speed,
     Volume,
     /// Session mute (mpv `mute`, M2-16). Not persisted across runs.
@@ -264,6 +266,7 @@ impl PlaybackProperty {
             Self::TimePosition => "time-pos",
             Self::Duration => "duration",
             Self::Paused => "pause",
+            Self::CachePaused => "paused-for-cache",
             Self::Speed => "speed",
             Self::Volume => "volume",
             Self::Mute => "mute",
@@ -279,7 +282,7 @@ impl PlaybackProperty {
             | Self::Speed
             | Self::Volume
             | Self::SubtitleDelay => MPV_FORMAT_DOUBLE,
-            Self::Paused | Self::Mute => MPV_FORMAT_FLAG,
+            Self::Paused | Self::CachePaused | Self::Mute => MPV_FORMAT_FLAG,
             Self::SubtitleTrackId => MPV_FORMAT_INT64,
         }
     }
@@ -293,6 +296,8 @@ pub enum PlaybackPropertyValue {
     Duration(Option<f64>),
     /// `None` means libmpv reported the property unavailable.
     Paused(Option<bool>),
+    /// Whether mpv is paused while waiting for cache data. `None` means unavailable.
+    CachePaused(Option<bool>),
     /// User-requested playback speed. `None` means unavailable or invalid.
     Speed(Option<f64>),
     /// The libmpv volume property value. `None` means unavailable.
@@ -2732,6 +2737,7 @@ fn decode_property_value(
         PlaybackProperty::TimePosition => PlaybackPropertyValue::TimePosition(None),
         PlaybackProperty::Duration => PlaybackPropertyValue::Duration(None),
         PlaybackProperty::Paused => PlaybackPropertyValue::Paused(None),
+        PlaybackProperty::CachePaused => PlaybackPropertyValue::CachePaused(None),
         PlaybackProperty::Speed => PlaybackPropertyValue::Speed(None),
         PlaybackProperty::Volume => PlaybackPropertyValue::Volume(None),
         PlaybackProperty::Mute => PlaybackPropertyValue::Muted(None),
@@ -2783,6 +2789,17 @@ fn decode_property_value(
                 other => PlaybackPropertyValue::InvalidFlagValue(other),
             }
         }
+        PlaybackProperty::CachePaused => {
+            // SAFETY: Format was checked against MPV_FORMAT_FLAG (C int) and
+            // data is non-null. The scalar is copied before the next wait.
+            let value =
+                unsafe { ptr::read_unaligned(property_event.data.cast::<std::ffi::c_int>()) };
+            match value {
+                0 => PlaybackPropertyValue::CachePaused(Some(false)),
+                1 => PlaybackPropertyValue::CachePaused(Some(true)),
+                other => PlaybackPropertyValue::InvalidFlagValue(other),
+            }
+        }
         PlaybackProperty::Speed => {
             // SAFETY: Format was checked against MPV_FORMAT_DOUBLE and data is
             // non-null. Non-finite values are not exposed as valid rates.
@@ -2826,6 +2843,7 @@ fn unavailable_property_value(property: PlaybackProperty) -> PlaybackPropertyVal
         PlaybackProperty::TimePosition => PlaybackPropertyValue::TimePosition(None),
         PlaybackProperty::Duration => PlaybackPropertyValue::Duration(None),
         PlaybackProperty::Paused => PlaybackPropertyValue::Paused(None),
+        PlaybackProperty::CachePaused => PlaybackPropertyValue::CachePaused(None),
         PlaybackProperty::Speed => PlaybackPropertyValue::Speed(None),
         PlaybackProperty::Volume => PlaybackPropertyValue::Volume(None),
         PlaybackProperty::Mute => PlaybackPropertyValue::Muted(None),
@@ -2862,7 +2880,7 @@ fn decode_property_read_value(
         };
     }
     match property {
-        PlaybackProperty::Paused | PlaybackProperty::Mute => {
+        PlaybackProperty::Paused | PlaybackProperty::CachePaused | PlaybackProperty::Mute => {
             // SAFETY: FLAG replies contain one C int, just like property-change events.
             let value =
                 unsafe { ptr::read_unaligned(property_event.data.cast::<std::ffi::c_int>()) };
@@ -2871,6 +2889,8 @@ fn decode_property_read_value(
                     let flag = Some(value == 1);
                     if property == PlaybackProperty::Paused {
                         PlaybackPropertyValue::Paused(flag)
+                    } else if property == PlaybackProperty::CachePaused {
+                        PlaybackPropertyValue::CachePaused(flag)
                     } else {
                         PlaybackPropertyValue::Muted(flag)
                     }
@@ -2898,6 +2918,7 @@ fn decode_property_read_value(
                     PlaybackPropertyValue::SubtitleDelay(Some(value))
                 }
                 PlaybackProperty::Paused
+                | PlaybackProperty::CachePaused
                 | PlaybackProperty::Mute
                 | PlaybackProperty::SubtitleTrackId => PlaybackPropertyValue::InvalidData(property),
             }
@@ -2976,6 +2997,84 @@ mod tests {
             PlaybackPropertyValue::InvalidData(PlaybackProperty::Paused),
         );
     }
+
+    #[test]
+    fn paused_for_cache_observation_decodes_only_valid_flag_values() {
+        for (mut flag, expected) in [
+            (0_i32, PlaybackPropertyValue::CachePaused(Some(false))),
+            (1_i32, PlaybackPropertyValue::CachePaused(Some(true))),
+            (2_i32, PlaybackPropertyValue::InvalidFlagValue(2)),
+        ] {
+            let mut property_event = MpvEventProperty {
+                _name: c"paused-for-cache".as_ptr(),
+                format: MPV_FORMAT_FLAG,
+                data: (&mut flag as *mut i32).cast(),
+            };
+            assert_eq!(
+                decode_property_value(
+                    PlaybackProperty::CachePaused,
+                    (&mut property_event as *mut MpvEventProperty).cast(),
+                ),
+                expected,
+            );
+        }
+
+        assert_eq!(
+            decode_property_value(PlaybackProperty::CachePaused, ptr::null_mut()),
+            PlaybackPropertyValue::CachePaused(None),
+        );
+    }
+
+    #[test]
+    fn paused_for_cache_reads_keep_unavailable_and_invalid_results_distinct() {
+        assert_eq!(
+            decode_property_read_value(PlaybackProperty::CachePaused, -1, ptr::null_mut()),
+            PlaybackPropertyValue::CachePaused(None),
+        );
+        assert_eq!(
+            decode_property_read_value(PlaybackProperty::CachePaused, 0, ptr::null_mut()),
+            PlaybackPropertyValue::InvalidData(PlaybackProperty::CachePaused),
+        );
+
+        for (mut flag, expected) in [
+            (0_i32, PlaybackPropertyValue::CachePaused(Some(false))),
+            (1_i32, PlaybackPropertyValue::CachePaused(Some(true))),
+            (2_i32, PlaybackPropertyValue::InvalidFlagValue(2)),
+        ] {
+            let mut property_event = MpvEventProperty {
+                _name: c"paused-for-cache".as_ptr(),
+                format: MPV_FORMAT_FLAG,
+                data: (&mut flag as *mut i32).cast(),
+            };
+            assert_eq!(
+                decode_property_read_value(
+                    PlaybackProperty::CachePaused,
+                    0,
+                    (&mut property_event as *mut MpvEventProperty).cast(),
+                ),
+                expected,
+            );
+        }
+
+        let mut wrong_format_value = 1.0_f64;
+        let mut wrong_format = MpvEventProperty {
+            _name: c"paused-for-cache".as_ptr(),
+            format: MPV_FORMAT_DOUBLE,
+            data: (&mut wrong_format_value as *mut f64).cast(),
+        };
+        assert_eq!(
+            decode_property_read_value(
+                PlaybackProperty::CachePaused,
+                0,
+                (&mut wrong_format as *mut MpvEventProperty).cast(),
+            ),
+            PlaybackPropertyValue::UnsupportedFormat {
+                property: PlaybackProperty::CachePaused,
+                format: MPV_FORMAT_DOUBLE,
+            },
+        );
+    }
+
     use crate::ffi::{MpvNodeList, MpvNodeValue};
 
     #[test]
@@ -3052,9 +3151,15 @@ mod tests {
         assert_eq!(PlaybackProperty::TimePosition.name(), "time-pos");
         assert_eq!(PlaybackProperty::Duration.name(), "duration");
         assert_eq!(PlaybackProperty::Paused.name(), "pause");
+        assert_eq!(PlaybackProperty::CachePaused.name(), "paused-for-cache");
         assert_eq!(PlaybackProperty::Speed.name(), "speed");
         assert_eq!(PlaybackProperty::Paused.format(), MPV_FORMAT_FLAG);
+        assert_eq!(PlaybackProperty::CachePaused.format(), MPV_FORMAT_FLAG);
         assert_eq!(PlaybackProperty::Speed.format(), MPV_FORMAT_DOUBLE);
+        assert_eq!(
+            unavailable_property_value(PlaybackProperty::CachePaused),
+            PlaybackPropertyValue::CachePaused(None)
+        );
         assert_eq!(
             unavailable_property_value(PlaybackProperty::Speed),
             PlaybackPropertyValue::Speed(None)

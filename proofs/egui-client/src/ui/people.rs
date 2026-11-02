@@ -4,7 +4,7 @@ use super::ui_text;
 use kattri_i18n::ids;
 use std::collections::HashMap;
 
-use egui::{self, Color32, RichText, TextureHandle, Ui, Vec2};
+use egui::{self, RichText, TextureHandle, Ui, Vec2};
 use jellyfin_api::BaseItemDto;
 
 /// Cast data needed by the UI, kept separate from networking and API ownership.
@@ -33,6 +33,7 @@ pub fn draw(
     current_item_id: &str,
     textures_by_name: &HashMap<String, TextureHandle>,
 ) -> PeopleAction {
+    let colors = crate::theme::active_palette();
     let similar = without_current_item(current_item_id, similar);
     let mut action = PeopleAction::default();
 
@@ -52,7 +53,7 @@ pub fn draw(
                                 );
                             } else {
                                 egui::Frame::new()
-                                    .fill(Color32::from_rgb(31, 31, 34))
+                                    .fill(colors.raised)
                                     .corner_radius(egui::CornerRadius::same(12))
                                     .show(ui, |ui| {
                                         ui.set_min_size(Vec2::new(112.0, 140.0));
@@ -61,7 +62,7 @@ pub fn draw(
                                                 RichText::new(initials(&person.name))
                                                     .size(26.0)
                                                     .strong()
-                                                    .color(Color32::from_gray(164)),
+                                                    .color(colors.muted),
                                             );
                                         });
                                     });
@@ -103,15 +104,13 @@ pub fn draw(
                                 );
                             } else {
                                 egui::Frame::new()
-                                    .fill(Color32::from_rgb(31, 31, 34))
+                                    .fill(colors.raised)
                                     .corner_radius(egui::CornerRadius::same(12))
                                     .show(ui, |ui| {
                                         ui.set_min_size(Vec2::new(156.0, 104.0));
                                         ui.centered_and_justified(|ui| {
                                             ui.label(
-                                                RichText::new("···")
-                                                    .size(24.0)
-                                                    .color(Color32::from_gray(140)),
+                                                RichText::new("···").size(24.0).color(colors.muted),
                                             );
                                         });
                                     });

@@ -14,6 +14,7 @@
 //! they are buffered, so an oversized message is refused without being allocated.
 
 use std::{
+    collections::HashSet,
     io::{self, Read, Write},
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     sync::{
@@ -43,6 +44,10 @@ use crate::{GroupState, JellyfinClient, Session, SyncPlayGroup};
 
 /// Largest inbound message or frame, in bytes. A session command is a few hundred bytes.
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
+/// Queue updates must fit in one bounded session-socket message.
+pub const MAX_SYNCPLAY_QUEUE_ITEMS: usize = 128;
+const MAX_SYNCPLAY_ID_LENGTH: usize = 36;
+const MAX_SYNCPLAY_TEXT_LENGTH: usize = 64;
 
 /// Total time allowed for DNS, TCP, TLS, and the WebSocket handshake.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -76,9 +81,8 @@ pub enum WebSocketError {
     Transport(#[source] Box<tungstenite::Error>),
 }
 
-/// A SyncPlay playback command the server relays to this session. This type carries what the
-/// server sent. The caller maps it with the group clock and the echo guard before it reaches
-/// the player (M4-11).
+/// Legacy SyncPlay command shape used by the core's pause/unpause/seek mapper. The session
+/// socket emits [`SyncPlayPlaybackCommand`] for commands so the app can validate queue identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncPlayMessage {
     pub command: SyncPlayWireCommand,
@@ -97,7 +101,45 @@ pub enum SyncPlayWireCommand {
     Seek,
 }
 
-/// A typed SyncPlay group lifecycle update received on the session WebSocket.
+/// SyncPlay commands carried with their queue-entry identity. This is separate from
+/// `SyncPlayMessage`, whose older core mapping deliberately covers only pause/unpause/seek.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncPlayPlaybackAction {
+    Pause,
+    Unpause,
+    Seek,
+    Stop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncPlayPlaybackCommand {
+    pub action: SyncPlayPlaybackAction,
+    pub group_id: Option<String>,
+    /// `None` is accepted only for Stop, which applies regardless of the current entry.
+    pub playlist_item_id: Option<String>,
+    pub position_ticks: i64,
+    pub when: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncPlayQueueEntry {
+    pub item_id: String,
+    pub playlist_item_id: String,
+}
+
+/// One bounded shared queue snapshot from Jellyfin's `PlayQueue` update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncPlayPlayQueueUpdate {
+    pub reason: String,
+    pub last_update: String,
+    pub playlist: Vec<SyncPlayQueueEntry>,
+    /// `-1` means there is no active playlist entry.
+    pub playing_item_index: i32,
+    pub start_position_ticks: i64,
+    pub is_playing: bool,
+}
+
+/// A typed SyncPlay group, queue, or playback update received on the session WebSocket.
 ///
 /// Participant names and group identifiers are data for the caller; this parser never logs
 /// either value.
@@ -124,6 +166,13 @@ pub enum SyncPlayGroupUpdate {
         state: GroupState,
         reason: String,
     },
+    PlayQueue {
+        group_id: Option<String>,
+        update: SyncPlayPlayQueueUpdate,
+    },
+    /// The socket bridge already forwards typed group updates, so command identity and Stop
+    /// travel through that bounded event path without changing the legacy core DTO.
+    PlaybackCommand(SyncPlayPlaybackCommand),
     /// A SyncPlay group update type this client does not yet interpret.
     Other,
 }
@@ -270,6 +319,14 @@ fn classify_text(text: &str) -> Inbound {
             Err(()) => Inbound::Ignored,
         };
     }
+    if let Some(command) = parse_sync_play_playback_command(text) {
+        return match command {
+            Ok(command) => {
+                Inbound::SyncPlayGroupUpdate(SyncPlayGroupUpdate::PlaybackCommand(command))
+            }
+            Err(_) => Inbound::Ignored,
+        };
+    }
     if let Some(sync_play) = parse_sync_play(text) {
         return match sync_play {
             Ok(message) => Inbound::SyncPlay(message),
@@ -314,9 +371,30 @@ struct SyncPlayStateUpdateData {
     reason: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct SyncPlayQueueEntryData {
+    item_id: String,
+    playlist_item_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct SyncPlayPlayQueueData {
+    reason: String,
+    last_update: String,
+    playlist: Vec<SyncPlayQueueEntryData>,
+    playing_item_index: i32,
+    start_position_ticks: i64,
+    is_playing: bool,
+}
+
 /// Parse a `SyncPlayGroupUpdate` notification. Unknown update types are preserved as `Other`;
 /// malformed known update payloads are ignored by the caller.
 fn parse_sync_play_group_update(text: &str) -> Option<Result<SyncPlayGroupUpdate, ()>> {
+    if text.len() > MAX_MESSAGE_BYTES {
+        return Some(Err(()));
+    }
     let envelope: SessionEnvelope = serde_json::from_str(text).ok()?;
     if envelope.message_type != "SyncPlayGroupUpdate" {
         return None;
@@ -367,9 +445,208 @@ fn parse_sync_play_group_update(text: &str) -> Option<Result<SyncPlayGroupUpdate
                 reason: state.reason,
             })
             .map_err(|_| ()),
+        "PlayQueue" => {
+            if group_id.as_deref().is_some_and(|id| !is_valid_guid(id)) {
+                Err(())
+            } else {
+                serde_json::from_value::<SyncPlayPlayQueueData>(update.data)
+                    .map_err(|_| ())
+                    .and_then(validate_sync_play_queue_update)
+                    .map(|update| SyncPlayGroupUpdate::PlayQueue { group_id, update })
+            }
+        }
         _ => Ok(SyncPlayGroupUpdate::Other),
     };
     Some(result)
+}
+
+fn validate_sync_play_queue_update(
+    update: SyncPlayPlayQueueData,
+) -> Result<SyncPlayPlayQueueUpdate, ()> {
+    if update.playlist.len() > MAX_SYNCPLAY_QUEUE_ITEMS
+        || update.reason.is_empty()
+        || update.reason.len() > MAX_SYNCPLAY_TEXT_LENGTH
+        || !is_utc_timestamp(&update.last_update)
+        || update.start_position_ticks < 0
+        || update.playing_item_index < -1
+        || (update.playlist.is_empty() && update.playing_item_index != -1)
+        || usize::try_from(update.playing_item_index)
+            .is_ok_and(|index| index >= update.playlist.len())
+    {
+        return Err(());
+    }
+
+    let mut playlist_item_ids = HashSet::with_capacity(update.playlist.len());
+    let mut playlist = Vec::with_capacity(update.playlist.len());
+    for entry in update.playlist {
+        if !is_valid_guid(&entry.item_id)
+            || !is_valid_guid(&entry.playlist_item_id)
+            || !playlist_item_ids.insert(entry.playlist_item_id.clone())
+        {
+            return Err(());
+        }
+        playlist.push(SyncPlayQueueEntry {
+            item_id: entry.item_id,
+            playlist_item_id: entry.playlist_item_id,
+        });
+    }
+
+    Ok(SyncPlayPlayQueueUpdate {
+        reason: update.reason,
+        last_update: update.last_update,
+        playlist,
+        playing_item_index: update.playing_item_index,
+        start_position_ticks: update.start_position_ticks,
+        is_playing: update.is_playing,
+    })
+}
+
+fn parse_sync_play_playback_command(
+    text: &str,
+) -> Option<Result<SyncPlayPlaybackCommand, RemoteCommandError>> {
+    if text.len() > MAX_MESSAGE_BYTES {
+        return Some(Err(RemoteCommandError::InvalidPayload));
+    }
+    let envelope: SessionEnvelope = serde_json::from_str(text).ok()?;
+    if envelope.message_type != "SyncPlayCommand" {
+        return None;
+    }
+    if envelope.data.get("PlaylistItemId").is_none()
+        && envelope.data.get("Command").and_then(Value::as_str) != Some("Stop")
+    {
+        // Preserve the public legacy decoder contract. The app refuses these identity-free
+        // events for native playback; malformed typed entry IDs must never take this path.
+        return None;
+    }
+    Some(sync_play_playback_command_from_data(envelope.data))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct SyncPlayPlaybackCommandData {
+    command: String,
+    #[serde(default)]
+    group_id: Option<String>,
+    #[serde(default)]
+    playlist_item_id: Option<String>,
+    #[serde(default)]
+    position_ticks: Option<i64>,
+    #[serde(default)]
+    when: Option<String>,
+}
+
+fn sync_play_playback_command_from_data(
+    data: Value,
+) -> Result<SyncPlayPlaybackCommand, RemoteCommandError> {
+    let data: SyncPlayPlaybackCommandData =
+        serde_json::from_value(data).map_err(|_| RemoteCommandError::InvalidPayload)?;
+    let action = match data.command.as_str() {
+        "Pause" => SyncPlayPlaybackAction::Pause,
+        "Unpause" => SyncPlayPlaybackAction::Unpause,
+        "Seek" => SyncPlayPlaybackAction::Seek,
+        "Stop" => SyncPlayPlaybackAction::Stop,
+        _ => return Err(RemoteCommandError::UnsupportedCommand),
+    };
+    let playlist_item_id = match data.playlist_item_id {
+        Some(id) if is_valid_guid(&id) => Some(id),
+        Some(_) => return Err(RemoteCommandError::InvalidPayload),
+        None if action == SyncPlayPlaybackAction::Stop => None,
+        None => return Err(RemoteCommandError::InvalidPayload),
+    };
+    let position_ticks = match data.position_ticks {
+        Some(ticks) if ticks >= 0 => ticks,
+        Some(_) => return Err(RemoteCommandError::InvalidPayload),
+        None if action == SyncPlayPlaybackAction::Stop => 0,
+        None => return Err(RemoteCommandError::InvalidPayload),
+    };
+    let when = match data.when {
+        Some(when)
+            if when.len() <= MAX_SYNCPLAY_TEXT_LENGTH
+                && (action == SyncPlayPlaybackAction::Stop || is_utc_timestamp(&when)) =>
+        {
+            when
+        }
+        None if action == SyncPlayPlaybackAction::Stop => String::new(),
+        _ => return Err(RemoteCommandError::InvalidPayload),
+    };
+    if data.group_id.as_ref().is_some_and(|id| !is_valid_guid(id)) {
+        return Err(RemoteCommandError::InvalidPayload);
+    }
+    Ok(SyncPlayPlaybackCommand {
+        action,
+        group_id: data.group_id,
+        playlist_item_id,
+        position_ticks,
+        when,
+    })
+}
+
+fn is_valid_guid(value: &str) -> bool {
+    if value.len() > MAX_SYNCPLAY_ID_LENGTH {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    let hyphenated = bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        });
+    let simple = bytes.len() == 32 && bytes.iter().all(u8::is_ascii_hexdigit);
+    hyphenated || simple
+}
+
+fn is_utc_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20 || bytes.len() > MAX_SYNCPLAY_TEXT_LENGTH || bytes.last() != Some(&b'Z') {
+        return false;
+    }
+    if !(*b"--T::")
+        .into_iter()
+        .zip([4, 7, 10, 13, 16])
+        .all(|(expected, index)| bytes.get(index) == Some(&expected))
+    {
+        return false;
+    }
+    if ![0..4, 5..7, 8..10, 11..13, 14..16, 17..19]
+        .into_iter()
+        .all(|range| bytes[range].iter().all(u8::is_ascii_digit))
+    {
+        return false;
+    }
+    let Ok(year) = value[0..4].parse::<u32>() else {
+        return false;
+    };
+    let Ok(month) = value[5..7].parse::<u32>() else {
+        return false;
+    };
+    let Ok(day) = value[8..10].parse::<u32>() else {
+        return false;
+    };
+    let Ok(hour) = value[11..13].parse::<u32>() else {
+        return false;
+    };
+    let Ok(minute) = value[14..16].parse::<u32>() else {
+        return false;
+    };
+    let Ok(second) = value[17..19].parse::<u32>() else {
+        return false;
+    };
+    let fraction_ok = match bytes.get(19) {
+        Some(b'Z') => bytes.len() == 20,
+        Some(b'.') => bytes.len() > 21 && bytes[20..bytes.len() - 1].iter().all(u8::is_ascii_digit),
+        _ => false,
+    };
+    if !fraction_ok || !(1..=12).contains(&month) || hour > 23 || minute > 59 || second > 59 {
+        return false;
+    }
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap_year => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    (1..=days_in_month).contains(&day)
 }
 
 /// The `Data` of a `SyncPlayCommand` message. The position and time are read as `Option` and
@@ -858,12 +1135,15 @@ mod tests {
     };
 
     use super::{
-        Clock, DeadlineStream, ResolverJob, SyncPlayGroupUpdate, SyncPlayMessage,
-        SyncPlayWireCommand, SystemClock, WebSocketError, connect_addresses_with, parse_sync_play,
-        parse_sync_play_group_update, resolver_worker, submit_resolution,
+        Clock, DeadlineStream, Inbound, ResolverJob, SyncPlayGroupUpdate, SyncPlayMessage,
+        SyncPlayPlayQueueUpdate, SyncPlayPlaybackAction, SyncPlayPlaybackCommand,
+        SyncPlayQueueEntry, SyncPlayWireCommand, SystemClock, WebSocketError,
+        connect_addresses_with, parse_sync_play, parse_sync_play_group_update,
+        parse_sync_play_playback_command, resolver_worker, submit_resolution,
     };
     use crate::remote_command::RemoteCommandError;
     use crate::{GroupState, SyncPlayGroup};
+    use serde_json::{Value, json};
 
     struct TestClock(Mutex<Instant>);
 
@@ -907,6 +1187,18 @@ mod tests {
         format!(
             r#"{{"MessageType":"SyncPlayGroupUpdate","Data":{{"Type":"{update_type}","Data":{data}}}}}"#
         )
+    }
+
+    fn play_queue_update(data: Value) -> String {
+        json!({
+            "MessageType": "SyncPlayGroupUpdate",
+            "Data": {
+                "GroupId": "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+                "Type": "PlayQueue",
+                "Data": data,
+            }
+        })
+        .to_string()
     }
 
     #[test]
@@ -984,6 +1276,159 @@ mod tests {
         }
         assert_eq!(parse_sync_play_group_update("not json"), None);
         assert_eq!(parse_sync_play_group_update(&sync_play("{}")), None);
+    }
+
+    #[test]
+    fn play_queue_update_keeps_duplicate_media_entries_and_entry_identity() {
+        const ITEM: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3302";
+        const ENTRY_A: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3303";
+        const ENTRY_B: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3304";
+        let text = play_queue_update(json!({
+            "Reason": "NewPlaylist",
+            "LastUpdate": "2026-11-01T12:00:00.1250000Z",
+            "Playlist": [
+                { "ItemId": ITEM, "PlaylistItemId": ENTRY_A },
+                { "ItemId": ITEM, "PlaylistItemId": ENTRY_B },
+            ],
+            "PlayingItemIndex": 1,
+            "StartPositionTicks": 12_345,
+            "IsPlaying": true,
+        }));
+
+        assert!(matches!(
+            super::classify_text(&text),
+            Inbound::SyncPlayGroupUpdate(SyncPlayGroupUpdate::PlayQueue { .. })
+        ));
+
+        assert_eq!(
+            parse_sync_play_group_update(&text),
+            Some(Ok(SyncPlayGroupUpdate::PlayQueue {
+                group_id: Some("3f2504e0-4f89-11d3-9a0c-0305e82c3301".into()),
+                update: SyncPlayPlayQueueUpdate {
+                    reason: "NewPlaylist".into(),
+                    last_update: "2026-11-01T12:00:00.1250000Z".into(),
+                    playlist: vec![
+                        SyncPlayQueueEntry {
+                            item_id: ITEM.into(),
+                            playlist_item_id: ENTRY_A.into(),
+                        },
+                        SyncPlayQueueEntry {
+                            item_id: ITEM.into(),
+                            playlist_item_id: ENTRY_B.into(),
+                        },
+                    ],
+                    playing_item_index: 1,
+                    start_position_ticks: 12_345,
+                    is_playing: true,
+                },
+            }))
+        );
+    }
+
+    #[test]
+    fn play_queue_update_rejects_malformed_duplicate_and_unbounded_entries() {
+        const ITEM: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3302";
+        const ENTRY: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3303";
+        let base = json!({
+            "Reason": "NewPlaylist",
+            "LastUpdate": "2026-11-01T12:00:00Z",
+            "Playlist": [{ "ItemId": ITEM, "PlaylistItemId": ENTRY }],
+            "PlayingItemIndex": 0,
+            "StartPositionTicks": 0,
+            "IsPlaying": false,
+        });
+        for (label, mutate) in [
+            ("bad time", json!({ "LastUpdate": "yesterdayZ" })),
+            ("negative ticks", json!({ "StartPositionTicks": -1 })),
+            ("out-of-range index", json!({ "PlayingItemIndex": 1 })),
+            (
+                "duplicate playlist IDs",
+                json!({
+                    "Playlist": [
+                        { "ItemId": ITEM, "PlaylistItemId": ENTRY },
+                        { "ItemId": ITEM, "PlaylistItemId": ENTRY },
+                    ],
+                    "PlayingItemIndex": 1,
+                }),
+            ),
+        ] {
+            let mut data = base.clone();
+            let object = data.as_object_mut().expect("base fixture is an object");
+            for (key, value) in mutate.as_object().expect("object").iter() {
+                object.insert(key.clone(), value.clone());
+            }
+            assert_eq!(
+                parse_sync_play_group_update(&play_queue_update(data)),
+                Some(Err(())),
+                "{label}"
+            );
+        }
+
+        let oversized = json!({
+            "Reason": "NewPlaylist",
+            "LastUpdate": "2026-11-01T12:00:00Z",
+            "Playlist": (0..=super::MAX_SYNCPLAY_QUEUE_ITEMS)
+                .map(|_| json!({ "ItemId": ITEM, "PlaylistItemId": ENTRY }))
+                .collect::<Vec<_>>(),
+            "PlayingItemIndex": 0,
+            "StartPositionTicks": 0,
+            "IsPlaying": false,
+        });
+        assert_eq!(
+            parse_sync_play_group_update(&play_queue_update(oversized)),
+            Some(Err(()))
+        );
+    }
+
+    #[test]
+    fn typed_playback_commands_retain_entry_identity_and_support_stop() {
+        let pause = sync_play(
+            r#"{"GroupId":"3f2504e0-4f89-11d3-9a0c-0305e82c3301","Command":"Pause","PlaylistItemId":"3f2504e0-4f89-11d3-9a0c-0305e82c3302","PositionTicks":600000000,"When":"1970-01-01T00:16:40Z"}"#,
+        );
+        assert_eq!(
+            parse_sync_play_playback_command(&pause),
+            Some(Ok(SyncPlayPlaybackCommand {
+                action: SyncPlayPlaybackAction::Pause,
+                group_id: Some("3f2504e0-4f89-11d3-9a0c-0305e82c3301".into()),
+                playlist_item_id: Some("3f2504e0-4f89-11d3-9a0c-0305e82c3302".into()),
+                position_ticks: 600_000_000,
+                when: "1970-01-01T00:16:40Z".into(),
+            }))
+        );
+
+        let stop = sync_play(r#"{"Command":"Stop"}"#);
+        assert!(matches!(
+            super::classify_text(&stop),
+            Inbound::SyncPlayGroupUpdate(SyncPlayGroupUpdate::PlaybackCommand(
+                SyncPlayPlaybackCommand {
+                    action: SyncPlayPlaybackAction::Stop,
+                    playlist_item_id: None,
+                    position_ticks: 0,
+                    when,
+                    ..
+                }
+            )) if when.is_empty()
+        ));
+
+        let legacy =
+            sync_play(r#"{"Command":"Pause","PositionTicks":0,"When":"1970-01-01T00:16:40Z"}"#);
+        assert!(matches!(
+            super::classify_text(&legacy),
+            Inbound::SyncPlay(_)
+        ));
+        for malformed in [
+            sync_play(
+                r#"{"Command":"Pause","PlaylistItemId":"invalid","PositionTicks":0,"When":"1970-01-01T00:16:40Z"}"#,
+            ),
+            sync_play(
+                r#"{"Command":"Stop","PlaylistItemId":"bad","PositionTicks":0,"When":"1970-01-01T00:16:40Z"}"#,
+            ),
+            sync_play(
+                r#"{"Command":"Pause","PlaylistItemId":"3f2504e0-4f89-11d3-9a0c-0305e82c3302","PositionTicks":-1,"When":"1970-01-01T00:16:40Z"}"#,
+            ),
+        ] {
+            assert!(matches!(super::classify_text(&malformed), Inbound::Ignored));
+        }
     }
 
     #[test]

@@ -23,8 +23,8 @@ run_step() {
 }
 
 run_step "fmt" cargo fmt --all -- --check
-run_step "clippy" cargo clippy --workspace --all-targets -- -D warnings
-run_step "test" cargo test --workspace
+run_step "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
+run_step "test" cargo test --workspace --locked
 
 echo
 echo "================ check summary ================"

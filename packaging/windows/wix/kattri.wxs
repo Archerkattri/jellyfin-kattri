@@ -47,6 +47,7 @@
       <ComponentRef Id="ExecutableComponent" />
       <ComponentRef Id="LicenseComponent" />
       <ComponentRef Id="LibmpvComponent" />
+      <ComponentRef Id="JellyfinUriProtocolComponent" />
       <ComponentRef Id="StartMenuShortcutComponent" />
     </Feature>
 
@@ -64,6 +65,22 @@
 
         <Component Id="LicenseComponent" Guid="*">
           <File Id="LicenseFile" Source="$(var.LicensePath)" Name="LICENSE.txt" KeyPath="yes" />
+        </Component>
+
+        <!-- The quoted %1 expands as one URI argument; the host parser validates it before use. -->
+        <Component Id="JellyfinUriProtocolComponent" Guid="*">
+          <RegistryValue
+            Root="HKMU"
+            Key="Software\Classes\jellyfin"
+            Name="URL Protocol"
+            Type="string"
+            Value=""
+            KeyPath="yes" />
+          <RegistryValue
+            Root="HKMU"
+            Key="Software\Classes\jellyfin\shell\open\command"
+            Type="string"
+            Value="&quot;[INSTALLFOLDER]$(var.ExeName)&quot; &quot;%1&quot;" />
         </Component>
 
       </Directory>

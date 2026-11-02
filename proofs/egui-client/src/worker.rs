@@ -16,17 +16,18 @@ use scheduler::{CommandQueue, EVENT_CAPACITY};
 pub use scheduler::{WorkerShutdownReport, WorkerSubmitError};
 use std::thread::JoinHandle;
 
-use crate::ui::admin::{AdminLoad, AdminSnapshot};
+use crate::ui::admin::{AdminLoad, AdminSnapshot, AdminUserMutationKind};
 use crate::ui::downloads::DownloadIntent;
 use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
 use jellyfin_api::remote_command::RemoteCommand;
+use jellyfin_api::websocket::MAX_SYNCPLAY_QUEUE_ITEMS;
 use jellyfin_api::{
-    ApiError, BackdropImageError, BaseItemDto, ClientConfig, DeviceProfile, ErrorClass,
-    GuideWindow, ItemFilter, ItemQuery, ItemSortBy, ItemSortOrder, ItemsResponse, JellyfinClient,
-    JellyfinTicks, LiveTvChannelPage, LiveTvProgramPage, MediaSegmentType, PlayMethod,
-    PlaybackInfoRequest, PlaybackInfoResponse, PlaybackSourceRequestOptions, PlaylistEntry,
-    PublicSystemInfo, QuickConnectRequest, QuickConnectStatus, Session, UserDto, UserItemDataDto,
-    UserView,
+    AdminUser, AdminUserPolicyChanges, ApiError, BackdropImageError, BaseItemDto, ClientConfig,
+    DeviceProfile, ErrorClass, GuideWindow, ItemFilter, ItemQuery, ItemSortBy, ItemSortOrder,
+    ItemsResponse, JellyfinClient, JellyfinTicks, LiveTvChannelPage, LiveTvProgramPage,
+    MediaSegmentType, PlayMethod, PlaybackInfoRequest, PlaybackInfoResponse,
+    PlaybackSourceRequestOptions, PlaylistEntry, PublicSystemInfo, QuickConnectRequest,
+    QuickConnectStatus, Session, UserDto, UserItemDataDto, UserView,
 };
 use jellyfin_playback_relay::{RelayHandle, RelayPlaybackUrl, start_relay};
 use kattri_client_core::playback_reporting::{PlaybackReportAction, PlaybackReportMetadata};
@@ -42,6 +43,9 @@ use zeroize::{Zeroize, Zeroizing};
 /// Items requested per home-screen row. Bounded so one row cannot grow the UI without limit.
 pub const HOME_ROW_LIMIT: u32 = 16;
 const CATALOG_PAGE_SIZE: u32 = 50;
+const MAX_ADMIN_USER_ID_BYTES: usize = 36;
+const MAX_ADMIN_USER_NAME_BYTES: usize = 256;
+const MAX_ADMIN_USER_PASSWORD_BYTES: usize = 4_096;
 /// Libraries whose item count is read per dashboard load. A server with more
 /// libraries shows the first ones and reports the rest without a count.
 const MAX_COUNTED_LIBRARIES: usize = 32;
@@ -185,6 +189,26 @@ pub enum SyncPlayCommand {
     },
 }
 
+/// The SyncPlay REST operation whose response is being reported to the app. An accepted
+/// request only confirms the HTTP operation; it does not imply that the group is ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncPlayAction {
+    SetNewQueue,
+    Ready,
+    Buffering,
+    Stop,
+    Pause,
+    Unpause,
+    Seek,
+}
+
+/// Boxed because a replacement queue can contain many item IDs.
+struct SyncPlayNewQueue {
+    item_ids: Vec<String>,
+    playing_item_position: i32,
+    start_position_ticks: i64,
+}
+
 /// An administrator action from the card menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ItemAdminAction {
@@ -274,6 +298,17 @@ pub enum WorkerEvent {
     DashboardLoaded {
         request_id: u64,
         load: AdminLoad,
+    },
+    AdminUsersLoaded {
+        request_id: u64,
+        generation: u64,
+        result: Result<Vec<AdminUser>, ErrorClass>,
+    },
+    AdminUserMutationFinished {
+        request_id: u64,
+        generation: u64,
+        kind: AdminUserMutationKind,
+        result: Result<Option<AdminUser>, ErrorClass>,
     },
     ServerChecked {
         request_id: u64,
@@ -745,6 +780,15 @@ pub enum WorkerEvent {
     SyncPlayLeaveFailed {
         request_id: u64,
     },
+    /// The named REST operation returned success. This is not a group-readiness signal.
+    SyncPlayActionAccepted {
+        request_id: u64,
+        action: SyncPlayAction,
+    },
+    SyncPlayActionFailed {
+        request_id: u64,
+        action: SyncPlayAction,
+    },
     PlaybackPrepareFailed {
         request_id: u64,
         message: String,
@@ -814,6 +858,164 @@ struct QuickConnectSession {
     identity: ServerIdentity,
 }
 
+pub(crate) enum AdminUserOperation {
+    Create {
+        name: String,
+        password: Zeroizing<String>,
+    },
+    Rename {
+        user_id: String,
+        name: String,
+    },
+    PolicyPatch {
+        user_id: String,
+        changes: AdminUserPolicyChanges,
+    },
+    Delete {
+        user_id: String,
+    },
+}
+
+impl AdminUserOperation {
+    fn kind(&self) -> AdminUserMutationKind {
+        match self {
+            Self::Create { .. } => AdminUserMutationKind::Create,
+            Self::Rename { .. } => AdminUserMutationKind::Rename,
+            Self::PolicyPatch { .. } => AdminUserMutationKind::PolicyPatch,
+            Self::Delete { .. } => AdminUserMutationKind::Delete,
+        }
+    }
+
+    pub(crate) fn within_bounds(&self) -> bool {
+        match self {
+            Self::Create { name, password } => {
+                valid_admin_user_name(name)
+                    && !password.is_empty()
+                    && password.len() <= MAX_ADMIN_USER_PASSWORD_BYTES
+            }
+            Self::Rename { user_id, name } => {
+                valid_admin_user_id(user_id) && valid_admin_user_name(name)
+            }
+            Self::PolicyPatch { user_id, changes } => {
+                valid_admin_user_id(user_id) && !admin_user_policy_changes_empty(changes)
+            }
+            Self::Delete { user_id } => valid_admin_user_id(user_id),
+        }
+    }
+}
+
+fn valid_admin_user_name(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name.len() <= MAX_ADMIN_USER_NAME_BYTES
+        && !name.chars().any(char::is_control)
+}
+
+fn valid_admin_user_id(user_id: &str) -> bool {
+    if user_id.len() == 32 {
+        return user_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit());
+    }
+    user_id.len() == MAX_ADMIN_USER_ID_BYTES
+        && user_id
+            .chars()
+            .enumerate()
+            .all(|(index, character)| match index {
+                8 | 13 | 18 | 23 => character == '-',
+                _ => character.is_ascii_hexdigit(),
+            })
+}
+
+fn admin_user_policy_changes_empty(changes: &AdminUserPolicyChanges) -> bool {
+    changes.is_administrator.is_none()
+        && changes.is_hidden.is_none()
+        && changes.is_disabled.is_none()
+        && changes.enable_media_playback.is_none()
+        && changes.enable_remote_access.is_none()
+}
+
+fn user_may_manage_admin_users(user: &UserDto) -> bool {
+    user.is_administrator()
+}
+
+#[cfg(test)]
+mod admin_user_command_tests {
+    use super::*;
+    use jellyfin_api::UserPolicy;
+
+    const USER_ID: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3302";
+
+    #[test]
+    fn user_commands_reject_unbounded_or_unaddressable_inputs_before_queueing() {
+        assert!(
+            AdminUserOperation::Create {
+                name: "Riley".to_owned(),
+                password: Zeroizing::new("secret".to_owned()),
+            }
+            .within_bounds()
+        );
+        assert!(
+            AdminUserOperation::Rename {
+                user_id: USER_ID.to_owned(),
+                name: "Renamed".to_owned(),
+            }
+            .within_bounds()
+        );
+        assert!(
+            !AdminUserOperation::Delete {
+                user_id: "not-a-user-id".to_owned(),
+            }
+            .within_bounds()
+        );
+        assert!(
+            !AdminUserOperation::Create {
+                name: " ".to_owned(),
+                password: Zeroizing::new("secret".to_owned()),
+            }
+            .within_bounds()
+        );
+        assert!(
+            !AdminUserOperation::Create {
+                name: "Riley".to_owned(),
+                password: Zeroizing::new("x".repeat(MAX_ADMIN_USER_PASSWORD_BYTES + 1)),
+            }
+            .within_bounds()
+        );
+        assert!(
+            !AdminUserOperation::PolicyPatch {
+                user_id: USER_ID.to_owned(),
+                changes: AdminUserPolicyChanges::default(),
+            }
+            .within_bounds()
+        );
+    }
+
+    #[test]
+    fn user_management_authorization_requires_an_explicit_administrator_policy() {
+        let admin = UserDto {
+            id: "admin".to_owned(),
+            name: "Admin".to_owned(),
+            server_id: None,
+            policy: Some(UserPolicy {
+                is_administrator: true,
+                ..UserPolicy::default()
+            }),
+        };
+        let missing_policy = UserDto {
+            policy: None,
+            ..admin.clone()
+        };
+        let ordinary_user = UserDto {
+            policy: Some(UserPolicy::default()),
+            ..admin.clone()
+        };
+
+        assert!(user_may_manage_admin_users(&admin));
+        assert!(!user_may_manage_admin_users(&missing_policy));
+        assert!(!user_may_manage_admin_users(&ordinary_user));
+    }
+}
+
 enum WorkerCommand {
     CheckServer {
         request_id: u64,
@@ -861,6 +1063,15 @@ enum WorkerCommand {
     },
     LoadDashboard {
         request_id: u64,
+    },
+    LoadAdminUsers {
+        request_id: u64,
+        generation: u64,
+    },
+    AdminUserMutation {
+        request_id: u64,
+        generation: u64,
+        operation: AdminUserOperation,
     },
     DownloadsOpen {
         dir: PathBuf,
@@ -925,6 +1136,21 @@ enum WorkerCommand {
         group_name: String,
     },
     SyncPlayLeave {
+        request_id: u64,
+    },
+    SyncPlaySetNewQueue {
+        request_id: u64,
+        queue: Box<SyncPlayNewQueue>,
+    },
+    SyncPlayReady {
+        request_id: u64,
+        status: Box<jellyfin_api::SyncPlayPlaybackStatus>,
+    },
+    SyncPlayBuffering {
+        request_id: u64,
+        status: Box<jellyfin_api::SyncPlayPlaybackStatus>,
+    },
+    SyncPlayStop {
         request_id: u64,
     },
     SyncPlaySend {
@@ -1357,6 +1583,35 @@ impl ApiWorker {
             .send(WorkerCommand::LoadDashboard { request_id })
     }
 
+    /// Explicit read for the administration user-management subview.
+    pub(crate) fn load_admin_users(
+        &self,
+        request_id: u64,
+        generation: u64,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::LoadAdminUsers {
+            request_id,
+            generation,
+        })
+    }
+
+    /// Submit one bounded user-management mutation on the ordered control lane.
+    pub(crate) fn mutate_admin_user(
+        &self,
+        request_id: u64,
+        generation: u64,
+        operation: AdminUserOperation,
+    ) -> Result<(), WorkerSubmitError> {
+        if !operation.within_bounds() {
+            return Err(WorkerSubmitError::Busy);
+        }
+        self.commands.send(WorkerCommand::AdminUserMutation {
+            request_id,
+            generation,
+            operation,
+        })
+    }
+
     pub fn load_home_row(
         &self,
         request_id: u64,
@@ -1480,6 +1735,62 @@ impl ApiWorker {
     pub(crate) fn sync_play_leave(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
         self.commands
             .send(WorkerCommand::SyncPlayLeave { request_id })
+    }
+
+    /// Replace the group queue. The queue is bounded before it enters the worker's control lane.
+    pub(crate) fn sync_play_set_new_queue(
+        &self,
+        request_id: u64,
+        item_ids: Vec<String>,
+        playing_item_position: i32,
+        start_position_ticks: i64,
+    ) -> Result<(), WorkerSubmitError> {
+        if item_ids.len() > MAX_SYNCPLAY_QUEUE_ITEMS
+            || item_ids.iter().any(|item_id| item_id.len() > 36)
+        {
+            return Err(WorkerSubmitError::Busy);
+        }
+        self.commands.send(WorkerCommand::SyncPlaySetNewQueue {
+            request_id,
+            queue: Box::new(SyncPlayNewQueue {
+                item_ids,
+                playing_item_position,
+                start_position_ticks,
+            }),
+        })
+    }
+
+    pub(crate) fn sync_play_ready(
+        &self,
+        request_id: u64,
+        status: jellyfin_api::SyncPlayPlaybackStatus,
+    ) -> Result<(), WorkerSubmitError> {
+        if status.when.len() > 64 || status.playlist_item_id.len() > 36 {
+            return Err(WorkerSubmitError::Busy);
+        }
+        self.commands.send(WorkerCommand::SyncPlayReady {
+            request_id,
+            status: Box::new(status),
+        })
+    }
+
+    pub(crate) fn sync_play_buffering(
+        &self,
+        request_id: u64,
+        status: jellyfin_api::SyncPlayPlaybackStatus,
+    ) -> Result<(), WorkerSubmitError> {
+        if status.when.len() > 64 || status.playlist_item_id.len() > 36 {
+            return Err(WorkerSubmitError::Busy);
+        }
+        self.commands.send(WorkerCommand::SyncPlayBuffering {
+            request_id,
+            status: Box::new(status),
+        })
+    }
+
+    pub(crate) fn sync_play_stop(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::SyncPlayStop { request_id })
     }
 
     /// Send a local pause, unpause or seek to the joined group (M4-11). A refusal is logged by
@@ -2444,6 +2755,41 @@ fn run_worker(
     // Image decoders own no session/token. Their allocation and concurrency are bounded.
     runtime.shutdown_timeout(std::time::Duration::from_millis(100));
     report
+}
+
+struct SyncPlayAuth<'a> {
+    client: &'a mut Option<JellyfinClient>,
+    session: &'a mut Option<Session>,
+    server: &'a mut Option<ServerIdentity>,
+    playback_info_cache: &'a mut Option<CachedPlaybackInfo>,
+}
+
+async fn finish_sync_play_action(
+    result: Result<(), ApiError>,
+    request_id: u64,
+    action: SyncPlayAction,
+    auth: SyncPlayAuth<'_>,
+    events: &WorkerSink,
+    ctx: &egui::Context,
+) {
+    let event = match result {
+        Ok(()) => WorkerEvent::SyncPlayActionAccepted { request_id, action },
+        Err(ApiError::ReauthenticationRequired) => {
+            *auth.session = None;
+            *auth.client = None;
+            *auth.server = None;
+            *auth.playback_info_cache = None;
+            WorkerEvent::ReauthenticationRequired {
+                request_id,
+                message: "The server requires you to sign in again.".into(),
+            }
+        }
+        Err(_) => {
+            tracing::warn!(?action, "SyncPlay request was not accepted by the server");
+            WorkerEvent::SyncPlayActionFailed { request_id, action }
+        }
+    };
+    send_event(events, ctx, event).await;
 }
 
 async fn execute_command(
@@ -3446,6 +3792,10 @@ async fn execute_command(
                 };
                 match result {
                     Ok(group) => {
+                        // NewGroup attaches its creator to the group, like the Web client flow.
+                        if let Some(sampler) = clock_sampler.as_ref() {
+                            sampler.set_joined(true);
+                        }
                         send_event(
                             events,
                             ctx,
@@ -3511,10 +3861,106 @@ async fn execute_command(
                     }
                 }
             }
+            WorkerCommand::SyncPlaySetNewQueue { request_id, queue } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        client
+                            .set_sync_play_new_queue(
+                                session,
+                                &queue.item_ids,
+                                queue.playing_item_position,
+                                queue.start_position_ticks,
+                            )
+                            .await
+                    }
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                finish_sync_play_action(
+                    result,
+                    request_id,
+                    SyncPlayAction::SetNewQueue,
+                    SyncPlayAuth {
+                        client: &mut client,
+                        session: &mut session,
+                        server: &mut server,
+                        playback_info_cache: &mut playback_info_cache,
+                    },
+                    events,
+                    ctx,
+                )
+                .await;
+            }
+            WorkerCommand::SyncPlayReady { request_id, status } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client.sync_play_ready(session, &status).await,
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                finish_sync_play_action(
+                    result,
+                    request_id,
+                    SyncPlayAction::Ready,
+                    SyncPlayAuth {
+                        client: &mut client,
+                        session: &mut session,
+                        server: &mut server,
+                        playback_info_cache: &mut playback_info_cache,
+                    },
+                    events,
+                    ctx,
+                )
+                .await;
+            }
+            WorkerCommand::SyncPlayBuffering { request_id, status } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        client.sync_play_buffering(session, &status).await
+                    }
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                finish_sync_play_action(
+                    result,
+                    request_id,
+                    SyncPlayAction::Buffering,
+                    SyncPlayAuth {
+                        client: &mut client,
+                        session: &mut session,
+                        server: &mut server,
+                        playback_info_cache: &mut playback_info_cache,
+                    },
+                    events,
+                    ctx,
+                )
+                .await;
+            }
+            WorkerCommand::SyncPlayStop { request_id } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client.sync_play_stop(session).await,
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                finish_sync_play_action(
+                    result,
+                    request_id,
+                    SyncPlayAction::Stop,
+                    SyncPlayAuth {
+                        client: &mut client,
+                        session: &mut session,
+                        server: &mut server,
+                        playback_info_cache: &mut playback_info_cache,
+                    },
+                    events,
+                    ctx,
+                )
+                .await;
+            }
             WorkerCommand::SyncPlaySend {
                 request_id,
                 command,
             } => {
+                let action = match command {
+                    SyncPlayCommand::Pause => SyncPlayAction::Pause,
+                    SyncPlayCommand::Unpause => SyncPlayAction::Unpause,
+                    SyncPlayCommand::Seek { .. } => SyncPlayAction::Seek,
+                };
                 let result = match (client.as_ref(), session.as_ref()) {
                     (Some(client), Some(session)) => match command {
                         SyncPlayCommand::Pause => client.sync_play_pause(session).await,
@@ -3525,27 +3971,20 @@ async fn execute_command(
                     },
                     _ => Err(ApiError::InvalidConfiguration),
                 };
-                match result {
-                    Ok(()) => {}
-                    Err(ApiError::ReauthenticationRequired) => {
-                        session = None;
-                        client = None;
-                        server = None;
-                        playback_info_cache = None;
-                        send_event(
-                            events,
-                            ctx,
-                            WorkerEvent::ReauthenticationRequired {
-                                request_id,
-                                message: "The server requires you to sign in again.".into(),
-                            },
-                        )
-                        .await;
-                    }
-                    Err(_) => {
-                        tracing::warn!("SyncPlay command was not accepted by the server");
-                    }
-                }
+                finish_sync_play_action(
+                    result,
+                    request_id,
+                    action,
+                    SyncPlayAuth {
+                        client: &mut client,
+                        session: &mut session,
+                        server: &mut server,
+                        playback_info_cache: &mut playback_info_cache,
+                    },
+                    events,
+                    ctx,
+                )
+                .await;
             }
             WorkerCommand::ListMediaSegments {
                 request_id,
@@ -5284,6 +5723,107 @@ async fn execute_command(
                             },
                         )
                         .await
+                    }
+                }
+            }
+            WorkerCommand::LoadAdminUsers {
+                request_id,
+                generation,
+            } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) if user_may_manage_admin_users(&session.user) => {
+                        client.list_admin_users(session).await
+                    }
+                    (Some(_), Some(_)) => Err(ApiError::Forbidden),
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                match result {
+                    Err(ApiError::ReauthenticationRequired) => {
+                        session = None;
+                        client = None;
+                        server = None;
+                        playback_info_cache = None;
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ReauthenticationRequired {
+                                request_id,
+                                message: "The server requires you to sign in again.".into(),
+                            },
+                        )
+                        .await;
+                    }
+                    result => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminUsersLoaded {
+                                request_id,
+                                generation,
+                                result: result.map_err(|error| error.classify()),
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            WorkerCommand::AdminUserMutation {
+                request_id,
+                generation,
+                operation,
+            } => {
+                let kind = operation.kind();
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) if user_may_manage_admin_users(&session.user) => {
+                        match operation {
+                            AdminUserOperation::Create { name, password } => client
+                                .create_user(session, &name, Some(password))
+                                .await
+                                .map(Some),
+                            AdminUserOperation::Rename { user_id, name } => client
+                                .update_user_name(session, &user_id, &name)
+                                .await
+                                .map(|()| None),
+                            AdminUserOperation::PolicyPatch { user_id, changes } => client
+                                .update_user_policy(session, &user_id, &changes)
+                                .await
+                                .map(|()| None),
+                            AdminUserOperation::Delete { user_id } => {
+                                client.delete_user(session, &user_id).await.map(|()| None)
+                            }
+                        }
+                    }
+                    (Some(_), Some(_)) => Err(ApiError::Forbidden),
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                match result {
+                    Err(ApiError::ReauthenticationRequired) => {
+                        session = None;
+                        client = None;
+                        server = None;
+                        playback_info_cache = None;
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ReauthenticationRequired {
+                                request_id,
+                                message: "The server requires you to sign in again.".into(),
+                            },
+                        )
+                        .await;
+                    }
+                    result => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminUserMutationFinished {
+                                request_id,
+                                generation,
+                                kind,
+                                result: result.map_err(|error| error.classify()),
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -9789,5 +10329,116 @@ mod saved_sign_in_worker_tests {
             .collect::<Vec<_>>();
         assert_eq!(remaining, [std::ffi::OsString::from("blocked.srt")]);
         std::fs::remove_dir_all(folder).expect("remove subtitle test folder");
+    }
+
+    #[tokio::test]
+    async fn sync_play_worker_posts_confirmed_queue_status_and_stop_dtos() {
+        const GROUP_ID: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+        const ITEM_A: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3302";
+        const ITEM_B: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3303";
+        let server = spawn(MockConfig::default()).await.expect("mock");
+        let backing: Backing = Arc::default();
+        let worker = worker_on(&backing);
+        sign_in(&worker, &server.base_url(), request("default", false)).await;
+
+        worker
+            .sync_play_join(30, GROUP_ID.to_owned())
+            .expect("queue SyncPlay join");
+        let joined = wait_for(&worker, |event| {
+            matches!(event, WorkerEvent::SyncPlayJoined { request_id: 30, .. })
+        })
+        .await;
+        assert!(matches!(joined, WorkerEvent::SyncPlayJoined { .. }));
+
+        worker
+            .sync_play_set_new_queue(31, vec![ITEM_A.into(), ITEM_B.into()], 1, 5_000_000)
+            .expect("queue SetNewQueue");
+        assert!(matches!(
+            wait_for(&worker, |event| matches!(
+                event,
+                WorkerEvent::SyncPlayActionAccepted {
+                    request_id: 31,
+                    action: super::SyncPlayAction::SetNewQueue,
+                }
+            ))
+            .await,
+            WorkerEvent::SyncPlayActionAccepted { .. }
+        ));
+
+        let status = jellyfin_api::SyncPlayPlaybackStatus {
+            when: "2026-11-01T12:00:00.125Z".into(),
+            position_ticks: 5_000_000,
+            is_playing: false,
+            playlist_item_id: ITEM_B.into(),
+        };
+        worker
+            .sync_play_ready(32, status.clone())
+            .expect("queue Ready");
+        assert!(matches!(
+            wait_for(&worker, |event| matches!(
+                event,
+                WorkerEvent::SyncPlayActionAccepted {
+                    request_id: 32,
+                    action: super::SyncPlayAction::Ready,
+                }
+            ))
+            .await,
+            WorkerEvent::SyncPlayActionAccepted { .. }
+        ));
+
+        worker
+            .sync_play_buffering(33, status)
+            .expect("queue Buffering");
+        assert!(matches!(
+            wait_for(&worker, |event| matches!(
+                event,
+                WorkerEvent::SyncPlayActionAccepted {
+                    request_id: 33,
+                    action: super::SyncPlayAction::Buffering,
+                }
+            ))
+            .await,
+            WorkerEvent::SyncPlayActionAccepted { .. }
+        ));
+
+        worker.sync_play_stop(34).expect("queue group Stop");
+        assert!(matches!(
+            wait_for(&worker, |event| matches!(
+                event,
+                WorkerEvent::SyncPlayActionAccepted {
+                    request_id: 34,
+                    action: super::SyncPlayAction::Stop,
+                }
+            ))
+            .await,
+            WorkerEvent::SyncPlayActionAccepted { .. }
+        ));
+
+        assert_eq!(
+            worker.sync_play_set_new_queue(
+                36,
+                vec![ITEM_A.into(); jellyfin_api::websocket::MAX_SYNCPLAY_QUEUE_ITEMS + 1],
+                0,
+                0,
+            ),
+            Err(super::WorkerSubmitError::Busy)
+        );
+        worker
+            .sync_play_set_new_queue(35, vec!["not-a-guid".into()], 0, 0)
+            .expect("invalid DTO is still admitted for API validation");
+        assert!(matches!(
+            wait_for(&worker, |event| matches!(
+                event,
+                WorkerEvent::SyncPlayActionFailed {
+                    request_id: 35,
+                    action: super::SyncPlayAction::SetNewQueue,
+                }
+            ))
+            .await,
+            WorkerEvent::SyncPlayActionFailed { .. }
+        ));
+
+        drop(worker);
+        server.shutdown().await;
     }
 }

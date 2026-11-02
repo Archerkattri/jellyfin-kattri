@@ -196,7 +196,7 @@ pub const ALLOWLIST: &[OptionSpec] = &[
     OptionSpec {
         name: "audio-spdif",
         kind: ValueKind::Text,
-        owner: "audio.passthrough (M2-04)",
+        owner: "audio.output and audio.passthrough (M2-04)",
         default: OptionValue::Text(""),
     },
     OptionSpec {
@@ -379,7 +379,7 @@ pub const ALLOWLIST: &[OptionSpec] = &[
     OptionSpec {
         name: "sub-back-color",
         kind: ValueKind::Text,
-        owner: "subtitles.background_color",
+        owner: "subtitles.background_color and subtitles.background_transparency",
         default: OptionValue::Text("#00000000"),
     },
     OptionSpec {

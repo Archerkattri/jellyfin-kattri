@@ -24,11 +24,12 @@ in a real desktop window.
   surface and video is decoded by libmpv into the same window. No bundled browser,
   no second UI stack, no web-app memory footprint.
 - **Your credentials stay yours.** libmpv never receives a token or your server URL.
-  It plays a single-use loopback relay URL, bound to one origin. Remembered sign-ins
+  It plays a session-scoped loopback relay URL, bound to one origin. Remembered sign-ins
   live in the operating-system credential store, not a settings file.
-- **Plays what the server has.** Kattri asks for DirectPlay, DirectStream or Transcode
-  only for formats its local libmpv can actually present, then falls back through the
-  server's transcode path when needed.
+- **Negotiates playback.** Kattri evaluates DirectPlay, DirectStream and Transcode
+  against its device profile and runtime libmpv inventory, with bounded source
+  fallback when playback fails. Hardware and display compatibility still need testing
+  on each machine.
 - **Made for a couch and a desk.** Hero artwork, poster rows and focus animation,
   driven by keyboard, gamepad or mouse, with Standard, Large and 10-foot interface
   sizes.
@@ -51,7 +52,7 @@ is used.
 
 | | |
 | --- | --- |
-| **Sign-in** | Password sign-in, Quick Connect, saved servers, multiple profiles, stay signed in, forgot-password flow |
+| **Sign-in** | Password sign-in, Quick Connect, saved servers, LAN discovery, multiple profiles, stay signed in, forgot-password flow |
 | **Home** | Continue Watching, Next Up, Latest, My Media and Collections shelves, hero banner, per-section visibility and ordering |
 | **Library** | Paging, sorting, play state, favorites, genre and studio filters, alphabet picker, poster grid or list, adjustable poster size, 1,000-item photo grids, music All/Albums/Songs views |
 | **Details** | Metadata, overview, cast, similar titles, seasons and episodes, series Next Up, media info, version picker, trailers and extras, lyrics, play and download |
@@ -62,10 +63,10 @@ is used.
 | **Live TV** | Channel list, 24-hour guide, tune through the relay, record the current program, recordings and scheduled recordings |
 | **Offline** | Download manager with pause, resume, range fallback, checksum verification and external subtitles |
 | **Extras** | Item menu (play, mark watched, favorite, download, add to playlist or queue), playlists, collections, favorites, photo slideshow, admin-lite dashboard, parental PIN |
-| **Administration** | Edit metadata, Identify, Edit images, Add to collection, Refresh metadata and confirmed Delete for administrators |
+| **Administration** | Edit metadata, Identify, Edit images, Add to collection, Refresh metadata and confirmed Delete; administrator user listing, creation, rename and access-policy editing with confirmation |
 | **Settings** | General, playback, audio, subtitles (including bold), video, input, server (private CA and client certificate), About; versioned TOML per profile |
 | **Input** | Rebindable keyboard map, gamepad menus and player control, full focus navigation |
-| **Interface** | Jellyfin Dark and Warm Dark themes, Inter typeface, ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu |
+| **Interface** | Jellyfin Dark, Warm Dark, Light and system themes, Inter typeface, ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu |
 
 ## Install
 
@@ -143,7 +144,7 @@ player.
 ## Status and limitations
 
 Kattri is an early development build, not a production release. The build and test
-workflows are green on Windows x64/ARM64, macOS and Linux x64/ARM64, and the default
+workflows passed for the v0.5.1 head on Windows x64/ARM64, macOS and Linux x64/ARM64; the default
 workspace suite runs more than 2,800 tests against local fixtures and an in-process
 mock Jellyfin server.
 
@@ -160,13 +161,16 @@ Validated so far:
 Not yet validated: visible and audible playback on macOS and Linux, GPU decode across
 hardware, HDR passthrough, long HLS sessions, SyncPlay with two clients, physical
 controllers, and screen-reader walks on each platform. The Windows MSI clean-runner
-check also fails on GitHub's GPU-less runners (the window never gains a title there);
-the installer and uninstaller themselves complete.
+check failed with startup exit code 1; its cause has not been established. New runs
+capture stderr, installed hashes and display-adapter diagnostics. Installation alone
+does not prove the application starts.
 
-Known functional gaps compared with the official clients: no custom CA or client
-certificates yet, no automatic updates in this release, no shuffle-from-menu or
-multi-select, no theme media or lyrics synced to playback, and no SyncPlay inside the
-player. See `docs/BLOCKERS.md` in a source checkout for the tracked list.
+Private CA and client certificates are available in Server settings. Known gaps
+include automatic updates, full server/library administration, multi-select, theme
+media and lyrics synced to playback. SyncPlay shared queues and native player status
+are implemented but still need a two-client runtime acceptance run. macOS URI dispatch
+and platform accessibility acceptance also remain open. This source tree includes
+changes newer than the published v0.5.1 installers.
 
 ## Build from source
 
@@ -201,7 +205,8 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-The full gate also runs credential-helper, live-runner and release-target checks:
+The full gate also runs credential-helper, live-runner, release-target, development
+runtime-selection and offline QA-harness checks:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
@@ -209,7 +214,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 
 The automated click-through QA drives the real window through Windows UI Automation,
 clicks every top-level page and settings category, opens item details and the player,
-and writes a screenshot and report per step:
+and checks accessible state changes before recording screenshots. It requires an
+interactive desktop, a debug build and locally encrypted test credentials. Set
+`JELLYFIN_TEST_URL` explicitly for a nonloopback test server; playback runs in
+stream-only mode with session reporting disabled:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/qa_clickthrough.ps1
@@ -219,6 +227,17 @@ Live-server tests are opt-in and ignored by default; point them at a test server
 `JELLYFIN_TEST_URL`, `JELLYFIN_TEST_USER` and `JELLYFIN_TEST_PASSWORD`. Never commit
 credentials, tokens or live output.
 
+Windows development QA can resolve architecture-matching libmpv from
+`KATTRI_LIBMPV_DIR`, beside the executable, or a private `.local/libmpv/` installation.
+Keeping the runtime outside `target/` lets it survive `cargo clean`. No runtime
+binary is downloaded by the QA launcher.
+
+Windows and Linux packages register Kattri-specific links of the form
+`jellyfin://kattri/v1/item/<item-guid>?server=<percent-encoded-server-base>`.
+Links prefill the server and require manual sign-in before opening details;
+they never carry credentials or start playback automatically. This is not a
+universal link format shared by all Jellyfin clients.
+
 ## License
 
 GPL-3.0-only. See `LICENSE` and `NOTICE`. The bundled Inter typeface is under the
@@ -226,3 +245,6 @@ SIL Open Font License (`assets/fonts/OFL.txt`). Bundled native libraries and cod
 their own licenses; the libmpv packaging notice is under
 `packaging/libmpv/NOTICE.txt`. Jellyfin Kattri is an independent client and is not
 affiliated with the Jellyfin project.
+
+The published v0.5.1 binaries predate the switch to Inter; the font description above
+applies to current source.

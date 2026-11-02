@@ -564,6 +564,8 @@ mod tests {
         for (preset, spelling) in [
             (ThemePreset::JellyfinDark, "jellyfin-dark"),
             (ThemePreset::WarmDark, "warm-dark"),
+            (ThemePreset::Light, "light"),
+            (ThemePreset::System, "system"),
         ] {
             let mut settings = Settings::default();
             settings.general.theme_preset = preset;

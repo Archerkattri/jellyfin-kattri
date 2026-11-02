@@ -235,6 +235,10 @@ pub enum ThemePreset {
     JellyfinDark,
     /// A dark brown and amber color scheme.
     WarmDark,
+    /// A light neutral color scheme.
+    Light,
+    /// Follow the operating system's light/dark preference.
+    System,
 }
 
 /// Preferred catalog arrangement.

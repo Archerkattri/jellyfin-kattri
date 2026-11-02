@@ -247,19 +247,17 @@ pub(super) fn audio_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
     let before = app.settings.settings().clone();
     settings_card(ui, |ui| {
         let audio = &mut app.settings.settings_mut().audio;
-        ui.add_enabled_ui(false, |ui| {
-            choice(
-                ui,
-                ui_text(ids::SETTINGS_MEDIA_AUDIO_OUTPUT_HEADING),
-                "settings_audio_output",
-                &mut audio.output,
-                &audio_outputs(),
-            );
-        });
+        choice(
+            ui,
+            ui_text(ids::SETTINGS_MEDIA_AUDIO_OUTPUT_HEADING),
+            "settings_audio_output",
+            &mut audio.output,
+            &audio_outputs(),
+        );
         muted(
             ui,
             colors,
-            "Unavailable: output mode selection is not connected to the audio backend.",
+            "Standard, S/PDIF, and HDMI control compressed-audio passthrough. Choose an output device below; changes apply when the next item loads.",
             12.0,
         );
         choice(
@@ -635,6 +633,14 @@ pub(super) fn video_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
 #[cfg(test)]
 mod sound_tests {
     use super::*;
+
+    #[test]
+    fn audio_output_picker_uses_the_persisted_device_type_enum() {
+        assert_eq!(
+            audio_outputs().map(|(output, _)| output),
+            [AudioOutput::Basic, AudioOutput::Spdif, AudioOutput::Hdmi]
+        );
+    }
 
     #[test]
     fn saved_gains_round_trip_and_flat_is_saved_as_empty() {

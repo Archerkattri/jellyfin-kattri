@@ -1,4 +1,5 @@
 pub(crate) mod admin;
+pub(crate) mod admin_users;
 pub mod ambient;
 pub mod anim;
 mod artwork;
@@ -23,6 +24,7 @@ pub mod row;
 pub(crate) mod search;
 mod series;
 mod series_memory;
+mod server_discovery;
 mod settings;
 mod settings_input;
 mod settings_media;
@@ -1006,6 +1008,15 @@ fn sign_in_form(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: 
                 ui.label(RichText::new(notice).color(colors.warning));
                 ui.add_space(8.0);
             }
+            if let Some(address) = ui
+                .add_enabled_ui(app.quick_connect.is_none(), server_discovery::show)
+                .inner
+            {
+                app.server_url = address;
+                app.allow_insecure_remote_http = false;
+                app.server_address_changed(duration_from_egui_time(ui.input(|input| input.time)));
+                quick_connect_probe_requested = true;
+            }
             ui.label(
                 RichText::new(ui_text(ids::CONNECT_FIELD_SERVER_ADDRESS))
                     .strong()
@@ -1612,8 +1623,40 @@ fn render_connected(
         return;
     }
     if app.page == Page::Dashboard {
-        let view = admin::dashboard_view(app.dashboard_enabled(), &app.admin_load);
-        admin::show(ui, &view, colors);
+        if app.admin_users_open
+            && (!app.user_is_admin || !app.dashboard_enabled() || app.server.is_none())
+        {
+            app.close_admin_users();
+        }
+        if app.admin_users_open {
+            let mut go_back = false;
+            ui.horizontal(|ui| {
+                if ui.button("← Administration overview").clicked() {
+                    go_back = true;
+                }
+            });
+            if go_back {
+                app.close_admin_users();
+            }
+        }
+        if app.admin_users_open {
+            let actions = {
+                let data = &mut app.admin_users;
+                let snapshot = admin_users::AdminUsersSnapshot {
+                    users: &data.users,
+                    loading: data.is_loading(),
+                    error: data.error.as_deref(),
+                    current_user_id: app.current_user_id.as_deref(),
+                };
+                admin_users::show(ui, snapshot, &mut data.component)
+            };
+            app.submit_admin_users_actions(actions);
+        } else {
+            let view = admin::dashboard_view(app.dashboard_enabled(), &app.admin_load);
+            if admin::show(ui, &view, colors, app.can_manage_admin_users()) {
+                app.open_admin_users();
+            }
+        }
         return;
     }
     if app.page == Page::SyncPlay {

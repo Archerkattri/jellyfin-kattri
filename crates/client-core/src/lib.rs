@@ -9,6 +9,7 @@ pub mod cache;
 pub mod chapters;
 pub mod controls;
 pub mod crash_report;
+pub mod deep_link;
 pub mod display_match;
 pub mod downloads;
 pub mod epg;

@@ -234,7 +234,13 @@ fn hero_alpha(now: f64, changed_at: f64, duration: f32, reduce_motion: bool) -> 
 
 /// Darkens the left side (behind the text) and the bottom edge, fading to transparent.
 fn paint_scrim(painter: &egui::Painter, rect: Rect, alpha: f32, page: Color32) {
-    let dark = Color32::from_black_alpha(190).gamma_multiply(alpha);
+    // Light themes need a light text backing as well; the image must not reverse contrast.
+    let scrim = if page.r() > 128 {
+        Color32::from_white_alpha(235)
+    } else {
+        Color32::from_black_alpha(190)
+    };
+    let dark = scrim.gamma_multiply(alpha);
     let clear = Color32::TRANSPARENT;
     // The bottom fades into the page colour so the hero melts into the shelves below.
     let page_solid = page.gamma_multiply(alpha);

@@ -1,16 +1,256 @@
-//! Read-only admin dashboard (M4-22): server version, library names, and the
-//! active session count. It has no action and makes no write call.
-//!
-//! The server decides admin rights. A 403 from any read hides the section; it
-//! does not show an error. The gate is `admin.dashboard` in the settings file and
-//! is off by default.
+//! Administration dashboard and session-scoped user-management state. The
+//! overview remains read-only; user writes are emitted as typed intents by the
+//! separate `admin_users` component and authorized again in the worker.
 
 use super::{ui_text, ui_text_args};
 use egui::{RichText, Ui};
-use jellyfin_api::{ScheduledTask, ServerInfo, UserCounts, VirtualFolder};
+use jellyfin_api::{
+    AdminUser, AdminUserPolicyChanges, ErrorClass, ScheduledTask, ServerInfo, UserCounts,
+    VirtualFolder,
+};
 use kattri_i18n::ids;
 
 use crate::theme::Palette;
+use crate::ui::admin_users::AdminUsersState;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AdminUserMutationKind {
+    Create,
+    Rename,
+    PolicyPatch,
+    Delete,
+}
+
+/// Non-secret details kept only while one mutation is in flight.
+pub(crate) enum PendingAdminUserMutation {
+    Create,
+    Rename {
+        user_id: String,
+        name: String,
+    },
+    PolicyPatch {
+        user_id: String,
+        changes: AdminUserPolicyChanges,
+    },
+    Delete {
+        user_id: String,
+    },
+}
+
+impl PendingAdminUserMutation {
+    pub(crate) fn kind(&self) -> AdminUserMutationKind {
+        match self {
+            Self::Create => AdminUserMutationKind::Create,
+            Self::Rename { .. } => AdminUserMutationKind::Rename,
+            Self::PolicyPatch { .. } => AdminUserMutationKind::PolicyPatch,
+            Self::Delete { .. } => AdminUserMutationKind::Delete,
+        }
+    }
+}
+
+enum AdminUsersInFlight {
+    List {
+        request_id: u64,
+    },
+    Mutation {
+        request_id: u64,
+        mutation: PendingAdminUserMutation,
+    },
+}
+
+/// Session-scoped data and correlation state for the explicit user-management view.
+#[derive(Default)]
+pub(crate) struct AdminUsersData {
+    pub(crate) users: Vec<AdminUser>,
+    pub(crate) error: Option<String>,
+    pub(crate) component: AdminUsersState,
+    generation: u64,
+    in_flight: Option<AdminUsersInFlight>,
+}
+
+impl AdminUsersData {
+    pub(crate) fn is_loading(&self) -> bool {
+        self.in_flight.is_some()
+    }
+
+    pub(crate) fn pending_policy_revokes_admin(&self, current_user_id: &str) -> bool {
+        let Some(AdminUsersInFlight::Mutation {
+            mutation:
+                PendingAdminUserMutation::PolicyPatch {
+                    user_id, changes, ..
+                },
+            ..
+        }) = self.in_flight.as_ref()
+        else {
+            return false;
+        };
+        same_admin_user_id(user_id, current_user_id)
+            && (changes.is_administrator == Some(false) || changes.is_disabled == Some(true))
+    }
+
+    pub(crate) fn reset(&mut self, generation: u64) {
+        self.component.cancel();
+        self.users.clear();
+        self.error = None;
+        self.generation = generation;
+        self.in_flight = None;
+    }
+
+    pub(crate) fn begin_list(&mut self, request_id: u64, generation: u64) -> bool {
+        if generation != self.generation || self.is_loading() {
+            return false;
+        }
+        self.error = None;
+        self.in_flight = Some(AdminUsersInFlight::List { request_id });
+        true
+    }
+
+    pub(crate) fn finish_list(
+        &mut self,
+        request_id: u64,
+        generation: u64,
+        result: Result<Vec<AdminUser>, ErrorClass>,
+    ) -> bool {
+        if generation != self.generation
+            || !matches!(
+                &self.in_flight,
+                Some(AdminUsersInFlight::List { request_id: pending }) if *pending == request_id
+            )
+        {
+            return false;
+        }
+        self.in_flight = None;
+        match result {
+            Ok(users) => {
+                self.users = users;
+                self.error = None;
+            }
+            Err(error) => self.error = Some(admin_users_error(error).to_owned()),
+        }
+        true
+    }
+
+    pub(crate) fn begin_mutation(
+        &mut self,
+        request_id: u64,
+        generation: u64,
+        mutation: PendingAdminUserMutation,
+    ) -> bool {
+        if generation != self.generation || self.is_loading() {
+            return false;
+        }
+        self.error = None;
+        self.in_flight = Some(AdminUsersInFlight::Mutation {
+            request_id,
+            mutation,
+        });
+        true
+    }
+
+    pub(crate) fn finish_mutation(
+        &mut self,
+        request_id: u64,
+        generation: u64,
+        kind: AdminUserMutationKind,
+        result: Result<Option<AdminUser>, ErrorClass>,
+    ) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        let Some(AdminUsersInFlight::Mutation {
+            request_id: pending_id,
+            mutation,
+        }) = self.in_flight.take()
+        else {
+            return false;
+        };
+        if pending_id != request_id || mutation.kind() != kind {
+            self.in_flight = Some(AdminUsersInFlight::Mutation {
+                request_id: pending_id,
+                mutation,
+            });
+            return false;
+        }
+
+        match result {
+            Err(error) => self.error = Some(admin_users_error(error).to_owned()),
+            Ok(created) => {
+                self.error = None;
+                match mutation {
+                    PendingAdminUserMutation::Create => {
+                        if let Some(user) = created {
+                            self.users.push(user);
+                        } else {
+                            self.error = Some(
+                                "User created, but refresh is needed to show the account."
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                    PendingAdminUserMutation::Rename { user_id, name } => {
+                        if let Some(user) = self.users.iter_mut().find(|user| user.id == user_id) {
+                            user.name = name;
+                        }
+                    }
+                    PendingAdminUserMutation::PolicyPatch { user_id, changes } => {
+                        if let Some(policy) = self
+                            .users
+                            .iter_mut()
+                            .find(|user| user.id == user_id)
+                            .and_then(|user| user.policy.as_mut())
+                        {
+                            apply_policy_changes(policy, &changes);
+                        }
+                    }
+                    PendingAdminUserMutation::Delete { user_id } => {
+                        self.users.retain(|user| user.id != user_id);
+                    }
+                }
+            }
+        }
+        true
+    }
+}
+
+fn same_admin_user_id(left: &str, right: &str) -> bool {
+    left.replace('-', "")
+        .eq_ignore_ascii_case(&right.replace('-', ""))
+}
+
+fn apply_policy_changes(
+    policy: &mut jellyfin_api::AdminUserPolicy,
+    changes: &AdminUserPolicyChanges,
+) {
+    if let Some(value) = changes.is_administrator {
+        policy.is_administrator = Some(value);
+    }
+    if let Some(value) = changes.is_hidden {
+        policy.is_hidden = Some(value);
+    }
+    if let Some(value) = changes.is_disabled {
+        policy.is_disabled = Some(value);
+    }
+    if let Some(value) = changes.enable_media_playback {
+        policy.enable_media_playback = Some(value);
+    }
+    if let Some(value) = changes.enable_remote_access {
+        policy.enable_remote_access = Some(value);
+    }
+}
+
+fn admin_users_error(error: ErrorClass) -> &'static str {
+    match error {
+        ErrorClass::Offline => "The server is unreachable. Check the connection and retry.",
+        ErrorClass::Timeout => "The server took too long to respond. Please retry.",
+        ErrorClass::ServerUnavailable => "The server is unavailable right now. Please retry.",
+        ErrorClass::AuthExpired => "Your sign-in has expired. Sign in again.",
+        ErrorClass::NotFound => "The selected user is no longer available. Refresh the list.",
+        ErrorClass::Forbidden => "The server did not allow this user-management action.",
+        ErrorClass::RefusedPlaintext => "The connection is not allowed because it is not secure.",
+        ErrorClass::TlsFailure => "The server's secure connection could not be verified.",
+        ErrorClass::Unexpected => "The user-management request failed. Please retry.",
+    }
+}
 
 /// Detail rows drawn for scheduled tasks that need attention. The summary row
 /// still counts every task, so a truncated list never hides a total.
@@ -295,7 +535,19 @@ pub(crate) fn dashboard_view(enabled: bool, load: &AdminLoad) -> DashboardView {
     }
 }
 
-pub(crate) fn show(ui: &mut Ui, view: &DashboardView, colors: Palette) {
+pub(crate) fn show(
+    ui: &mut Ui,
+    view: &DashboardView,
+    colors: Palette,
+    can_manage_users: bool,
+) -> bool {
+    let mut manage_users = false;
+    if can_manage_users {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            manage_users = ui.button("Manage users").clicked();
+        });
+        ui.add_space(8.0);
+    }
     match view {
         DashboardView::Hidden => {}
         DashboardView::Loading => {
@@ -434,11 +686,20 @@ pub(crate) fn show(ui: &mut Ui, view: &DashboardView, colors: Palette) {
             });
         }
     }
+    manage_users
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn account(id: &str, name: &str) -> AdminUser {
+        AdminUser {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            policy: Some(jellyfin_api::AdminUserPolicy::default()),
+        }
+    }
 
     #[test]
     fn failed_read_shows_the_unavailable_message_only_when_enabled() {
@@ -828,5 +1089,62 @@ mod tests {
             dashboard_view(true, &AdminLoad::Pending),
             DashboardView::Loading
         );
+    }
+
+    #[test]
+    fn user_list_requires_an_explicit_load_and_ignores_stale_responses() {
+        let mut state = AdminUsersData::default();
+        assert!(!state.begin_list(10, 7));
+        state.reset(7);
+        assert!(state.begin_list(10, 7));
+        assert!(
+            !state.begin_list(11, 7),
+            "only one operation may be pending"
+        );
+        assert!(!state.finish_list(9, 7, Ok(vec![account("u1", "Old")])));
+        assert!(state.is_loading());
+        assert!(!state.finish_list(10, 6, Ok(vec![account("u1", "Old")])));
+        assert!(state.finish_list(10, 7, Ok(vec![account("u1", "Riley")])));
+        assert_eq!(state.users[0].name, "Riley");
+        assert!(!state.is_loading());
+    }
+
+    #[test]
+    fn user_mutation_completion_is_correlated_and_updates_only_the_local_snapshot() {
+        let mut state = AdminUsersData::default();
+        state.reset(3);
+        state.users.push(account("u1", "Before"));
+        assert!(state.begin_mutation(
+            22,
+            3,
+            PendingAdminUserMutation::Rename {
+                user_id: "u1".to_owned(),
+                name: "After".to_owned(),
+            },
+        ));
+        assert!(!state.finish_mutation(21, 3, AdminUserMutationKind::Rename, Ok(None),));
+        assert!(!state.finish_mutation(22, 3, AdminUserMutationKind::Delete, Ok(None),));
+        assert!(state.is_loading());
+        assert!(state.finish_mutation(22, 3, AdminUserMutationKind::Rename, Ok(None),));
+        assert_eq!(state.users[0].name, "After");
+        assert!(!state.is_loading());
+    }
+
+    #[test]
+    fn changing_connection_generation_discards_pending_user_data_and_errors() {
+        let mut state = AdminUsersData::default();
+        state.reset(4);
+        assert!(state.begin_list(30, 4));
+        assert!(state.finish_list(30, 4, Err(ErrorClass::Forbidden)));
+        assert!(state.error.is_some());
+        state.users.push(account("u1", "Riley"));
+
+        state.reset(5);
+
+        assert_eq!(state.generation, 5);
+        assert!(state.users.is_empty());
+        assert!(state.error.is_none());
+        assert!(!state.is_loading());
+        assert!(!state.finish_list(30, 4, Ok(vec![account("u1", "Stale")])));
     }
 }

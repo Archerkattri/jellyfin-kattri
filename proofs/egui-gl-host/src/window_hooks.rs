@@ -18,6 +18,108 @@ use winit::window::{Fullscreen, Window, WindowLevel};
 /// Quiet time after the last move or resize before the geometry is written (M2-14).
 pub(crate) const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
+/// Defocus must settle before minimizing so a native child dialog can take foreground first.
+#[cfg(any(windows, test))]
+pub(crate) const DEFOCUS_MINIMIZE_DELAY: Duration = Duration::from_millis(300);
+
+/// The user preference applies to the normal window. PiP always stays above other windows.
+pub(crate) const fn should_be_always_on_top(always_on_top: bool, pip_active: bool) -> bool {
+    always_on_top || pip_active
+}
+
+pub(crate) fn apply_window_level(window: &Window, always_on_top: bool) {
+    window.set_window_level(if always_on_top {
+        WindowLevel::AlwaysOnTop
+    } else {
+        WindowLevel::Normal
+    });
+}
+
+/// Defers minimizing until the main window has received focus once and focus loss has settled.
+/// The caller rechecks whether a window from this process is foreground when the delay expires.
+#[cfg(any(windows, test))]
+#[derive(Debug, Default)]
+pub(crate) struct DefocusMinimizer {
+    has_been_focused: bool,
+    deadline: Option<Instant>,
+}
+
+#[cfg(any(windows, test))]
+impl DefocusMinimizer {
+    pub(crate) fn focus_changed(&mut self, focused: bool, enabled: bool, now: Instant) {
+        if focused {
+            self.has_been_focused = true;
+            self.deadline = None;
+        } else if self.has_been_focused && enabled {
+            // If Instant addition overflows, handle it on this event-loop pass.
+            self.deadline = Some(now.checked_add(DEFOCUS_MINIMIZE_DELAY).unwrap_or(now));
+        } else {
+            self.deadline = None;
+        }
+    }
+
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    /// Returns true once when the delay expires, unless a same-process child window is foreground.
+    pub(crate) fn take_due(
+        &mut self,
+        now: Instant,
+        enabled: bool,
+        app_window_is_foreground: bool,
+    ) -> bool {
+        match self.deadline {
+            Some(deadline) if now >= deadline => {
+                self.deadline = None;
+                self.has_been_focused && enabled && !app_window_is_foreground
+            }
+            _ => false,
+        }
+    }
+}
+
+/// True while any window owned by this process is foreground, including native modal children.
+/// This is only used by the Windows-only minimize-on-defocus setting.
+#[cfg(windows)]
+pub(crate) fn app_process_has_foreground_window() -> bool {
+    use std::ffi::c_void;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        #[link_name = "GetForegroundWindow"]
+        fn get_foreground_window() -> *mut c_void;
+        #[link_name = "GetAncestor"]
+        fn get_ancestor(window: *mut c_void, flags: u32) -> *mut c_void;
+        #[link_name = "GetWindowThreadProcessId"]
+        fn get_window_thread_process_id(window: *mut c_void, process_id: *mut u32) -> u32;
+    }
+
+    // SAFETY: GetForegroundWindow has no arguments or preconditions. The returned handle is only
+    // queried immediately with GetWindowThreadProcessId and is never retained.
+    let foreground = unsafe { get_foreground_window() };
+    if foreground.is_null() {
+        return false;
+    }
+
+    // GA_ROOTOWNER follows owned modal windows back to their owning top-level window, including
+    // dialogs whose UI is hosted by a different process.
+    const GA_ROOTOWNER: u32 = 3;
+    // SAFETY: `foreground` is a live HWND returned by GetForegroundWindow.
+    let root_owner = unsafe { get_ancestor(foreground, GA_ROOTOWNER) };
+    let foreground_owner = if root_owner.is_null() {
+        foreground
+    } else {
+        root_owner
+    };
+
+    let mut process_id = 0;
+    // SAFETY: `foreground_owner` is an HWND and `process_id` is a valid output pointer for the
+    // duration of the call.
+    let thread_id = unsafe { get_window_thread_process_id(foreground_owner, &mut process_id) };
+    thread_id != 0 && process_id == std::process::id()
+}
+
 /// Trailing debounce for geometry saves (M2-14). Each move or resize pushes the deadline out, so a
 /// drag writes once after it settles. The caller passes the time in, so tests use simulated
 /// instants and nothing sleeps.
@@ -149,9 +251,13 @@ pub(crate) fn capture_window(window: &Window, event_loop: &ActiveEventLoop) -> O
     ))
 }
 
-/// Apply one transition from the PiP model to the window. Enter sets always-on-top and the PiP
-/// size. Leave clears always-on-top and puts the window back where the model placed it.
-pub(crate) fn apply_transition(window: &Window, transition: &PipTransition) {
+/// Apply one transition from the PiP model to the window. Enter forces always-on-top; leaving PiP
+/// restores the user's normal-window preference before putting the window back in place.
+pub(crate) fn apply_transition(
+    window: &Window,
+    transition: &PipTransition,
+    always_on_top: bool,
+) -> bool {
     match transition {
         PipTransition::Enter {
             size,
@@ -161,17 +267,19 @@ pub(crate) fn apply_transition(window: &Window, transition: &PipTransition) {
                 window.set_fullscreen(None);
             }
             window.set_maximized(false);
-            window.set_window_level(WindowLevel::AlwaysOnTop);
+            apply_window_level(window, true);
             // The resize is a request. The platform may apply it on a later event, so the
             // returned size is not used here.
             let _ = window.request_inner_size(LogicalSize::new(
                 f64::from(size.width()),
                 f64::from(size.height()),
             ));
+            true
         }
         PipTransition::Leave { placement } => {
-            window.set_window_level(WindowLevel::Normal);
+            apply_window_level(window, always_on_top);
             apply_placement(window, placement);
+            always_on_top
         }
     }
 }
@@ -215,6 +323,70 @@ mod tests {
 
     fn ms(value: u64) -> Duration {
         Duration::from_millis(value)
+    }
+
+    #[test]
+    fn picture_in_picture_forces_topmost_and_normal_window_uses_preference() {
+        assert!(!should_be_always_on_top(false, false));
+        assert!(should_be_always_on_top(true, false));
+        assert!(should_be_always_on_top(false, true));
+        assert!(should_be_always_on_top(true, true));
+    }
+
+    #[test]
+    fn startup_focus_loss_does_not_arm_minimization() {
+        let now = Instant::now();
+        let mut minimizer = DefocusMinimizer::default();
+        minimizer.focus_changed(false, true, now);
+        assert_eq!(minimizer.deadline(), None);
+        assert!(!minimizer.take_due(now + ms(1_000), true, false));
+    }
+
+    #[test]
+    fn focus_loss_waits_then_minimizes_only_if_the_app_is_not_foreground() {
+        let now = Instant::now();
+        let mut minimizer = DefocusMinimizer::default();
+        minimizer.focus_changed(true, true, now);
+        minimizer.focus_changed(false, true, now + ms(10));
+
+        let deadline = now + ms(10) + DEFOCUS_MINIMIZE_DELAY;
+        assert_eq!(minimizer.deadline(), Some(deadline));
+        assert!(!minimizer.take_due(deadline - ms(1), true, false));
+        assert!(minimizer.take_due(deadline, true, false));
+        assert!(!minimizer.take_due(deadline + ms(1), true, false));
+    }
+
+    #[test]
+    fn a_foreground_child_window_prevents_minimizing_the_app() {
+        let now = Instant::now();
+        let mut minimizer = DefocusMinimizer::default();
+        minimizer.focus_changed(true, true, now);
+        minimizer.focus_changed(false, true, now + ms(1));
+
+        assert!(!minimizer.take_due(now + ms(1) + DEFOCUS_MINIMIZE_DELAY, true, true,));
+        assert_eq!(minimizer.deadline(), None);
+    }
+
+    #[test]
+    fn regaining_focus_cancels_pending_minimization() {
+        let now = Instant::now();
+        let mut minimizer = DefocusMinimizer::default();
+        minimizer.focus_changed(true, true, now);
+        minimizer.focus_changed(false, true, now + ms(1));
+        minimizer.focus_changed(true, true, now + ms(100));
+
+        assert_eq!(minimizer.deadline(), None);
+        assert!(!minimizer.take_due(now + ms(1_000), true, false));
+    }
+
+    #[test]
+    fn disabling_the_setting_cancels_a_pending_minimize() {
+        let now = Instant::now();
+        let mut minimizer = DefocusMinimizer::default();
+        minimizer.focus_changed(true, true, now);
+        minimizer.focus_changed(false, true, now + ms(1));
+
+        assert!(!minimizer.take_due(now + ms(1) + DEFOCUS_MINIMIZE_DELAY, false, false,));
     }
 
     #[test]

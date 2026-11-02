@@ -8,8 +8,8 @@ Set-Location -LiteralPath $repoRoot
 
 $steps = @(
     @{ Name = 'fmt';    Args = @('fmt', '--all', '--', '--check') },
-    @{ Name = 'clippy'; Args = @('clippy', '--workspace', '--all-targets', '--', '-D', 'warnings') },
-    @{ Name = 'test';   Args = @('test', '--workspace') }
+    @{ Name = 'clippy'; Args = @('clippy', '--workspace', '--all-targets', '--locked', '--', '-D', 'warnings') },
+    @{ Name = 'test';   Args = @('test', '--workspace', '--locked') }
 )
 
 $results = @()
@@ -35,6 +35,16 @@ Write-Host ''
 Write-Host '==> [release-targets] native host and packaging contract checks'
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'tests/release_targets.ps1')
 $results += [pscustomobject]@{ Name = 'release-targets'; Code = $LASTEXITCODE }
+
+Write-Host ''
+Write-Host '==> [libmpv-runtime] durable development runtime selection checks'
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'tests/libmpv_runtime.ps1')
+$results += [pscustomobject]@{ Name = 'libmpv-runtime'; Code = $LASTEXITCODE }
+
+Write-Host ''
+Write-Host '==> [qa-harness] offline click-through assertion checks'
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test_qa_clickthrough.ps1')
+$results += [pscustomobject]@{ Name = 'qa-harness'; Code = $LASTEXITCODE }
 
 Write-Host ''
 Write-Host '================ check summary ================'

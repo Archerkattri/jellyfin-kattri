@@ -140,6 +140,16 @@ impl ReportHandoff {
                 PlaybackReportSubmitError::ProgressRetryBudgetExhausted => {
                     "A required playback report was refused"
                 }
+                PlaybackReportSubmitError::SyncPlayNotJoined => {
+                    "The SyncPlay group is no longer joined"
+                }
+                PlaybackReportSubmitError::SyncPlayQueueInvalid => "The SyncPlay queue is invalid",
+                PlaybackReportSubmitError::SyncPlayStatusInvalid => {
+                    "The SyncPlay player status is stale"
+                }
+                PlaybackReportSubmitError::SyncPlayClockUnavailable => {
+                    "The SyncPlay clock is unavailable"
+                }
             };
             let counts = self.counts();
             messages.push(format!(

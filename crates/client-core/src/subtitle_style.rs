@@ -18,9 +18,9 @@
 //! - Vertical placement (`sub-pos`) and alignment (`sub-align-x`) are not part of this model, so
 //!   they are never emitted from here.
 //!
-//! Colors are entered as `#RRGGBBAA`, or as `#RRGGBB` for an opaque color. mpv reads the alpha
-//! byte first, so [`RgbaColor::to_mpv_argb`] writes `#AARRGGBB`. That byte order has not been
-//! confirmed against the pinned libmpv.
+//! Colors are entered as `#RRGGBBAA`, or as `#RRGGBB` for an opaque color. mpv's manual specifies
+//! alpha-first `#AARRGGBB`, so [`RgbaColor::to_mpv_argb`] uses that form. Runtime behavior has not
+//! been exercised against the libmpv build used by this proof.
 
 use std::fmt;
 
@@ -315,6 +315,65 @@ pub fn size_and_color_options(
         )?);
     }
     Ok(options)
+}
+
+/// Build the background color for the persisted transparency setting. Legacy values are hex alpha
+/// bytes, so any two-digit hex string is kept as-is; percentages are also accepted. If color is
+/// set without transparency, preserve the color's parsed alpha. Only when both are unset does the
+/// option reset to transparent black. If transparency is set without a color, black is used. A
+/// trailing `%` disambiguates two-digit percentage strings from legacy alpha bytes.
+pub fn subtitle_background_option(
+    background_color: Option<&str>,
+    background_transparency: Option<&str>,
+) -> Result<ValidatedOption, MpvOptionError> {
+    let transparency = background_transparency
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(parse_background_alpha)
+        .transpose()?;
+
+    let color_text = background_color
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let color = match color_text {
+        Some(text) => RgbaColor::parse(text).map_err(|_| MpvOptionError::NotAllowedValue {
+            name: "sub-back-color",
+        })?,
+        None => RgbaColor::new(0, 0, 0, u8::MAX),
+    };
+    let alpha = match transparency {
+        Some(alpha) => alpha,
+        None if color_text.is_some() => color.a,
+        None => return validate("sub-back-color", OptionValue::Text("#00000000")),
+    };
+    let argb = format!("#{alpha:02X}{:02X}{:02X}{:02X}", color.r, color.g, color.b);
+    validate("sub-back-color", OptionValue::Text(&argb))
+}
+
+fn parse_background_alpha(raw: &str) -> Result<u8, MpvOptionError> {
+    let trimmed = raw.trim();
+    if trimmed.len() == 2 && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return u8::from_str_radix(trimmed, 16).map_err(|_| MpvOptionError::NotAllowedValue {
+            name: "sub-back-color",
+        });
+    }
+
+    let digits = trimmed.strip_suffix('%').unwrap_or(trimmed).trim();
+    let transparency = digits
+        .parse::<u32>()
+        .map_err(|_| MpvOptionError::NotAllowedValue {
+            name: "sub-back-color",
+        })?;
+    if transparency > 100 {
+        return Err(MpvOptionError::OutOfRange {
+            name: "sub-back-color",
+        });
+    }
+    let percent = 100 - transparency;
+    let alpha = (percent * 255 + 50) / 100;
+    u8::try_from(alpha).map_err(|_| MpvOptionError::OutOfRange {
+        name: "sub-back-color",
+    })
 }
 
 fn validate_font_family(raw: &str) -> Result<String, SubtitleStyleError> {
@@ -623,5 +682,71 @@ mod tests {
         assert_eq!(background_argb(0), "#00000000");
         assert_eq!(background_argb(50), "#80000000");
         assert_eq!(background_argb(100), "#FF000000");
+    }
+
+    #[test]
+    fn saved_background_transparency_maps_to_mpv_opacity_and_keeps_legacy_forms() {
+        for (transparency, expected) in [
+            (Some("0%"), "#FF202020"),
+            (Some("25%"), "#BF202020"),
+            (Some("50%"), "#80202020"),
+            (Some("100"), "#00202020"),
+            (Some("FF"), "#FF202020"),
+            (Some("C0"), "#C0202020"),
+            (Some("80"), "#80202020"),
+            (Some("40"), "#40202020"),
+            (Some("00"), "#00202020"),
+            (Some("AA"), "#AA202020"),
+        ] {
+            let option = subtitle_background_option(Some("#202020"), transparency)
+                .expect("valid background setting");
+            assert_eq!(option.name, "sub-back-color");
+            assert_eq!(option.value, expected);
+        }
+    }
+
+    #[test]
+    fn missing_background_settings_reset_and_explicit_color_alpha_is_preserved() {
+        assert_eq!(
+            subtitle_background_option(None, None)
+                .expect("default is allowlisted")
+                .value,
+            "#00000000"
+        );
+        assert_eq!(
+            subtitle_background_option(Some("#FFFFFF"), None)
+                .expect("opaque color alpha is preserved")
+                .value,
+            "#FFFFFFFF"
+        );
+        assert_eq!(
+            subtitle_background_option(Some("#20202080"), None)
+                .expect("explicit color alpha is preserved")
+                .value,
+            "#80202020"
+        );
+        assert_eq!(
+            subtitle_background_option(None, Some("25%"))
+                .expect("transparency uses the default black")
+                .value,
+            "#BF000000"
+        );
+        assert_eq!(
+            subtitle_background_option(None, Some("0%"))
+                .expect("transparency is valid")
+                .value,
+            "#FF000000"
+        );
+    }
+
+    #[test]
+    fn invalid_background_transparency_or_color_is_refused_without_echoing_values() {
+        for raw in ["101", "-1", "1.5", "50%%", "auto"] {
+            assert!(
+                subtitle_background_option(None, Some(raw)).is_err(),
+                "accepted {raw:?}"
+            );
+        }
+        assert!(subtitle_background_option(Some("red"), Some("50")).is_err());
     }
 }

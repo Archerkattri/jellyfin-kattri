@@ -185,9 +185,10 @@ fn episode_row(
     episode: &BaseItemDto,
     thumbnail: Option<&egui::TextureHandle>,
 ) -> Option<EpisodeRowAction> {
+    let colors = crate::theme::active_palette();
     ui.push_id(&episode.id, |ui| {
         egui::Frame::new()
-            .fill(Color32::from_rgb(21, 21, 23))
+            .fill(colors.panel)
             .corner_radius(egui::CornerRadius::same(12))
             .inner_margin(egui::Margin::symmetric(14, 10))
             .show(ui, |ui| {
@@ -213,7 +214,7 @@ fn episode_row(
                                 ui.painter().rect_filled(
                                     rect,
                                     egui::CornerRadius::same(6),
-                                    Color32::from_rgb(38, 38, 42),
+                                    colors.raised,
                                 );
                             }
                         }
@@ -232,7 +233,7 @@ fn episode_row(
                             None
                         };
                         if let Some(runtime) = format_runtime(episode.run_time_ticks) {
-                            ui.label(RichText::new(runtime).color(Color32::from_gray(164)));
+                            ui.label(RichText::new(runtime).color(colors.muted));
                         }
                         if let Some(progress) = progress_fraction(episode) {
                             ui.add(

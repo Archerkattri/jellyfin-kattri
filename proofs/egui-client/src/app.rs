@@ -2,7 +2,7 @@ use crate::catalog::MediaItem;
 use crate::saved_servers::{SavedServers, default_servers_path};
 use crate::settings_state::{SettingsState, default_profiles_dir};
 use crate::sign_in::QuickConnectFlow;
-use crate::ui::admin::AdminLoad;
+use crate::ui::admin::{AdminLoad, AdminUsersData, PendingAdminUserMutation};
 use crate::ui::detail::WatchedToggle;
 use crate::ui::downloads::DownloadIntent;
 use crate::ui::home::{HomeAction, HomeState, HomeViewTarget};
@@ -13,18 +13,22 @@ use crate::ui::{ui_text, ui_text_args};
 use crate::worker::downloads::DownloadsState;
 use crate::worker::update::{ApplyRequest, UpdateState, UpdateStatus, prepare};
 use crate::worker::{
-    ApiWorker, ClientTlsFiles, HomeCatalogData, HomeCatalogKind, HomeRowKind, PlaylistMutationKind,
-    PreparedPlayback, SavedSignInRequest, ServerIdentity, SyncPlayCommand, WorkerEvent,
-    WorkerSubmitError,
+    AdminUserOperation, ApiWorker, ClientTlsFiles, HomeCatalogData, HomeCatalogKind, HomeRowKind,
+    PlaylistMutationKind, PreparedPlayback, SavedSignInRequest, ServerIdentity, SyncPlayAction,
+    SyncPlayCommand, WorkerEvent, WorkerSubmitError,
 };
 use jellyfin_api::remote_command::RemoteCommand;
 use jellyfin_api::session_reporting::QueueItem;
-use jellyfin_api::websocket::{SyncPlayGroupUpdate, SyncPlayMessage};
+use jellyfin_api::websocket::{
+    MAX_SYNCPLAY_QUEUE_ITEMS, SyncPlayGroupUpdate, SyncPlayMessage, SyncPlayPlayQueueUpdate,
+    SyncPlayPlaybackAction, SyncPlayPlaybackCommand, SyncPlayQueueEntry, SyncPlayWireCommand,
+};
 use jellyfin_api::{
     BaseItemDto, BaseItemPerson, CollectionRuntime, DeviceProfile, ErrorClass, FavoriteToggle,
     ItemFilter, ItemQuery, ItemSortBy, ItemSortOrder, ItemsResponse, LiveTvChannel,
     PlaybackInfoRequest, PlaybackInfoResponse, PlaybackRequestOverrides, PlaylistEntry,
-    baseline_device_profile, collection_runtime, connectivity::OfflineTracker,
+    SyncPlayPlaybackStatus, baseline_device_profile, collection_runtime,
+    connectivity::OfflineTracker,
 };
 use kattri_client_core::epg::{EpgProgram, EpgWindow};
 use kattri_client_core::focus::FocusGraph;
@@ -45,7 +49,7 @@ use kattri_client_core::syncplay::playback::group_command_from_wire;
 use kattri_client_core::syncplay::{
     ClockEstimate, ClockEstimator, DriftController, GroupCommand, LocalAction as GroupAction,
     PlayAnchor, SyncPlayError, SyncPlayState, clock_sample_from_exchange, map_command,
-    target_position_ms,
+    parse_server_timestamp_ms, target_position_ms,
 };
 use kattri_i18n::ids;
 use kattri_input::input_store::{MapName, map_file_changed, map_file_mtime};
@@ -77,6 +81,7 @@ const SYNC_PLAY_ECHO_TOLERANCE_MS: i64 = 1_500;
 const SYNC_PLAY_FORWARD_SEEK_MS: i64 = 2_000;
 /// Backward movement beyond this counts as a seek. Reporting jitter stays under it.
 const SYNC_PLAY_BACKWARD_SEEK_MS: i64 = 1_000;
+const MAX_SYNCPLAY_STATUS_RESULTS: usize = 16;
 
 /// The player as its last report described it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +98,38 @@ struct InboundEcho {
     paused: bool,
     position_ms: i64,
     applied_at_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+struct PendingPlayerIntent {
+    action: LocalAction,
+    connection_generation: u64,
+    sync_play_generation: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct SyncPlayQueueState {
+    group_id: String,
+    generation: u64,
+    last_update_ms: i64,
+    playlist: Vec<SyncPlayQueueEntry>,
+    playing_item_index: Option<usize>,
+    start_position_ticks: i64,
+}
+
+#[derive(Clone, Debug)]
+struct SyncPlayAutoTarget {
+    generation: u64,
+    item_id: String,
+    playlist_item_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct SyncPlayPlaybackHandoff {
+    generation: u64,
+    item_id: String,
+    playlist_item_id: String,
+    playback_generation: u64,
 }
 
 /// What the app knows about the player. It feeds the SyncPlay outbound path and the update
@@ -175,6 +212,65 @@ fn group_command_for(change: LocalPlayerChange) -> SyncPlayCommand {
             position_ticks: u64::try_from(position_ms.saturating_mul(TICKS_PER_MS)).unwrap_or(0),
         },
     }
+}
+
+/// Convert a server-clock Unix millisecond value to the UTC form Jellyfin's Ready and
+/// Buffering DTOs require. The conversion is kept here so tests do not depend on wall time.
+fn sync_play_timestamp(unix_ms: i64) -> Option<String> {
+    let seconds = unix_ms.div_euclid(1_000);
+    let milliseconds = unix_ms.rem_euclid(1_000);
+    let days = seconds.div_euclid(86_400);
+    let second_of_day = seconds.rem_euclid(86_400);
+    let shifted_days = days.checked_add(719_468)?;
+    let era = if shifted_days >= 0 {
+        shifted_days
+    } else {
+        shifted_days - 146_096
+    }
+    .div_euclid(146_097);
+    let day_of_era = shifted_days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    if !(0..=9_999).contains(&year) {
+        return None;
+    }
+    let hour = second_of_day / 3_600;
+    let minute = second_of_day % 3_600 / 60;
+    let second = second_of_day % 60;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{milliseconds:03}Z"
+    ))
+}
+
+fn sync_play_submit_error(error: WorkerSubmitError) -> PlaybackReportSubmitError {
+    match error {
+        WorkerSubmitError::Busy => PlaybackReportSubmitError::CommandQueueFull,
+        WorkerSubmitError::Stopped => PlaybackReportSubmitError::CommandQueueClosed,
+    }
+}
+
+fn sync_play_guid_is_valid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let hyphenated = bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        });
+    let simple = bytes.len() == 32 && bytes.iter().all(u8::is_ascii_hexdigit);
+    hyphenated || simple
+}
+
+fn same_admin_user_id(left: &str, right: &str) -> bool {
+    left.replace('-', "")
+        .eq_ignore_ascii_case(&right.replace('-', ""))
 }
 
 fn decode_photo_request_tag(encoded: &str) -> Option<(Option<String>, usize, bool)> {
@@ -353,6 +449,10 @@ pub enum PlaybackReportSubmitError {
     /// Admission was refused; the caller still owns responsibility for this report.
     CommandQueueFull,
     ProgressRetryBudgetExhausted,
+    SyncPlayNotJoined,
+    SyncPlayQueueInvalid,
+    SyncPlayStatusInvalid,
+    SyncPlayClockUnavailable,
 }
 
 const MAX_CONSECUTIVE_PROGRESS_REPORT_FAILURES: u8 = 3;
@@ -389,6 +489,157 @@ mod worker_admission_tests {
                 .as_deref()
                 .is_some_and(|text| text.contains("busy"))
         );
+    }
+}
+
+#[cfg(test)]
+mod launch_intent_tests {
+    use super::{ApiWorker, ConnectionStatus, KattriApp, ServerIdentity, WorkerEvent};
+    use jellyfin_api::{ItemsResponse, UserDto};
+    use std::time::Duration;
+    use zeroize::Zeroizing;
+
+    const ITEM_ID: &str = "0123456789abcdef0123456789abcdef";
+    const SERVER_URL: &str = "https://media.example";
+
+    fn intent() -> kattri_client_core::deep_link::DeepLinkIntent {
+        kattri_client_core::deep_link::DeepLinkIntent::parse(&format!(
+            "jellyfin://kattri/v1/item/{ITEM_ID}?server=https%3A%2F%2Fmedia.example"
+        ))
+        .expect("valid item intent")
+    }
+
+    #[test]
+    fn launch_intent_prefills_review_fields_without_sign_in_or_playback() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.server_url = "https://old.example".into();
+        app.username = "old user".into();
+        app.password_input = Zeroizing::new("old password".into());
+
+        app.apply_launch_intent(intent());
+
+        assert_eq!(app.server_url, SERVER_URL);
+        assert!(app.username.is_empty());
+        assert!(app.password_input.is_empty());
+        assert!(matches!(
+            app.connection,
+            ConnectionStatus::Disconnected { .. }
+        ));
+        assert_eq!(app.selected_item_id, None);
+        assert!(app.pending_launch_intent.is_some());
+        assert!(app.auto_play.is_none());
+        assert!(app.pending_playback.is_none());
+        assert!(!app.playback_start_loading);
+    }
+
+    #[test]
+    fn matching_manual_sign_in_selects_launch_item_once_without_autoplay() {
+        let ctx = egui::Context::default();
+        let mut app = KattriApp::new(ctx.clone());
+        let (worker, events) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.apply_launch_intent(intent());
+        app.username = "alice".into();
+        app.password_input = Zeroizing::new("manual password".into());
+        app.server_preview = Some((
+            SERVER_URL.into(),
+            false,
+            ServerIdentity {
+                name: "Media server".into(),
+                version: Some("test".into()),
+                id: None,
+            },
+        ));
+
+        app.start_connection();
+        let request_id = app.connection_request_id;
+        assert_eq!(
+            app.pending_launch_intent
+                .as_ref()
+                .and_then(|pending| pending.connection_generation),
+            Some(request_id)
+        );
+
+        let signed_in = || WorkerEvent::ItemsLoaded {
+            request_id,
+            server: ServerIdentity {
+                name: "Media server".into(),
+                version: Some("test".into()),
+                id: None,
+            },
+            user: UserDto {
+                id: "user-1".into(),
+                name: "Alice".into(),
+                server_id: None,
+                policy: None,
+            },
+            page: ItemsResponse::default(),
+        };
+        events.try_send(signed_in()).expect("sign-in result queued");
+        app.receive_worker_events(&ctx);
+        assert_eq!(app.selected_item_id.as_deref(), Some(ITEM_ID));
+        assert!(app.pending_launch_intent.is_none());
+        assert!(app.auto_play.is_none());
+        assert!(!app.playback_start_loading);
+        let details_request_id = app.details_request_id;
+
+        events
+            .try_send(signed_in())
+            .expect("duplicate result queued");
+        app.receive_worker_events(&ctx);
+        assert_eq!(app.selected_item_id.as_deref(), Some(ITEM_ID));
+        assert_eq!(app.details_request_id, details_request_id);
+        assert!(app.auto_play.is_none());
+    }
+
+    #[test]
+    fn failed_manual_auth_keeps_the_item_pending_for_a_same_server_retry() {
+        let ctx = egui::Context::default();
+        let mut app = KattriApp::new(ctx.clone());
+        let (worker, events) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.apply_launch_intent(intent());
+        app.username = "alice".into();
+        app.password_input = Zeroizing::new("wrong password".into());
+        app.server_preview = Some((
+            SERVER_URL.into(),
+            false,
+            ServerIdentity {
+                name: "Media server".into(),
+                version: Some("test".into()),
+                id: None,
+            },
+        ));
+        app.start_connection();
+        let failed_request = app.connection_request_id;
+
+        events
+            .try_send(WorkerEvent::ConnectionFailed {
+                request_id: Some(failed_request),
+                message: "Sign-in was refused.".into(),
+            })
+            .expect("failure event queued");
+        app.receive_worker_events(&ctx);
+
+        assert!(app.selected_item_id.is_none());
+        assert!(app.auto_play.is_none());
+        assert!(app.pending_launch_intent.as_ref().is_some_and(|pending| {
+            pending.server_url == SERVER_URL && pending.connection_generation.is_none()
+        }));
+    }
+
+    #[test]
+    fn launch_intent_is_cancelled_on_server_change_or_logout() {
+        let mut changed = KattriApp::new(egui::Context::default());
+        changed.apply_launch_intent(intent());
+        changed.server_url = "https://other.example".into();
+        changed.server_address_changed(Duration::ZERO);
+        assert!(changed.pending_launch_intent.is_none());
+
+        let mut logged_out = KattriApp::new(egui::Context::default());
+        logged_out.apply_launch_intent(intent());
+        logged_out.clear_connection();
+        assert!(logged_out.pending_launch_intent.is_none());
     }
 }
 
@@ -533,6 +784,12 @@ pub(crate) struct AutoPlay {
     start_over: bool,
 }
 
+struct PendingLaunchIntent {
+    server_url: String,
+    item_id: String,
+    connection_generation: Option<u64>,
+}
+
 struct PlaybackRecovery {
     item_id: String,
     options_request_id: u64,
@@ -591,6 +848,7 @@ pub struct KattriApp {
     forgot_password_request_id: u64,
     // This is only the volatile input buffer; it is moved to the worker and zeroized on drop.
     pub(crate) password_input: Zeroizing<String>,
+    pending_launch_intent: Option<PendingLaunchIntent>,
     pub(crate) allow_insecure_remote_http: bool,
     /// The "Stay signed in on this device" choice on the sign-in form. Off until ticked.
     pub(crate) remember_sign_in: bool,
@@ -599,6 +857,7 @@ pub struct KattriApp {
     pub(crate) saved_sign_in_available: Option<bool>,
     pub(crate) server: Option<ServerIdentity>,
     pub(crate) user_name: Option<String>,
+    pub(crate) current_user_id: Option<String>,
     /// The signed-in user is a server administrator: the card menu offers admin actions.
     pub(crate) user_is_admin: bool,
     /// The signed-in user may search and download subtitles (administrator, or the policy's
@@ -871,6 +1130,8 @@ pub struct KattriApp {
     /// Latest admin dashboard read (M4-22). A reply for any other request is stale.
     pub(crate) admin_load: AdminLoad,
     admin_request_id: Option<u64>,
+    pub(crate) admin_users_open: bool,
+    pub(crate) admin_users: AdminUsersData,
     details_request_id: u64,
     watched: Option<WatchedItemState>,
     favorite: Option<FavoriteItemState>,
@@ -881,7 +1142,7 @@ pub struct KattriApp {
     /// Segments fetched for the current item, waiting for the native host to take them.
     loaded_media_segments: Option<(String, Vec<MediaSegment>)>,
     /// Player actions for the native host to apply, in arrival order (M4-13, M4-11).
-    pending_player_intents: Vec<LocalAction>,
+    pending_player_intents: Vec<PendingPlayerIntent>,
     /// SyncPlay membership and the last applied group command (M4-11).
     sync_play_state: SyncPlayState,
     /// User-facing group list and request state for the SyncPlay screen.
@@ -890,6 +1151,17 @@ pub struct KattriApp {
     sync_play_pending_join: Option<(u64, String)>,
     /// Leave request awaiting the worker's answer.
     sync_play_pending_leave: Option<u64>,
+    /// Most recently submitted SyncPlay REST operation; older responses must not clear a newer
+    /// operation's error state.
+    sync_play_latest_action_request_id: Option<(u64, SyncPlayAction)>,
+    sync_play_status_results: VecDeque<(u64, bool)>,
+    sync_play_queue: Option<SyncPlayQueueState>,
+    /// Advances when the active queue entry changes or membership is invalidated. Native
+    /// callbacks carry this value with the playlist-entry ID they opened.
+    sync_play_queue_generation: u64,
+    sync_play_auto_target: Option<SyncPlayAutoTarget>,
+    sync_play_playback_handoff: Option<SyncPlayPlaybackHandoff>,
+    sync_play_invalidated_playback_generation: Option<u64>,
     sync_play_drift: DriftController,
     /// Server clock estimate for inbound SyncPlay commands. It has no samples until a server
     /// time exchange records one, so inbound commands are refused until then (M4-11).
@@ -1158,11 +1430,13 @@ impl KattriApp {
             forgot_password_notice: None,
             forgot_password_request_id: 0,
             password_input: Zeroizing::new(String::new()),
+            pending_launch_intent: None,
             allow_insecure_remote_http: false,
             remember_sign_in: false,
             saved_sign_in_available: None,
             server: None,
             user_name: None,
+            current_user_id: None,
             user_is_admin: false,
             user_can_manage_subtitles: false,
             trickplay: crate::trickplay::TrickplayState::default(),
@@ -1384,6 +1658,8 @@ impl KattriApp {
             catalog_request_id: 0,
             admin_load: AdminLoad::Pending,
             admin_request_id: None,
+            admin_users_open: false,
+            admin_users: AdminUsersData::default(),
             details_request_id: 0,
             watched: None,
             favorite: None,
@@ -1396,6 +1672,13 @@ impl KattriApp {
             sync_play_ui: crate::ui::syncplay::SyncPlayScreenState::default(),
             sync_play_pending_join: None,
             sync_play_pending_leave: None,
+            sync_play_latest_action_request_id: None,
+            sync_play_status_results: VecDeque::new(),
+            sync_play_queue: None,
+            sync_play_queue_generation: 0,
+            sync_play_auto_target: None,
+            sync_play_playback_handoff: None,
+            sync_play_invalidated_playback_generation: None,
             sync_play_drift: DriftController::new(),
             sync_play_clock: ClockEstimator::new(),
             player_view: PlayerView::new(),
@@ -1584,7 +1867,26 @@ impl KattriApp {
     /// Player actions for the native host to apply, in arrival order. The host applies them
     /// on the thread that owns the player, so this app side never touches libmpv.
     pub fn take_player_intents(&mut self) -> Vec<LocalAction> {
+        let connection_generation = self.connection_generation();
+        let sync_play_generation = self.sync_play_queue_generation;
         std::mem::take(&mut self.pending_player_intents)
+            .into_iter()
+            .filter(|intent| {
+                intent.connection_generation == connection_generation
+                    && intent
+                        .sync_play_generation
+                        .is_none_or(|generation| generation == sync_play_generation)
+            })
+            .map(|intent| intent.action)
+            .collect()
+    }
+
+    fn queue_player_intent(&mut self, action: LocalAction, sync_play: bool) {
+        self.pending_player_intents.push(PendingPlayerIntent {
+            action,
+            connection_generation: self.connection_generation(),
+            sync_play_generation: sync_play.then_some(self.sync_play_queue_generation),
+        });
     }
 
     /// Hand one inbound remote session message to the worker, which parses it and queues the
@@ -1606,7 +1908,7 @@ impl KattriApp {
     fn queue_socket_command(&mut self, command: RemoteCommand) {
         let max_volume_percent = self.playback_audio_settings().max_volume_percent;
         match local_action(command, max_volume_percent) {
-            Ok(action) => self.pending_player_intents.push(action),
+            Ok(action) => self.queue_player_intent(action, false),
             Err(error) => tracing::warn!(?error, "remote session command not executed"),
         }
     }
@@ -1630,7 +1932,76 @@ impl KattriApp {
     /// player intents and sets the echo guard, so the player's reports for this command are not
     /// sent back. Without a clock estimate the command is refused, because its time cannot be
     /// placed.
-    fn queue_sync_play_command(&mut self, message: SyncPlayMessage) {
+    fn queue_sync_play_command(&mut self, _message: SyncPlayMessage) {
+        // The legacy websocket DTO does not carry PlaylistItemId. Only the typed socket update
+        // below has enough identity to act without risking a command for a prior queue entry.
+        tracing::warn!("SyncPlay command refused: queue-entry identity is missing");
+    }
+
+    fn apply_sync_play_playback_command(&mut self, command: SyncPlayPlaybackCommand) {
+        let Some(group_id) = self.joined_sync_play_group_id().map(str::to_owned) else {
+            tracing::warn!("SyncPlay command refused: not in a group");
+            return;
+        };
+        if command
+            .group_id
+            .as_deref()
+            .is_some_and(|incoming| incoming != group_id)
+        {
+            tracing::debug!("SyncPlay command refused: group does not match");
+            return;
+        }
+
+        if command.action == SyncPlayPlaybackAction::Stop {
+            self.invalidate_sync_play_playback_handoff();
+            self.sync_play_auto_target = None;
+            self.auto_play = None;
+            self.player_view.player = None;
+            self.player_view.echo = None;
+            self.queue_player_intent(LocalAction::Stop, true);
+            self.sync_play_state = SyncPlayState::Joined { group_id };
+            return;
+        }
+
+        let Some(entry) = self.sync_play_queue_active_entry().cloned() else {
+            tracing::warn!("SyncPlay command refused: no active queue entry");
+            return;
+        };
+        if command.playlist_item_id.as_deref() != Some(entry.playlist_item_id.as_str()) {
+            tracing::debug!("SyncPlay command refused: playlist entry does not match");
+            return;
+        }
+        let Some(queue) = self.sync_play_queue.as_ref() else {
+            return;
+        };
+        let queue_generation = queue.generation;
+        let wire_command = match command.action {
+            SyncPlayPlaybackAction::Pause => SyncPlayWireCommand::Pause,
+            SyncPlayPlaybackAction::Unpause => SyncPlayWireCommand::Unpause,
+            SyncPlayPlaybackAction::Seek => SyncPlayWireCommand::Seek,
+            SyncPlayPlaybackAction::Stop => return,
+        };
+        self.queue_sync_play_command_for_entry(
+            SyncPlayMessage {
+                command: wire_command,
+                position_ticks: command.position_ticks,
+                when: command.when,
+            },
+            queue_generation,
+            &entry.playlist_item_id,
+        );
+    }
+
+    fn queue_sync_play_command_for_entry(
+        &mut self,
+        message: SyncPlayMessage,
+        queue_generation: u64,
+        playlist_item_id: &str,
+    ) {
+        if !self.sync_play_queue_matches(queue_generation, playlist_item_id) {
+            tracing::debug!("SyncPlay command refused: queue generation is stale");
+            return;
+        }
         let Ok(command) = group_command_from_wire(&message) else {
             tracing::warn!("SyncPlay command refused: server time is not in UTC form");
             return;
@@ -1644,6 +2015,122 @@ impl KattriApp {
         if let Err(error) = self.apply_sync_play_command(command, clock, now_ms, playing) {
             tracing::warn!(?error, "SyncPlay command refused");
         }
+    }
+
+    fn sync_play_queue_active_entry(&self) -> Option<&SyncPlayQueueEntry> {
+        let queue = self.sync_play_queue.as_ref()?;
+        queue
+            .playing_item_index
+            .and_then(|index| queue.playlist.get(index))
+    }
+
+    fn invalidate_sync_play_queue(&mut self) {
+        self.invalidate_sync_play_playback_handoff();
+        if self.sync_play_auto_target.take().is_some() {
+            self.auto_play = None;
+        }
+        self.sync_play_queue_generation = self.sync_play_queue_generation.wrapping_add(1);
+        self.sync_play_queue = None;
+    }
+
+    fn invalidate_sync_play_playback_handoff(&mut self) {
+        let Some(handoff) = self.sync_play_playback_handoff.take() else {
+            return;
+        };
+        self.sync_play_invalidated_playback_generation = Some(handoff.playback_generation);
+        self.pending_playback = None;
+        self.held_playback = None;
+        self.playback_recovery = None;
+        self.active_playback = None;
+        if self.playback_start_request_id == handoff.playback_generation {
+            self.playback_start_request_id = self.allocate_request_id();
+            self.playback_start_loading = false;
+            self.playback_start_status = None;
+        }
+    }
+
+    fn apply_sync_play_queue_update(
+        &mut self,
+        group_id: Option<String>,
+        update: SyncPlayPlayQueueUpdate,
+    ) {
+        let Some(joined_group_id) = self.joined_sync_play_group_id().map(str::to_owned) else {
+            return;
+        };
+        if group_id
+            .as_deref()
+            .is_some_and(|incoming| incoming != joined_group_id)
+        {
+            return;
+        }
+        let Ok(last_update_ms) = parse_server_timestamp_ms(&update.last_update) else {
+            tracing::warn!("SyncPlay queue update refused: invalid timestamp");
+            return;
+        };
+        if self.sync_play_queue.as_ref().is_some_and(|current| {
+            current.group_id == joined_group_id && last_update_ms <= current.last_update_ms
+        }) {
+            return;
+        }
+
+        let playing_item_index = usize::try_from(update.playing_item_index)
+            .ok()
+            .filter(|index| *index < update.playlist.len());
+        let previous_entry = self.sync_play_queue_active_entry().cloned();
+        let next_entry = playing_item_index
+            .and_then(|index| update.playlist.get(index))
+            .cloned();
+        let active_entry_changed = previous_entry
+            .as_ref()
+            .map(|entry| (&entry.item_id, &entry.playlist_item_id))
+            != next_entry
+                .as_ref()
+                .map(|entry| (&entry.item_id, &entry.playlist_item_id));
+        if active_entry_changed
+            || self
+                .sync_play_queue
+                .as_ref()
+                .is_none_or(|queue| queue.group_id != joined_group_id)
+        {
+            self.invalidate_sync_play_playback_handoff();
+            self.sync_play_queue_generation = self.sync_play_queue_generation.wrapping_add(1);
+        }
+
+        let mut start_position_ticks = update.start_position_ticks;
+        if update.is_playing
+            && let Some(clock) = self.sync_play_clock.estimate()
+        {
+            let now_server_ms = self.player_view.now_ms().saturating_add(clock.offset_ms);
+            let elapsed_ms = now_server_ms.saturating_sub(last_update_ms).max(0);
+            start_position_ticks =
+                start_position_ticks.saturating_add(elapsed_ms.saturating_mul(TICKS_PER_MS));
+        }
+
+        self.sync_play_queue = Some(SyncPlayQueueState {
+            group_id: joined_group_id,
+            generation: self.sync_play_queue_generation,
+            last_update_ms,
+            playlist: update.playlist,
+            playing_item_index,
+            start_position_ticks,
+        });
+
+        if !active_entry_changed {
+            return;
+        }
+        let Some(entry) = next_entry else {
+            if self.sync_play_auto_target.take().is_some() {
+                self.auto_play = None;
+            }
+            self.sync_play_auto_target = None;
+            return;
+        };
+        self.sync_play_auto_target = Some(SyncPlayAutoTarget {
+            generation: self.sync_play_queue_generation,
+            item_id: entry.item_id.clone(),
+            playlist_item_id: entry.playlist_item_id.clone(),
+        });
+        self.play_item_locally(entry.item_id, true);
     }
 
     /// Ask the worker to join a SyncPlay group (M4-11). The group counts as joined only after
@@ -1717,6 +2204,228 @@ impl KattriApp {
         Ok(())
     }
 
+    fn sync_play_can_send(&self) -> bool {
+        self.joined_sync_play_group_id().is_some() && self.sync_play_pending_leave.is_none()
+    }
+
+    fn sync_play_queue_matches(&self, generation: u64, playlist_item_id: &str) -> bool {
+        self.sync_play_queue.as_ref().is_some_and(|queue| {
+            queue.generation == generation
+                && self.joined_sync_play_group_id() == Some(queue.group_id.as_str())
+                && queue
+                    .playing_item_index
+                    .and_then(|index| queue.playlist.get(index))
+                    .is_some_and(|entry| entry.playlist_item_id == playlist_item_id)
+        })
+    }
+
+    fn sync_play_prepared_target_is_current(
+        &self,
+        playback_generation: u64,
+        item_id: &str,
+    ) -> bool {
+        if self.sync_play_invalidated_playback_generation == Some(playback_generation) {
+            return false;
+        }
+        self.sync_play_playback_handoff
+            .as_ref()
+            .is_none_or(|handoff| {
+                handoff.playback_generation == playback_generation
+                    && handoff.item_id == item_id
+                    && self.sync_play_queue_matches(handoff.generation, &handoff.playlist_item_id)
+            })
+    }
+
+    /// Replace the shared group queue. The server remains authoritative; a successful REST
+    /// response does not start local playback or mark this client ready.
+    pub fn set_sync_play_new_queue(
+        &mut self,
+        item_ids: Vec<String>,
+        playing_item_position: usize,
+        start_position_ticks: i64,
+    ) -> Result<u64, PlaybackReportSubmitError> {
+        if !self.sync_play_can_send() {
+            return Err(PlaybackReportSubmitError::SyncPlayNotJoined);
+        }
+        let Ok(server_item_position) = i32::try_from(playing_item_position) else {
+            return Err(PlaybackReportSubmitError::SyncPlayQueueInvalid);
+        };
+        if item_ids.is_empty()
+            || item_ids.len() > MAX_SYNCPLAY_QUEUE_ITEMS
+            || playing_item_position >= item_ids.len()
+            || start_position_ticks < 0
+            || item_ids
+                .iter()
+                .any(|item_id| !sync_play_guid_is_valid(item_id))
+        {
+            return Err(PlaybackReportSubmitError::SyncPlayQueueInvalid);
+        }
+        let request_id = self.allocate_request_id();
+        let Some(worker) = self.worker.as_ref() else {
+            return Err(PlaybackReportSubmitError::WorkerUnavailable);
+        };
+        worker
+            .sync_play_set_new_queue(
+                request_id,
+                item_ids,
+                server_item_position,
+                start_position_ticks,
+            )
+            .map_err(sync_play_submit_error)?;
+        self.sync_play_latest_action_request_id = Some((request_id, SyncPlayAction::SetNewQueue));
+        Ok(request_id)
+    }
+
+    /// The host captures this pair when it takes a prepared stream, then returns it with
+    /// playback callbacks. The playback request generation prevents callbacks from an old
+    /// open from being mistaken for the current queue entry.
+    pub fn sync_play_playback_target(&self, playback_generation: u64) -> Option<(u64, String)> {
+        let handoff = self.sync_play_playback_handoff.as_ref()?;
+        if handoff.playback_generation != playback_generation
+            || !self.sync_play_queue_matches(handoff.generation, &handoff.playlist_item_id)
+        {
+            return None;
+        }
+        Some((handoff.generation, handoff.playlist_item_id.clone()))
+    }
+
+    /// Feed the current native player's observed position into group command and drift logic.
+    /// Call only after loading/resume completes and while the player is not cache-paused.
+    /// Old opens and unrelated local playback cannot change the group's state.
+    pub fn observe_sync_play_player(
+        &mut self,
+        playback_generation: u64,
+        paused: bool,
+        position_ticks: u64,
+    ) {
+        if !self.sync_play_can_send()
+            || self
+                .sync_play_playback_target(playback_generation)
+                .is_none()
+        {
+            return;
+        }
+        let Ok(position_ms) = i64::try_from(position_ticks / TICKS_PER_MS as u64) else {
+            return;
+        };
+        let now = self.player_view.now_ms();
+        if let Some(command) = self.observe_local_player(paused, position_ms, now) {
+            self.send_sync_play_command(command);
+            // Let the authoritative server command establish the new anchor before correcting.
+            return;
+        }
+        if self.player_view.echo.is_none()
+            && !paused
+            && let Some(clock) = self.sync_play_clock.estimate()
+        {
+            self.check_sync_play_drift(position_ms, clock, now);
+        }
+    }
+
+    /// Report that the current SyncPlay queue entry is ready. The callback must include both
+    /// the queue generation and its playlist-entry GUID from `sync_play_playback_target`.
+    pub fn sync_play_ready(
+        &mut self,
+        queue_generation: u64,
+        playlist_item_id: &str,
+        position_ticks: u64,
+        is_playing: bool,
+    ) -> Result<u64, PlaybackReportSubmitError> {
+        self.submit_sync_play_status(
+            false,
+            queue_generation,
+            playlist_item_id,
+            position_ticks,
+            is_playing,
+        )
+    }
+
+    /// Report that the current SyncPlay queue entry is buffering with its captured identity.
+    pub fn sync_play_buffering(
+        &mut self,
+        queue_generation: u64,
+        playlist_item_id: &str,
+        position_ticks: u64,
+        is_playing: bool,
+    ) -> Result<u64, PlaybackReportSubmitError> {
+        self.submit_sync_play_status(
+            true,
+            queue_generation,
+            playlist_item_id,
+            position_ticks,
+            is_playing,
+        )
+    }
+
+    fn submit_sync_play_status(
+        &mut self,
+        buffering: bool,
+        queue_generation: u64,
+        playlist_item_id: &str,
+        position_ticks: u64,
+        is_playing: bool,
+    ) -> Result<u64, PlaybackReportSubmitError> {
+        if !self.sync_play_can_send() {
+            return Err(PlaybackReportSubmitError::SyncPlayNotJoined);
+        }
+        if !sync_play_guid_is_valid(playlist_item_id)
+            || !self.sync_play_queue_matches(queue_generation, playlist_item_id)
+        {
+            return Err(PlaybackReportSubmitError::SyncPlayStatusInvalid);
+        }
+        let clock = self
+            .sync_play_clock
+            .estimate()
+            .ok_or(PlaybackReportSubmitError::SyncPlayClockUnavailable)?;
+        let server_now_ms = self
+            .player_view
+            .now_ms()
+            .checked_add(clock.offset_ms)
+            .and_then(sync_play_timestamp)
+            .ok_or(PlaybackReportSubmitError::SyncPlayClockUnavailable)?;
+        let status = SyncPlayPlaybackStatus {
+            when: server_now_ms,
+            position_ticks,
+            is_playing,
+            playlist_item_id: playlist_item_id.to_owned(),
+        };
+        let request_id = self.allocate_request_id();
+        let Some(worker) = self.worker.as_ref() else {
+            return Err(PlaybackReportSubmitError::WorkerUnavailable);
+        };
+        let sent = if buffering {
+            worker.sync_play_buffering(request_id, status)
+        } else {
+            worker.sync_play_ready(request_id, status)
+        };
+        sent.map_err(sync_play_submit_error)?;
+        self.sync_play_latest_action_request_id = Some((
+            request_id,
+            if buffering {
+                SyncPlayAction::Buffering
+            } else {
+                SyncPlayAction::Ready
+            },
+        ));
+        Ok(request_id)
+    }
+
+    /// Ask the server to stop playback for every group member.
+    pub fn stop_sync_play_group_playback(&mut self) -> Result<u64, PlaybackReportSubmitError> {
+        if !self.sync_play_can_send() {
+            return Err(PlaybackReportSubmitError::SyncPlayNotJoined);
+        }
+        let request_id = self.allocate_request_id();
+        let Some(worker) = self.worker.as_ref() else {
+            return Err(PlaybackReportSubmitError::WorkerUnavailable);
+        };
+        worker
+            .sync_play_stop(request_id)
+            .map_err(sync_play_submit_error)?;
+        self.sync_play_latest_action_request_id = Some((request_id, SyncPlayAction::Stop));
+        Ok(request_id)
+    }
+
     /// Apply one membership or state update from Jellyfin's session socket. These events are
     /// separate from scheduled playback commands: they keep the Watch Together screen in step
     /// with group creation, joins, leaves, and participant changes.
@@ -1726,6 +2435,7 @@ impl KattriApp {
                 let group_id = group.group_id.clone();
                 self.sync_play_ui.upsert_group(group);
                 if self.joined_sync_play_group_id() != Some(group_id.as_str()) {
+                    self.invalidate_sync_play_queue();
                     self.sync_play_state = SyncPlayState::Joined { group_id };
                 }
                 self.sync_play_pending_join = None;
@@ -1740,9 +2450,11 @@ impl KattriApp {
                         .is_none_or(|group_id| current == group_id)
                 });
                 if matches_current {
+                    self.invalidate_sync_play_queue();
                     self.sync_play_state = SyncPlayState::NotJoined;
                     self.sync_play_pending_join = None;
                     self.sync_play_pending_leave = None;
+                    self.sync_play_latest_action_request_id = None;
                     self.request_sync_play_groups();
                 }
             }
@@ -1766,6 +2478,12 @@ impl KattriApp {
             } => {
                 self.sync_play_ui
                     .update_group_state(group_id.as_deref(), state);
+            }
+            SyncPlayGroupUpdate::PlayQueue { group_id, update } => {
+                self.apply_sync_play_queue_update(group_id, update);
+            }
+            SyncPlayGroupUpdate::PlaybackCommand(command) => {
+                self.apply_sync_play_playback_command(command);
             }
             SyncPlayGroupUpdate::Other => {}
         }
@@ -1803,30 +2521,35 @@ impl KattriApp {
         };
         match mapped.action {
             GroupAction::Pause => {
-                self.pending_player_intents.extend([
+                self.queue_player_intent(
                     LocalAction::Seek {
                         position_ms: seek_to,
                     },
-                    LocalAction::Pause,
-                ]);
+                    true,
+                );
+                self.queue_player_intent(LocalAction::Pause, true);
                 self.sync_play_state = SyncPlayState::Paused {
                     group_id,
                     position_ms,
                 };
             }
             GroupAction::Unpause => {
-                self.pending_player_intents.extend([
+                self.queue_player_intent(
                     LocalAction::Seek {
                         position_ms: seek_to,
                     },
-                    LocalAction::Play,
-                ]);
+                    true,
+                );
+                self.queue_player_intent(LocalAction::Play, true);
                 self.sync_play_state = SyncPlayState::Playing { group_id, anchor };
             }
             GroupAction::Seek => {
-                self.pending_player_intents.push(LocalAction::Seek {
-                    position_ms: seek_to,
-                });
+                self.queue_player_intent(
+                    LocalAction::Seek {
+                        position_ms: seek_to,
+                    },
+                    true,
+                );
                 self.sync_play_state = if playing {
                     SyncPlayState::Playing { group_id, anchor }
                 } else {
@@ -1928,6 +2651,13 @@ impl KattriApp {
         };
         if let Err(error) = worker.sync_play_command(request_id, command) {
             self.playback_report_feedback = Some(error.to_string());
+        } else {
+            let action = match command {
+                SyncPlayCommand::Pause => SyncPlayAction::Pause,
+                SyncPlayCommand::Unpause => SyncPlayAction::Unpause,
+                SyncPlayCommand::Seek { .. } => SyncPlayAction::Seek,
+            };
+            self.sync_play_latest_action_request_id = Some((request_id, action));
         }
     }
 
@@ -1950,8 +2680,16 @@ impl KattriApp {
             .sync_play_drift
             .check(expected_ms, measured_ms, local_now_ms)
         {
-            self.pending_player_intents.push(LocalAction::Seek {
-                position_ms: u64::try_from(target_ms).unwrap_or(0),
+            self.queue_player_intent(
+                LocalAction::Seek {
+                    position_ms: u64::try_from(target_ms).unwrap_or(0),
+                },
+                true,
+            );
+            self.player_view.echo = Some(InboundEcho {
+                paused: false,
+                position_ms: target_ms,
+                applied_at_ms: local_now_ms,
             });
         }
     }
@@ -2158,6 +2896,7 @@ impl KattriApp {
     }
 
     pub(crate) fn start_connection(&mut self) {
+        self.cancel_mismatched_launch_intent();
         if self.quick_connect.is_some() {
             self.cancel_quick_connect();
         }
@@ -2187,6 +2926,14 @@ impl KattriApp {
         let password = std::mem::take(&mut *self.password_input);
         let saved = self.saved_sign_in_request(self.remember_sign_in);
         let request_id = self.begin_connection(ui_text(ids::CONNECT_CHECKING_SERVER));
+        let selected_server_url = self.server_url.trim().to_owned();
+        if let Some(intent) = self
+            .pending_launch_intent
+            .as_mut()
+            .filter(|intent| intent.server_url == selected_server_url)
+        {
+            intent.connection_generation = Some(request_id);
+        }
 
         let connect_result =
             self.worker
@@ -2228,7 +2975,68 @@ impl KattriApp {
         self.server_address_changed(Duration::ZERO);
     }
 
+    /// Prefill a parsed item link for a normal, user-initiated sign-in. Parsing the link never
+    /// authenticates, fetches the catalog, selects an item, or starts playback.
+    pub fn apply_launch_intent(&mut self, intent: kattri_client_core::deep_link::DeepLinkIntent) {
+        if self.quick_connect.is_some() {
+            self.cancel_quick_connect();
+        }
+        let has_session = self.server.is_some()
+            || self.user_name.is_some()
+            || !matches!(self.connection, ConnectionStatus::Disconnected { .. });
+        if has_session {
+            if !self.disconnect() {
+                return;
+            }
+        } else {
+            self.clear_connection();
+        }
+        let server_url = intent.server_url().to_owned();
+        self.server_url = server_url.clone();
+        self.username.clear();
+        self.password_input.zeroize();
+        self.password_input.clear();
+        self.server_preview = None;
+        self.server_check_pending = None;
+        self.server_check_error = None;
+        self.quick_connect_probe_after = None;
+        self.quick_connect_probe_pending = None;
+        self.quick_connect_enabled_for = None;
+        self.auto_play = None;
+        self.pending_playback = None;
+        self.pending_launch_intent = Some(PendingLaunchIntent {
+            server_url,
+            item_id: intent.item_id().to_owned(),
+            connection_generation: None,
+        });
+    }
+
+    fn cancel_mismatched_launch_intent(&mut self) {
+        if self
+            .pending_launch_intent
+            .as_ref()
+            .is_some_and(|intent| intent.server_url != self.server_url.trim())
+        {
+            self.pending_launch_intent = None;
+        }
+    }
+
+    fn open_launch_item_after_manual_sign_in(&mut self) {
+        self.cancel_mismatched_launch_intent();
+        let item_id = self
+            .pending_launch_intent
+            .as_ref()
+            .filter(|intent| intent.connection_generation == Some(self.connection_request_id))
+            .map(|intent| intent.item_id.clone());
+        if let Some(item_id) = item_id {
+            self.pending_launch_intent = None;
+            self.auto_play = None;
+            self.select_item(item_id);
+        }
+    }
+
     pub(crate) fn server_address_changed(&mut self, now: Duration) {
+        self.cancel_mismatched_launch_intent();
         self.server_preview = None;
         self.server_check_pending = None;
         self.server_check_error = None;
@@ -2482,6 +3290,9 @@ impl KattriApp {
         if let Some(worker) = self.worker.as_ref() {
             worker.cancel_reads();
         }
+        if let Some(intent) = self.pending_launch_intent.as_mut() {
+            intent.connection_generation = None;
+        }
         let request_id = self.allocate_request_id();
         self.connection_request_id = request_id;
         self.catalog_request_id = request_id;
@@ -2597,6 +3408,12 @@ impl KattriApp {
         self.music_queue_auto_play_item_id = None;
         self.music_queue_notice = None;
         self.focus_graph = FocusGraph::default();
+        self.invalidate_sync_play_queue();
+        self.sync_play_state = SyncPlayState::NotJoined;
+        self.sync_play_pending_join = None;
+        self.sync_play_pending_leave = None;
+        self.sync_play_latest_action_request_id = None;
+        self.sync_play_ui = crate::ui::syncplay::SyncPlayScreenState::default();
         self.connection = ConnectionStatus::Connecting {
             message: message.into(),
         };
@@ -2707,6 +3524,9 @@ impl KattriApp {
     }
 
     pub(crate) fn navigate_to(&mut self, page: Page) {
+        if page != Page::Dashboard && self.admin_users_open {
+            self.close_admin_users();
+        }
         self.view = AppView::Library;
         let left_browse_context = self.browse_context.take().is_some();
         if self.page == page && !left_browse_context {
@@ -2771,6 +3591,159 @@ impl KattriApp {
         if !submitted {
             self.admin_request_id = None;
             self.admin_load = AdminLoad::Failed;
+        }
+    }
+
+    pub(crate) fn can_manage_admin_users(&self) -> bool {
+        self.view == AppView::Library
+            && self.page == Page::Dashboard
+            && self.dashboard_enabled()
+            && self.user_is_admin
+            && self.server.is_some()
+            && self.current_user_id.is_some()
+    }
+
+    pub(crate) fn open_admin_users(&mut self) {
+        if !self.can_manage_admin_users() {
+            return;
+        }
+        self.admin_users_open = true;
+        self.admin_users.reset(self.connection_request_id);
+        self.request_admin_users();
+    }
+
+    pub(crate) fn close_admin_users(&mut self) {
+        self.admin_users_open = false;
+        self.admin_users.reset(self.connection_request_id);
+    }
+
+    fn request_admin_users(&mut self) {
+        if !self.admin_users_open || !self.can_manage_admin_users() || self.admin_users.is_loading()
+        {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        let generation = self.connection_request_id;
+        if !self.admin_users.begin_list(request_id, generation) {
+            return;
+        }
+        let submitted = self
+            .worker
+            .as_ref()
+            .ok_or(WorkerSubmitError::Stopped)
+            .and_then(|worker| worker.load_admin_users(request_id, generation));
+        if let Err(error) = submitted {
+            let _ =
+                self.admin_users
+                    .finish_list(request_id, generation, Err(ErrorClass::Unexpected));
+            self.admin_users.error = Some(error.to_string());
+        }
+    }
+
+    pub(crate) fn submit_admin_users_actions(
+        &mut self,
+        actions: Vec<crate::ui::admin_users::AdminUsersAction>,
+    ) {
+        if !self.admin_users_open || !self.can_manage_admin_users() {
+            return;
+        }
+        for action in actions {
+            match action {
+                crate::ui::admin_users::AdminUsersAction::Refresh => self.request_admin_users(),
+                crate::ui::admin_users::AdminUsersAction::Create { name, password } => {
+                    let mutation = PendingAdminUserMutation::Create;
+                    self.submit_admin_user_mutation(
+                        mutation,
+                        AdminUserOperation::Create { name, password },
+                    );
+                }
+                crate::ui::admin_users::AdminUsersAction::Rename { user_id, name } => {
+                    let mutation = PendingAdminUserMutation::Rename {
+                        user_id: user_id.clone(),
+                        name: name.clone(),
+                    };
+                    self.submit_admin_user_mutation(
+                        mutation,
+                        AdminUserOperation::Rename { user_id, name },
+                    );
+                }
+                crate::ui::admin_users::AdminUsersAction::PolicyPatch { user_id, changes } => {
+                    let mutation = PendingAdminUserMutation::PolicyPatch {
+                        user_id: user_id.clone(),
+                        changes: changes.clone(),
+                    };
+                    self.submit_admin_user_mutation(
+                        mutation,
+                        AdminUserOperation::PolicyPatch { user_id, changes },
+                    );
+                }
+                crate::ui::admin_users::AdminUsersAction::Delete { user_id } => {
+                    if self
+                        .current_user_id
+                        .as_deref()
+                        .is_some_and(|current_id| same_admin_user_id(current_id, &user_id))
+                    {
+                        continue;
+                    }
+                    let mutation = PendingAdminUserMutation::Delete {
+                        user_id: user_id.clone(),
+                    };
+                    self.submit_admin_user_mutation(
+                        mutation,
+                        AdminUserOperation::Delete { user_id },
+                    );
+                }
+            }
+        }
+    }
+
+    fn submit_admin_user_mutation(
+        &mut self,
+        mutation: PendingAdminUserMutation,
+        operation: AdminUserOperation,
+    ) {
+        if !self.can_manage_admin_users() || self.admin_users.is_loading() {
+            return;
+        }
+        let target_id = match &mutation {
+            PendingAdminUserMutation::Rename { user_id, .. }
+            | PendingAdminUserMutation::PolicyPatch { user_id, .. }
+            | PendingAdminUserMutation::Delete { user_id } => Some(user_id.as_str()),
+            PendingAdminUserMutation::Create => None,
+        };
+        if target_id.is_some_and(|target_id| {
+            !self
+                .admin_users
+                .users
+                .iter()
+                .any(|user| same_admin_user_id(&user.id, target_id))
+        }) {
+            self.admin_users.error = Some("Refresh the user list and retry.".to_owned());
+            return;
+        }
+
+        let request_id = self.allocate_request_id();
+        let generation = self.connection_request_id;
+        let kind = mutation.kind();
+        if !self
+            .admin_users
+            .begin_mutation(request_id, generation, mutation)
+        {
+            return;
+        }
+        let submitted = self
+            .worker
+            .as_ref()
+            .ok_or(WorkerSubmitError::Stopped)
+            .and_then(|worker| worker.mutate_admin_user(request_id, generation, operation));
+        if let Err(error) = submitted {
+            let _ = self.admin_users.finish_mutation(
+                request_id,
+                generation,
+                kind,
+                Err(ErrorClass::Unexpected),
+            );
+            self.admin_users.error = Some(error.to_string());
         }
     }
 
@@ -2869,6 +3842,9 @@ impl KattriApp {
     }
 
     pub(crate) fn set_view(&mut self, view: AppView) {
+        if view == AppView::Home && self.admin_users_open {
+            self.close_admin_users();
+        }
         self.view = view;
     }
 
@@ -5259,6 +6235,36 @@ impl KattriApp {
     /// stream from `poll_auto_play` as soon as both the item record and the options have
     /// arrived. `start_over` ignores a saved resume position.
     pub(crate) fn play_item(&mut self, item_id: String, start_over: bool) {
+        if self.sync_play_can_send() {
+            let start_ticks = if start_over {
+                0
+            } else {
+                self.selected_details
+                    .as_ref()
+                    .filter(|details| details.id == item_id)
+                    .and_then(|details| {
+                        details.user_data.as_ref().and_then(|user_data| {
+                            crate::ui::resumable_position_ticks(
+                                user_data.playback_position_ticks,
+                                user_data.played,
+                                details.run_time_ticks,
+                            )
+                        })
+                    })
+                    .unwrap_or(0)
+            };
+            if self
+                .set_sync_play_new_queue(vec![item_id], 0, start_ticks)
+                .is_err()
+            {
+                self.sync_play_ui.action_failed();
+            }
+            return;
+        }
+        self.play_item_locally(item_id, start_over);
+    }
+
+    fn play_item_locally(&mut self, item_id: String, start_over: bool) {
         self.select_item(item_id.clone());
         self.auto_play = Some(AutoPlay {
             item_id,
@@ -5279,6 +6285,14 @@ impl KattriApp {
         let Some(auto) = self.auto_play.clone() else {
             return;
         };
+        if self.sync_play_auto_target.as_ref().is_some_and(|target| {
+            self.selected_item_id.as_deref() != Some(target.item_id.as_str())
+                || !self.sync_play_queue_matches(target.generation, &target.playlist_item_id)
+        }) {
+            self.auto_play = None;
+            self.sync_play_auto_target = None;
+            return;
+        }
         let options = match self.playback_info.as_ref() {
             None => OptionsState::NotLoaded,
             Some(info) if info.error_code.is_some() || info.media_sources.is_empty() => {
@@ -5319,9 +6333,13 @@ impl KattriApp {
         });
         match decision {
             AutoPlayDecision::Wait => {}
-            AutoPlayDecision::Drop => self.auto_play = None,
+            AutoPlayDecision::Drop => {
+                self.auto_play = None;
+                self.sync_play_auto_target = None;
+            }
             AutoPlayDecision::DropNoCompatibleSource => {
                 self.auto_play = None;
+                self.sync_play_auto_target = None;
                 self.playback_start_error =
                     Some(ui_text(ids::PLAYBACK_ERROR_NO_COMPATIBLE_SOURCE).into());
             }
@@ -5356,7 +6374,18 @@ impl KattriApp {
                     ));
                 }
                 self.auto_play = None;
-                self.start_server_playback(source_index, play_method, resume_ticks);
+                let sync_play_start_ticks =
+                    self.sync_play_auto_target.as_ref().and_then(|target| {
+                        self.sync_play_queue
+                            .as_ref()
+                            .filter(|queue| queue.generation == target.generation)
+                            .map(|queue| queue.start_position_ticks)
+                    });
+                self.start_server_playback(
+                    source_index,
+                    play_method,
+                    sync_play_start_ticks.or(resume_ticks),
+                );
             }
         }
     }
@@ -5431,6 +6460,24 @@ impl KattriApp {
         play_method: jellyfin_api::PlayMethod,
         start_time_ticks: Option<i64>,
     ) {
+        let group_queue_load = self.sync_play_auto_target.as_ref().is_some_and(|target| {
+            self.selected_item_id.as_deref() == Some(target.item_id.as_str())
+                && self.sync_play_queue_matches(target.generation, &target.playlist_item_id)
+        });
+        if self.sync_play_can_send() && !group_queue_load {
+            let item_id = self.selected_item_id.clone();
+            if let Some(item_id) = item_id
+                && self
+                    .set_sync_play_new_queue(vec![item_id], 0, start_time_ticks.unwrap_or(0).max(0))
+                    .is_err()
+            {
+                self.sync_play_ui.action_failed();
+            }
+            self.playback_recovery = None;
+            self.playback_start_loading = false;
+            self.playback_start_status = None;
+            return;
+        }
         self.playback_recovery = None;
         self.mid_stream_recoveries = 0;
         // Only ordinary movie/episode startup is retried. Music and Live TV
@@ -5813,6 +6860,19 @@ impl KattriApp {
         };
         let request_id = self.allocate_request_id();
         self.playback_start_request_id = request_id;
+        self.sync_play_playback_handoff = self
+            .sync_play_auto_target
+            .as_ref()
+            .filter(|target| {
+                target.item_id == item_id
+                    && self.sync_play_queue_matches(target.generation, &target.playlist_item_id)
+            })
+            .map(|target| SyncPlayPlaybackHandoff {
+                generation: target.generation,
+                item_id: target.item_id.clone(),
+                playlist_item_id: target.playlist_item_id.clone(),
+                playback_generation: request_id,
+            });
         self.active_playback = Some(ActivePlayback {
             item_id: item_id.clone(),
             options_request_id: self.playback_request_id,
@@ -6316,6 +7376,21 @@ impl KattriApp {
         self.connection_request_id
     }
 
+    fn record_sync_play_status_result(&mut self, request_id: u64, accepted: bool) {
+        if self.sync_play_status_results.len() == MAX_SYNCPLAY_STATUS_RESULTS {
+            self.sync_play_status_results.pop_front();
+        }
+        self.sync_play_status_results
+            .push_back((request_id, accepted));
+    }
+
+    /// Take actual HTTP outcomes for queued SyncPlay Ready/Buffering reports.
+    /// Each pair is `(request_id, accepted_by_server)`; submission alone never
+    /// appears here. The bounded queue retains the newest outcomes.
+    pub fn take_sync_play_status_results(&mut self) -> Vec<(u64, bool)> {
+        self.sync_play_status_results.drain(..).collect()
+    }
+
     /// Latest non-authentication playback-report failure, if any.
     pub fn playback_report_feedback(&self) -> Option<&str> {
         self.playback_report_feedback.as_deref()
@@ -6340,6 +7415,8 @@ impl KattriApp {
             worker.cancel_reads();
         }
         self.connection_request_id = self.allocate_request_id();
+        self.admin_users_open = false;
+        self.admin_users.reset(self.connection_request_id);
         self.catalog_request_id = self.allocate_request_id();
         self.unsupported_catalog_filters.clear();
         self.details_request_id = self.allocate_request_id();
@@ -6354,6 +7431,7 @@ impl KattriApp {
         self.artwork_access_ticks.clear();
         self.server = None;
         self.user_name = None;
+        self.current_user_id = None;
         self.user_is_admin = false;
         self.clear_subtitle_management();
         self.items.clear();
@@ -6376,10 +7454,14 @@ impl KattriApp {
         self.playback_info = None;
         self.playback_loading = false;
         self.playback_error = None;
+        self.auto_play = None;
         self.playback_start_loading = false;
         self.playback_start_error = None;
         self.playback_start_status = None;
         self.pending_playback = None;
+        self.held_playback = None;
+        self.playback_recovery = None;
+        self.active_playback = None;
         self.submitted_search = None;
         self.search_results.clear();
         self.search_stale = false;
@@ -6443,9 +7525,13 @@ impl KattriApp {
         self.music_album_tracks_error = None;
         self.music_album_tracks_request_id = self.allocate_request_id();
         self.focus_graph = FocusGraph::default();
+        self.invalidate_sync_play_queue();
         self.sync_play_state = SyncPlayState::NotJoined;
         self.sync_play_pending_join = None;
         self.sync_play_pending_leave = None;
+        self.sync_play_latest_action_request_id = None;
+        self.sync_play_status_results.clear();
+        self.pending_launch_intent = None;
         self.sync_play_ui = crate::ui::syncplay::SyncPlayScreenState::default();
         self.connection = ConnectionStatus::Disconnected { error: None };
     }
@@ -6608,6 +7694,9 @@ impl KattriApp {
                 } if catalog_response_is_current(request_id, self.catalog_request_id) => {
                     let signed_in = request_id == self.connection_request_id;
                     if signed_in {
+                        self.admin_users_open = false;
+                        self.admin_users.reset(self.connection_request_id);
+                        self.sync_play_status_results.clear();
                         let _ = self.saved_servers.remember(
                             &server.name,
                             self.server_url.trim(),
@@ -6618,7 +7707,11 @@ impl KattriApp {
                     self.server = Some(server);
                     self.user_is_admin = user.is_administrator();
                     self.user_can_manage_subtitles = user.can_manage_subtitles();
+                    self.current_user_id = Some(user.id.clone());
                     self.user_name = Some(user.name);
+                    if !self.user_is_admin && self.admin_users_open {
+                        self.close_admin_users();
+                    }
                     self.catalog_loading = true;
                     if !self.catalog_loaded {
                         self.connection = ConnectionStatus::LoadingItems;
@@ -6634,6 +7727,52 @@ impl KattriApp {
                 {
                     self.admin_request_id = None;
                     self.admin_load = load;
+                }
+                WorkerEvent::AdminUsersLoaded {
+                    request_id,
+                    generation,
+                    result,
+                } if self.admin_users_open
+                    && self.user_is_admin
+                    && generation == self.connection_request_id =>
+                {
+                    let error = result.as_ref().err().copied();
+                    if self.admin_users.finish_list(request_id, generation, result) {
+                        if let Some(error) = error {
+                            self.record_network_error(error, None);
+                        } else {
+                            self.record_network_success();
+                        }
+                    }
+                }
+                WorkerEvent::AdminUserMutationFinished {
+                    request_id,
+                    generation,
+                    kind,
+                    result,
+                } if self.admin_users_open
+                    && self.user_is_admin
+                    && generation == self.connection_request_id =>
+                {
+                    let error = result.as_ref().err().copied();
+                    let revoke_current_admin = result.is_ok()
+                        && self.current_user_id.as_deref().is_some_and(|user_id| {
+                            self.admin_users.pending_policy_revokes_admin(user_id)
+                        });
+                    if self
+                        .admin_users
+                        .finish_mutation(request_id, generation, kind, result)
+                    {
+                        if let Some(error) = error {
+                            self.record_network_error(error, None);
+                        } else {
+                            self.record_network_success();
+                        }
+                        if revoke_current_admin {
+                            self.user_is_admin = false;
+                            self.close_admin_users();
+                        }
+                    }
                 }
                 WorkerEvent::HomeRowLoaded {
                     request_id,
@@ -6889,7 +8028,12 @@ impl KattriApp {
                         self.server = Some(server);
                         self.user_is_admin = user.is_administrator();
                         self.user_can_manage_subtitles = user.can_manage_subtitles();
+                        self.current_user_id = Some(user.id.clone());
                         self.user_name = Some(user.name);
+                        if !self.user_is_admin && self.admin_users_open {
+                            self.close_admin_users();
+                        }
+                        self.open_launch_item_after_manual_sign_in();
                     }
                 }
                 WorkerEvent::ItemsFailed {
@@ -8025,7 +9169,8 @@ impl KattriApp {
                     item_id,
                     mut playback,
                 } if request_id == self.playback_start_request_id
-                    && self.selected_item_id.as_deref() == Some(item_id.as_str()) =>
+                    && self.selected_item_id.as_deref() == Some(item_id.as_str())
+                    && self.sync_play_prepared_target_is_current(request_id, &item_id) =>
                 {
                     if let Some((repeat, order, queue)) =
                         music_queue_report_context(&self.music_queue, &item_id)
@@ -8119,7 +9264,16 @@ impl KattriApp {
                         self.quick_connect = None;
                     }
                     self.record_error_for_crash_report(&format!("sign-in failed: {message}"));
+                    let retry_launch_intent = self
+                        .pending_launch_intent
+                        .take()
+                        .filter(|intent| intent.server_url == self.server_url.trim())
+                        .map(|mut intent| {
+                            intent.connection_generation = None;
+                            intent
+                        });
                     self.clear_connection();
+                    self.pending_launch_intent = retry_launch_intent;
                     self.connection = ConnectionStatus::Disconnected {
                         error: Some(message),
                     };
@@ -8157,7 +9311,7 @@ impl KattriApp {
                 {
                     self.media_segments_request = None;
                 }
-                WorkerEvent::RemoteAction { action } => self.pending_player_intents.push(action),
+                WorkerEvent::RemoteAction { action } => self.queue_player_intent(action, false),
                 WorkerEvent::RemoteCommandReceived { command } => {
                     self.queue_socket_command(command);
                 }
@@ -8166,6 +9320,25 @@ impl KattriApp {
                 }
                 WorkerEvent::SyncPlayGroupUpdate { update } => {
                     self.apply_sync_play_group_update(update);
+                }
+                WorkerEvent::SyncPlayActionAccepted { request_id, action } => {
+                    if matches!(action, SyncPlayAction::Ready | SyncPlayAction::Buffering) {
+                        self.record_sync_play_status_result(request_id, true);
+                    }
+                    if self.sync_play_latest_action_request_id == Some((request_id, action)) {
+                        self.sync_play_latest_action_request_id = None;
+                        self.sync_play_ui.action_succeeded();
+                    }
+                }
+                WorkerEvent::SyncPlayActionFailed { request_id, action } => {
+                    if matches!(action, SyncPlayAction::Ready | SyncPlayAction::Buffering) {
+                        self.record_sync_play_status_result(request_id, false);
+                    }
+                    if self.sync_play_latest_action_request_id == Some((request_id, action)) {
+                        self.sync_play_latest_action_request_id = None;
+                        tracing::warn!(?action, "SyncPlay request failed");
+                        self.sync_play_ui.action_failed();
+                    }
                 }
                 WorkerEvent::SyncPlayGroupsLoaded { request_id, groups } => {
                     self.sync_play_ui.list_loaded(request_id, groups);
@@ -8178,9 +9351,12 @@ impl KattriApp {
                         // Jellyfin's Web client creates a group without a separate Join call;
                         // NewGroup puts the creating session in the group and announces it over
                         // the session socket.
-                        self.sync_play_state = SyncPlayState::Joined {
-                            group_id: group.group_id,
-                        };
+                        if self.joined_sync_play_group_id() != Some(group.group_id.as_str()) {
+                            self.invalidate_sync_play_queue();
+                            self.sync_play_state = SyncPlayState::Joined {
+                                group_id: group.group_id,
+                            };
+                        }
                     }
                 }
                 WorkerEvent::SyncPlayGroupCreateFailed { request_id } => {
@@ -8200,6 +9376,10 @@ impl KattriApp {
                     .is_some_and(|(pending, _)| *pending == request_id) =>
                 {
                     self.sync_play_pending_join = None;
+                    self.sync_play_latest_action_request_id = None;
+                    if self.joined_sync_play_group_id() != Some(group_id.as_str()) {
+                        self.invalidate_sync_play_queue();
+                    }
                     self.sync_play_state = SyncPlayState::Joined { group_id };
                     self.sync_play_ui.action_succeeded();
                 }
@@ -8216,6 +9396,8 @@ impl KattriApp {
                     if self.sync_play_pending_leave == Some(request_id) =>
                 {
                     self.sync_play_pending_leave = None;
+                    self.invalidate_sync_play_queue();
+                    self.sync_play_latest_action_request_id = None;
                     self.sync_play_state = SyncPlayState::NotJoined;
                     self.sync_play_ui.action_succeeded();
                 }
@@ -11820,7 +13002,10 @@ mod remote_and_sync_play_tests {
         ApiWorker, ClockEstimate, GroupCommand, KattriApp, LocalAction, SyncPlayState, WorkerEvent,
     };
     use jellyfin_api::remote_command::RemoteCommand;
-    use jellyfin_api::websocket::{SyncPlayMessage, SyncPlayWireCommand};
+    use jellyfin_api::websocket::{
+        SyncPlayGroupUpdate, SyncPlayPlayQueueUpdate, SyncPlayPlaybackAction,
+        SyncPlayPlaybackCommand, SyncPlayQueueEntry, SyncPlayWireCommand,
+    };
     use kattri_client_core::syncplay::ClockSample;
 
     const CLOCK: ClockEstimate = ClockEstimate {
@@ -11892,20 +13077,460 @@ mod remote_and_sync_play_tests {
         app
     }
 
+    #[test]
+    fn sync_play_status_calls_require_a_join_and_clock_estimate() {
+        let item_id = "3f2504e0-4f89-11d3-9a0c-0305e82c3302".to_owned();
+        let mut app = KattriApp::new(egui::Context::default());
+        assert_eq!(
+            app.sync_play_ready(0, &item_id, 0, false),
+            Err(super::PlaybackReportSubmitError::SyncPlayNotJoined)
+        );
+        assert_eq!(
+            app.set_sync_play_new_queue(vec![item_id.clone()], 0, 0),
+            Err(super::PlaybackReportSubmitError::SyncPlayNotJoined)
+        );
+
+        app.sync_play_state = SyncPlayState::Joined {
+            group_id: "group-1".into(),
+        };
+        app.sync_play_queue_generation = 4;
+        app.sync_play_queue = Some(super::SyncPlayQueueState {
+            group_id: "group-1".into(),
+            generation: 4,
+            last_update_ms: 1_000_000,
+            playlist: vec![SyncPlayQueueEntry {
+                item_id: "3f2504e0-4f89-11d3-9a0c-0305e82c3303".into(),
+                playlist_item_id: item_id.clone(),
+            }],
+            playing_item_index: Some(0),
+            start_position_ticks: 0,
+        });
+        app.worker = Some(ApiWorker::queued_for_test());
+        assert_eq!(
+            app.sync_play_buffering(4, &item_id, 0, false),
+            Err(super::PlaybackReportSubmitError::SyncPlayClockUnavailable)
+        );
+        assert_eq!(
+            app.sync_play_ready(4, "bad-playlist-entry", 0, false),
+            Err(super::PlaybackReportSubmitError::SyncPlayStatusInvalid)
+        );
+    }
+
+    #[test]
+    fn sync_play_queue_bounds_are_checked_before_worker_admission() {
+        let mut app = joined_app_with_clock();
+        app.worker = Some(ApiWorker::queued_for_test());
+        let queue_item = "3f2504e0-4f89-11d3-9a0c-0305e82c3302".to_owned();
+        assert_eq!(
+            app.set_sync_play_new_queue(vec![queue_item.clone()], 1, 0),
+            Err(super::PlaybackReportSubmitError::SyncPlayQueueInvalid)
+        );
+        assert_eq!(
+            app.set_sync_play_new_queue(vec![queue_item], 0, -1),
+            Err(super::PlaybackReportSubmitError::SyncPlayQueueInvalid)
+        );
+        assert_eq!(
+            app.set_sync_play_new_queue(vec!["invalid-id".into()], 0, 0),
+            Err(super::PlaybackReportSubmitError::SyncPlayQueueInvalid)
+        );
+        assert!(app.sync_play_latest_action_request_id.is_none());
+    }
+
+    #[test]
+    fn sync_play_rest_acceptance_does_not_mark_the_group_ready() {
+        let ctx = egui::Context::default();
+        let mut app = joined_app_with_clock();
+        let (worker, events) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        let request_id = app
+            .set_sync_play_new_queue(vec!["3f2504e0-4f89-11d3-9a0c-0305e82c3302".into()], 0, 0)
+            .expect("queue request is admitted");
+        events
+            .try_send(WorkerEvent::SyncPlayActionAccepted {
+                request_id,
+                action: crate::worker::SyncPlayAction::SetNewQueue,
+            })
+            .expect("accepted event queued");
+
+        app.receive_worker_events(&ctx);
+
+        assert!(matches!(app.sync_play_state, SyncPlayState::Joined { .. }));
+        assert!(app.sync_play_latest_action_request_id.is_none());
+    }
+
+    #[test]
+    fn native_status_results_report_http_outcomes_even_when_ui_request_is_stale() {
+        let ctx = egui::Context::default();
+        let mut app = joined_app_with_clock();
+        let (worker, events) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        let item_id = "3f2504e0-4f89-11d3-9a0c-0305e82c3302";
+        app.sync_play_queue_generation = 4;
+        app.sync_play_queue = Some(super::SyncPlayQueueState {
+            group_id: "group-1".to_owned(),
+            generation: 4,
+            last_update_ms: 1_000_000,
+            playlist: vec![SyncPlayQueueEntry {
+                item_id: "3f2504e0-4f89-11d3-9a0c-0305e82c3303".to_owned(),
+                playlist_item_id: item_id.to_owned(),
+            }],
+            playing_item_index: Some(0),
+            start_position_ticks: 0,
+        });
+        let submitted_id = app
+            .sync_play_ready(4, item_id, 0, false)
+            .expect("ready status is queued");
+        assert!(app.take_sync_play_status_results().is_empty());
+        events
+            .try_send(WorkerEvent::SyncPlayActionAccepted {
+                request_id: submitted_id,
+                action: crate::worker::SyncPlayAction::Ready,
+            })
+            .expect("accepted status queued");
+        events
+            .try_send(WorkerEvent::SyncPlayActionFailed {
+                request_id: 702,
+                action: crate::worker::SyncPlayAction::Buffering,
+            })
+            .expect("failed status queued");
+        events
+            .try_send(WorkerEvent::SyncPlayActionAccepted {
+                request_id: 703,
+                action: crate::worker::SyncPlayAction::Pause,
+            })
+            .expect("non-status action queued");
+
+        app.receive_worker_events(&ctx);
+
+        assert_eq!(
+            app.take_sync_play_status_results(),
+            vec![(submitted_id, true), (702, false)]
+        );
+        assert!(app.take_sync_play_status_results().is_empty());
+    }
+
+    #[test]
+    fn native_status_result_queue_is_bounded_and_cleared_on_session_reset() {
+        let mut app = joined_app_with_clock();
+        for request_id in 0..(super::MAX_SYNCPLAY_STATUS_RESULTS as u64 + 2) {
+            app.record_sync_play_status_result(request_id, true);
+        }
+        let results = app.take_sync_play_status_results();
+        assert_eq!(results.len(), super::MAX_SYNCPLAY_STATUS_RESULTS);
+        assert_eq!(results.first(), Some(&(2, true)));
+
+        app.record_sync_play_status_result(99, false);
+        app.clear_connection();
+        assert!(app.take_sync_play_status_results().is_empty());
+    }
+
+    #[test]
+    fn sync_play_timestamp_formats_unix_time_as_rfc3339_utc() {
+        assert_eq!(
+            super::sync_play_timestamp(0).as_deref(),
+            Some("1970-01-01T00:00:00.000Z")
+        );
+        assert_eq!(
+            super::sync_play_timestamp(951_782_400_125).as_deref(),
+            Some("2000-02-29T00:00:00.125Z")
+        );
+        assert!(super::sync_play_timestamp(i64::MAX).is_none());
+    }
+
     fn sync_play_event(command: SyncPlayWireCommand) -> WorkerEvent {
-        WorkerEvent::SyncPlayCommandReceived {
-            command: SyncPlayMessage {
-                command,
+        let action = match command {
+            SyncPlayWireCommand::Pause => SyncPlayPlaybackAction::Pause,
+            SyncPlayWireCommand::Unpause => SyncPlayPlaybackAction::Unpause,
+            SyncPlayWireCommand::Seek => SyncPlayPlaybackAction::Seek,
+        };
+        WorkerEvent::SyncPlayGroupUpdate {
+            update: SyncPlayGroupUpdate::PlaybackCommand(SyncPlayPlaybackCommand {
+                action,
+                group_id: Some("group-1".into()),
+                playlist_item_id: Some("3f2504e0-4f89-11d3-9a0c-0305e82c3302".into()),
                 position_ticks: 600_000_000,
                 when: "1970-01-01T00:16:40.0000000Z".into(),
+            }),
+        }
+    }
+
+    fn joined_app_with_queue() -> KattriApp {
+        let mut app = joined_app_with_clock();
+        app.sync_play_queue_generation = 7;
+        app.sync_play_queue = Some(super::SyncPlayQueueState {
+            group_id: "group-1".into(),
+            generation: 7,
+            last_update_ms: 1_000_000,
+            playlist: vec![SyncPlayQueueEntry {
+                item_id: "3f2504e0-4f89-11d3-9a0c-0305e82c3303".into(),
+                playlist_item_id: "3f2504e0-4f89-11d3-9a0c-0305e82c3302".into(),
+            }],
+            playing_item_index: Some(0),
+            start_position_ticks: 600_000_000,
+        });
+        app
+    }
+
+    #[test]
+    fn legacy_sync_messages_without_entry_identity_never_control_native_playback() {
+        let mut app = joined_app_with_queue();
+        app.queue_sync_play_command(jellyfin_api::websocket::SyncPlayMessage {
+            command: SyncPlayWireCommand::Pause,
+            position_ticks: 600_000_000,
+            when: "1970-01-01T00:16:40Z".into(),
+        });
+        assert!(app.take_player_intents().is_empty());
+        assert!(app.player_view.echo.is_none());
+    }
+
+    #[test]
+    fn native_sync_observations_require_the_current_queue_open() {
+        let mut app = joined_app_with_queue();
+        let entry = app
+            .sync_play_queue_active_entry()
+            .expect("active entry")
+            .clone();
+        app.sync_play_playback_handoff = Some(super::SyncPlayPlaybackHandoff {
+            generation: 7,
+            item_id: entry.item_id,
+            playlist_item_id: entry.playlist_item_id,
+            playback_generation: 42,
+        });
+        app.observe_sync_play_player(41, false, 50_000_000);
+        assert!(app.player_view.player.is_none());
+        app.observe_sync_play_player(42, true, 50_000_000);
+        assert_eq!(
+            app.player_view
+                .player
+                .expect("current observation")
+                .position_ms,
+            5_000
+        );
+        assert!(app.take_player_intents().is_empty());
+        app.invalidate_sync_play_queue();
+        app.observe_sync_play_player(42, false, 90_000_000);
+        assert_eq!(
+            app.player_view
+                .player
+                .expect("old snapshot retained")
+                .position_ms,
+            5_000
+        );
+    }
+
+    #[test]
+    fn drift_correction_suppresses_its_own_observed_seek_echo() {
+        let mut app = joined_app_with_queue();
+        app.sync_play_state = SyncPlayState::Playing {
+            group_id: "group-1".into(),
+            anchor: super::PlayAnchor {
+                position_ms: 1_000,
+                server_time_ms: 1_000,
+            },
+        };
+        app.check_sync_play_drift(2_500, CLOCK, 2_000);
+        assert_eq!(
+            app.take_player_intents(),
+            vec![LocalAction::Seek { position_ms: 2_000 }]
+        );
+        assert!(app.player_view.echo.is_some());
+        assert!(app.observe_local_player(false, 2_000, 2_000).is_none());
+        assert!(app.player_view.echo.is_none());
+    }
+
+    fn queue_update(
+        last_update: &str,
+        playlist: Vec<SyncPlayQueueEntry>,
+        playing_item_index: i32,
+    ) -> SyncPlayGroupUpdate {
+        SyncPlayGroupUpdate::PlayQueue {
+            group_id: Some("group-1".into()),
+            update: SyncPlayPlayQueueUpdate {
+                reason: "NewPlaylist".into(),
+                last_update: last_update.into(),
+                playlist,
+                playing_item_index,
+                start_position_ticks: 10_000_000,
+                is_playing: false,
             },
         }
+    }
+
+    fn queue_entry(item_id: &str, playlist_item_id: &str) -> SyncPlayQueueEntry {
+        SyncPlayQueueEntry {
+            item_id: item_id.into(),
+            playlist_item_id: playlist_item_id.into(),
+        }
+    }
+
+    #[test]
+    fn queue_updates_use_normal_playback_and_ignore_stale_or_duplicate_timestamps() {
+        const ITEM_A: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3302";
+        const ITEM_B: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3303";
+        const ENTRY_A: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3304";
+        const ENTRY_B: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3305";
+        let mut app = joined_app_with_clock();
+        app.worker = Some(ApiWorker::queued_for_test());
+        let update = queue_update(
+            "2026-11-01T12:00:00.000Z",
+            vec![queue_entry(ITEM_A, ENTRY_A), queue_entry(ITEM_B, ENTRY_B)],
+            0,
+        );
+
+        app.apply_sync_play_group_update(update);
+
+        assert_eq!(app.selected_item_id.as_deref(), Some(ITEM_A));
+        assert!(
+            app.playback_loading,
+            "the normal PlaybackInfo path is queued"
+        );
+        let generation = app.sync_play_queue_generation;
+        assert_eq!(
+            app.sync_play_queue_active_entry()
+                .map(|entry| entry.playlist_item_id.as_str()),
+            Some(ENTRY_A)
+        );
+
+        app.apply_sync_play_group_update(queue_update(
+            "2026-11-01T12:00:00.000Z",
+            vec![queue_entry(ITEM_B, ENTRY_B)],
+            0,
+        ));
+        app.apply_sync_play_group_update(queue_update(
+            "2026-11-01T11:59:59.000Z",
+            vec![queue_entry(ITEM_B, ENTRY_B)],
+            0,
+        ));
+
+        assert_eq!(app.sync_play_queue_generation, generation);
+        assert_eq!(
+            app.sync_play_queue_active_entry()
+                .map(|entry| entry.playlist_item_id.as_str()),
+            Some(ENTRY_A)
+        );
+        assert_eq!(app.selected_item_id.as_deref(), Some(ITEM_A));
+    }
+
+    #[test]
+    fn duplicate_media_items_keep_distinct_playlist_identity_and_generation_hooks() {
+        const ITEM: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3302";
+        const ENTRY_A: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3303";
+        const ENTRY_B: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3304";
+        let mut app = joined_app_with_clock();
+        app.worker = Some(ApiWorker::queued_for_test());
+        app.apply_sync_play_group_update(queue_update(
+            "2026-11-01T12:00:00.000Z",
+            vec![queue_entry(ITEM, ENTRY_A), queue_entry(ITEM, ENTRY_B)],
+            1,
+        ));
+
+        let generation = app.sync_play_queue_generation;
+        let playback_generation = app.playback_start_generation();
+        app.sync_play_playback_handoff = Some(super::SyncPlayPlaybackHandoff {
+            generation,
+            item_id: ITEM.into(),
+            playlist_item_id: ENTRY_B.into(),
+            playback_generation,
+        });
+        let target = app
+            .sync_play_playback_target(playback_generation)
+            .expect("prepared group load has an identity");
+        assert_eq!(target, (generation, ENTRY_B.to_owned()));
+        assert_eq!(
+            app.sync_play_queue.as_ref().map(|queue| queue
+                .playlist
+                .iter()
+                .map(|entry| entry.playlist_item_id.as_str())
+                .collect::<Vec<_>>()),
+            Some(vec![ENTRY_A, ENTRY_B])
+        );
+        assert!(
+            app.sync_play_ready(generation, ENTRY_B, 10_000_000, false)
+                .is_ok()
+        );
+        assert_eq!(
+            app.sync_play_ready(generation.wrapping_sub(1), ENTRY_B, 10_000_000, false),
+            Err(super::PlaybackReportSubmitError::SyncPlayStatusInvalid)
+        );
+
+        app.apply_sync_play_group_update(queue_update(
+            "2026-11-01T12:00:01.000Z",
+            vec![queue_entry(ITEM, ENTRY_A), queue_entry(ITEM, ENTRY_B)],
+            0,
+        ));
+        assert_ne!(app.sync_play_queue_generation, generation);
+        assert!(app.sync_play_playback_target(playback_generation).is_none());
+        assert_eq!(
+            app.sync_play_ready(generation, ENTRY_B, 10_000_000, false),
+            Err(super::PlaybackReportSubmitError::SyncPlayStatusInvalid)
+        );
+    }
+
+    #[test]
+    fn non_stop_commands_for_a_different_playlist_entry_are_ignored() {
+        let ctx = egui::Context::default();
+        let mut app = joined_app_with_queue();
+        let (worker, events) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        events
+            .try_send(WorkerEvent::SyncPlayGroupUpdate {
+                update: SyncPlayGroupUpdate::PlaybackCommand(SyncPlayPlaybackCommand {
+                    action: SyncPlayPlaybackAction::Pause,
+                    group_id: Some("group-1".into()),
+                    playlist_item_id: Some("3f2504e0-4f89-11d3-9a0c-0305e82c3305".into()),
+                    position_ticks: 600_000_000,
+                    when: "1970-01-01T00:16:40.0000000Z".into(),
+                }),
+            })
+            .expect("mismatched command queued");
+
+        app.receive_worker_events(&ctx);
+
+        assert!(app.take_player_intents().is_empty());
+        assert_eq!(
+            app.sync_play_state,
+            SyncPlayState::Joined {
+                group_id: "group-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn stop_is_entry_independent_but_queued_intents_do_not_cross_group_or_session_epochs() {
+        let ctx = egui::Context::default();
+        let mut app = joined_app_with_queue();
+        let (worker, events) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        events
+            .try_send(WorkerEvent::SyncPlayGroupUpdate {
+                update: SyncPlayGroupUpdate::PlaybackCommand(SyncPlayPlaybackCommand {
+                    action: SyncPlayPlaybackAction::Stop,
+                    group_id: Some("group-1".into()),
+                    playlist_item_id: Some("3f2504e0-4f89-11d3-9a0c-0305e82c3305".into()),
+                    position_ticks: 0,
+                    when: "1970-01-01T00:16:40.0000000Z".into(),
+                }),
+            })
+            .expect("stop update queued");
+        app.receive_worker_events(&ctx);
+        assert_eq!(app.take_player_intents(), vec![LocalAction::Stop]);
+
+        app.queue_player_intent(LocalAction::Pause, false);
+        app.queue_player_intent(LocalAction::Seek { position_ms: 99 }, true);
+        app.invalidate_sync_play_queue();
+        assert_eq!(app.pending_player_intents.len(), 2);
+        assert_eq!(app.take_player_intents(), vec![LocalAction::Pause]);
+
+        app.queue_player_intent(LocalAction::Play, false);
+        app.clear_connection();
+        assert_eq!(app.pending_player_intents.len(), 1);
+        assert!(app.take_player_intents().is_empty());
     }
 
     #[test]
     fn inbound_sync_play_pause_becomes_a_pause_intent_behind_the_echo_guard() {
         let ctx = egui::Context::default();
-        let mut app = joined_app_with_clock();
+        let mut app = joined_app_with_queue();
         let (worker, events) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
         events
@@ -11988,10 +13613,8 @@ mod remote_and_sync_play_tests {
     #[test]
     fn inbound_sync_play_is_refused_without_a_clock_estimate() {
         let ctx = egui::Context::default();
-        let mut app = KattriApp::new(ctx.clone());
-        app.sync_play_state = SyncPlayState::Joined {
-            group_id: "group-1".into(),
-        };
+        let mut app = joined_app_with_queue();
+        app.sync_play_clock = super::ClockEstimator::new();
         let (worker, events) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
         events

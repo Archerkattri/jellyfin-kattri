@@ -263,6 +263,26 @@ pub(crate) fn show(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
             .filter(|name| !name.is_empty())
             .unwrap_or("a group");
         ui.label(RichText::new(format!("Joined: {group_name}")).color(colors.accent));
+        let waiting_for_group = app
+            .joined_sync_play_group_id()
+            .and_then(|id| {
+                app.sync_play_ui
+                    .groups()
+                    .iter()
+                    .find(|group| group.group_id == id)
+            })
+            .is_some_and(|group| group.state == GroupState::Waiting);
+        if waiting_for_group {
+            ui.label(RichText::new("Waiting for group playback…").color(colors.muted));
+        }
+        let stop = ui.add_enabled(
+            !app.sync_play_leave_pending(),
+            egui::Button::new("Stop group playback"),
+        );
+        accessible_button(&stop, "Stop playback for the SyncPlay group");
+        if stop.clicked() && app.stop_sync_play_group_playback().is_err() {
+            app.sync_play_ui.action_failed();
+        }
         let leave = ui.add_enabled(
             !app.sync_play_leave_pending(),
             egui::Button::new(if app.sync_play_leave_pending() {

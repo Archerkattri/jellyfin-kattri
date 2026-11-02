@@ -57,6 +57,14 @@ jobs:
           $msi = Get-ChildItem -LiteralPath artifacts -Filter '*.msi' | Select-Object -First 1
           if ($null -eq $msi) { throw 'No MSI was downloaded from the triggering run.' }
           New-Item -ItemType Directory -Force -Path smoke-logs | Out-Null
+          try {
+            Get-CimInstance Win32_VideoController |
+              Select-Object Name, DriverVersion, VideoProcessor, Status |
+              Format-List | Out-File smoke-logs\display-adapters.txt
+          } catch {
+            "Display adapter diagnostics unavailable: $($_.Exception.GetType().Name)" |
+              Out-File smoke-logs\display-adapters.txt
+          }
           $installLog = (Resolve-Path smoke-logs).Path + '\msi-install.log'
           $uninstallLog = (Resolve-Path smoke-logs).Path + '\msi-uninstall.log'
           $perMachine = '${{ matrix.allusers }}' -eq '1'
@@ -73,8 +81,12 @@ jobs:
           $libmpv = Join-Path $installDir 'libmpv-2.dll'
           if (-not (Test-Path -LiteralPath $exe)) { throw "Installed executable is missing: $exe" }
           if (-not (Test-Path -LiteralPath $libmpv)) { throw "Installed libmpv is missing: $libmpv" }
+          Get-FileHash -LiteralPath $exe, $libmpv -Algorithm SHA256 |
+            Format-Table -AutoSize | Out-File smoke-logs\installed-hashes.txt
           try {
-            $process = Start-Process -FilePath $exe -WorkingDirectory $installDir -PassThru
+            $process = Start-Process -FilePath $exe -WorkingDirectory $installDir -PassThru `
+              -RedirectStandardOutput smoke-logs\app-stdout.txt `
+              -RedirectStandardError smoke-logs\app-stderr.txt
             $deadline = [DateTime]::UtcNow.AddSeconds(60)
             do {
               $process.Refresh()
@@ -99,6 +111,10 @@ jobs:
             if ($process.ExitCode -ne 0) { throw "Application exited with code $($process.ExitCode)" }
           }
           finally {
+            # Preserve startup diagnostics even when the process exits before a window exists.
+            if (Test-Path -LiteralPath smoke-logs\app-stderr.txt) {
+              Get-Content -LiteralPath smoke-logs\app-stderr.txt | Write-Host
+            }
             $installer = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/x', $msi.FullName, '/qn', '/norestart', '/L*v', $uninstallLog)
             if ($installer.ExitCode -ne 0) { throw "MSI uninstall failed with exit code $($installer.ExitCode)" }
           }
@@ -111,7 +127,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: windows-installation-smoke-${{ matrix.platform }}
+          name: windows-installation-smoke-${{ matrix.platform }}-${{ matrix.scope }}
           path: smoke-logs/
           if-no-files-found: warn
           retention-days: 30

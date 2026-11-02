@@ -213,6 +213,14 @@ try {
     if ((git ls-files --stage packaging/linux/smoke-launch.sh) -notmatch '^100755 ') {
         throw 'Linux smoke launcher must be executable in a fresh checkout.'
     }
+    foreach ($diagnostic in @('app-stdout.txt', 'app-stderr.txt', 'display-adapters.txt', 'installed-hashes.txt')) {
+        if ($installWorkflow -notmatch [regex]::Escape($diagnostic)) {
+            throw "Windows startup smoke must preserve $diagnostic for early process failures."
+        }
+    }
+    if ($installWorkflow -notmatch [regex]::Escape('windows-installation-smoke-${{ matrix.platform }}-${{ matrix.scope }}')) {
+        throw 'Windows installation artifacts must include both platform and scope to avoid job upload collisions.'
+    }
     if ($installWorkflow -match 'usr/bin/jellyfin-kattri') {
         throw 'Linux smoke setup must launch the packaged /usr/bin/kattri binary.'
     }
@@ -246,6 +254,95 @@ try {
         $linuxSmoke -notmatch 'xdotool windowquit' -or
         $linuxSmoke -notmatch 'xwininfo') {
         throw 'Linux smoke launcher must start a window manager and request a normal close.'
+    }
+
+    $desktopEntry = Get-Content 'packaging/linux/share/kattri.desktop' -Raw
+    if ($desktopEntry -notmatch '(?m)^Exec=kattri %u[ \t]*\r?$' -or
+        $desktopEntry -notmatch '(?m)^MimeType=x-scheme-handler/jellyfin;[ \t]*\r?$' -or
+        $debMetadata -notmatch 'target/release/jellyfin-kattri' -or
+        $debMetadata -notmatch 'usr/bin/kattri' -or
+        $rpmMetadata -notmatch 'target/kattri-stripped' -or
+        $rpmMetadata -notmatch '"/usr/bin/kattri"' -or
+        $rpmMetadata -notmatch 'packaging/linux/share/kattri\.desktop' -or
+        $flatpakManifest -notmatch 'command: kattri' -or
+        $flatpakManifest -notmatch 'target/release/jellyfin-kattri /app/bin/kattri' -or
+        $flatpakManifest -notmatch 'packaging/linux/share/kattri\.desktop' -or
+        $appImageScript -notmatch 'install -m 644 "\$DESKTOP" "\$APPDIR/usr/share/applications/kattri\.desktop"' -or
+        $appImageScript -notmatch 'install -m 755 "\$BINARY" "\$APPDIR/usr/bin/kattri"' -or
+        $appImageScript -notmatch '--desktop-file "\$APPDIR/usr/share/applications/kattri\.desktop"') {
+        throw 'Linux URI registration must deliver one URL argument through the packaged kattri executable.'
+    }
+
+    $wixProtocol = Get-Content 'packaging/windows/wix/kattri.wxs' -Raw
+    $msiBuilder = Get-Content 'packaging/windows/build-msi.ps1' -Raw
+    $expectedUriCommand = 'Value="&quot;[INSTALLFOLDER]$(var.ExeName)&quot; &quot;%1&quot;"'
+    if ($wixProtocol -notmatch '<ComponentRef Id="JellyfinUriProtocolComponent"\s*/>' -or
+        $wixProtocol -notmatch 'Root="HKMU"[\s\S]*?Key="Software\\Classes\\jellyfin"' -or
+        $wixProtocol -notmatch 'Name="URL Protocol"' -or
+        $wixProtocol -notmatch 'Key="Software\\Classes\\jellyfin\\shell\\open\\command"' -or
+        $wixProtocol -notmatch [regex]::Escape($expectedUriCommand) -or
+        $msiBuilder -notmatch 'wix\\kattri\.wxs') {
+        throw 'Windows MSI must register jellyfin:// and pass the quoted URI as one argument.'
+    }
+
+    $launchArgs = Get-Content 'proofs/egui-gl-host/src/launch_intent.rs' -Raw
+    foreach ($requiredLaunchTest in @(
+        'profile_forms_and_local_media_are_preserved',
+        'deep_links_cannot_be_combined_with_local_media_or_each_other',
+        'play_actions_are_not_launch_intents',
+        'quoted_or_encoded_argument_injection_is_rejected_without_echoing_input',
+        'malformed_links_and_ambiguous_options_have_sanitized_errors'
+    )) {
+        if ($launchArgs -notmatch [regex]::Escape("fn $requiredLaunchTest")) {
+            throw "Native launch argument regression test is missing: $requiredLaunchTest"
+        }
+    }
+    $launchTestStart = $launchArgs.IndexOf('#[cfg(test)]')
+    if ($launchTestStart -lt 0) {
+        throw 'Native launch argument tests are missing.'
+    }
+    $launchParser = $launchArgs.Substring(0, $launchTestStart)
+    if ($launchParser -match 'to_string_lossy|format!') {
+        throw 'Native launch argument errors must not echo a deep-link URL or argument.'
+    }
+
+    $appSource = Get-Content 'proofs/egui-client/src/app.rs' -Raw
+    $hostSource = Get-Content 'proofs/egui-gl-host/src/main.rs' -Raw
+    $dispatchStart = $hostSource.IndexOf('if let Some(intent) = launch_intent {')
+    if ($dispatchStart -lt 0) {
+        throw 'Could not locate the host launch-intent dispatch.'
+    }
+    $dispatchElse = $hostSource.IndexOf('} else {', $dispatchStart)
+    $dispatchEnd = $hostSource.IndexOf('// Load the local file after the app exists', $dispatchElse)
+    if ($dispatchElse -le $dispatchStart -or $dispatchEnd -le $dispatchElse) {
+        throw 'Could not locate the host launch-intent dispatch.'
+    }
+    $intentBranch = $hostSource.Substring($dispatchStart, $dispatchElse - $dispatchStart)
+    $fallbackBranch = $hostSource.Substring($dispatchElse, $dispatchEnd - $dispatchElse)
+    if ($intentBranch -notmatch 'kattri_app\.apply_launch_intent\(intent\)' -or
+        $intentBranch -match 'offer_launch_picker|resume_saved_sign_in' -or
+        $fallbackBranch -notmatch 'kattri_app\.offer_launch_picker\(\)' -or
+        $fallbackBranch -notmatch 'kattri_app\.resume_saved_sign_in\(\)') {
+        throw 'A link launch must skip the profile picker and saved sign-in resume.'
+    }
+    $prefillStart = $appSource.IndexOf('fn launch_intent_prefills_review_fields_without_sign_in_or_playback')
+    $manualSignInStart = $appSource.IndexOf('fn matching_manual_sign_in_selects_launch_item_once_without_autoplay')
+    $retryStart = $appSource.IndexOf('fn failed_manual_auth_keeps_the_item_pending_for_a_same_server_retry')
+    if ($prefillStart -lt 0 -or $manualSignInStart -le $prefillStart -or $retryStart -le $manualSignInStart) {
+        throw 'Launch intent tests must cover unauthenticated prefill and manual sign-in behavior.'
+    }
+    $prefillTest = $appSource.Substring($prefillStart, $manualSignInStart - $prefillStart)
+    $manualSignInTest = $appSource.Substring($manualSignInStart, $retryStart - $manualSignInStart)
+    if ($prefillTest -notmatch 'ConnectionStatus::Disconnected' -or
+        $prefillTest -notmatch 'app\.username\.is_empty\(\)' -or
+        $prefillTest -notmatch 'app\.password_input\.is_empty\(\)' -or
+        $prefillTest -notmatch 'app\.auto_play\.is_none\(\)' -or
+        $prefillTest -notmatch 'app\.pending_playback\.is_none\(\)' -or
+        $manualSignInTest -notmatch 'app\.start_connection\(\)' -or
+        $manualSignInTest -notmatch 'WorkerEvent::ItemsLoaded' -or
+        $manualSignInTest -notmatch 'app\.auto_play\.is_none\(\)' -or
+        $manualSignInTest -notmatch '!app\.playback_start_loading') {
+        throw 'Launch intent must wait for manual authentication, select the item, and never auto-play it.'
     }
 
     Write-Output 'PASS: release targets and clean-runner installation contracts.'

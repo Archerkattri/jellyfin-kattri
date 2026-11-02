@@ -68,7 +68,11 @@ fn transition_alpha(now: f64, changed_at: f64, reduced_motion: bool) -> f32 {
 }
 
 fn paint_scrim(painter: &egui::Painter, rect: Rect, palette: Palette) {
-    let dark = Color32::from_black_alpha(205);
+    let dark = if palette.background.r() > 128 {
+        Color32::from_white_alpha(235)
+    } else {
+        Color32::from_black_alpha(205)
+    };
     let clear = Color32::TRANSPARENT;
     gradient_quad(
         painter,
