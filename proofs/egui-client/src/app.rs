@@ -1020,14 +1020,21 @@ impl KattriApp {
     #[cfg(debug_assertions)]
     fn debug_log_changes(&self) {
         static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+        let connection = match self.connection {
+            ConnectionStatus::Disconnected { .. } => "Disconnected",
+            ConnectionStatus::Connecting { .. } => "Connecting",
+            ConnectionStatus::LoadingItems => "LoadingItems",
+            ConnectionStatus::Connected => "Connected",
+            ConnectionStatus::LibraryError(_) => "LibraryError",
+        };
         let snapshot = format!(
-            "connection={:?} server_check_error={:?} catalog_error={:?} catalog_loading={} items={} user={:?} selected={:?} details_loading={} auto_play={:?} info_loading={} info_ready={} playback_error={:?} start_loading={} start_status={:?} start_error={:?}",
-            self.connection,
+            "connection={} server_check_error={:?} catalog_error={:?} catalog_loading={} items={} signed_in={} selected={:?} details_loading={} auto_play={:?} info_loading={} info_ready={} playback_error={:?} start_loading={} start_status={:?} start_error={:?}",
+            connection,
             self.server_check_error,
             self.catalog_error,
             self.catalog_loading,
             self.items.len(),
-            self.user_name,
+            self.user_name.is_some(),
             self.selected_item_id,
             self.details_loading,
             self.auto_play,
@@ -1070,7 +1077,7 @@ impl KattriApp {
         self.password_input = Zeroizing::new(password.to_owned());
         self.allow_insecure_remote_http = url.starts_with("http://");
         crate::debug_log::install_panic_hook();
-        crate::debug_log::log(&format!("debug sign-in: prefilled form for {url}"));
+        crate::debug_log::log("debug sign-in: prefilled form for the configured test server");
         // Start the server check now; the per-frame hook presses Connect once it answers.
         self.check_current_server();
         DEBUG_SIGNIN_PENDING.store(true, std::sync::atomic::Ordering::Relaxed);

@@ -76,8 +76,12 @@ pub fn log(message: &str) {
         .append(true)
         .open(path)
     {
-        let _ = writeln!(file, "[{elapsed:>9.3}s] {}", redact(message));
+        let _ = writeln!(file, "[{elapsed:>9.3}s] {}", sanitized_line(message));
     }
+}
+
+fn sanitized_line(message: &str) -> String {
+    kattri_client_core::crash_report::redact(&redact(message))
 }
 
 /// Logs panics (message and location) before the default hook runs.
@@ -104,5 +108,19 @@ mod tests {
             "Token=\"[redacted]\", user=bob"
         );
         assert_eq!(redact("plain text"), "plain text");
+    }
+
+    #[test]
+    fn persisted_debug_lines_also_remove_urls_and_opaque_identifiers() {
+        let line = super::sanitized_line(
+            "request https://media.example/private selected=0123456789abcdef0123456789abcdef",
+        );
+        assert!(!line.contains("media.example"));
+        assert!(!line.contains("://"));
+        assert!(!line.contains("0123456789abcdef0123456789abcdef"));
+        assert_eq!(
+            super::sanitized_line("items=50 connected=true"),
+            "items=50 connected=true"
+        );
     }
 }

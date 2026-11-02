@@ -94,7 +94,12 @@ fn redact_line(line: &str, redact_all: bool) -> (String, bool) {
             redact_continuation = has_empty_secret_assignment(token)
                 && has_only_optional_scheme_word(&line[last_end..]);
             "[redacted]".to_owned()
-        } else if is_opaque_token(token) {
+        } else if token
+            .split(|character: char| {
+                !(character.is_ascii_alphanumeric() || character == '-' || character == '_')
+            })
+            .any(is_opaque_token)
+        {
             "[redacted]".to_owned()
         } else {
             token.to_owned()
@@ -211,6 +216,25 @@ fn hex(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::redact;
+
+    #[test]
+    fn opaque_values_are_redacted_inside_assignments_and_debug_wrappers() {
+        let opaque = "0123456789abcdef0123456789abcdef";
+        for input in [
+            format!("selected={opaque} items=50"),
+            format!("selected=Some(\"{opaque}\") items=50"),
+            format!("{{\"request_id\":\"{opaque}\"}} items=50"),
+        ] {
+            let result = redact(&input);
+            assert!(!result.contains(opaque));
+            assert!(result.contains("items=50"));
+            assert_eq!(redact(&result), result);
+        }
+        assert_eq!(
+            redact("selected=abc123 items=50"),
+            "selected=abc123 items=50"
+        );
+    }
 
     /// Input, then text that must not survive in the output.
     const LEAKS: &[(&str, &str)] = &[
