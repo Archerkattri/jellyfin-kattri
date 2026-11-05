@@ -193,6 +193,9 @@ impl WorkerCommand {
         match self {
             Self::CheckServer { .. } => Some(0),
             Self::FetchItems { .. } => Some(1),
+            // A tab load and a catalog page are the same navigation read: a newer one supersedes
+            // a queued request and Back/disconnect cancels both.
+            Self::ListLibrarySuggestions { .. } | Self::ListUpcomingEpisodes { .. } => Some(1),
             Self::GetItem { .. } => Some(2),
             Self::LoadHomeRow { row, .. } => Some(match row {
                 HomeRowKind::ContinueWatching => 3,
@@ -322,6 +325,20 @@ impl CommandQueue {
         drop(state);
         self.wake.notify_one();
         Ok(())
+    }
+
+    /// Drains queued work for tests that assert which request the UI issued. The production
+    /// worker loop is the only consumer of the queue otherwise.
+    #[cfg(test)]
+    pub(super) fn take_commands_for_test(&self) -> Vec<WorkerCommand> {
+        let Ok(mut state) = self.state.lock() else {
+            return Vec::new();
+        };
+        let mut commands = Vec::new();
+        commands.extend(state.controls.drain(..).map(|queued| queued.command));
+        commands.extend(state.reads.drain(..).map(|queued| queued.command));
+        commands.extend(state.artwork.drain(..).map(|queued| queued.command));
+        commands
     }
 
     fn invalidate_reads(state: &mut QueueState) {

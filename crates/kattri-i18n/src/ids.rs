@@ -137,6 +137,12 @@ pub const MUSIC_QUEUE_ADD: &str = "music.queue.add";
 pub const MUSIC_QUEUE_PLAY_NEXT: &str = "music.queue.play_next";
 pub const MUSIC_ALBUM_PLAY_FIRST: &str = "music.album.play_first";
 pub const MUSIC_ALBUM_LOADING_TRACKS: &str = "music.album.loading_tracks";
+pub const MUSIC_ALBUM_DOWNLOAD_ALL: &str = "music.album.download_all";
+pub const LIBRARY_TAB_SUGGESTIONS: &str = "library.tab.suggestions";
+pub const LIBRARY_TAB_UPCOMING: &str = "library.tab.upcoming";
+pub const LIBRARY_TAB_EPISODES: &str = "library.tab.episodes";
+pub const LIBRARY_TAB_EMPTY_SUGGESTIONS: &str = "library.tab.empty.suggestions";
+pub const LIBRARY_TAB_EMPTY_UPCOMING: &str = "library.tab.empty.upcoming";
 pub const SERIES_HEADING_SEASONS: &str = "series.heading.seasons";
 pub const SERIES_BUTTON_PLAY_NEXT_UP: &str = "series.button.play_next_up";
 pub const SERIES_BUTTON_SHUFFLE: &str = "series.button.shuffle";
@@ -1084,6 +1090,12 @@ pub const ALL: &[&str] = &[
     MUSIC_QUEUE_PLAY_NEXT,
     MUSIC_ALBUM_PLAY_FIRST,
     MUSIC_ALBUM_LOADING_TRACKS,
+    MUSIC_ALBUM_DOWNLOAD_ALL,
+    LIBRARY_TAB_SUGGESTIONS,
+    LIBRARY_TAB_UPCOMING,
+    LIBRARY_TAB_EPISODES,
+    LIBRARY_TAB_EMPTY_SUGGESTIONS,
+    LIBRARY_TAB_EMPTY_UPCOMING,
     SERIES_HEADING_SEASONS,
     SERIES_BUTTON_PLAY_NEXT_UP,
     SERIES_BUTTON_SHUFFLE,

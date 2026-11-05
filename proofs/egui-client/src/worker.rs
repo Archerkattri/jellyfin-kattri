@@ -44,6 +44,8 @@ use zeroize::{Zeroize, Zeroizing};
 /// Items requested per home-screen row. Bounded so one row cannot grow the UI without limit.
 pub const HOME_ROW_LIMIT: u32 = 16;
 const CATALOG_PAGE_SIZE: u32 = 50;
+/// Suggestions and upcoming episodes are one capped page; the server endpoints clamp here too.
+pub(crate) const LIBRARY_TAB_LIMIT: u32 = 50;
 const MAX_ADMIN_USER_ID_BYTES: usize = 36;
 const MAX_ADMIN_USER_NAME_BYTES: usize = 256;
 const MAX_ADMIN_USER_PASSWORD_BYTES: usize = 4_096;
@@ -204,7 +206,7 @@ pub enum SyncPlayAction {
 }
 
 /// Boxed because a replacement queue can contain many item IDs.
-struct SyncPlayNewQueue {
+pub(crate) struct SyncPlayNewQueue {
     item_ids: Vec<String>,
     playing_item_position: i32,
     start_position_ticks: i64,
@@ -466,6 +468,26 @@ pub enum WorkerEvent {
         request_id: u64,
         genres: Vec<String>,
         studios: Vec<(String, String)>,
+    },
+    /// The server's suggestions for the library page's Suggestions tab.
+    LibrarySuggestionsLoaded {
+        request_id: u64,
+        items: Vec<BaseItemDto>,
+    },
+    LibrarySuggestionsFailed {
+        request_id: u64,
+        error_class: ErrorClass,
+        retry_after: Option<std::time::Duration>,
+    },
+    /// Episodes that have not premiered yet, for the series library's Upcoming tab.
+    UpcomingEpisodesLoaded {
+        request_id: u64,
+        items: Vec<BaseItemDto>,
+    },
+    UpcomingEpisodesFailed {
+        request_id: u64,
+        error_class: ErrorClass,
+        retry_after: Option<std::time::Duration>,
     },
     /// Trickplay resolutions of the playing item's media source. Empty when it has none or on
     /// failure.
@@ -1017,7 +1039,7 @@ mod admin_user_command_tests {
     }
 }
 
-enum WorkerCommand {
+pub(crate) enum WorkerCommand {
     CheckServer {
         request_id: u64,
         server_url: String,
@@ -1043,6 +1065,15 @@ enum WorkerCommand {
     FetchItems {
         request_id: u64,
         query: ItemQuery,
+    },
+    /// The server's suggestions for one library (`GET /Items/{id}/Suggestions`).
+    ListLibrarySuggestions {
+        request_id: u64,
+        library_id: String,
+    },
+    /// Episodes that have not premiered yet (`GET /Shows/Upcoming`).
+    ListUpcomingEpisodes {
+        request_id: u64,
     },
     RestoreQueueItems {
         request_id: u64,
@@ -1414,6 +1445,12 @@ impl ApiWorker {
             },
             sender,
         )
+    }
+
+    /// Drains commands queued by the app so a headless test can assert the exact request.
+    #[cfg(test)]
+    pub(crate) fn take_commands_for_test(&self) -> Vec<WorkerCommand> {
+        self.commands.take_commands_for_test()
     }
 
     pub fn new(ctx: egui::Context, tls: ClientTlsFiles) -> std::io::Result<Self> {
@@ -2009,6 +2046,22 @@ impl ApiWorker {
             parent_id,
             item_types,
         })
+    }
+
+    pub(crate) fn list_library_suggestions(
+        &self,
+        request_id: u64,
+        library_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ListLibrarySuggestions {
+            request_id,
+            library_id,
+        })
+    }
+
+    pub(crate) fn list_upcoming_episodes(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::ListUpcomingEpisodes { request_id })
     }
 
     pub(crate) fn list_user_playlists(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
@@ -4253,6 +4306,101 @@ async fn execute_command(
                     },
                 )
                 .await
+            }
+            WorkerCommand::ListLibrarySuggestions {
+                request_id,
+                library_id,
+            } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        client
+                            .list_suggestions(session, &library_id, LIBRARY_TAB_LIMIT)
+                            .await
+                    }
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                match result {
+                    Ok(items) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::LibrarySuggestionsLoaded { request_id, items },
+                        )
+                        .await
+                    }
+                    Err(ApiError::ReauthenticationRequired) => {
+                        session = None;
+                        client = None;
+                        server = None;
+                        playback_info_cache = None;
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ReauthenticationRequired {
+                                request_id,
+                                message: "The server requires you to sign in again.".into(),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::LibrarySuggestionsFailed {
+                                request_id,
+                                error_class: error.classify(),
+                                retry_after: error.retry_after(),
+                            },
+                        )
+                        .await
+                    }
+                }
+            }
+            WorkerCommand::ListUpcomingEpisodes { request_id } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        client.upcoming_episodes(session, LIBRARY_TAB_LIMIT).await
+                    }
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                match result {
+                    Ok(items) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::UpcomingEpisodesLoaded { request_id, items },
+                        )
+                        .await
+                    }
+                    Err(ApiError::ReauthenticationRequired) => {
+                        session = None;
+                        client = None;
+                        server = None;
+                        playback_info_cache = None;
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ReauthenticationRequired {
+                                request_id,
+                                message: "The server requires you to sign in again.".into(),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::UpcomingEpisodesFailed {
+                                request_id,
+                                error_class: error.classify(),
+                                retry_after: error.retry_after(),
+                            },
+                        )
+                        .await
+                    }
+                }
             }
             WorkerCommand::GetTrickplayResolutions {
                 request_id,

@@ -18,8 +18,8 @@ use crate::worker::downloads_batch::{
 use crate::worker::update::{ApplyRequest, UpdateState, UpdateStatus, prepare};
 use crate::worker::{
     AdminUserOperation, ApiWorker, ClientTlsFiles, HomeCatalogData, HomeCatalogKind, HomeRowKind,
-    PlaylistMutationKind, PreparedPlayback, SavedSignInRequest, ServerIdentity, SyncPlayAction,
-    SyncPlayCommand, WorkerEvent, WorkerSubmitError,
+    LIBRARY_TAB_LIMIT, PlaylistMutationKind, PreparedPlayback, SavedSignInRequest, ServerIdentity,
+    SyncPlayAction, SyncPlayCommand, WorkerEvent, WorkerSubmitError,
 };
 use jellyfin_api::remote_command::RemoteCommand;
 use jellyfin_api::session_reporting::QueueItem;
@@ -490,6 +490,53 @@ pub enum AppView {
     Library,
 }
 
+/// A tab of the Movies or Series library page. The first tab keeps the page's own catalog;
+/// the others load a different source into the same card grid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) enum LibraryTab {
+    #[default]
+    Library,
+    Suggestions,
+    Upcoming,
+    Episodes,
+}
+
+impl LibraryTab {
+    pub(crate) const MOVIE_TABS: [Self; 2] = [Self::Library, Self::Suggestions];
+    pub(crate) const SERIES_TABS: [Self; 4] = [
+        Self::Library,
+        Self::Suggestions,
+        Self::Upcoming,
+        Self::Episodes,
+    ];
+
+    pub(crate) fn for_page(page: Page) -> &'static [Self] {
+        match page {
+            Page::Movies => &Self::MOVIE_TABS,
+            Page::Series => &Self::SERIES_TABS,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn label(self, page: Page) -> &'static str {
+        match self {
+            Self::Library => page.label(),
+            Self::Suggestions => ui_text(ids::LIBRARY_TAB_SUGGESTIONS),
+            Self::Upcoming => ui_text(ids::LIBRARY_TAB_UPCOMING),
+            Self::Episodes => ui_text(ids::LIBRARY_TAB_EPISODES),
+        }
+    }
+}
+
+/// Why the album track list was requested: the details page loads it to offer Download all,
+/// while Play album loads or reuses it to start the queue.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AlbumTracksPurpose {
+    #[default]
+    Display,
+    Play,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Home,
@@ -903,6 +950,39 @@ fn selection_method(method: jellyfin_api::PlayMethod) -> PlaybackMethod {
     }
 }
 
+/// Why an album's Download all cannot plan its tracks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AlbumDownloadError {
+    /// The server's download policy does not permit a batch.
+    PermissionDenied,
+    /// Another album's tracks are loaded, or none were loaded yet.
+    NotLoaded,
+    /// The album loaded successfully but has no tracks.
+    NoTracks,
+    /// More than the batch cap; nothing is truncated.
+    TooManyItems,
+}
+
+/// Plan every loaded track of `album_id` through the bounded batch planner, refusing instead of
+/// truncating an over-cap album and never reusing another album's tracks.
+fn plan_album_download(
+    can_download: bool,
+    album_id: &str,
+    loaded_album_id: Option<&str>,
+    tracks: &[CollectionItem],
+) -> Result<BatchPlan, AlbumDownloadError> {
+    if !can_download {
+        return Err(AlbumDownloadError::PermissionDenied);
+    }
+    if loaded_album_id != Some(album_id) {
+        return Err(AlbumDownloadError::NotLoaded);
+    }
+    if tracks.is_empty() {
+        return Err(AlbumDownloadError::NoTracks);
+    }
+    plan_batch(tracks.to_vec()).map_err(|_| AlbumDownloadError::TooManyItems)
+}
+
 pub struct KattriApp {
     pub(crate) worker: Option<ApiWorker>,
     /// Download list and page state. The worker owns the jobs; this copy is what the page reads.
@@ -945,6 +1025,8 @@ pub struct KattriApp {
     /// The signed-in user may search and download subtitles (administrator, or the policy's
     /// `EnableSubtitleManagement`).
     pub(crate) user_can_manage_subtitles: bool,
+    /// The server's policy permits downloading content (`EnableContentDownloading`).
+    pub(crate) user_can_download: bool,
     /// Seek-bar preview thumbnails of the item now playing.
     trickplay: crate::trickplay::TrickplayState,
     /// The remote subtitle search dialog, while open.
@@ -975,6 +1057,10 @@ pub struct KattriApp {
     pub(crate) catalog_next_index: u32,
     pub(crate) catalog_end_reached: bool,
     pub(crate) catalog_loaded: bool,
+    /// The selected tab of the Movies or Series page. Reset whenever the page changes.
+    pub(crate) library_tab: LibraryTab,
+    /// Latest Suggestions or Upcoming request; a reply for any other id is stale.
+    library_tab_request_id: u64,
     loaded_search: Option<String>,
     pub(crate) catalog_loading: bool,
     pub(crate) catalog_error: Option<String>,
@@ -1119,6 +1205,11 @@ pub struct KattriApp {
     pub(crate) music_album_tracks_loading: bool,
     pub(crate) music_album_tracks_error: Option<ErrorClass>,
     music_album_tracks_request_id: u64,
+    /// The album's tracks from the last `MusicAlbumTracksLoaded`, for Play album and Download all.
+    pub(crate) music_album_tracks: Vec<CollectionItem>,
+    /// Album the loaded tracks belong to; a different album page never reuses them.
+    music_album_tracks_album_id: Option<String>,
+    music_album_tracks_purpose: AlbumTracksPurpose,
     music_queue_auto_play_item_id: Option<String>,
     pub(crate) music_queue_notice: Option<String>,
     pending_stored_music_queue: Option<StoredQueue>,
@@ -1518,6 +1609,7 @@ impl KattriApp {
             current_user_id: None,
             user_is_admin: false,
             user_can_manage_subtitles: false,
+            user_can_download: false,
             trickplay: crate::trickplay::TrickplayState::default(),
             subtitle_search: None,
             subtitle_cultures: Vec::new(),
@@ -1537,6 +1629,8 @@ impl KattriApp {
             catalog_next_index: 0,
             catalog_end_reached: false,
             catalog_loaded: false,
+            library_tab: LibraryTab::Library,
+            library_tab_request_id: 0,
             loaded_search: None,
             catalog_loading: false,
             catalog_error: None,
@@ -1660,6 +1754,9 @@ impl KattriApp {
             music_album_tracks_loading: false,
             music_album_tracks_error: None,
             music_album_tracks_request_id: 0,
+            music_album_tracks: Vec::new(),
+            music_album_tracks_album_id: None,
+            music_album_tracks_purpose: AlbumTracksPurpose::Display,
             music_queue_auto_play_item_id: None,
             music_queue_notice,
             pending_stored_music_queue,
@@ -3396,9 +3493,13 @@ impl KattriApp {
         self.server = None;
         self.user_name = None;
         self.user_is_admin = false;
+        self.user_can_manage_subtitles = false;
+        self.user_can_download = false;
         self.clear_subtitle_management();
         self.items.clear();
         self.catalog_selection.clear();
+        self.library_tab = LibraryTab::Library;
+        self.library_tab_request_id = self.allocate_request_id();
         self.selected_item_id = None;
         self.selected_details = None;
         self.selected_artwork_texture = None;
@@ -3629,6 +3730,8 @@ impl KattriApp {
         }
         self.cancel_navigation_requests();
         self.page = page;
+        self.library_tab = LibraryTab::Library;
+        self.library_tab_request_id = self.allocate_request_id();
         if page == Page::LiveTv {
             self.live_tv_recordings_state = RecordingsState::NotLoaded;
         }
@@ -3872,6 +3975,8 @@ impl KattriApp {
         self.cancel_navigation_requests();
         self.view = AppView::Library;
         self.page = page;
+        self.library_tab = LibraryTab::Library;
+        self.library_tab_request_id = self.allocate_request_id();
         self.catalog_name_prefix = None;
         self.catalog_genre = None;
         self.catalog_studio = None;
@@ -4404,18 +4509,39 @@ impl KattriApp {
         }
     }
 
+    /// Play album: queue the tracks, fetching them first only when the page has not loaded them.
     pub(crate) fn request_selected_album_tracks(&mut self) {
-        let Some(album_id) = self.selected_details.as_ref().and_then(|item| {
+        self.request_album_tracks(AlbumTracksPurpose::Play);
+    }
+
+    /// Loads an album's tracks when its details page opens, so Download all can be offered.
+    fn load_selected_album_tracks(&mut self) {
+        self.request_album_tracks(AlbumTracksPurpose::Display);
+    }
+
+    fn selected_album_id(&self) -> Option<String> {
+        self.selected_details.as_ref().and_then(|item| {
             (item.item_type.as_deref() == Some("MusicAlbum")
                 && self.selected_item_id.as_deref() == Some(item.id.as_str()))
             .then(|| item.id.clone())
-        }) else {
+        })
+    }
+
+    fn request_album_tracks(&mut self, purpose: AlbumTracksPurpose) {
+        let Some(album_id) = self.selected_album_id() else {
             return;
         };
+        if self.music_album_tracks_album_id.as_deref() == Some(album_id.as_str()) {
+            if purpose == AlbumTracksPurpose::Play {
+                self.play_selected_album_tracks();
+            }
+            return;
+        }
         let request_id = self.allocate_request_id();
         self.music_album_tracks_request_id = request_id;
         self.music_album_tracks_loading = true;
         self.music_album_tracks_error = None;
+        self.music_album_tracks_purpose = purpose;
         let result = self
             .worker
             .as_ref()
@@ -4425,6 +4551,58 @@ impl KattriApp {
             self.music_album_tracks_loading = false;
             self.music_album_tracks_error = Some(ErrorClass::Unexpected);
         }
+    }
+
+    /// Starts the album's loaded tracks playing, as Play album did before the list was cached.
+    fn play_selected_album_tracks(&mut self) {
+        let mut names = HashMap::new();
+        let queue_items = self
+            .music_album_tracks
+            .iter()
+            .filter(|track| track.item_type.as_deref() == Some("Audio"))
+            .map(|track| {
+                names.insert(track.item_id.clone(), track.title.clone());
+                QueueItem::new(track.item_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let first_id = queue_items.first().map(|item| item.id.clone());
+        if queue_items.is_empty() || self.music_queue.add_album_and_play(queue_items).is_err() {
+            self.music_album_tracks_error = Some(ErrorClass::Unexpected);
+        } else if let Some(first_id) = first_id {
+            self.music_track_names.extend(names);
+            self.music_album_tracks_error = None;
+            self.music_queue_position_ms = 0;
+            self.music_queue_resume_position_ms = None;
+            self.music_queue_resume_position_ticks = None;
+            self.select_item(first_id);
+        }
+    }
+
+    /// The album page offers Download all only when the server permits downloads and the
+    /// bounded track load returned at least one track.
+    pub(crate) fn album_download_all_visible(&self) -> bool {
+        self.user_can_download && !self.music_album_tracks.is_empty()
+    }
+
+    /// Downloads every loaded track of the open album through the bounded batch queue.
+    pub(crate) fn download_selected_album(&mut self) {
+        let Some(album_id) = self.selected_album_id() else {
+            return;
+        };
+        let plan = match plan_album_download(
+            self.user_can_download,
+            &album_id,
+            self.music_album_tracks_album_id.as_deref(),
+            &self.music_album_tracks,
+        ) {
+            Ok(plan) => plan,
+            Err(AlbumDownloadError::TooManyItems) => {
+                self.show_toast(ui_text(ids::BROWSE_SELECTION_DOWNLOAD_TOO_MANY).to_owned());
+                return;
+            }
+            Err(_) => return,
+        };
+        self.start_download_plan(plan, &album_id, CollectionKind::Album);
     }
 
     pub(crate) fn apply_music_action(&mut self, action: MusicAction) {
@@ -5405,7 +5583,147 @@ impl KattriApp {
         }
     }
 
+    /// The item id of the library the page is showing. A library tile already carries it in the
+    /// browse context; a page reached from the top bar falls back to the matching user view.
+    fn library_tab_library_id(&self) -> Option<String> {
+        if let Some(context) = self.browse_context.as_ref() {
+            return Some(context.parent_id.clone());
+        }
+        let collection_type = match self.page {
+            Page::Movies => "movies",
+            Page::Series => "tvshows",
+            _ => return None,
+        };
+        self.home
+            .library_views()?
+            .iter()
+            .find(|view| view.collection_type.as_deref() == Some(collection_type))
+            .map(|view| view.id.clone())
+    }
+
+    pub(crate) fn library_tab_available(&self, tab: LibraryTab) -> bool {
+        match tab {
+            LibraryTab::Library => true,
+            LibraryTab::Suggestions => self.library_tab_library_id().is_some(),
+            LibraryTab::Upcoming | LibraryTab::Episodes => self.page == Page::Series,
+        }
+    }
+
+    /// Switch the Movies or Series page to another tab, dropping the old page's selection,
+    /// paging and scroll position before the new source loads.
+    pub(crate) fn select_library_tab(&mut self, tab: LibraryTab) {
+        if self.library_tab == tab || !self.library_tab_available(tab) {
+            return;
+        }
+        self.library_tab = tab;
+        self.cancel_navigation_requests();
+        self.library_tab_request_id = self.allocate_request_id();
+        self.catalog_selection.clear();
+        self.items.clear();
+        self.total_record_count = None;
+        self.collection_runtime = CollectionRuntime::default();
+        self.start_index = 0;
+        self.catalog_next_index = 0;
+        self.catalog_end_reached = false;
+        self.catalog_error = None;
+        self.catalog_filter_notice = None;
+        if self.server.is_some() {
+            self.request_catalog(0, None);
+        }
+    }
+
+    /// Reset the grid and the request ids for one Suggestions or Upcoming load. These sources
+    /// are a single capped page, so they never page.
+    fn begin_library_tab_request(&mut self) -> u64 {
+        let request_id = self.allocate_request_id();
+        self.library_tab_request_id = request_id;
+        self.catalog_request_id = request_id;
+        self.items.clear();
+        self.total_record_count = None;
+        self.collection_runtime = CollectionRuntime::default();
+        self.start_index = 0;
+        self.catalog_next_index = 0;
+        self.catalog_end_reached = true;
+        self.catalog_loading = true;
+        self.catalog_error = None;
+        self.search_results.clear();
+        self.search_stale = false;
+        self.loaded_search = None;
+        self.selected_item_id = None;
+        self.selected_details = None;
+        self.details_loading = false;
+        self.details_error = None;
+        request_id
+    }
+
+    fn request_library_suggestions(&mut self) {
+        let Some(library_id) = self.library_tab_library_id() else {
+            self.catalog_loading = false;
+            self.catalog_error = Some(ui_text(ids::BROWSE_ERROR_LOAD_FAILED).to_owned());
+            return;
+        };
+        let request_id = self.begin_library_tab_request();
+        let result = self
+            .worker
+            .as_ref()
+            .ok_or(WorkerSubmitError::Stopped)
+            .and_then(|worker| worker.list_library_suggestions(request_id, library_id));
+        if result.is_err() {
+            self.catalog_loading = false;
+            self.catalog_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).to_owned());
+        }
+    }
+
+    fn request_upcoming_episodes(&mut self) {
+        let request_id = self.begin_library_tab_request();
+        let result = self
+            .worker
+            .as_ref()
+            .ok_or(WorkerSubmitError::Stopped)
+            .and_then(|worker| worker.list_upcoming_episodes(request_id));
+        if result.is_err() {
+            self.catalog_loading = false;
+            self.catalog_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).to_owned());
+        }
+    }
+
+    fn apply_library_tab_items(&mut self, items: Vec<BaseItemDto>, ceiling: Option<u32>) {
+        let shown = crate::parental::shown_items(&items, ceiling)
+            .into_iter()
+            .take(LIBRARY_TAB_LIMIT as usize)
+            .map(crate::catalog::MediaItem::poster_from_api)
+            .collect::<Vec<_>>();
+        let count = u32::try_from(shown.len()).unwrap_or(u32::MAX);
+        self.items = shown;
+        self.total_record_count = Some(count);
+        self.start_index = 0;
+        self.catalog_next_index = count;
+        self.catalog_end_reached = true;
+        self.attempted_artwork.clear();
+        self.artwork_access_ticks.clear();
+        self.catalog_loaded = true;
+        self.catalog_loading = false;
+        self.catalog_error = None;
+        self.connection = ConnectionStatus::Connected;
+    }
+
     fn request_catalog(&mut self, start_index: u32, search_term: Option<String>) {
+        if search_term.is_none() && matches!(self.page, Page::Movies | Page::Series) {
+            match self.library_tab {
+                LibraryTab::Suggestions => {
+                    self.request_library_suggestions();
+                    return;
+                }
+                LibraryTab::Upcoming if self.page == Page::Series => {
+                    self.request_upcoming_episodes();
+                    return;
+                }
+                LibraryTab::Library | LibraryTab::Upcoming | LibraryTab::Episodes => {}
+            }
+        }
+        let episodes_tab = search_term.is_none()
+            && self.library_tab == LibraryTab::Episodes
+            && self.page == Page::Series;
         let is_search = search_term.is_some() && self.search_browse_group.is_none();
         let is_search_browse = search_term.is_some() && self.search_browse_group.is_some();
         let channel_search_term = if start_index == 0
@@ -5466,7 +5784,7 @@ impl KattriApp {
             return;
         }
 
-        let browsing = !is_search && !is_search_browse;
+        let browsing = !is_search && !is_search_browse && !episodes_tab;
         let name_bounds = if browsing {
             self.catalog_name_bounds()
         } else {
@@ -5516,6 +5834,8 @@ impl KattriApp {
                                 .map(|kind| (*kind).to_owned())
                                 .collect()
                         })
+                    } else if episodes_tab {
+                        Some(vec!["Episode".to_owned()])
                     } else {
                         self.page_item_types().map(|types| {
                             types
@@ -5530,7 +5850,24 @@ impl KattriApp {
                         self.browse_context
                             .as_ref()
                             .map(|context| context.parent_id.clone())
+                            .or_else(|| {
+                                episodes_tab
+                                    .then(|| self.library_tab_library_id())
+                                    .flatten()
+                            })
                             .or_else(|| self.page_library_parent())
+                    };
+                    // Jellyfin Web's Episodes tab lists the newest episodes of the library
+                    // regardless of the page's sort and filters.
+                    let sort_by = if episodes_tab {
+                        ItemSortBy::DateCreated
+                    } else {
+                        self.catalog_sort.api_value()
+                    };
+                    let sort_order = if episodes_tab {
+                        ItemSortOrder::Descending
+                    } else {
+                        self.catalog_sort_order
                     };
                     worker.fetch_items(
                         request_id,
@@ -5547,9 +5884,9 @@ impl KattriApp {
                             parent_id,
                             include_item_types,
                             search_term,
-                            sort_by: Some(vec![self.catalog_sort.api_value()]),
-                            sort_order: Some(vec![self.catalog_sort_order]),
-                            filters: if is_search || is_search_browse {
+                            sort_by: Some(vec![sort_by]),
+                            sort_order: Some(vec![sort_order]),
+                            filters: if is_search || is_search_browse || episodes_tab {
                                 None
                             } else {
                                 self.catalog_filters()
@@ -5615,6 +5952,9 @@ impl KattriApp {
         self.music_album_tracks_request_id = self.allocate_request_id();
         self.music_album_tracks_loading = false;
         self.music_album_tracks_error = None;
+        self.music_album_tracks.clear();
+        self.music_album_tracks_album_id = None;
+        self.music_album_tracks_purpose = AlbumTracksPurpose::Display;
         self.selected_item_id = Some(item_id.clone());
         self.selected_details = None;
         self.reset_series_detail();
@@ -6319,13 +6659,13 @@ impl KattriApp {
                 return;
             }
         };
-        self.start_download_plan(plan, "catalog-selection");
+        self.start_download_plan(plan, "catalog-selection", CollectionKind::Playlist);
     }
 
     /// Downloads every media entry of the opened playlist in order.
     fn download_playlist_items(&mut self, items: Vec<(String, String)>) {
         match plan_entries(items) {
-            Ok(plan) => self.start_download_plan(plan, "playlist"),
+            Ok(plan) => self.start_download_plan(plan, "playlist", CollectionKind::Playlist),
             Err(_) => {
                 self.show_toast(ui_text(ids::BROWSE_SELECTION_DOWNLOAD_TOO_MANY).to_owned());
             }
@@ -6333,7 +6673,7 @@ impl KattriApp {
     }
 
     /// Starts a packed batch under `parent_id`, three transfers at a time.
-    fn start_download_plan(&mut self, plan: BatchPlan, parent_id: &str) {
+    fn start_download_plan(&mut self, plan: BatchPlan, parent_id: &str, kind: CollectionKind) {
         let queued = plan.candidates.len();
         if queued == 0 {
             self.show_toast(ui_text(ids::BROWSE_SELECTION_DOWNLOAD_TOO_MANY).to_owned());
@@ -6343,7 +6683,7 @@ impl KattriApp {
             request_id: self.allocate_request_id(),
             connection_generation: self.connection_generation(),
             parent_id: parent_id.to_owned(),
-            kind: CollectionKind::Playlist,
+            kind,
         };
         if self.batch_downloads.begin(identity, plan).is_err() {
             self.show_toast(ui_text(ids::BROWSE_SELECTION_DOWNLOAD_BUSY).to_owned());
@@ -7796,6 +8136,8 @@ impl KattriApp {
         self.user_name = None;
         self.current_user_id = None;
         self.user_is_admin = false;
+        self.user_can_manage_subtitles = false;
+        self.user_can_download = false;
         self.clear_subtitle_management();
         self.items.clear();
         self.total_record_count = None;
@@ -7887,6 +8229,9 @@ impl KattriApp {
         self.music_album_tracks_loading = false;
         self.music_album_tracks_error = None;
         self.music_album_tracks_request_id = self.allocate_request_id();
+        self.music_album_tracks.clear();
+        self.music_album_tracks_album_id = None;
+        self.music_album_tracks_purpose = AlbumTracksPurpose::Display;
         self.focus_graph = FocusGraph::default();
         self.invalidate_sync_play_queue();
         self.sync_play_state = SyncPlayState::NotJoined;
@@ -8070,6 +8415,7 @@ impl KattriApp {
                     self.server = Some(server);
                     self.user_is_admin = user.is_administrator();
                     self.user_can_manage_subtitles = user.can_manage_subtitles();
+                    self.user_can_download = user.can_download_content();
                     self.current_user_id = Some(user.id.clone());
                     self.user_name = Some(user.name);
                     if !self.user_is_admin && self.admin_users_open {
@@ -8391,6 +8737,7 @@ impl KattriApp {
                         self.server = Some(server);
                         self.user_is_admin = user.is_administrator();
                         self.user_can_manage_subtitles = user.can_manage_subtitles();
+                        self.user_can_download = user.can_download_content();
                         self.current_user_id = Some(user.id.clone());
                         self.user_name = Some(user.name);
                         if !self.user_is_admin && self.admin_users_open {
@@ -8450,6 +8797,14 @@ impl KattriApp {
                         && let Some(series_id) = self.selected_item_id.clone()
                     {
                         self.request_series_seasons(series_id);
+                    }
+                    if self
+                        .selected_details
+                        .as_ref()
+                        .is_some_and(|item| item.item_type.as_deref() == Some("MusicAlbum"))
+                    {
+                        // The tracks feed both Play album and Download all; one bounded fetch.
+                        self.load_selected_album_tracks();
                     }
                     self.request_season_siblings();
                     self.request_item_extras();
@@ -8591,6 +8946,44 @@ impl KattriApp {
                         self.catalog_genres = genres;
                         self.catalog_studios = studios;
                     }
+                }
+                WorkerEvent::LibrarySuggestionsLoaded { request_id, items }
+                    if request_id == self.library_tab_request_id
+                        && self.library_tab == LibraryTab::Suggestions =>
+                {
+                    self.record_network_success();
+                    let ceiling = self.browse_rating_ceiling(ctx);
+                    self.apply_library_tab_items(items, ceiling);
+                }
+                WorkerEvent::LibrarySuggestionsFailed {
+                    request_id,
+                    error_class,
+                    retry_after,
+                } if request_id == self.library_tab_request_id
+                    && self.library_tab == LibraryTab::Suggestions =>
+                {
+                    self.record_network_error(error_class, retry_after);
+                    self.catalog_loading = false;
+                    self.catalog_error = Some(crate::ui::status::message(error_class).to_owned());
+                }
+                WorkerEvent::UpcomingEpisodesLoaded { request_id, items }
+                    if request_id == self.library_tab_request_id
+                        && self.library_tab == LibraryTab::Upcoming =>
+                {
+                    self.record_network_success();
+                    let ceiling = self.browse_rating_ceiling(ctx);
+                    self.apply_library_tab_items(items, ceiling);
+                }
+                WorkerEvent::UpcomingEpisodesFailed {
+                    request_id,
+                    error_class,
+                    retry_after,
+                } if request_id == self.library_tab_request_id
+                    && self.library_tab == LibraryTab::Upcoming =>
+                {
+                    self.record_network_error(error_class, retry_after);
+                    self.catalog_loading = false;
+                    self.catalog_error = Some(crate::ui::status::message(error_class).to_owned());
                 }
                 WorkerEvent::TrickplayResolutionsLoaded {
                     request_id,
@@ -8803,27 +9196,20 @@ impl KattriApp {
                 {
                     self.record_network_success();
                     self.music_album_tracks_loading = false;
-                    let mut names = HashMap::new();
-                    let queue_items = tracks
-                        .into_iter()
+                    self.music_album_tracks = tracks
+                        .iter()
                         .filter(|track| track.item_type.as_deref() == Some("Audio"))
-                        .map(|track| {
-                            names.insert(track.id.clone(), track.name);
-                            QueueItem::new(track.id)
+                        .map(|track| CollectionItem {
+                            item_id: track.id.clone(),
+                            item_type: track.item_type.clone(),
+                            title: track.name.clone(),
                         })
-                        .collect::<Vec<_>>();
-                    let first_id = queue_items.first().map(|item| item.id.clone());
-                    if queue_items.is_empty()
-                        || self.music_queue.add_album_and_play(queue_items).is_err()
-                    {
-                        self.music_album_tracks_error = Some(ErrorClass::Unexpected);
-                    } else if let Some(first_id) = first_id {
-                        self.music_track_names.extend(names);
+                        .collect();
+                    self.music_album_tracks_album_id = Some(album_id.clone());
+                    if self.music_album_tracks_purpose == AlbumTracksPurpose::Play {
+                        self.play_selected_album_tracks();
+                    } else {
                         self.music_album_tracks_error = None;
-                        self.music_queue_position_ms = 0;
-                        self.music_queue_resume_position_ms = None;
-                        self.music_queue_resume_position_ticks = None;
-                        self.select_item(first_id);
                     }
                 }
                 WorkerEvent::MusicAlbumTracksFailed {
@@ -12491,7 +12877,8 @@ mod live_tv_event_tests {
 #[cfg(test)]
 mod music_queue_app_tests {
     use super::{
-        KattriApp, MusicAction, PlaylistEntry, Queue, StoredQueue, music_queue_report_context,
+        AlbumTracksPurpose, KattriApp, MusicAction, PlaylistEntry, Queue, StoredQueue,
+        music_queue_report_context,
     };
     use crate::worker::{ApiWorker, WorkerEvent};
     use jellyfin_api::BaseItemDto;
@@ -12898,6 +13285,7 @@ mod music_queue_app_tests {
         });
         app.music_album_tracks_request_id = 81;
         app.music_album_tracks_loading = true;
+        app.music_album_tracks_purpose = AlbumTracksPurpose::Play;
         events
             .try_send(WorkerEvent::MusicAlbumTracksLoaded {
                 request_id: 80,
@@ -15406,6 +15794,279 @@ mod subtitle_management_integration_tests {
                 .as_ref()
                 .expect("success")
                 .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod library_tab_tests {
+    use super::{
+        AlbumDownloadError, AppView, BrowseContext, ConnectionStatus, KattriApp, LibraryTab, Page,
+        ServerIdentity, plan_album_download,
+    };
+    use crate::ui::ui_text;
+    use crate::worker::downloads_batch::CollectionItem;
+    use crate::worker::{ApiWorker, WorkerCommand, WorkerEvent};
+    use egui::{FullOutput, Pos2, RawInput, Rect, Shape, Vec2};
+    use jellyfin_api::{BaseItemDto, ItemSortBy, ItemSortOrder};
+
+    fn movie(id: &str, name: &str) -> BaseItemDto {
+        BaseItemDto {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            item_type: Some("Movie".to_owned()),
+            ..serde_json::from_str(r#"{"Id":"template","Name":"template"}"#)
+                .expect("valid minimal item fixture")
+        }
+    }
+
+    fn track(id: &str) -> CollectionItem {
+        CollectionItem {
+            item_id: id.to_owned(),
+            item_type: Some("Audio".to_owned()),
+            title: format!("Track {id}"),
+        }
+    }
+
+    fn connected_app(page: Page, parent_id: &str) -> KattriApp {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.worker = Some(ApiWorker::with_event_sender_for_test().0);
+        app.server = Some(ServerIdentity {
+            name: "Media server".into(),
+            version: Some("test".into()),
+            id: None,
+        });
+        app.connection = ConnectionStatus::Connected;
+        app.view = AppView::Library;
+        app.page = page;
+        app.browse_context = Some(BrowseContext {
+            parent_id: parent_id.to_owned(),
+            title: "Library".into(),
+            is_collection: false,
+        });
+        app.catalog_loaded = true;
+        app
+    }
+
+    fn take_commands(app: &mut KattriApp) -> Vec<WorkerCommand> {
+        app.worker
+            .as_ref()
+            .expect("test worker")
+            .take_commands_for_test()
+    }
+
+    #[test]
+    fn library_tabs_map_to_the_matching_server_request() {
+        let mut app = connected_app(Page::Movies, "movies-lib");
+
+        app.select_library_tab(LibraryTab::Suggestions);
+        assert_eq!(app.library_tab, LibraryTab::Suggestions);
+        assert!(app.catalog_loading);
+        let commands = take_commands(&mut app);
+        assert_eq!(commands.len(), 1, "one tab request");
+        match &commands[0] {
+            WorkerCommand::ListLibrarySuggestions { library_id, .. } => {
+                assert_eq!(library_id, "movies-lib");
+            }
+            _ => panic!("unexpected suggestions command"),
+        }
+
+        app.page = Page::Series;
+        app.browse_context = Some(BrowseContext {
+            parent_id: "series-lib".into(),
+            title: "Shows".into(),
+            is_collection: false,
+        });
+        app.library_tab = LibraryTab::Library;
+        app.select_library_tab(LibraryTab::Upcoming);
+        let commands = take_commands(&mut app);
+        assert_eq!(commands.len(), 1, "one tab request");
+        match &commands[0] {
+            WorkerCommand::ListUpcomingEpisodes { .. } => {}
+            _ => panic!("unexpected upcoming command"),
+        }
+
+        app.library_tab = LibraryTab::Library;
+        app.select_library_tab(LibraryTab::Episodes);
+        let commands = take_commands(&mut app);
+        assert_eq!(commands.len(), 1, "one tab request");
+        let WorkerCommand::FetchItems { query, .. } = &commands[0] else {
+            panic!("unexpected episodes command");
+        };
+        assert_eq!(
+            query.include_item_types.as_deref(),
+            Some(&["Episode".to_owned()][..])
+        );
+        assert_eq!(query.parent_id.as_deref(), Some("series-lib"));
+        assert_eq!(query.sort_by, Some(vec![ItemSortBy::DateCreated]));
+        assert_eq!(query.sort_order, Some(vec![ItemSortOrder::Descending]));
+    }
+
+    #[test]
+    fn suggestions_and_upcoming_are_one_capped_page_without_paging() {
+        let mut app = connected_app(Page::Movies, "movies-lib");
+        let items = (0..60)
+            .map(|index| movie(&format!("movie-{index}"), &format!("Movie {index}")))
+            .collect();
+        app.apply_library_tab_items(items, None);
+        assert_eq!(app.items.len(), 50);
+        assert_eq!(app.total_record_count, Some(50));
+        assert!(app.catalog_end_reached);
+        assert!(!app.catalog_loading);
+    }
+
+    #[test]
+    fn album_download_plan_gates_permission_album_identity_and_empty_tracks() {
+        let tracks = [track("track-1")];
+        assert_eq!(
+            plan_album_download(false, "album", Some("album"), &tracks).unwrap_err(),
+            AlbumDownloadError::PermissionDenied
+        );
+        assert_eq!(
+            plan_album_download(true, "album", Some("other"), &tracks).unwrap_err(),
+            AlbumDownloadError::NotLoaded
+        );
+        assert_eq!(
+            plan_album_download(true, "album", Some("album"), &[]).unwrap_err(),
+            AlbumDownloadError::NoTracks
+        );
+        let over_cap: Vec<_> = (0..201).map(|index| track(&format!("t{index}"))).collect();
+        assert_eq!(
+            plan_album_download(true, "album", Some("album"), &over_cap).unwrap_err(),
+            AlbumDownloadError::TooManyItems
+        );
+    }
+
+    #[test]
+    fn album_download_plan_dedupes_case_insensitively_and_keeps_order() {
+        let items = [track("Track-A"), track("track-a"), track("Track-B")];
+        let plan = plan_album_download(true, "album", Some("album"), &items).expect("valid plan");
+        assert_eq!(plan.total, 3);
+        assert_eq!(plan.skipped, 1);
+        assert_eq!(
+            plan.candidates
+                .iter()
+                .map(|candidate| candidate.item_id.as_str())
+                .collect::<Vec<_>>(),
+            ["Track-A", "Track-B"]
+        );
+    }
+
+    #[test]
+    fn album_download_all_button_requires_permission_and_loaded_tracks() {
+        let mut app = connected_app(Page::Music, "");
+        assert!(!app.album_download_all_visible());
+        app.music_album_tracks = vec![track("track-1")];
+        assert!(
+            !app.album_download_all_visible(),
+            "the download policy is off"
+        );
+        app.user_can_download = true;
+        assert!(app.album_download_all_visible());
+        app.music_album_tracks.clear();
+        assert!(
+            !app.album_download_all_visible(),
+            "an empty album has no button"
+        );
+    }
+
+    fn frame_input(click: Option<Pos2>) -> RawInput {
+        let events = click.map_or_else(Vec::new, |position| {
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                },
+            ]
+        });
+        RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1200.0))),
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn text_positions(output: &FullOutput, needle: &str) -> Vec<Pos2> {
+        fn visit(shape: &Shape, needle: &str, positions: &mut Vec<Pos2>) {
+            match shape {
+                Shape::Text(text) if text.galley.job.text.contains(needle) => {
+                    positions.push(text.pos + text.galley.size() * 0.5);
+                }
+                Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        visit(shape, needle, positions);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut positions = Vec::new();
+        for clipped in &output.shapes {
+            visit(&clipped.shape, needle, &mut positions);
+        }
+        positions
+    }
+
+    #[test]
+    fn clicking_the_suggestions_tab_requests_it_and_renders_the_result() {
+        let ctx = egui::Context::default();
+        let mut app = connected_app(Page::Movies, "movies-lib");
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+
+        let mut first = ctx.run_ui(frame_input(None), |ui| {
+            crate::ui::draw(ui, &mut app, 1600.0);
+        });
+        first.textures_delta.clear();
+        let tab = *text_positions(&first, ui_text(kattri_i18n::ids::LIBRARY_TAB_SUGGESTIONS))
+            .first()
+            .expect("the Suggestions tab is rendered");
+
+        let mut clicked = ctx.run_ui(frame_input(Some(tab)), |ui| {
+            crate::ui::draw(ui, &mut app, 1600.0);
+        });
+        clicked.textures_delta.clear();
+        assert_eq!(app.library_tab, LibraryTab::Suggestions);
+        let commands = take_commands(&mut app);
+        let request_id = commands
+            .iter()
+            .find_map(|command| match command {
+                WorkerCommand::ListLibrarySuggestions {
+                    request_id,
+                    library_id,
+                } => {
+                    assert_eq!(library_id, "movies-lib");
+                    Some(*request_id)
+                }
+                _ => None,
+            })
+            .expect("the tab issued a suggestions request");
+
+        sender
+            .try_send(WorkerEvent::LibrarySuggestionsLoaded {
+                request_id,
+                items: vec![movie("suggested", "Suggested Movie")],
+            })
+            .expect("send suggestions result");
+        let output = ctx.run_ui(frame_input(None), |ui| {
+            app.receive_worker_events(ui.ctx());
+            crate::ui::draw(ui, &mut app, 1600.0);
+        });
+        assert_eq!(app.items.len(), 1);
+        let mut output = output;
+        output.textures_delta.clear();
+        assert!(
+            !text_positions(&output, "Suggested Movie").is_empty(),
+            "the suggestions result is drawn in the same card grid"
         );
     }
 }

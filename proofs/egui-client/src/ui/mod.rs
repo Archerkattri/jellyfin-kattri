@@ -36,8 +36,8 @@ pub(crate) mod syncplay;
 mod update;
 
 use crate::app::{
-    AppView, BrowseContext, CatalogPlayedFilter, CatalogSort, ConnectionStatus, KattriApp, Page,
-    duration_from_egui_time,
+    AppView, BrowseContext, CatalogPlayedFilter, CatalogSort, ConnectionStatus, KattriApp,
+    LibraryTab, Page, duration_from_egui_time,
 };
 use crate::catalog::{MediaItem, MediaKind};
 use crate::sign_in::{pending_code, status_text};
@@ -246,6 +246,7 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
         "library_content_scroll",
         format!("{:?}:{:?}", app.view, app.page),
         app.selected_item_id.as_deref(),
+        app.library_tab,
     ));
 
     let (card_focus, visible_artwork, search_show_all_targets) = egui::CentralPanel::default()
@@ -1707,6 +1708,15 @@ fn render_connected(
         photos_page(ui, app);
         return;
     }
+    if matches!(app.page, Page::Movies | Page::Series)
+        && app.view == AppView::Library
+        && app.search_browse_group.is_none()
+        && !app.search_active
+        && app.submitted_search.is_none()
+    {
+        library_tab_strip(ui, app, gamepad_actions);
+        ui.add_space(10.0);
+    }
     if let Some(message) = app.catalog_error.clone() {
         error_banner(ui, app, colors, &message);
     }
@@ -1886,7 +1896,11 @@ fn render_connected(
     }
     // Sorting and paging belong to the list; an open item or person page replaces them.
     if app.selected_item_id.is_none() && app.selected_person.is_none() {
-        catalog_controls(ui, app, colors);
+        // Sort and filter controls only describe the library's own catalog. Suggestions and
+        // Upcoming are one fixed page, and Episodes has its own newest-first ordering.
+        if app.library_tab == LibraryTab::Library {
+            catalog_controls(ui, app, colors);
+        }
         catalog_pagination(ui, app, colors);
     }
     details_panel(ui, app, colors);
@@ -2100,26 +2114,31 @@ fn render_connected(
         .browse_context
         .as_ref()
         .is_some_and(|context| context.is_collection);
-    let matches_item: fn(MediaKind) -> bool = match app.page {
-        Page::Movies => |kind| kind == MediaKind::Movie,
-        Page::Series => |kind| kind == MediaKind::Series,
-        Page::Music => |kind| kind == MediaKind::Audio,
-        Page::Photos => |kind| kind == MediaKind::Photo,
-        Page::Playlists => |kind| kind == MediaKind::Playlist,
-        // A collection holds any kind of item.
-        Page::Collections if open_collection => |_| true,
-        Page::Collections => |kind| kind == MediaKind::Folder,
-        Page::MusicVideos | Page::HomeVideos => |kind| kind == MediaKind::Video,
-        Page::Books => |kind| matches!(kind, MediaKind::Book | MediaKind::Audio),
-        // These pages do not render the catalog grid. A future caller must not crash the app;
-        // showing nothing is the safe default.
-        Page::Home
-        | Page::Downloads
-        | Page::LiveTv
-        | Page::Dashboard
-        | Page::SyncPlay
-        | Page::Settings => |_| false,
-    };
+    let matches_item: fn(MediaKind) -> bool =
+        if matches!(app.library_tab, LibraryTab::Upcoming | LibraryTab::Episodes) {
+            |kind| kind == MediaKind::Episode
+        } else {
+            match app.page {
+                Page::Movies => |kind| kind == MediaKind::Movie,
+                Page::Series => |kind| kind == MediaKind::Series,
+                Page::Music => |kind| kind == MediaKind::Audio,
+                Page::Photos => |kind| kind == MediaKind::Photo,
+                Page::Playlists => |kind| kind == MediaKind::Playlist,
+                // A collection holds any kind of item.
+                Page::Collections if open_collection => |_| true,
+                Page::Collections => |kind| kind == MediaKind::Folder,
+                Page::MusicVideos | Page::HomeVideos => |kind| kind == MediaKind::Video,
+                Page::Books => |kind| matches!(kind, MediaKind::Book | MediaKind::Audio),
+                // These pages do not render the catalog grid. A future caller must not crash the
+                // app; showing nothing is the safe default.
+                Page::Home
+                | Page::Downloads
+                | Page::LiveTv
+                | Page::Dashboard
+                | Page::SyncPlay
+                | Page::Settings => |_| false,
+            }
+        };
     // Selection is bounded to the grid on screen: a page/library change clears it and a
     // reloaded list drops ids that are no longer loaded.
     app.catalog_selection
@@ -2137,6 +2156,36 @@ fn render_connected(
         .filter(|item| matches_item(item.kind))
         .peekable();
     if items.peek().is_none() {
+        if matches!(
+            app.library_tab,
+            LibraryTab::Suggestions | LibraryTab::Upcoming | LibraryTab::Episodes
+        ) {
+            let kind = match app.library_tab {
+                LibraryTab::Upcoming => "upcoming episodes".to_owned(),
+                tab => tab.label(app.page).to_lowercase(),
+            };
+            let title = ui_text_args(
+                ids::BROWSE_EMPTY_TYPE_LOADED_TITLE,
+                &[("kind", kind.as_str())],
+            );
+            let message = match app.library_tab {
+                LibraryTab::Suggestions => ui_text(ids::LIBRARY_TAB_EMPTY_SUGGESTIONS),
+                LibraryTab::Upcoming => ui_text(ids::LIBRARY_TAB_EMPTY_UPCOMING),
+                _ => ui_text(ids::BROWSE_EMPTY_TYPE_SERVER_HINT),
+            };
+            state_panel(
+                ui,
+                colors,
+                &title,
+                message,
+                Some((
+                    ui_text(ids::BROWSE_BUTTON_RETRY_REQUEST),
+                    StateAction::RetryItems,
+                )),
+                app,
+            );
+            return;
+        }
         if app.has_catalog_filters() {
             state_panel(
                 ui,
@@ -2176,6 +2225,9 @@ fn render_connected(
     // An open collection's grid holds its items, not more collections.
     let grid_title = match app.browse_context.as_ref() {
         Some(context) if open_collection => context.title.clone(),
+        _ if matches!(app.page, Page::Movies | Page::Series) => {
+            app.library_tab.label(app.page).to_owned()
+        }
         _ => app.page.label().to_owned(),
     };
     let mut catalog_view = CatalogView {
@@ -2774,6 +2826,61 @@ fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     app.set_catalog_name_prefix(name_prefix);
 }
 
+/// Jellyfin Web's library tabs above the Movies and Shows grids. The selected tab is exposed
+/// to assistive technology by `Button::selectable`, and a focused tab moves with the same
+/// keyboard/gamepad actions as the rest of the shell.
+fn library_tab_strip(ui: &mut egui::Ui, app: &mut KattriApp, gamepad_actions: &mut Vec<NavAction>) {
+    let page = app.page;
+    let tabs = LibraryTab::for_page(page);
+    if tabs.is_empty() {
+        return;
+    }
+    let mut picked = None;
+    let mut responses = Vec::with_capacity(tabs.len());
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for tab in tabs {
+            let enabled = app.library_tab_available(*tab);
+            let selected = app.library_tab == *tab;
+            let response = ui.add_enabled(
+                enabled,
+                egui::Button::selectable(selected, RichText::new(tab.label(page)).size(16.0)),
+            );
+            responses.push((*tab, response.clone()));
+            if response.clicked() {
+                picked = Some(*tab);
+            }
+        }
+    });
+    if let Some(index) = responses
+        .iter()
+        .position(|(_, response)| response.has_focus())
+    {
+        let accepted = [NavAction::Left, NavAction::Right, NavAction::Select];
+        let action = (!ui.ctx().egui_wants_keyboard_input())
+            .then(|| {
+                crate::input::take_action(
+                    ui.ctx(),
+                    &accepted,
+                    app.settings.settings().input.key_repeat,
+                )
+            })
+            .flatten()
+            .or_else(|| take_gamepad_action(gamepad_actions, &accepted));
+        match action {
+            Some(NavAction::Left) if index > 0 => responses[index - 1].1.request_focus(),
+            Some(NavAction::Right) if index + 1 < responses.len() => {
+                responses[index + 1].1.request_focus();
+            }
+            Some(NavAction::Select) => picked = Some(responses[index].0),
+            _ => {}
+        }
+    }
+    if let Some(tab) = picked {
+        app.select_library_tab(tab);
+    }
+}
+
 /// The letters the alphabet picker offers after "All": `#` for digits and symbols, then A-Z.
 const ALPHABET_PICKER_LETTERS: [char; 27] = [
     '#', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
@@ -2867,6 +2974,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     let mut queue_audio_clicked = false;
     let mut play_next_clicked = false;
     let mut queue_album_clicked = false;
+    let mut download_album_clicked = false;
     let mut detail_error_action = None;
     let mut season_to_load = None;
     let mut episode_to_open = None;
@@ -2932,6 +3040,13 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                             .clicked()
                         {
                             queue_album_clicked = true;
+                        }
+                        // Only after the bounded track load succeeded: an album with no tracks
+                        // and a server that forbids downloads both get no button.
+                        if app.album_download_all_visible()
+                            && ui.button(ui_text(ids::MUSIC_ALBUM_DOWNLOAD_ALL)).clicked()
+                        {
+                            download_album_clicked = true;
                         }
                         if app.music_album_tracks_loading {
                             ui.spinner();
@@ -3338,6 +3453,9 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     }
     if queue_album_clicked {
         app.request_selected_album_tracks();
+    }
+    if download_album_clicked {
+        app.download_selected_album();
     }
     if let Some(season_id) = season_to_load {
         app.select_series_season(season_id);
