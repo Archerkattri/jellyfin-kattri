@@ -175,12 +175,28 @@ pub fn classify(err: wasmtime::Error, limits: &SandboxLimits, elapsed: Duration)
             elapsed,
         }),
         Some(trap) => RuntimeError::Sandbox(SandboxFailure::Trap {
-            detail: trap.to_string(),
+            detail: bounded_diagnostic(&trap.to_string(), limits),
         }),
-        None => RuntimeError::Runtime(err.to_string()),
+        None => RuntimeError::Runtime(bounded_diagnostic(&err.to_string(), limits)),
     }
 }
 
+/// Diagnostics quote wasmtime text, which can include a guest module's own names. Redact
+/// credentials and cap the length at the configured output bound, the same rule guest error
+/// strings follow before they reach the UI or the log.
+fn bounded_diagnostic(message: &str, limits: &SandboxLimits) -> String {
+    let limit = limits.max_output_bytes();
+    let mut text = kattri_guard::redact(message);
+    if text.len() > limit {
+        let mut cut = limit;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+    }
+    text
+}
+
 fn runtime_error(err: wasmtime::Error) -> RuntimeError {
-    RuntimeError::Runtime(err.to_string())
+    RuntimeError::Runtime(kattri_guard::redact(&err.to_string()))
 }

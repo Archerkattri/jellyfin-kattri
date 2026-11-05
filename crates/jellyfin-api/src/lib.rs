@@ -150,8 +150,9 @@ pub struct ClientConfig {
     extra_request_headers: Vec<ExtraRequestHeader>,
     /// Extra root certificates in PEM form, for a private CA.
     custom_ca_pem: Option<Vec<u8>>,
-    /// Client certificate and private key in PEM form, for mutual TLS.
-    client_identity_pem: Option<Vec<u8>>,
+    /// Client certificate and private key in PEM form, for mutual TLS. The buffer carries a
+    /// private key, so it is zeroized on drop and copied only when the config is cloned.
+    client_identity_pem: Option<Zeroizing<Vec<u8>>>,
 }
 
 impl ClientConfig {
@@ -241,8 +242,10 @@ impl ClientConfig {
     }
 
     /// Present a client certificate and private key (PEM, certificate first) for mutual TLS.
+    /// The caller's buffer is moved into a zeroizing wrapper, so the key does not outlive the
+    /// config as ordinary heap memory.
     pub fn with_client_identity_pem(mut self, pem: Vec<u8>) -> Self {
-        self.client_identity_pem = Some(pem);
+        self.client_identity_pem = Some(Zeroizing::new(pem));
         self
     }
 }

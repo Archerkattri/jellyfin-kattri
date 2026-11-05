@@ -131,6 +131,10 @@ impl DriverConfig {
     pub fn new(store: TempStore) -> Result<Self, DriverError> {
         let client = reqwest::Client::builder()
             .redirect(download_redirect_policy())
+            // Download requests carry the server's Authorization header. A system or
+            // environment proxy would receive that credential and could send the body
+            // through a third party, so bypass proxies the same way the API client does.
+            .no_proxy()
             .connect_timeout(REQUEST_TIMEOUT)
             .read_timeout(REQUEST_TIMEOUT)
             .build()
