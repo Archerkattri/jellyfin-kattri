@@ -73,6 +73,12 @@ pub struct HomeSeriesSuppressionSetting {
 pub const MAX_SERIES_LANGUAGE_ENTRIES: usize = 500;
 /// Maximum server/profile/series suppression records retained in one settings document.
 pub const MAX_HOME_SERIES_SUPPRESSIONS: usize = 500;
+/// Maximum per-item subtitle style overrides retained in one settings document.
+pub const MAX_TITLE_STYLE_ENTRIES: usize = 500;
+/// Longest accepted `item_id` in a per-item subtitle style override, in characters.
+pub const MAX_TITLE_STYLE_ITEM_ID_CHARS: usize = 64;
+/// Largest allowed idle time before the in-app screensaver starts, in seconds. Zero disables it.
+pub const SCREENSAVER_IDLE_SECONDS_MAX: u32 = 3600;
 
 /// Smallest allowed playback cache, in MiB (M2-06).
 ///
@@ -222,6 +228,9 @@ pub struct GeneralSettings {
     pub home_collections: bool,
     /// Stable section IDs in display order. Unknown IDs are retained for forward compatibility.
     pub home_section_order: Vec<String>,
+    /// Seconds without input before the in-app screensaver starts. Zero turns it off.
+    /// Clamped to 0..=[`SCREENSAVER_IDLE_SECONDS_MAX`] on load.
+    pub screensaver_idle_seconds: u32,
     #[serde(rename = "_unknown", skip_serializing_if = "toml::Table::is_empty")]
     pub unknown: toml::Table,
 }
@@ -254,8 +263,25 @@ impl Default for GeneralSettings {
                 .iter()
                 .map(|section| (*section).to_owned())
                 .collect(),
+            screensaver_idle_seconds: 0,
             unknown: toml::Table::new(),
         }
+    }
+}
+
+impl GeneralSettings {
+    /// Clamp the numeric fields into their ranges. Returns the dotted names of the fields that
+    /// changed, so the caller can log one warning per field.
+    pub fn clamp_ranges(&mut self) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        clamp_into(
+            &mut self.screensaver_idle_seconds,
+            0,
+            SCREENSAVER_IDLE_SECONDS_MAX,
+            "general.screensaver_idle_seconds",
+            &mut changed,
+        );
+        changed
     }
 }
 
@@ -524,6 +550,26 @@ impl Settings {
                 "must be at most 100",
             ));
         }
+        if self.general.screensaver_idle_seconds > SCREENSAVER_IDLE_SECONDS_MAX {
+            return Err(invalid(
+                "general.screensaver_idle_seconds",
+                "must be at most 3600",
+            ));
+        }
+        if self.subtitles.title_styles.len() > MAX_TITLE_STYLE_ENTRIES {
+            return Err(invalid(
+                "subtitles.title_styles",
+                "must contain at most 500 entries",
+            ));
+        }
+        for style in &self.subtitles.title_styles {
+            if !valid_title_style_item_id(&style.item_id) {
+                return Err(invalid(
+                    "subtitles.title_styles.item_id",
+                    "must be 1 to 64 characters",
+                ));
+            }
+        }
         if self.video.screenshot.template.trim().is_empty() {
             return Err(invalid("video.screenshot.template", "must not be empty"));
         }
@@ -537,6 +583,10 @@ impl Settings {
         }
         Ok(())
     }
+}
+
+fn valid_title_style_item_id(item_id: &str) -> bool {
+    !item_id.is_empty() && item_id.chars().count() <= MAX_TITLE_STYLE_ITEM_ID_CHARS
 }
 
 fn valid_series_guid(raw: &str) -> bool {
@@ -616,6 +666,9 @@ pub struct PlaybackSettings {
     pub external_player: bool,
     /// Legacy `video.max_streaming_bitrate` in bits per second. 0 means no cap.
     pub max_streaming_bitrate: u64,
+    /// Play a server theme intro/theme video/theme song when an item detail page opens, when
+    /// the server has one.
+    pub theme_media: bool,
     #[serde(rename = "_unknown", skip_serializing_if = "toml::Table::is_empty")]
     pub unknown: toml::Table,
 }
@@ -638,6 +691,7 @@ impl Default for PlaybackSettings {
             auto_play_next_episode: true,
             external_player: false,
             max_streaming_bitrate: 0,
+            theme_media: true,
             unknown: toml::Table::new(),
         }
     }
@@ -1000,6 +1054,12 @@ pub struct SubtitleSettings {
     pub secondary_position_percent: u32,
     /// Legacy `subtitles.resync_on_start`.
     pub resync_on_start: bool,
+    /// Burn the selected subtitle into a server transcode instead of rendering it in the player.
+    /// Only applies when the source is transcoded.
+    pub burn_in: bool,
+    /// Per-item (movie or series) subtitle style overrides, so one show can keep its own style.
+    /// Invalid entries are dropped and duplicates keep the last occurrence on load.
+    pub title_styles: Vec<TitleSubtitleStyleSetting>,
     #[serde(rename = "_unknown", skip_serializing_if = "toml::Table::is_empty")]
     pub unknown: toml::Table,
 }
@@ -1020,9 +1080,62 @@ impl Default for SubtitleSettings {
             ass_scale_border_and_shadow: true,
             secondary_position_percent: 10,
             resync_on_start: true,
+            burn_in: false,
+            title_styles: Vec::new(),
             unknown: toml::Table::new(),
         }
     }
+}
+
+impl SubtitleSettings {
+    /// Drop malformed per-item overrides, keep the last override per item, and cap the list to
+    /// [`MAX_TITLE_STYLE_ENTRIES`]. Returns the number of entries removed, so a caller can count
+    /// them without logging item IDs.
+    pub fn normalize_title_styles(&mut self) -> usize {
+        let original_len = self.title_styles.len();
+        let styles = std::mem::take(&mut self.title_styles);
+        let mut seen = BTreeSet::new();
+        let mut kept = Vec::with_capacity(styles.len().min(MAX_TITLE_STYLE_ENTRIES));
+        // Walk backwards so a later record wins; the reverse restores the file order.
+        for style in styles.into_iter().rev() {
+            if !valid_title_style_item_id(&style.item_id) || !seen.insert(style.item_id.clone()) {
+                continue;
+            }
+            kept.push(style);
+        }
+        kept.reverse();
+        kept.truncate(MAX_TITLE_STYLE_ENTRIES);
+        let kept_len = kept.len();
+        self.title_styles = kept;
+        original_len.saturating_sub(kept_len)
+    }
+}
+
+/// One per-item (movie or series) subtitle style override. Every style field is optional so an
+/// override changes only what it needs. Unknown fields are preserved in `_unknown`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TitleSubtitleStyleSetting {
+    /// Jellyfin item ID this override applies to. Unique within the settings file.
+    pub item_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_size: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
+    #[serde(rename = "_unknown", skip_serializing_if = "toml::Table::is_empty")]
+    pub unknown: toml::Table,
 }
 
 // ---------------------------------------------------------------------------

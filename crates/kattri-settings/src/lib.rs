@@ -42,10 +42,11 @@ pub use schema::{
     HOME_SECTION_CONTINUE_WATCHING, HOME_SECTION_LATEST, HOME_SECTION_MY_MEDIA,
     HOME_SECTION_NEXT_UP, HdrPreference, ImageFormat, InputSettings, InterfaceSize,
     LOUDNESS_TARGET_LUFS_RANGE, LibraryArtworkSize, LibraryLayout, LogDetail,
-    MAX_SERIES_LANGUAGE_ENTRIES, Passthrough, PlaybackSettings, PluginSettings, READAHEAD_SECS_MAX,
-    ScreenshotSettings, SeriesLanguageSetting, Settings, SubtitleSettings, SyncMode, ThemePreset,
-    ToneMapping, TranscodePreferences, UpdateSettings, VideoSettings, WindowGeometry,
-    WindowSettings,
+    MAX_SERIES_LANGUAGE_ENTRIES, MAX_TITLE_STYLE_ENTRIES, MAX_TITLE_STYLE_ITEM_ID_CHARS,
+    Passthrough, PlaybackSettings, PluginSettings, READAHEAD_SECS_MAX,
+    SCREENSAVER_IDLE_SECONDS_MAX, ScreenshotSettings, SeriesLanguageSetting, Settings,
+    SubtitleSettings, SyncMode, ThemePreset, TitleSubtitleStyleSetting, ToneMapping,
+    TranscodePreferences, UpdateSettings, VideoSettings, WindowGeometry, WindowSettings,
 };
 pub use store::{
     LoadWarning, load, load_from_str, load_from_str_with_report, load_with_report, save,

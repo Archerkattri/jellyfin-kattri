@@ -18,7 +18,7 @@ use kattri_settings::guard::{
 use kattri_settings::{
     AspectMode, AudioOutput, ChannelLayout, DecodeMode, HdrPreference, ImageFormat, InputSettings,
     Passthrough, PlaybackSettings, SeriesLanguageSetting, Settings, SettingsError, SyncMode,
-    TranscodePreferences, WindowGeometry, load, load_from_str, save,
+    TitleSubtitleStyleSetting, TranscodePreferences, WindowGeometry, load, load_from_str, save,
 };
 
 /// Every field set to a non-default, non-secret value.
@@ -27,6 +27,7 @@ fn populated() -> Settings {
     let mut s = Settings::default();
     s.general.high_contrast = true;
     s.general.reduce_motion = false;
+    s.general.screensaver_idle_seconds = 120;
     s.playback = PlaybackSettings {
         sync_mode: SyncMode::DisplayAdrop,
         frame_drop: false,
@@ -43,6 +44,7 @@ fn populated() -> Settings {
         auto_play_next_episode: false,
         external_player: true,
         max_streaming_bitrate: 20_000_000,
+        theme_media: false,
         unknown: toml::Table::new(),
     };
     s.audio.output = AudioOutput::Hdmi;
@@ -93,6 +95,19 @@ fn populated() -> Settings {
     s.subtitles.ass_scale_border_and_shadow = false;
     s.subtitles.secondary_position_percent = 25;
     s.subtitles.resync_on_start = false;
+    s.subtitles.burn_in = true;
+    s.subtitles.title_styles = vec![TitleSubtitleStyleSetting {
+        item_id: "0123456789abcdef0123456789abcdef".to_owned(),
+        font: Some("Arial".to_owned()),
+        bold: Some(true),
+        size: Some(28),
+        color: Some("#FFFFFF".to_owned()),
+        border_color: Some("#000000".to_owned()),
+        border_size: Some(2),
+        background_color: Some("#101010".to_owned()),
+        placement: Some("bottom".to_owned()),
+        unknown: toml::Table::new(),
+    }];
     s.window.fullscreen = true;
     s.window.always_on_top = true;
     s.window.minimize_on_defocus = true;

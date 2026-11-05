@@ -131,11 +131,19 @@ pub fn load_from_str_with_report(
         .map_err(SettingsError::Parse)?;
     warnings.extend(
         settings
+            .general
+            .clamp_ranges()
+            .into_iter()
+            .map(LoadWarning::ClampedField),
+    );
+    warnings.extend(
+        settings
             .playback
             .clamp_buffers()
             .into_iter()
             .map(LoadWarning::ClampedField),
     );
+    settings.subtitles.normalize_title_styles();
     settings.validate()?;
     Ok((settings, warnings))
 }
@@ -187,6 +195,7 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
                 "home_my_media",
                 "home_collections",
                 "home_section_order",
+                "screensaver_idle_seconds",
             ][..],
         ),
         (
@@ -207,6 +216,7 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
                 "auto_play_next_episode",
                 "external_player",
                 "max_streaming_bitrate",
+                "theme_media",
             ][..],
         ),
         (
@@ -259,6 +269,8 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
                 "ass_scale_border_and_shadow",
                 "secondary_position_percent",
                 "resync_on_start",
+                "burn_in",
+                "title_styles",
             ][..],
         ),
         (
@@ -288,6 +300,35 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
     ] {
         if let Some(toml::Value::Table(section_table)) = table.get_mut(section) {
             move_unknown_fields(section_table, known);
+        }
+    }
+    preserve_title_style_unknown_fields(table);
+}
+
+/// Fields of one per-item subtitle style override. Unknown keys must survive a load/save cycle
+/// inside that record's own `_unknown` table.
+const TITLE_STYLE_KNOWN_FIELDS: &[&str] = &[
+    "item_id",
+    "font",
+    "bold",
+    "size",
+    "color",
+    "border_color",
+    "border_size",
+    "background_color",
+    "placement",
+];
+
+fn preserve_title_style_unknown_fields(table: &mut toml::Table) {
+    let Some(toml::Value::Table(subtitles)) = table.get_mut("subtitles") else {
+        return;
+    };
+    let Some(toml::Value::Array(styles)) = subtitles.get_mut("title_styles") else {
+        return;
+    };
+    for style in styles {
+        if let toml::Value::Table(record) = style {
+            move_unknown_fields(record, TITLE_STYLE_KNOWN_FIELDS);
         }
     }
 }
@@ -441,7 +482,9 @@ mod tests {
     use crate::schema::{
         AspectMode, AudioOutput, BACKBUFFER_MB_MAX, CACHE_MB_MAX, CACHE_MB_MIN,
         CURRENT_SCHEMA_VERSION, ChannelLayout, DecodeMode, HomeSeriesSuppressionSetting,
-        READAHEAD_SECS_MAX, SeriesLanguageSetting, SyncMode, WindowGeometry,
+        MAX_TITLE_STYLE_ENTRIES, MAX_TITLE_STYLE_ITEM_ID_CHARS, READAHEAD_SECS_MAX,
+        SCREENSAVER_IDLE_SECONDS_MAX, SeriesLanguageSetting, SyncMode, TitleSubtitleStyleSetting,
+        WindowGeometry,
     };
     use std::path::PathBuf;
 
@@ -449,6 +492,7 @@ mod tests {
         let mut s = Settings::default();
         s.general.high_contrast = true;
         s.general.reduce_motion = false;
+        s.general.screensaver_idle_seconds = 300;
         s.playback.sync_mode = SyncMode::Audio;
         s.playback.frame_drop = false;
         s.playback.default_speed = 1.5;
@@ -462,6 +506,7 @@ mod tests {
         s.playback.outro_delay_ms = 10_000;
         s.playback.external_player = true;
         s.playback.max_streaming_bitrate = 20_000_000;
+        s.playback.theme_media = false;
         s.video.decode_mode = DecodeMode::Vaapi;
         s.audio.output = AudioOutput::Spdif;
         s.audio.channels = ChannelLayout::Surround51;
@@ -512,6 +557,19 @@ mod tests {
         s.subtitles.ass_scale_border_and_shadow = false;
         s.subtitles.secondary_position_percent = 25;
         s.subtitles.resync_on_start = false;
+        s.subtitles.burn_in = true;
+        s.subtitles.title_styles = vec![TitleSubtitleStyleSetting {
+            item_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            font: Some("Noto Sans".to_owned()),
+            bold: Some(true),
+            size: Some(32),
+            color: Some("#FFFFFF".to_owned()),
+            border_color: Some("#000000".to_owned()),
+            border_size: Some(3),
+            background_color: Some("#202020".to_owned()),
+            placement: Some("bottom".to_owned()),
+            unknown: toml::Table::new(),
+        }];
         s.window.fullscreen = true;
         s.window.always_on_top = true;
         s.window.minimize_on_defocus = true;
@@ -745,6 +803,188 @@ mod tests {
         assert!(loaded.subtitles.bold);
         let saved = to_toml_string(&loaded).expect("save");
         assert!(load_from_str(&saved).expect("reload").subtitles.bold);
+    }
+
+    #[test]
+    fn newer_subtitle_screensaver_and_theme_fields_default_and_round_trip() {
+        let defaults = Settings::default();
+        assert!(!defaults.subtitles.burn_in);
+        assert!(defaults.subtitles.title_styles.is_empty());
+        assert_eq!(defaults.general.screensaver_idle_seconds, 0);
+        assert!(defaults.playback.theme_media);
+
+        let mut settings = Settings::default();
+        settings.general.screensaver_idle_seconds = 600;
+        settings.playback.theme_media = false;
+        settings.subtitles.burn_in = true;
+        settings.subtitles.title_styles = vec![TitleSubtitleStyleSetting {
+            item_id: "0123456789abcdef0123456789abcdef".to_owned(),
+            font: Some("Arial".to_owned()),
+            bold: Some(true),
+            size: Some(30),
+            color: Some("#FBF93E".to_owned()),
+            border_color: Some("#000000".to_owned()),
+            border_size: Some(2),
+            background_color: Some("#202020".to_owned()),
+            placement: Some("top".to_owned()),
+            unknown: toml::Table::new(),
+        }];
+
+        let text = to_toml_string(&settings).expect("serialize new fields");
+        assert!(text.contains("burn_in = true"), "{text}");
+        assert!(text.contains("theme_media = false"), "{text}");
+        assert!(text.contains("screensaver_idle_seconds = 600"), "{text}");
+        assert!(text.contains("[[subtitles.title_styles]]"), "{text}");
+        assert_eq!(load_from_str(&text).expect("reload new fields"), settings);
+    }
+
+    #[test]
+    fn older_document_without_the_new_keys_loads_their_defaults() {
+        let old = format!(
+            "schema_version = {CURRENT_SCHEMA_VERSION}\n[general]\nhigh_contrast = true\n[playback]\nskip_intro = true\n[subtitles]\nfont = \"Arial\"\n"
+        );
+        let loaded = load_from_str(&old).expect("load document without new keys");
+        assert!(loaded.general.high_contrast);
+        assert!(loaded.playback.skip_intro);
+        assert!(!loaded.subtitles.burn_in);
+        assert!(loaded.subtitles.title_styles.is_empty());
+        assert_eq!(loaded.general.screensaver_idle_seconds, 0);
+        assert!(loaded.playback.theme_media);
+
+        let saved = to_toml_string(&loaded).expect("save document with new defaults");
+        assert_eq!(load_from_str(&saved).expect("reload"), loaded);
+    }
+
+    #[test]
+    fn screensaver_idle_seconds_is_clamped_on_load_and_bounded() {
+        for value in [0, 1, SCREENSAVER_IDLE_SECONDS_MAX] {
+            let text = format!("[general]\nscreensaver_idle_seconds = {value}\n");
+            let (loaded, warnings) = load_from_str_with_report(&text).expect("load in range");
+            assert_eq!(loaded.general.screensaver_idle_seconds, value);
+            assert!(warnings.is_empty(), "{value}: {warnings:?}");
+        }
+
+        let (loaded, warnings) =
+            load_from_str_with_report("[general]\nscreensaver_idle_seconds = 3601\n")
+                .expect("load out of range");
+        assert_eq!(
+            loaded.general.screensaver_idle_seconds,
+            SCREENSAVER_IDLE_SECONDS_MAX
+        );
+        assert_eq!(
+            warnings,
+            vec![LoadWarning::ClampedField(
+                "general.screensaver_idle_seconds"
+            )]
+        );
+
+        let mut over = Settings::default();
+        over.general.screensaver_idle_seconds = SCREENSAVER_IDLE_SECONDS_MAX + 1;
+        assert!(matches!(
+            over.validate(),
+            Err(SettingsError::Invalid {
+                field: "general.screensaver_idle_seconds",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_title_style_item_id_is_kept_up_to_64_characters() {
+        for len in [1, 51, MAX_TITLE_STYLE_ITEM_ID_CHARS] {
+            let item_id = "x".repeat(len);
+            let text =
+                format!("[[subtitles.title_styles]]\nitem_id = \"{item_id}\"\nfont = \"Arial\"\n");
+            let loaded = load_from_str(&text).expect("load title style");
+            assert_eq!(
+                loaded.subtitles.title_styles.len(),
+                1,
+                "{len}-character id should be kept"
+            );
+            assert_eq!(loaded.subtitles.title_styles[0].item_id, item_id);
+        }
+
+        let too_long = "x".repeat(MAX_TITLE_STYLE_ITEM_ID_CHARS + 1);
+        let text =
+            format!("[[subtitles.title_styles]]\nitem_id = \"{too_long}\"\nfont = \"Arial\"\n");
+        let loaded = load_from_str(&text).expect("load long title style id");
+        assert!(loaded.subtitles.title_styles.is_empty());
+    }
+
+    #[test]
+    fn invalid_title_style_entries_are_dropped_and_duplicates_keep_the_last() {
+        let long_id = "x".repeat(MAX_TITLE_STYLE_ITEM_ID_CHARS + 1);
+        let text = format!(
+            r#"
+[[subtitles.title_styles]]
+item_id = "movie-1"
+font = "First"
+[[subtitles.title_styles]]
+item_id = "movie-1"
+font = "Last"
+[[subtitles.title_styles]]
+item_id = ""
+font = "NoId"
+[[subtitles.title_styles]]
+item_id = "{long_id}"
+font = "TooLong"
+[[subtitles.title_styles]]
+item_id = "series-2"
+bold = true
+"#
+        );
+        let loaded = load_from_str(&text).expect("load title styles");
+        assert_eq!(loaded.subtitles.title_styles.len(), 2);
+        assert_eq!(loaded.subtitles.title_styles[0].item_id, "movie-1");
+        assert_eq!(
+            loaded.subtitles.title_styles[0].font.as_deref(),
+            Some("Last")
+        );
+        assert_eq!(loaded.subtitles.title_styles[1].item_id, "series-2");
+        assert_eq!(loaded.subtitles.title_styles[1].bold, Some(true));
+    }
+
+    #[test]
+    fn title_style_entries_are_capped_at_500_on_load() {
+        let mut text = String::new();
+        for index in 0..=MAX_TITLE_STYLE_ENTRIES {
+            text.push_str(&format!(
+                "[[subtitles.title_styles]]\nitem_id = \"item-{index}\"\n"
+            ));
+        }
+        let loaded = load_from_str(&text).expect("load 501 title styles");
+        assert_eq!(loaded.subtitles.title_styles.len(), MAX_TITLE_STYLE_ENTRIES);
+        assert_eq!(loaded.subtitles.title_styles[0].item_id, "item-0");
+        assert_eq!(
+            loaded.subtitles.title_styles[MAX_TITLE_STYLE_ENTRIES - 1].item_id,
+            format!("item-{}", MAX_TITLE_STYLE_ENTRIES - 1)
+        );
+    }
+
+    #[test]
+    fn unknown_fields_in_a_title_style_round_trip_in_its_own_unknown_table() {
+        let loaded = load_from_str(
+            "[[subtitles.title_styles]]\nitem_id = \"movie-1\"\nfont = \"Arial\"\nfuture_style_key = \"keep\"\n",
+        )
+        .expect("load title style with unknown key");
+        assert_eq!(
+            loaded.subtitles.title_styles[0]
+                .unknown
+                .get("future_style_key"),
+            Some(&toml::Value::String("keep".to_owned()))
+        );
+
+        let saved = to_toml_string(&loaded).expect("save title style with unknown key");
+        let document: toml::Table = saved.parse().expect("serialized document is TOML");
+        assert_eq!(
+            document["subtitles"]["title_styles"][0]["_unknown"]["future_style_key"].as_str(),
+            Some("keep"),
+            "{saved}"
+        );
+        assert_eq!(
+            load_from_str(&saved).expect("reload title style with unknown key"),
+            loaded
+        );
     }
 
     #[test]
