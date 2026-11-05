@@ -5,12 +5,14 @@
 use reqwest::Method;
 use serde::Deserialize;
 
-use crate::{ApiError, BaseItemDto, JellyfinClient, Session, decode_response, home};
+use crate::{ApiError, BaseItemDto, ItemsResponse, JellyfinClient, Session, decode_response, home};
 
 /// Most recommendation categories requested at once.
 pub const MAX_RECOMMENDATION_CATEGORIES: u32 = 10;
 /// Most items requested per recommendation category.
 pub const MAX_RECOMMENDATION_ITEMS: u32 = 30;
+/// Most upcoming episodes [`JellyfinClient::upcoming_episodes`] requests and returns.
+pub const MAX_UPCOMING_EPISODES: u32 = 50;
 
 /// A paged item list. Every variant answers with Jellyfin's
 /// `BaseItemDtoQueryResult`, so [`JellyfinClient::list_items_at`] decodes them alike.
@@ -91,6 +93,31 @@ const fn other_kind() -> RecommendationKind {
 }
 
 impl JellyfinClient {
+    /// Episodes that have not premiered yet (`GET /Shows/Upcoming`), in the
+    /// server's order. The limit is clamped to `1..=MAX_UPCOMING_EPISODES` so one
+    /// call stays bounded.
+    pub async fn upcoming_episodes(
+        &self,
+        session: &Session,
+        limit: u32,
+    ) -> Result<Vec<BaseItemDto>, ApiError> {
+        let limit = limit.clamp(1, MAX_UPCOMING_EPISODES).to_string();
+        let request = self
+            .http
+            .request(
+                Method::GET,
+                self.endpoint(ItemsEndpoint::UpcomingEpisodes.path_segments()),
+            )
+            .query(&[
+                ("userId", session.user.id.as_str()),
+                ("limit", limit.as_str()),
+            ]);
+        let request = self.add_metadata(request, Some(&session.access_token));
+        let response = request.send().await.map_err(crate::transport_error)?;
+        let response: ItemsResponse = decode_response(response).await?;
+        Ok(response.items)
+    }
+
     /// Fetch movie recommendation categories (`GET /Movies/Recommendations`).
     /// Limits are clamped so one call stays bounded.
     pub async fn movie_recommendations(
@@ -130,7 +157,84 @@ impl JellyfinClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{ItemsEndpoint, Recommendation, RecommendationKind};
+    use std::collections::HashMap;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::{ItemsEndpoint, MAX_UPCOMING_EPISODES, Recommendation, RecommendationKind};
+    use crate::{ApiError, ClientConfig, JellyfinClient, Session, StatusCode, UserDto};
+
+    fn client(base_url: &str) -> JellyfinClient {
+        JellyfinClient::new(
+            ClientConfig::new(base_url, "Kattri test", "test device", "device-id", "1.0")
+                .expect("valid config"),
+        )
+        .expect("client")
+    }
+
+    fn session() -> Session {
+        Session {
+            access_token: "secret-token".into(),
+            user: UserDto {
+                policy: None,
+                id: "user-id".into(),
+                name: "Test user".into(),
+                server_id: None,
+            },
+            server_id: None,
+            session_info: None,
+        }
+    }
+
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 2048];
+        loop {
+            let count = socket.read(&mut chunk).await.expect("read request");
+            assert_ne!(count, 0, "client closed before sending headers");
+            request.extend_from_slice(&chunk[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                return String::from_utf8_lossy(&request).into_owned();
+            }
+        }
+    }
+
+    async fn serve_once(body: String) -> (JellyfinClient, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let address = listener.local_addr().expect("mock server address");
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept client");
+            let request = read_request(&mut socket).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            request
+        });
+        (client(&format!("http://{address}/jellyfin")), task)
+    }
+
+    fn request_url(request: &str) -> url::Url {
+        let target = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .expect("request target");
+        url::Url::parse(&format!("http://localhost{target}")).expect("request URL")
+    }
+
+    fn params(url: &url::Url) -> HashMap<String, String> {
+        url.query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect()
+    }
 
     #[test]
     fn endpoints_map_to_jellyfin_paths() {
@@ -173,5 +277,59 @@ mod tests {
         assert_eq!(parsed[1].recommendation_type, RecommendationKind::Other);
         assert_eq!(parsed[2].recommendation_type, RecommendationKind::Other);
         assert!(parsed[2].items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn upcoming_episodes_uses_bounded_route_and_query() {
+        let body = r#"{"Items":[{"Id":"episode-1","Name":"Future","Type":"Episode"}],"TotalRecordCount":1}"#;
+        for (requested, expected) in [(u32::MAX, "50"), (0, "1"), (12, "12")] {
+            let (client, task) = serve_once(body.into()).await;
+            let episodes = client
+                .upcoming_episodes(&session(), requested)
+                .await
+                .expect("upcoming episodes");
+            let request = task.await.expect("server task");
+            let url = request_url(&request);
+            assert_eq!(url.path(), "/jellyfin/Shows/Upcoming");
+            assert_eq!(
+                params(&url),
+                HashMap::from([
+                    ("userId".into(), "user-id".into()),
+                    ("limit".into(), expected.into()),
+                ])
+            );
+            assert_eq!(episodes.len(), 1);
+            assert_eq!(episodes[0].id, "episode-1");
+            let request_line = request.lines().next().unwrap_or_default();
+            assert!(!request_line.contains("secret-token"));
+        }
+        assert_eq!(MAX_UPCOMING_EPISODES, 50);
+    }
+
+    #[tokio::test]
+    async fn upcoming_episodes_preserves_server_errors() {
+        for status in [StatusCode::NOT_FOUND, StatusCode::INTERNAL_SERVER_ERROR] {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock server");
+            let address = listener.local_addr().expect("mock server address");
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept client");
+                let _ = read_request(&mut socket).await;
+                let response = format!(
+                    "HTTP/1.1 {status} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write error response");
+            });
+
+            let result = client(&format!("http://{address}/jellyfin"))
+                .upcoming_episodes(&session(), 10)
+                .await;
+            server.await.expect("server task");
+            assert!(matches!(result, Err(ApiError::HttpStatus(actual)) if actual == status));
+        }
     }
 }

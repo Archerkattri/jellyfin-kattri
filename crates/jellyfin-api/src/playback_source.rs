@@ -96,6 +96,16 @@ impl fmt::Debug for PlaybackSourceHeader {
     }
 }
 
+/// Opt-in burn-in of one subtitle stream into a transcoded video.
+///
+/// The server receives Jellyfin's `SubtitleMethod=Encode` and
+/// `SubtitleStreamIndex` query parameters. Direct-play and direct-stream URLs
+/// never include them, and omitting the option keeps the URL unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BurnInSubtitle {
+    pub stream_index: u32,
+}
+
 /// Inputs that bind a negotiated source to the item's selected tracks and
 /// starting position.
 #[derive(Clone, Copy)]
@@ -174,7 +184,22 @@ impl JellyfinClient {
         session: &Session,
         options: PlaybackSourceRequestOptions<'_>,
     ) -> Result<PlaybackSourceRequest, PlaybackSourceError> {
-        self.build_playback_source_request_for_route(session, options, "Videos")
+        self.build_playback_source_request_with_burn_in_subtitle(session, options, None)
+    }
+
+    /// Build an authenticated video request that burns `subtitle` into a
+    /// transcoded stream, as Jellyfin Web's subtitle burn-in option does.
+    ///
+    /// `None` is the default: the URL is exactly the one
+    /// [`JellyfinClient::build_playback_source_request`] builds. Direct-play and
+    /// direct-stream requests ignore the option and keep their usual URL.
+    pub fn build_playback_source_request_with_burn_in_subtitle(
+        &self,
+        session: &Session,
+        options: PlaybackSourceRequestOptions<'_>,
+        subtitle: Option<BurnInSubtitle>,
+    ) -> Result<PlaybackSourceRequest, PlaybackSourceError> {
+        self.build_playback_source_request_for_route(session, options, "Videos", subtitle)
     }
 
     /// Build an authenticated request for a negotiated Jellyfin audio source.
@@ -186,7 +211,7 @@ impl JellyfinClient {
         session: &Session,
         options: PlaybackSourceRequestOptions<'_>,
     ) -> Result<PlaybackSourceRequest, PlaybackSourceError> {
-        self.build_playback_source_request_for_route(session, options, "Audio")
+        self.build_playback_source_request_for_route(session, options, "Audio", None)
     }
 
     fn build_playback_source_request_for_route(
@@ -194,6 +219,7 @@ impl JellyfinClient {
         session: &Session,
         options: PlaybackSourceRequestOptions<'_>,
         direct_stream_route: &'static str,
+        burn_in_subtitle: Option<BurnInSubtitle>,
     ) -> Result<PlaybackSourceRequest, PlaybackSourceError> {
         let PlaybackSourceRequestOptions {
             item_id,
@@ -295,6 +321,18 @@ impl JellyfinClient {
             start_time_ticks.map(|ticks| ticks.as_ticks().to_string()),
             transcode,
         );
+        if transcode && let Some(burn_in) = burn_in_subtitle {
+            // A single logical subtitle index: drop the camelCase variant (ours or the
+            // server's) so the burn-in stream is unambiguous, then add Jellyfin's
+            // PascalCase burn-in pair.
+            remove_query_parameter(&mut url, "subtitleStreamIndex");
+            set_query_parameter(&mut url, "SubtitleMethod", Some("Encode".to_owned()));
+            set_query_parameter(
+                &mut url,
+                "SubtitleStreamIndex",
+                Some(burn_in.stream_index.to_string()),
+            );
+        }
         if url.as_str().len() > MAX_PLAYBACK_URL_BYTES {
             return Err(PlaybackSourceError::InputTooLarge);
         }
@@ -465,6 +503,27 @@ fn add_query_parameter_if_missing(
         return;
     }
     set_query_parameter(url, name, value);
+}
+
+fn remove_query_parameter(url: &mut Url, name: &str) {
+    if !url
+        .query_pairs()
+        .any(|(existing_name, _)| existing_name.eq_ignore_ascii_case(name))
+    {
+        return;
+    }
+    let retained_pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(existing_name, _)| !existing_name.eq_ignore_ascii_case(name))
+        .map(|(existing_name, existing_value)| {
+            (existing_name.into_owned(), existing_value.into_owned())
+        })
+        .collect();
+    let mut query = url.query_pairs_mut();
+    query.clear();
+    for (existing_name, existing_value) in retained_pairs {
+        query.append_pair(&existing_name, &existing_value);
+    }
 }
 
 fn media_browser_authorization(client: &JellyfinClient, token: &str) -> Zeroizing<String> {
@@ -894,6 +953,112 @@ mod tests {
         assert_eq!(headers[0].as_pair().0, "Authorization");
         assert!(headers[0].as_pair().1.contains("session-token-secret"));
         assert_eq!(headers[1].as_pair(), ("x-playback-key", "header-secret"));
+    }
+
+    #[test]
+    fn default_transcode_url_has_no_subtitle_burn_in_parameters() {
+        let client = client();
+        let session = session();
+        let source = media_source(serde_json::json!({
+            "Id": "source-id",
+            "SupportsTranscoding": true,
+            "TranscodingUrl": "/Videos/item-id/master.m3u8?VideoCodec=h264&subtitleStreamIndex=3"
+        }));
+        let default_url = client
+            .build_playback_source_request(&session, options(&source, PlayMethod::Transcode))
+            .expect("default transcode request")
+            .into_parts()
+            .0;
+        let explicit_none_url = client
+            .build_playback_source_request_with_burn_in_subtitle(
+                &session,
+                options(&source, PlayMethod::Transcode),
+                None,
+            )
+            .expect("explicit default transcode request")
+            .into_parts()
+            .0;
+        assert_eq!(default_url.as_str(), explicit_none_url.as_str());
+
+        let url = Url::parse(default_url.as_str()).expect("parse generated URL");
+        let query = query(&url);
+        assert!(!query.contains_key("SubtitleMethod"));
+        assert!(!query.contains_key("SubtitleStreamIndex"));
+        assert_eq!(
+            query.get("subtitleStreamIndex").map(String::as_str),
+            Some("3")
+        );
+    }
+
+    #[test]
+    fn burn_in_subtitle_adds_encode_parameters_only_to_transcoded_urls() {
+        let client = client();
+        let session = session();
+        let burn_in = Some(BurnInSubtitle { stream_index: 7 });
+
+        let transcode = media_source(serde_json::json!({
+            "Id": "source-id",
+            "SupportsTranscoding": true,
+            "TranscodingUrl": "/Videos/item-id/master.m3u8?VideoCodec=h264&subtitleStreamIndex=3"
+        }));
+        let url = client
+            .build_playback_source_request_with_burn_in_subtitle(
+                &session,
+                options(&transcode, PlayMethod::Transcode),
+                burn_in,
+            )
+            .expect("transcode burn-in request")
+            .into_parts()
+            .0;
+        let url = Url::parse(url.as_str()).expect("parse generated URL");
+        let parameters = query(&url);
+        assert_eq!(
+            parameters.get("SubtitleMethod").map(String::as_str),
+            Some("Encode")
+        );
+        assert_eq!(
+            parameters.get("SubtitleStreamIndex").map(String::as_str),
+            Some("7")
+        );
+        // A server-provided or option-derived camelCase index must not compete with the
+        // burn-in stream.
+        assert!(!parameters.contains_key("subtitleStreamIndex"));
+        assert!(!parameters.contains_key("static"));
+        assert!(
+            url.as_str()
+                .contains("SubtitleMethod=Encode&SubtitleStreamIndex=7")
+        );
+
+        for method in [PlayMethod::DirectPlay, PlayMethod::DirectStream] {
+            let direct = media_source(serde_json::json!({
+                "Id": "source-id",
+                "Container": "mkv",
+                "SupportsDirectPlay": true,
+                "SupportsDirectStream": true
+            }));
+            let default_url = client
+                .build_playback_source_request(&session, options(&direct, method))
+                .expect("default direct request")
+                .into_parts()
+                .0;
+            let burn_in_url = client
+                .build_playback_source_request_with_burn_in_subtitle(
+                    &session,
+                    options(&direct, method),
+                    burn_in,
+                )
+                .expect("direct request ignores burn-in")
+                .into_parts()
+                .0;
+            assert_eq!(default_url.as_str(), burn_in_url.as_str(), "{method:?}");
+            let url = Url::parse(burn_in_url.as_str()).expect("parse generated URL");
+            let parameters = query(&url);
+            assert!(!parameters.contains_key("SubtitleMethod"), "{method:?}");
+            assert!(
+                !parameters.contains_key("SubtitleStreamIndex"),
+                "{method:?}"
+            );
+        }
     }
 
     #[test]

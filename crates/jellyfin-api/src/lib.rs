@@ -35,6 +35,7 @@ mod series;
 pub mod session_reporting;
 mod syncplay;
 pub mod system_time;
+mod theme_media;
 pub mod trickplay;
 pub mod websocket;
 
@@ -54,7 +55,7 @@ pub use extras::LyricLine;
 pub use favorites::FavoriteToggle;
 pub use home::{MAX_HOME_LIMIT, UserView};
 pub use item_images::BackdropImageError;
-pub use library_views::{ItemsEndpoint, Recommendation, RecommendationKind};
+pub use library_views::{ItemsEndpoint, MAX_UPCOMING_EPISODES, Recommendation, RecommendationKind};
 pub use live_tv::{
     GuideWindow, GuideWindowError, LiveTvChannel, LiveTvChannelPage, LiveTvProgram,
     LiveTvProgramPage, MAX_GUIDE_CHANNEL_IDS, MAX_GUIDE_CHANNELS_PER_WINDOW,
@@ -78,8 +79,8 @@ pub use playback::{
     PlaybackRequestOverrides, SensitiveString,
 };
 pub use playback_source::{
-    PlaybackSourceError, PlaybackSourceHeader, PlaybackSourceRequest, PlaybackSourceRequestOptions,
-    PlaybackSourceUrl,
+    BurnInSubtitle, PlaybackSourceError, PlaybackSourceHeader, PlaybackSourceRequest,
+    PlaybackSourceRequestOptions, PlaybackSourceUrl,
 };
 pub use playlists::{
     MAX_PLAYLIST_IDS_PER_REQUEST, PlaylistDto, PlaylistEntry, PlaylistItemsResponse,
@@ -105,6 +106,7 @@ pub use syncplay::{
     GroupState, MAX_GROUP_NAME_LENGTH, PlaybackCommand, SyncPlayGroup, SyncPlayPlaybackStatus,
     SyncPlayStatusReportKind,
 };
+pub use theme_media::{MAX_THEME_MEDIA_ITEMS, ThemeMediaItems, ThemeMediaResult};
 
 use std::{
     collections::HashMap,
@@ -131,6 +133,8 @@ const MAX_ITEMS_ERROR_RESPONSE_BYTES: usize = 16 * 1024;
 pub const MAX_ITEM_IDS_PER_QUERY: usize = 50;
 /// Most genres [`JellyfinClient::list_genres`] returns.
 pub const MAX_GENRES: usize = 500;
+/// Most suggestions [`JellyfinClient::list_suggestions`] requests and returns.
+pub const MAX_SUGGESTIONS: u32 = 50;
 
 /// Stable client metadata sent in Jellyfin's `Authorization` header.
 #[derive(Clone, PartialEq, Eq)]
@@ -562,6 +566,30 @@ impl JellyfinClient {
         let request = self.add_metadata(request, Some(&session.access_token));
         let response = request.send().await.map_err(transport_error)?;
         decode_response(response).await
+    }
+
+    /// List the server's suggestions for an item (`GET /Items/{itemId}/Suggestions`)
+    /// for the authenticated user. The limit is clamped to `1..=MAX_SUGGESTIONS`, and
+    /// no more than that many items are returned. A 404 or server error is returned
+    /// as [`ApiError::HttpStatus`], the same as [`JellyfinClient::list_similar`].
+    pub async fn list_suggestions(
+        &self,
+        session: &Session,
+        item_id: &str,
+        limit: u32,
+    ) -> Result<Vec<BaseItemDto>, ApiError> {
+        home::validate_id(item_id)?;
+        let url = self.endpoint(&["Items", item_id, "Suggestions"]);
+        let limit = limit.clamp(1, MAX_SUGGESTIONS);
+        let limit_value = limit.to_string();
+        let request = self.http.request(Method::GET, url).query(&[
+            ("userId", session.user.id.as_str()),
+            ("limit", limit_value.as_str()),
+        ]);
+        let request = self.add_metadata(request, Some(&session.access_token));
+        let response = request.send().await.map_err(transport_error)?;
+        let response: ItemsResponse = decode_response(response).await?;
+        Ok(response.items.into_iter().take(limit as usize).collect())
     }
 
     /// List items associated with a person by filtering the user's `/Items`.
@@ -2668,6 +2696,93 @@ mod primary_image_tests {
             .await;
         server.await.expect("mock server task");
         assert!(matches!(result, Err(ApiError::ImageTooLarge)));
+    }
+
+    #[tokio::test]
+    async fn suggestions_uses_authenticated_route_and_clamps_the_limit() {
+        for (requested, expected) in [(1000, "50"), (0, "1"), (25, "25")] {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock server");
+            let address = listener.local_addr().expect("mock server address");
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept client");
+                let request = read_request(&mut socket).await;
+                let body =
+                    r#"{"Items":[{"Id":"suggestion-1","Name":"Suggestion","Type":"Movie"}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+                request
+            });
+
+            let items = client_for(address)
+                .list_suggestions(&session(), "item/id", requested)
+                .await
+                .expect("list suggestions");
+            let request = server.await.expect("mock server task");
+            let request_line = request.lines().next().expect("HTTP request line");
+            let uri = request_line.split_whitespace().nth(1).expect("request URI");
+            let query: std::collections::HashMap<_, _> =
+                url::form_urlencoded::parse(uri.split_once('?').expect("query").1.as_bytes())
+                    .collect();
+
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].id, "suggestion-1");
+            assert!(uri.starts_with("/jellyfin/Items/item%2Fid/Suggestions?"));
+            assert_eq!(
+                query.get("userId").map(|value| value.as_ref()),
+                Some("user-id")
+            );
+            assert_eq!(
+                query.get("limit").map(|value| value.as_ref()),
+                Some(expected)
+            );
+            assert!(!uri.contains("secret-token"));
+        }
+    }
+
+    #[tokio::test]
+    async fn suggestions_preserves_not_found_and_server_errors() {
+        for status in [StatusCode::NOT_FOUND, StatusCode::INTERNAL_SERVER_ERROR] {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock server");
+            let address = listener.local_addr().expect("mock server address");
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept client");
+                let _ = read_request(&mut socket).await;
+                let response = format!(
+                    "HTTP/1.1 {status} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write error response");
+            });
+
+            let result = client_for(address)
+                .list_suggestions(&session(), "item-id", 10)
+                .await;
+            server.await.expect("mock server task");
+            assert!(matches!(result, Err(ApiError::HttpStatus(actual)) if actual == status));
+        }
+    }
+
+    #[tokio::test]
+    async fn suggestions_reject_invalid_identifiers_before_request() {
+        let client = client_for("127.0.0.1:1".parse().expect("local socket address"));
+        for item_id in ["", ".", "..", "a\nb", &"x".repeat(129)] {
+            assert!(matches!(
+                client.list_suggestions(&session(), item_id, 10).await,
+                Err(ApiError::InvalidResponse)
+            ));
+        }
     }
 }
 
