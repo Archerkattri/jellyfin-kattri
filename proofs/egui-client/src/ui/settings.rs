@@ -647,6 +647,24 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             &mut general.reduce_motion,
             ui_text(ids::SETTINGS_GENERAL_REDUCE_MOTION),
         );
+        ui.add(
+            egui::Slider::new(
+                &mut general.screensaver_idle_seconds,
+                0..=crate::ui::screensaver::MAX_IDLE_SECONDS,
+            )
+            .step_by(5.0)
+            .suffix(format!(
+                " {}",
+                ui_text(ids::SETTINGS_GENERAL_SCREENSAVER_UNIT)
+            ))
+            .text(ui_text(ids::SETTINGS_GENERAL_SCREENSAVER)),
+        );
+        muted(
+            ui,
+            colors,
+            ui_text(ids::SETTINGS_GENERAL_SCREENSAVER_HELP),
+            12.0,
+        );
         choice(
             ui,
             ui_text(ids::SETTINGS_GENERAL_THEME),

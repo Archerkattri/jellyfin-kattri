@@ -21,6 +21,7 @@ pub mod playlists;
 #[allow(dead_code)]
 pub mod profile_picker;
 pub mod row;
+pub(crate) mod screensaver;
 pub(crate) mod search;
 pub(crate) mod selection;
 mod series;
@@ -221,6 +222,7 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
     };
     if !gamepad_actions.is_empty() {
         app.cancel_network_retry_for_user_action();
+        app.note_gamepad_activity();
     }
     // While a video fills the window the library page is hidden; the player takes the pad.
     if app.player_owns_input() {
@@ -418,6 +420,15 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
         app.catalog_selection.clear();
     }
     handle_shell_action(&ctx, app, &mut gamepad_actions);
+    if app.screensaver_active() {
+        let reduced_motion = root.style().animation_time <= 0.0;
+        screensaver::paint(
+            &ctx,
+            app.ambient_texture(),
+            app.screensaver_animation_seconds(),
+            reduced_motion,
+        );
+    }
 }
 
 fn displayed_catalog_item_index<'a>(
@@ -2966,8 +2977,9 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
         return;
     }
 
-    // Some(start_over) when the viewer pressed Play, Resume or Start over.
-    let mut play_request: Option<bool> = None;
+    // Some(start_over) when the viewer pressed Play, Resume or Start over; theme when the
+    // viewer asked for the item's theme media.
+    let mut play_requests = PlayButtonRequest::default();
     let mut detail_back = false;
     let mut watched_clicked = false;
     let mut favorite_clicked = false;
@@ -3015,7 +3027,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                     app,
                                     item,
                                     colors,
-                                    &mut play_request,
+                                    &mut play_requests,
                                     &mut download_target,
                                     &mut save_subtitle_style_target,
                                 );
@@ -3501,7 +3513,11 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     if let Some((item_id, series_id)) = save_subtitle_style_target {
         app.save_title_subtitle_style(&item_id, series_id.as_deref());
     }
-    if let Some(start_over) = play_request
+    if play_requests.theme {
+        app.play_theme_media();
+        ui.ctx().request_repaint();
+    }
+    if let Some(start_over) = play_requests.start_over
         && detail_error_action.is_none()
         && let Some(item_id) = app.selected_item_id.clone()
     {
@@ -3632,22 +3648,30 @@ mod next_up_label_tests {
     }
 }
 
+/// Buttons on the details header that ask the app to start something.
+#[derive(Default)]
+struct PlayButtonRequest {
+    start_over: Option<bool>,
+    theme: bool,
+}
+
 fn detail_play_buttons(
     ui: &mut egui::Ui,
     app: &KattriApp,
     item: &jellyfin_api::BaseItemDto,
     colors: Palette,
-    play_request: &mut Option<bool>,
+    play_requests: &mut PlayButtonRequest,
     download_target: &mut Option<(String, String)>,
     save_subtitle_style_target: &mut Option<(String, Option<String>)>,
 ) {
     let playable = is_playable_item_type(item.item_type.as_deref());
     let downloadable = is_downloadable_item_type(item.item_type.as_deref());
+    let themed = app.theme_media_item().is_some();
     let subtitle_style_savable = matches!(
         item.item_type.as_deref(),
         Some("Movie" | "Episode" | "Video")
     );
-    if !playable && !downloadable {
+    if !playable && !downloadable && !themed {
         return;
     }
     let resume_ticks = item.user_data.as_ref().and_then(|user_data| {
@@ -3681,7 +3705,7 @@ fn detail_play_buttons(
             .corner_radius(CornerRadius::same(24))
             .min_size(egui::vec2(150.0, 48.0));
             if ui.add_enabled(!busy, primary).clicked() {
-                *play_request = Some(false);
+                play_requests.start_over = Some(false);
             }
             if resume_ticks.is_some()
                 && ui
@@ -3696,8 +3720,20 @@ fn detail_play_buttons(
                     )
                     .clicked()
             {
-                *play_request = Some(true);
+                play_requests.start_over = Some(true);
             }
+        }
+        if themed
+            && ui
+                .add(
+                    egui::Button::new(RichText::new(ui_text(ids::DETAIL_BUTTON_THEME)).size(16.0))
+                        .fill(Color32::from_white_alpha(46))
+                        .corner_radius(CornerRadius::same(24))
+                        .min_size(egui::vec2(110.0, 48.0)),
+                )
+                .clicked()
+        {
+            play_requests.theme = true;
         }
         if downloadable
             && ui

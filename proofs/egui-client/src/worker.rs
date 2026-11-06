@@ -646,6 +646,18 @@ pub enum WorkerEvent {
         request_id: u64,
         item_id: String,
     },
+    /// Theme media for one detail page. An empty pair means the item has no theme.
+    ThemeMediaLoaded {
+        request_id: u64,
+        item_id: String,
+        videos: Vec<BaseItemDto>,
+        songs: Vec<BaseItemDto>,
+    },
+    /// A theme lookup failed silently; the detail page simply shows no Theme action.
+    ThemeMediaFailed {
+        request_id: u64,
+        item_id: String,
+    },
     PersonItemsLoaded {
         request_id: u64,
         person_id: String,
@@ -1325,6 +1337,10 @@ pub(crate) enum WorkerCommand {
         request_id: u64,
         item_id: String,
         limit: u32,
+    },
+    ThemeMedia {
+        request_id: u64,
+        item_id: String,
     },
     ListPersonItems {
         request_id: u64,
@@ -2181,6 +2197,18 @@ impl ApiWorker {
             request_id,
             item_id,
             limit,
+        })
+    }
+
+    /// Ask for an item's theme videos and songs. The reply is silent when it fails.
+    pub(crate) fn theme_media(
+        &self,
+        request_id: u64,
+        item_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ThemeMedia {
+            request_id,
+            item_id,
         })
     }
 
@@ -5189,6 +5217,58 @@ async fn execute_command(
                     }
                 }
             }
+            WorkerCommand::ThemeMedia {
+                request_id,
+                item_id,
+            } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => (client.theme_media(session, &item_id)).await,
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                match result {
+                    Ok(theme) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ThemeMediaLoaded {
+                                request_id,
+                                item_id,
+                                videos: theme.theme_videos.items,
+                                songs: theme.theme_songs.items,
+                            },
+                        )
+                        .await
+                    }
+                    Err(ApiError::ReauthenticationRequired) => {
+                        session = None;
+                        client = None;
+                        server = None;
+                        playback_info_cache = None;
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ReauthenticationRequired {
+                                request_id,
+                                message: "The server requires you to sign in again.".into(),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(_) => {
+                        // Theme media is optional; a failure must not surface as an error banner.
+                        tracing::debug!(request_id, "theme media request failed");
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ThemeMediaFailed {
+                                request_id,
+                                item_id,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
             WorkerCommand::ListPersonItems {
                 request_id,
                 person_id,
@@ -8132,6 +8212,20 @@ mod people_command_tests {
                 item_id,
                 limit: 12,
             }) if item_id == "item-9"
+        ));
+    }
+
+    #[test]
+    fn theme_media_enqueues_item() {
+        let (worker, commands) = worker_with_command_receiver();
+
+        assert_eq!(worker.theme_media(54, "item-theme".into()), Ok(()));
+        assert!(matches!(
+            commands.recv(),
+            Ok(WorkerCommand::ThemeMedia {
+                request_id: 54,
+                item_id,
+            }) if item_id == "item-theme"
         ));
     }
 

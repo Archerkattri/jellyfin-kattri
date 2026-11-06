@@ -994,8 +994,23 @@ struct ActivePlayback {
     selection: PlaybackSelection,
 }
 
+/// The theme item chosen for the open detail page: the first theme video, else the first song.
+#[derive(Clone, Debug)]
+struct ThemeMediaState {
+    item_id: String,
+    item: BaseItemDto,
+}
+
 /// Reopens allowed after mid-stream failures for one user-started playback.
 const MAX_MID_STREAM_RECOVERIES: u8 = 3;
+
+/// Prefer a theme video over a theme song. The API has already capped both lists.
+fn preferred_theme_item(videos: Vec<BaseItemDto>, songs: Vec<BaseItemDto>) -> Option<BaseItemDto> {
+    videos
+        .into_iter()
+        .next()
+        .or_else(|| songs.into_iter().next())
+}
 
 fn api_play_method(method: PlaybackMethod) -> jellyfin_api::PlayMethod {
     match method {
@@ -1412,6 +1427,9 @@ pub struct KattriApp {
     /// Player view for the SyncPlay outbound path and the update gate (M4-11, M4-16).
     player_view: PlayerView,
     similar_request_id: u64,
+    /// Theme media result for the open detail page, and the request still in flight.
+    theme_media: Option<ThemeMediaState>,
+    theme_media_request: Option<(u64, String)>,
     person_items_request_id: u64,
     person_artwork_queue: Vec<BaseItemPerson>,
     pending_person_artwork: HashMap<u64, String>,
@@ -1426,6 +1444,10 @@ pub struct KattriApp {
     pending_playback_report_requests: HashMap<u64, PendingPlaybackReport>,
     playback_report_session_generation: u64,
     consecutive_progress_report_failures: u8,
+    /// The idle screensaver clock and its visibility. Fed once per frame from egui input.
+    screensaver: crate::ui::screensaver::Screensaver,
+    /// The native host reports whether libmpv currently has media loaded.
+    media_playing: bool,
     pending_artwork_requests: HashMap<u64, (String, String)>,
     attempted_artwork: HashSet<(String, String)>,
     artwork_access_ticks: HashMap<(String, String), u64>,
@@ -1933,6 +1955,8 @@ impl KattriApp {
             sync_play_clock: ClockEstimator::new(),
             player_view: PlayerView::new(),
             similar_request_id: 0,
+            theme_media: None,
+            theme_media_request: None,
             person_items_request_id: 0,
             person_artwork_queue: Vec::new(),
             pending_person_artwork: HashMap::new(),
@@ -1944,6 +1968,8 @@ impl KattriApp {
             menu_favorite_pending: HashMap::new(),
             playback_report_session_generation: 0,
             consecutive_progress_report_failures: 0,
+            screensaver: crate::ui::screensaver::Screensaver::default(),
+            media_playing: false,
             pending_artwork_requests: HashMap::new(),
             attempted_artwork: HashSet::new(),
             artwork_access_ticks: HashMap::new(),
@@ -1963,6 +1989,29 @@ impl KattriApp {
 
     pub(crate) fn player_owns_input(&self) -> bool {
         self.player_owns_input
+    }
+
+    /// The native host calls this each frame with whether libmpv has media loaded, so the idle
+    /// screensaver never covers a video or audio player.
+    pub fn set_media_playing(&mut self, playing: bool) {
+        self.media_playing = playing;
+    }
+
+    pub(crate) fn screensaver_active(&self) -> bool {
+        self.screensaver.active()
+    }
+
+    pub(crate) fn screensaver_animation_seconds(&self) -> f32 {
+        self.screensaver.animation_seconds(self.ui_time)
+    }
+
+    /// Gamepad input is polled outside the egui event stream, so it dismisses explicitly.
+    pub(crate) fn note_gamepad_activity(&mut self) {
+        self.screensaver.reset(self.ui_time);
+    }
+
+    fn media_is_playing(&self) -> bool {
+        self.media_playing || self.player_owns_input || self.playback_start_loading
     }
 
     /// The gamepad actions pressed for the player since the last call, in order.
@@ -3118,6 +3167,10 @@ impl KattriApp {
         self.settings.save_if_changed(before);
         let current = self.settings.settings().clone();
         self.apply_settings(&current);
+        // Turning theme media off removes the action from the page immediately.
+        if !current.playback.theme_media {
+            self.clear_theme_media();
+        }
         // A subtitle change made while media is open must reach the running player and keep any
         // per-title override in effect.
         self.refresh_effective_subtitles();
@@ -3890,6 +3943,7 @@ impl KattriApp {
         self.series_episodes_loading = false;
         self.similar_loading = false;
         self.person_items_loading = false;
+        self.clear_theme_media();
         self.cancel_network_retry_for_user_action();
     }
 
@@ -6147,7 +6201,8 @@ impl KattriApp {
         self.playback_start_status = None;
         self.pending_playback = None;
         self.held_playback = None;
-        self.load_selected_details(item_id);
+        self.load_selected_details(item_id.clone());
+        self.request_theme_media(&item_id);
     }
 
     fn request_playlist_items(&mut self, playlist_id: String) {
@@ -6480,6 +6535,52 @@ impl KattriApp {
         {
             self.similar_loading = false;
         }
+    }
+
+    /// Drop the cached theme item and any request for it when the selection changes.
+    fn clear_theme_media(&mut self) {
+        self.theme_media = None;
+        self.theme_media_request = None;
+    }
+
+    /// Ask for the open item's theme media once. Off means no request and no Theme action.
+    fn request_theme_media(&mut self, item_id: &str) {
+        self.clear_theme_media();
+        if !self.settings.settings().playback.theme_media {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        let submitted = self
+            .worker
+            .as_ref()
+            .ok_or(WorkerSubmitError::Stopped)
+            .and_then(|worker| worker.theme_media(request_id, item_id.to_owned()));
+        if submitted.is_ok() {
+            self.theme_media_request = Some((request_id, item_id.to_owned()));
+        }
+    }
+
+    fn theme_media_request_matches(&self, request_id: u64, item_id: &str) -> bool {
+        self.theme_media_request
+            .as_ref()
+            .is_some_and(|(id, item)| *id == request_id && item == item_id)
+    }
+
+    /// The theme item offered by the open detail page, once its request has succeeded.
+    pub(crate) fn theme_media_item(&self) -> Option<&BaseItemDto> {
+        self.theme_media
+            .as_ref()
+            .filter(|state| self.selected_item_id.as_deref() == Some(state.item_id.as_str()))
+            .map(|state| &state.item)
+    }
+
+    /// Play the theme item through the ordinary preparation path. It does not join the catalog
+    /// multi-selection or the music queue.
+    pub(crate) fn play_theme_media(&mut self) {
+        let Some(item_id) = self.theme_media_item().map(|item| item.id.clone()) else {
+            return;
+        };
+        self.play_item(item_id, false);
     }
 
     pub(crate) fn open_person_page(&mut self, person: BaseItemPerson) {
@@ -9676,6 +9777,25 @@ impl KattriApp {
                     self.similar_loading = false;
                     self.similar_items.clear();
                 }
+                WorkerEvent::ThemeMediaLoaded {
+                    request_id,
+                    item_id,
+                    videos,
+                    songs,
+                } if self.theme_media_request_matches(request_id, &item_id) => {
+                    self.theme_media_request = None;
+                    if self.selected_item_id.as_deref() == Some(item_id.as_str()) {
+                        self.theme_media = preferred_theme_item(videos, songs)
+                            .map(|item| ThemeMediaState { item_id, item });
+                    }
+                }
+                WorkerEvent::ThemeMediaFailed {
+                    request_id,
+                    item_id,
+                } if self.theme_media_request_matches(request_id, &item_id) => {
+                    // Silent by design: no banner, no retry, and no Theme action.
+                    self.theme_media_request = None;
+                }
                 WorkerEvent::PersonItemsLoaded {
                     request_id,
                     person_id,
@@ -11476,6 +11596,19 @@ impl KattriApp {
         }
         let now = duration_from_egui_time(ctx.input(|input| input.time));
         self.ui_time = now;
+        let screensaver_input = crate::ui::screensaver::input_seen(ctx);
+        let idle_seconds = self.settings.settings().general.screensaver_idle_seconds;
+        let media_playing = self.media_is_playing();
+        self.screensaver
+            .update(now, screensaver_input, idle_seconds, media_playing);
+        if let Some(interval) = self.screensaver.repaint_interval(self.reduce_motion) {
+            ctx.request_repaint_after(interval);
+        } else if let Some(remaining) =
+            self.screensaver
+                .time_until_due(now, idle_seconds, media_playing)
+        {
+            ctx.request_repaint_after(remaining.max(Duration::from_millis(50)));
+        }
         self.receive_worker_events(ctx);
         self.persist_music_queue_if_needed();
         if !self.music_queue.is_empty()
@@ -16398,5 +16531,100 @@ mod subtitle_style_tests {
         assert_eq!(effective.font, "chosen-font");
         drop(app);
         cleanup(dir);
+    }
+}
+
+#[cfg(test)]
+mod theme_media_tests {
+    use super::{KattriApp, ThemeMediaState, preferred_theme_item};
+    use crate::worker::{ApiWorker, WorkerCommand};
+    use jellyfin_api::BaseItemDto;
+
+    fn app_with_worker(theme_media: bool) -> KattriApp {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.worker = Some(ApiWorker::queued_for_test());
+        app.settings.settings_mut().playback.theme_media = theme_media;
+        app
+    }
+
+    fn item(id: &str) -> BaseItemDto {
+        serde_json::from_value(serde_json::json!({ "Id": id, "Name": id }))
+            .expect("valid item fixture")
+    }
+
+    fn theme_requests(app: &mut KattriApp) -> Vec<String> {
+        app.worker
+            .as_ref()
+            .expect("test worker")
+            .take_commands_for_test()
+            .into_iter()
+            .filter_map(|command| match command {
+                WorkerCommand::ThemeMedia { item_id, .. } => Some(item_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_request_when_the_setting_is_off() {
+        let mut app = app_with_worker(false);
+        app.select_item("movie-1".into());
+        assert!(theme_requests(&mut app).is_empty());
+    }
+
+    #[test]
+    fn theme_media_is_requested_once_per_item() {
+        let mut app = app_with_worker(true);
+        app.select_item("movie-1".into());
+        assert_eq!(theme_requests(&mut app), ["movie-1"]);
+        // Re-selecting the open item does not open the page again, so it sends nothing.
+        app.select_item("movie-1".into());
+        assert!(theme_requests(&mut app).is_empty());
+        app.select_item("movie-2".into());
+        assert_eq!(theme_requests(&mut app), ["movie-2"]);
+    }
+
+    #[test]
+    fn video_is_preferred_over_song() {
+        let video = item("theme-video");
+        let song = item("theme-song");
+        assert_eq!(
+            preferred_theme_item(vec![video], vec![song.clone()]).map(|item| item.id),
+            Some("theme-video".to_owned())
+        );
+        assert_eq!(
+            preferred_theme_item(Vec::new(), vec![song]).map(|item| item.id),
+            Some("theme-song".to_owned())
+        );
+        assert_eq!(preferred_theme_item(Vec::new(), Vec::new()), None);
+    }
+
+    #[test]
+    fn theme_action_submits_playback_for_the_theme_item() {
+        let mut app = app_with_worker(true);
+        app.selected_item_id = Some("movie-1".into());
+        app.theme_media = Some(ThemeMediaState {
+            item_id: "movie-1".into(),
+            item: item("theme-video"),
+        });
+
+        app.play_theme_media();
+
+        let commands = app
+            .worker
+            .as_ref()
+            .expect("test worker")
+            .take_commands_for_test();
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            WorkerCommand::PlaybackInfo { item_id, .. } if item_id == "theme-video"
+        )));
+        assert_eq!(
+            app.auto_play.as_ref().map(|auto| auto.item_id.as_str()),
+            Some("theme-video")
+        );
+        // The catalog multi-selection and the music queue are untouched.
+        assert!(!app.catalog_selection.is_active());
+        assert!(app.music_queue.is_empty());
     }
 }

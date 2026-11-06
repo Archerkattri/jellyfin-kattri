@@ -156,6 +156,7 @@ pub const DETAIL_STATE_FAVORITE: &str = "detail.state.favorite";
 pub const DETAIL_STATE_PLAYED: &str = "detail.state.played";
 pub const PLAYBACK_BUTTON_PLAY: &str = "playback.button.play";
 pub const DETAIL_BUTTON_DOWNLOAD: &str = "detail.button.download";
+pub const DETAIL_BUTTON_THEME: &str = "detail.button.theme";
 pub const PLAYBACK_STATUS_REQUESTING: &str = "playback.status.requesting";
 pub const DETAIL_BUTTON_REMOVE_FAVORITE: &str = "detail.button.remove_favorite";
 pub const DETAIL_BUTTON_ADD_FAVORITE: &str = "detail.button.add_favorite";
@@ -471,6 +472,9 @@ pub const SETTINGS_VALUE_UNKNOWN: &str = "settings.value.unknown";
 pub const SETTINGS_HEADING_DISPLAY: &str = "settings.heading.display";
 pub const SETTINGS_GENERAL_HIGH_CONTRAST: &str = "settings.general.high_contrast";
 pub const SETTINGS_GENERAL_REDUCE_MOTION: &str = "settings.general.reduce_motion";
+pub const SETTINGS_GENERAL_SCREENSAVER: &str = "settings.general.screensaver";
+pub const SETTINGS_GENERAL_SCREENSAVER_UNIT: &str = "settings.general.screensaver.unit";
+pub const SETTINGS_GENERAL_SCREENSAVER_HELP: &str = "settings.general.screensaver.help";
 pub const SETTINGS_GENERAL_MOTION_HELP: &str = "settings.general.motion_help";
 pub const SETTINGS_GENERAL_BACKDROP: &str = "settings.general.backdrop";
 pub const SETTINGS_GENERAL_BACKDROP_SERVER: &str = "settings.general.backdrop.server";
@@ -662,6 +666,8 @@ pub const SETTINGS_MEDIA_CREDITS_AUTO: &str = "settings.media.credits.auto";
 pub const SETTINGS_MEDIA_AUTO_PLAY_NEXT_EPISODE: &str = "settings.media.auto_play_next_episode";
 pub const SETTINGS_MEDIA_CREDITS_DELAY: &str = "settings.media.credits.delay";
 pub const SETTINGS_MEDIA_EXTERNAL_PLAYER: &str = "settings.media.external_player";
+pub const SETTINGS_MEDIA_THEME_MEDIA: &str = "settings.media.theme_media";
+pub const SETTINGS_MEDIA_THEME_MEDIA_HELP: &str = "settings.media.theme_media_help";
 pub const SETTINGS_MEDIA_BITRATE: &str = "settings.media.bitrate";
 pub const SETTINGS_MEDIA_CACHE_HELP: &str = "settings.media.cache.help";
 pub const SETTINGS_MEDIA_AUDIO_OUTPUT_HEADING: &str = "settings.media.audio.output_heading";
@@ -964,6 +970,8 @@ pub const METADATA_REMOTE_EMPTY: &str = "metadata.remote_empty";
 pub const METADATA_DOWNLOAD: &str = "metadata.download";
 pub const TOAST_METADATA_SAVED: &str = "toast.metadata_saved";
 pub const TOAST_IDENTIFY_APPLIED: &str = "toast.identify_applied";
+pub const SCREENSAVER_WORDMARK: &str = "screensaver.wordmark";
+pub const SCREENSAVER_HINT: &str = "screensaver.hint";
 
 pub const ALL: &[&str] = &[
     CONNECT_WORKER_UNAVAILABLE,
@@ -1207,6 +1215,7 @@ pub const ALL: &[&str] = &[
     TOAST_ADDED_TO_PLAYLIST,
     TOAST_ADD_TO_PLAYLIST_FAILED,
     DETAIL_BUTTON_DOWNLOAD,
+    DETAIL_BUTTON_THEME,
     PLAYBACK_STATUS_REQUESTING,
     DETAIL_BUTTON_REMOVE_FAVORITE,
     DETAIL_BUTTON_ADD_FAVORITE,
@@ -1521,6 +1530,9 @@ pub const ALL: &[&str] = &[
     SETTINGS_HEADING_DISPLAY,
     SETTINGS_GENERAL_HIGH_CONTRAST,
     SETTINGS_GENERAL_REDUCE_MOTION,
+    SETTINGS_GENERAL_SCREENSAVER,
+    SETTINGS_GENERAL_SCREENSAVER_UNIT,
+    SETTINGS_GENERAL_SCREENSAVER_HELP,
     SETTINGS_GENERAL_MOTION_HELP,
     SETTINGS_GENERAL_BACKDROP,
     SETTINGS_GENERAL_BACKDROP_SERVER,
@@ -1710,6 +1722,8 @@ pub const ALL: &[&str] = &[
     SETTINGS_MEDIA_AUTO_PLAY_NEXT_EPISODE,
     SETTINGS_MEDIA_CREDITS_DELAY,
     SETTINGS_MEDIA_EXTERNAL_PLAYER,
+    SETTINGS_MEDIA_THEME_MEDIA,
+    SETTINGS_MEDIA_THEME_MEDIA_HELP,
     SETTINGS_MEDIA_BITRATE,
     SETTINGS_MEDIA_CACHE_HELP,
     SETTINGS_MEDIA_AUDIO_OUTPUT_HEADING,
@@ -1905,6 +1919,8 @@ pub const ALL: &[&str] = &[
     METADATA_DOWNLOAD,
     TOAST_METADATA_SAVED,
     TOAST_IDENTIFY_APPLIED,
+    SCREENSAVER_WORDMARK,
+    SCREENSAVER_HINT,
     SHELL_NAV_MORE,
     SHELL_NAV_COLLECTIONS,
     SHELL_NAV_BOOKS,

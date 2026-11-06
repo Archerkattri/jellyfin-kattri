@@ -75,6 +75,8 @@ use video_target::VideoTarget;
 
 /// How long a status-bar notice (screenshot or PiP) stays on screen.
 const SHELL_NOTICE_DURATION: Duration = Duration::from_secs(3);
+/// The pointer must be still this long in fullscreen before its cursor is hidden.
+const CURSOR_HIDE_AFTER: Duration = Duration::from_secs(2);
 
 pub(crate) enum HostEvent {
     EguiRepaint(Duration),
@@ -133,6 +135,11 @@ struct GlHost<'session> {
     geometry_save: window_hooks::SaveDebounce,
     // Requested state is cached to avoid sending redundant window-level hints every frame.
     window_level_topmost: bool,
+    /// Last time pointer or keyboard activity arrived, for the fullscreen cursor timer.
+    cursor_idle_since: Instant,
+    cursor_hidden: bool,
+    /// Winit focus state. A defocused window always shows its cursor again.
+    window_focused: bool,
     #[cfg(windows)]
     defocus_minimizer: window_hooks::DefocusMinimizer,
 }
@@ -340,6 +347,9 @@ impl<'session> GlHost<'session> {
             display_switch: display_switch::DisplaySwitch::new(),
             geometry_save: window_hooks::SaveDebounce::new(window_hooks::SAVE_DEBOUNCE),
             window_level_topmost,
+            cursor_idle_since: osd_clock,
+            cursor_hidden: false,
+            window_focused: true,
             #[cfg(windows)]
             defocus_minimizer: window_hooks::DefocusMinimizer::default(),
         })
@@ -427,6 +437,40 @@ impl<'session> GlHost<'session> {
                 .surface
                 .resize(&self.parts.context, width, height);
         }
+    }
+
+    fn show_cursor(&mut self) {
+        if self.cursor_hidden {
+            self.window.set_cursor_visible(true);
+            self.cursor_hidden = false;
+        }
+    }
+
+    /// Hide the pointer in fullscreen after it has been still, and show it again as soon as the
+    /// window is not a fullscreen, focused, idle surface. The player keeps receiving input either
+    /// way; only the pointer's visibility changes.
+    fn update_cursor_visibility(&mut self, fullscreen: bool, input_seen: bool) {
+        let now = Instant::now();
+        if input_seen {
+            self.cursor_idle_since = now;
+        }
+        let idle = now.saturating_duration_since(self.cursor_idle_since);
+        if cursor_should_hide(fullscreen, self.window_focused, idle, input_seen) {
+            if !self.cursor_hidden {
+                self.window.set_cursor_visible(false);
+                self.cursor_hidden = true;
+            }
+        } else {
+            self.show_cursor();
+        }
+    }
+
+    /// When the fullscreen cursor is due to hide, so the event loop can wake for it.
+    fn cursor_hide_deadline(&self) -> Option<Instant> {
+        if self.cursor_hidden || !self.window_focused || self.window.fullscreen().is_none() {
+            return None;
+        }
+        self.cursor_idle_since.checked_add(CURSOR_HIDE_AFTER)
     }
 
     fn render(&mut self, event_loop: &ActiveEventLoop) -> Duration {
@@ -565,7 +609,8 @@ impl<'session> GlHost<'session> {
             }
             return Duration::MAX;
         }
-        if has_user_activity(&input.events) {
+        let user_activity = has_user_activity(&input.events);
+        if user_activity {
             self.osd_visibility.on_input(self.osd_clock.elapsed());
         }
         // Playback keys are ignored while a text field in the app has keyboard focus.
@@ -659,6 +704,7 @@ impl<'session> GlHost<'session> {
         let volume_max_percent = self.kattri_app.audio_settings().max_volume_percent;
         let muted = controls_snapshot.muted;
         let fullscreen = self.window.fullscreen().is_some();
+        self.update_cursor_visibility(fullscreen, user_activity);
         // In fullscreen there is no scrollable page behind the video, so the wheel seeks.
         if fullscreen
             && !typing
@@ -732,6 +778,7 @@ impl<'session> GlHost<'session> {
             && !self.show_player_details
             && self.kattri_app.selected_is_video();
         self.kattri_app.set_player_owns_input(theater);
+        self.kattri_app.set_media_playing(media_active);
         let mpv = &mut self.mpv;
         let kattri_app = &mut self.kattri_app;
         let show_player_details = &mut self.show_player_details;
@@ -1073,6 +1120,8 @@ impl<'session> GlHost<'session> {
                     .is_none()
                     .then_some(winit::window::Fullscreen::Borderless(None));
                 self.window.set_fullscreen(next);
+                self.cursor_idle_since = Instant::now();
+                self.show_cursor();
                 self.window.request_redraw();
             }
         }
@@ -1639,6 +1688,8 @@ impl<'session> GlHost<'session> {
     }
 
     fn destroy(&mut self) -> bool {
+        // Never leave the desktop with an invisible pointer after shutdown.
+        self.show_cursor();
         if self.destroyed {
             return true;
         }
@@ -2381,10 +2432,12 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
             }
             WindowEvent::Moved(_) => host.touch_window_geometry(),
             WindowEvent::Focused(focused) => {
+                // A defocused window must never keep a hidden cursor.
+                host.window_focused = focused;
+                host.cursor_idle_since = Instant::now();
+                host.show_cursor();
                 #[cfg(windows)]
                 host.on_window_focus_changed(focused, Instant::now());
-                #[cfg(not(windows))]
-                let _ = focused;
             }
             WindowEvent::RedrawRequested => {
                 let delay = host.render(event_loop);
@@ -2512,6 +2565,12 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
                         .map_or(deadline, |current| current.min(deadline)),
                 );
             }
+            if let Some(deadline) = host.cursor_hide_deadline() {
+                self.redraw_at = Some(
+                    self.redraw_at
+                        .map_or(deadline, |current| current.min(deadline)),
+                );
+            }
             if let Some(deadline) = host.power_poll_deadline() {
                 self.redraw_at = Some(
                     self.redraw_at
@@ -2557,6 +2616,12 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
             presence.shutdown(self.started.elapsed());
         }
     }
+}
+
+/// The fullscreen cursor hides only when the window is a focused, fullscreen surface, the pointer
+/// has been still long enough, and this frame carried no input. Input always brings it back.
+fn cursor_should_hide(fullscreen: bool, focused: bool, idle: Duration, input_seen: bool) -> bool {
+    fullscreen && focused && !input_seen && idle >= CURSOR_HIDE_AFTER
 }
 
 fn has_user_activity(events: &[egui::Event]) -> bool {
@@ -2744,9 +2809,33 @@ fn stream_only_validation(value: Option<&OsStr>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{duration_from_seconds, has_user_activity};
+    use super::{CURSOR_HIDE_AFTER, cursor_should_hide, duration_from_seconds, has_user_activity};
     use egui::{Event, Key, Modifiers};
     use std::time::Duration;
+
+    #[test]
+    fn cursor_hides_only_in_a_focused_fullscreen_window_after_idle() {
+        let idle = CURSOR_HIDE_AFTER;
+        assert!(cursor_should_hide(true, true, idle, false));
+        assert!(cursor_should_hide(
+            true,
+            true,
+            idle + Duration::from_secs(4),
+            false
+        ));
+        assert!(
+            !cursor_should_hide(true, true, idle, true),
+            "input shows it"
+        );
+        assert!(!cursor_should_hide(
+            true,
+            true,
+            CURSOR_HIDE_AFTER - Duration::from_millis(1),
+            false
+        ));
+        assert!(!cursor_should_hide(false, true, idle, false), "windowed");
+        assert!(!cursor_should_hide(true, false, idle, false), "unfocused");
+    }
 
     #[test]
     fn stream_only_validation_requires_the_exact_debug_opt_in() {
