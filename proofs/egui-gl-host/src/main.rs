@@ -116,6 +116,9 @@ struct GlHost<'session> {
     sync_play_bridge: syncplay_bridge::SyncPlaybackBridge,
     osd_visibility: OsdVisibility,
     osd_clock: Instant,
+    /// Fade of the player chrome, driven by the OSD timer but stepped smoothly so the row and the
+    /// top overlay appear and disappear together.
+    chrome_opacity: f32,
     destroyed: bool,
     show_player_details: bool,
     // The screenshot command goes to the same session the MpvHost renders from.
@@ -333,6 +336,7 @@ impl<'session> GlHost<'session> {
             sync_play_bridge: syncplay_bridge::SyncPlaybackBridge::default(),
             osd_visibility,
             osd_clock,
+            chrome_opacity: 0.0,
             destroyed: false,
             show_player_details: false,
             session,
@@ -683,6 +687,20 @@ impl<'session> GlHost<'session> {
             self.egui.memory(|memory| memory.focused().is_some()),
             egui::Popup::is_any_open(&self.egui),
         );
+        // The chrome follows the existing OSD timer, but its opacity is stepped smoothly so the
+        // bottom row and the top overlay appear and disappear as one surface. Reduced motion
+        // (a zero style animation time) makes this snap.
+        let chrome_target = if controls_visible { 1.0 } else { 0.0 };
+        let fade = player_controls::fade_seconds(self.egui.global_style().animation_time);
+        let frame_time = self.egui.input(|input| input.stable_dt);
+        self.chrome_opacity = player_controls::advance_fade(
+            self.chrome_opacity,
+            chrome_target,
+            Duration::from_secs_f32(frame_time.max(0.0)),
+            Duration::from_secs_f32(fade),
+        );
+        let chrome_opacity = self.chrome_opacity;
+        let chrome_present = chrome_opacity > 0.001;
         let osd_hide_after = self.osd_visibility.time_until_hidden(osd_now);
         let controls_feedback = self.mpv.controls_feedback().map(str::to_owned);
         let playback_report_feedback = self
@@ -700,6 +718,19 @@ impl<'session> GlHost<'session> {
             .as_deref()
             .and_then(|id| self.kattri_app.item_title(id))
             .map(str::to_owned);
+        // The app exposes only an item title publicly, so the second title line uses the chapter
+        // that contains the playhead, which is the useful context a viewer has here.
+        let playing_subtitle = controls_chapters
+            .iter()
+            .rev()
+            .find(|chapter| chapter.time <= controls_position)
+            .map(|chapter| {
+                if chapter.title.trim().is_empty() {
+                    format!("Chapter {}", chapter.index.saturating_add(1))
+                } else {
+                    chapter.title.clone()
+                }
+            });
         let volume_percent = controls_snapshot.volume_percent;
         let volume_max_percent = self.kattri_app.audio_settings().max_volume_percent;
         let muted = controls_snapshot.muted;
@@ -760,10 +791,12 @@ impl<'session> GlHost<'session> {
             ab_loop_a,
             ab_loop_b,
             title: playing_title.as_deref(),
+            subtitle: playing_subtitle.as_deref(),
             volume_percent,
             volume_max_percent,
             muted,
             fullscreen,
+            opacity: chrome_opacity,
             skip_settings,
             feedback: controls_feedback.as_deref(),
             audio_tracks: audio_track_options.as_deref(),
@@ -811,6 +844,11 @@ impl<'session> GlHost<'session> {
             if let Some(delay) = osd_hide_after {
                 root.request_repaint_after(delay);
             }
+            if (chrome_opacity - chrome_target).abs() > 0.001 {
+                // Step the fade while it is in flight; when it lands the regular OSD schedule
+                // takes over again.
+                root.request_repaint();
+            }
             if media_info.is_some() {
                 // The panel re-reads the player's properties on this cadence.
                 root.request_repaint_after(media_info_panel::REFRESH_INTERVAL);
@@ -845,34 +883,67 @@ impl<'session> GlHost<'session> {
                             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                             egui::Color32::WHITE,
                         );
-                        if controls_visible {
-                            egui::Area::new(egui::Id::unique("theater_back"))
+                        if chrome_present {
+                            // Keep the chrome inside the video area, not the whole window: a
+                            // debug-only notice or any future top panel must not be covered.
+                            let screen = ui.ctx().content_rect();
+                            let stage = area;
+                            player_controls::paint_top_scrim(
+                                ui.painter(),
+                                stage,
+                                chrome_opacity,
+                            );
+                            player_controls::paint_bottom_scrim(
+                                ui.painter(),
+                                stage,
+                                chrome_opacity,
+                            );
+                            egui::Area::new(egui::Id::unique("theater_top"))
                                 .order(egui::Order::Foreground)
-                                .anchor(egui::Align2::LEFT_TOP, egui::vec2(24.0, 20.0))
+                                .fixed_pos(stage.left_top())
                                 .show(ui.ctx(), |ui| {
-                                    let back = egui::Button::new(
-                                        egui::RichText::new("←  Back")
-                                            .size(17.0)
-                                            .strong()
-                                            .color(egui::Color32::WHITE),
-                                    )
-                                    .fill(egui::Color32::from_black_alpha(150))
-                                    .corner_radius(egui::CornerRadius::same(22))
-                                    .min_size(egui::vec2(110.0, 44.0));
-                                    ui.horizontal_wrapped(|ui| {
-                                        if ui.add(back).clicked() {
+                                    ui.set_width(stage.width());
+                                    match player_controls::draw_top_chrome(
+                                        ui,
+                                        player_controls::TopChromeView {
+                                            title: osd.title,
+                                            subtitle: osd.subtitle,
+                                            opacity: chrome_opacity,
+                                        },
+                                    ) {
+                                        player_controls::TopChromeAction::Back => {
                                             mpv.stop_playback();
                                         }
-                                        if ui.button("Player details").clicked() {
+                                        player_controls::TopChromeAction::PlayerDetails => {
                                             *show_player_details = true;
                                         }
-                                    });
+                                        player_controls::TopChromeAction::None => {}
+                                    }
                                 });
+                            if player_controls::draw_center_play(
+                                ui.ctx(),
+                                stage,
+                                osd.paused,
+                                osd.media_active,
+                                chrome_opacity,
+                            ) {
+                                if mpv.live_stream_active() {
+                                    mpv.stop_playback();
+                                } else {
+                                    mpv.toggle_paused();
+                                }
+                            }
                             egui::Area::new(egui::Id::unique("theater_controls"))
                                 .order(egui::Order::Foreground)
-                                .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -28.0))
+                                .anchor(
+                                    egui::Align2::LEFT_BOTTOM,
+                                    egui::vec2(
+                                        stage.left() - screen.left(),
+                                        stage.bottom() - screen.bottom(),
+                                    ),
+                                )
                                 .show(ui.ctx(), |ui| {
-                                    ui.set_max_width((area.width() - 32.0).clamp(1.0, 920.0));
+                                    ui.set_width(stage.width());
                                     osd_controls(
                                         ui,
                                         mpv,
@@ -1860,6 +1931,8 @@ struct OsdState<'a> {
     ab_loop_a: Option<Duration>,
     ab_loop_b: Option<Duration>,
     title: Option<&'a str>,
+    subtitle: Option<&'a str>,
+    opacity: f32,
     volume_percent: Option<f64>,
     volume_max_percent: u32,
     muted: Option<bool>,
@@ -1953,10 +2026,8 @@ fn osd_controls(
         skipper: mpv.segment_skipper_mut(),
         settings,
     });
-    // The menu lives inside the panel, so it is built during the draw and the host performs the
-    // chosen actions afterwards: the panel is drawn while the skipper still holds the host.
-    let mut audio_pick = None;
-    let mut subtitle_pick = None;
+    // The popover is built during the draw and the host performs the chosen actions afterwards:
+    // the panel is drawn while the skipper still holds the host.
     let mut sync_marker = None;
     let mut reset_subtitle_delay = false;
     let mut search_subtitles = false;
@@ -1982,52 +2053,48 @@ fn osd_controls(
             pip_available: osd.pip_available,
             ab_loop_a: osd.ab_loop_a,
             ab_loop_b: osd.ab_loop_b,
-            title: osd.title,
             volume_percent: osd.volume_percent,
             volume_max_percent: osd.volume_max_percent,
             muted: osd.muted,
             fullscreen: osd.fullscreen,
+            // mpv does not currently expose a demuxer-cache range through the properties this
+            // host observes, so the loaded range is drawn only when a backend supplies it.
+            buffered: None,
+            audio_tracks: osd.audio_tracks,
+            subtitle_tracks: osd.subtitle_tracks,
+            opacity: osd.opacity,
         },
         skip,
         |ui| {
-            ui.menu_button("Audio & subtitles", |ui| {
-                ui.set_max_width(300.0);
-                let (audio, subtitle) = player_controls::track_menu_contents(
-                    ui,
-                    osd.audio_tracks,
-                    osd.subtitle_tracks,
-                    osd.track_feedback,
-                );
-                if let Some(selection) = audio {
-                    audio_pick = Some(selection);
+            ui.label(
+                egui::RichText::new("Subtitles")
+                    .size(11.0)
+                    .strong()
+                    .color(egui::Color32::from_gray(176)),
+            );
+            if let Some(feedback) = osd.track_feedback {
+                ui.small(feedback);
+            }
+            ui.label("Sync subtitles to speech");
+            ui.add_enabled_ui(subtitle_selected, |ui| {
+                for (marker, label) in SYNC_MARKER_BUTTONS {
+                    if ui.button(label).clicked() {
+                        sync_marker = Some(marker);
+                    }
                 }
-                if let Some(selection) = subtitle {
-                    subtitle_pick = Some(selection);
-                }
-                ui.separator();
-                ui.label("Sync subtitles to speech");
-                ui.add_enabled_ui(subtitle_selected, |ui| {
-                    for (marker, label) in SYNC_MARKER_BUTTONS {
-                        if ui.button(label).clicked() {
-                            sync_marker = Some(marker);
-                        }
-                    }
-                    if ui.button("Reset subtitle delay").clicked() {
-                        reset_subtitle_delay = true;
-                    }
-                });
-                ui.label(&sync_feedback);
-                if subtitle_search_available {
-                    ui.separator();
-                    if ui
-                        .button(jellyfin_egui_client::search_subtitles_label())
-                        .clicked()
-                    {
-                        search_subtitles = true;
-                        ui.close();
-                    }
+                if ui.button("Reset subtitle delay").clicked() {
+                    reset_subtitle_delay = true;
                 }
             });
+            ui.label(&sync_feedback);
+            if subtitle_search_available
+                && ui
+                    .button(jellyfin_egui_client::search_subtitles_label())
+                    .clicked()
+            {
+                search_subtitles = true;
+                ui.close();
+            }
         },
         |time| {
             playing_item_id
@@ -2037,12 +2104,6 @@ fn osd_controls(
     );
     if search_subtitles && let Some(item_id) = playing_item_id.as_deref() {
         kattri_app.open_subtitle_search(item_id, true);
-    }
-    if let Some(selection) = audio_pick {
-        mpv.select_audio_track(selection);
-    }
-    if let Some(selection) = subtitle_pick {
-        mpv.select_subtitle_track(selection);
     }
     if let Some(marker) = sync_marker {
         mpv.capture_sync_marker(marker);
@@ -2085,6 +2146,15 @@ fn osd_controls(
             PlayerControlAction::SelectSecondarySubtitle(track) => {
                 mpv.select_secondary_subtitle(track);
             }
+            PlayerControlAction::SelectAudioTrack(selection) => {
+                mpv.select_audio_track(selection);
+            }
+            PlayerControlAction::SelectSubtitleTrack(selection) => {
+                mpv.select_subtitle_track(selection);
+            }
+            PlayerControlAction::ToggleMediaInfo => {
+                mpv.dispatch_playback_key(mpv_host::PlaybackKeyAction::MediaInfo);
+            }
             PlayerControlAction::TogglePip => *pip_toggle_requested = true,
             PlayerControlAction::StepFrame { backward } => {
                 mpv.dispatch_playback_key(mpv_host::PlaybackKeyAction::FrameStep { backward });
@@ -2107,7 +2177,7 @@ fn osd_controls(
 
 /// Keep keyboard focus and open player menus visible beyond the pointer inactivity timer.
 fn player_controls_visible(timed: bool, focused: bool, popup_open: bool) -> bool {
-    timed || focused || popup_open
+    player_controls::player_controls_visible(timed, focused, popup_open)
 }
 
 /// The window client size that shows a decoded frame at 1:1. The theater draws the video into a

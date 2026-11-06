@@ -1,13 +1,37 @@
 //! Presentational playback controls for the native egui host.
+//!
+//! The chrome follows the patterns shared by current streaming players rather than a floating
+//! settings panel. Researched patterns and sources:
+//!
+//! - Full-bleed video with a bottom scrim and auto-hiding chrome, kept visible while paused or
+//!   while a menu is open: the Video.js 10 controls design
+//!   <https://github.com/videojs/v10/blob/main/internal/design/ui/controls-design.md>.
+//! - A single top overlay with a back affordance, title and secondary line; a large center
+//!   play affordance while paused: the Netflix iOS video player and web player captures on
+//!   Mobbin <https://mobbin.com/explore/screens/b1f2670c-5b85-416c-aec3-368bbc58c2fb>.
+//! - A slim seek bar with a hover time/thumbnail bubble and drag scrubbing: Netflix's timeline
+//!   preview behaviour
+//!   <https://exabyting.com/blog/how-youtube-and-netflix-show-video-timeline-preview-images/>.
+//! - Playback options collected in one "swipe down"/overflow surface instead of several dense
+//!   combo boxes: Infuse's Apple TV playback options
+//!   <https://support.firecore.com/hc/en-us/articles/215090987-Playback-Controls>.
+//! - Chapter ticks and a compact transport row: Jellyfin Web and Plex player reviews
+//!   <https://forums.plex.tv/t/make-playback-speed-control-easier-to-access/877939>.
+//! - Picture-in-picture from the control row and a settings gear: Disney+ player captures on
+//!   Mobbin <https://mobbin.com/explore/screens/34a6b7ef-4ed3-4b60-9073-8f46ae0ec7e3>.
+//!
+//! Controls stay reachable at every window width: the row sheds its secondary controls into the
+//! single settings popover instead of wrapping into a second dense row.
 
 use std::time::Duration;
 
-use egui::{Color32, RichText, Role, WidgetInfo};
+use egui::{Color32, RichText, Role, Sense, WidgetInfo};
 use kattri_client_core::controls::PlaybackSpeed;
 use kattri_client_core::segments::{
     SegmentError, SegmentKind, SegmentSkipper, SkipDecision, SkipSettings,
 };
 use kattri_settings::PlaybackSettings;
+use mpv_render_proof::TrackSelection;
 
 use crate::player_icons::{self, OsdIcon};
 use jellyfin_egui_client::SeekThumbnail;
@@ -15,14 +39,32 @@ use jellyfin_egui_client::SeekThumbnail;
 /// Width of the seek preview thumbnail in points.
 const SEEK_PREVIEW_WIDTH: f32 = 240.0;
 
-/// Size of one icon button in points. Compact enough for a row of transports without the
-/// control bar dwarfing the video.
-const ICON_BUTTON: f32 = 30.0;
+/// Size of one icon button in points. Generous enough for a remote or a touch pad, small enough
+/// that the row never dwarfs the video.
+const ICON_BUTTON: f32 = 32.0;
 /// The play/pause button, the one control a viewer looks for first.
-const PRIMARY_BUTTON: f32 = 36.0;
+const PRIMARY_BUTTON: f32 = 44.0;
+/// Height of the interactive strip around the slim seek track. The visible track is much thinner;
+/// the strip is what the pointer and the focus ring use.
+const SEEK_HIT_HEIGHT: f32 = 26.0;
+/// Resting and hovered heights of the seek track, in points.
+const SEEK_TRACK_REST: f32 = 3.0;
+const SEEK_TRACK_HOVER: f32 = 6.0;
 
-/// Maximum number of chapter entries exposed in the menu.
+/// Fade duration for the chrome and small hover transitions. Reduced motion turns it off.
+pub const CHROME_FADE: f32 = 0.24;
+/// Height of the bottom gradient scrim. Tall enough to cover the seek bar and the control row.
+pub const BOTTOM_SCRIM_HEIGHT: f32 = 190.0;
+/// Height of the top gradient scrim under the back/title/Player details row.
+pub const TOP_SCRIM_HEIGHT: f32 = 116.0;
+
+/// Maximum number of chapter entries exposed in the popover.
 pub const MAX_CHAPTER_CHOICES: usize = 128;
+
+/// Width of the settings popover, clamped to the window.
+const POPOVER_WIDTH: f32 = 320.0;
+/// Stable id for the single settings popover.
+const SETTINGS_POPOVER_ID: &str = "kattri-player-settings";
 
 /// A chapter choice, using mpv's zero-based chapter index.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,8 +112,6 @@ pub struct PlayerControlsView<'a> {
     pub ab_loop_a: Option<Duration>,
     /// A-B loop point B for the current item, when one is set (M6-12). Session-only.
     pub ab_loop_b: Option<Duration>,
-    /// Title of the item now playing, shown above the transport row.
-    pub title: Option<&'a str>,
     /// Observed mpv volume in percent. `None` hides the slider until mpv reports it.
     pub volume_percent: Option<f64>,
     /// Highest volume the settings allow, so the slider cannot exceed the boost cap.
@@ -80,6 +120,15 @@ pub struct PlayerControlsView<'a> {
     pub muted: Option<bool>,
     /// Whether the window is fullscreen now.
     pub fullscreen: bool,
+    /// End of the demuxer's loaded range, when the backend reports one. The seek bar paints it
+    /// behind the progress; `None` leaves only the played range visible.
+    pub buffered: Option<Duration>,
+    /// Primary audio choices for the settings popover. `None` while the inventory is loading.
+    pub audio_tracks: Option<&'a [TrackChoice<TrackSelection>]>,
+    /// Primary subtitle choices for the settings popover. `None` while the inventory is loading.
+    pub subtitle_tracks: Option<&'a [TrackChoice<TrackSelection>]>,
+    /// Opacity of the whole chrome, from the host's OSD fade. Tests draw at full opacity.
+    pub opacity: f32,
 }
 
 /// One secondary subtitle the selector offers.
@@ -153,6 +202,12 @@ pub enum PlayerControlAction {
     SelectChapter(usize),
     /// Set the secondary subtitle track by mpv track id, or `None` to turn it off.
     SelectSecondarySubtitle(Option<i64>),
+    /// Set the primary audio track from the settings popover.
+    SelectAudioTrack(TrackSelection),
+    /// Set the primary subtitle track from the settings popover.
+    SelectSubtitleTrack(TrackSelection),
+    /// Show or hide the existing media-info panel.
+    ToggleMediaInfo,
     /// Enter or leave picture-in-picture (M2-12).
     TogglePip,
     /// Step exactly one frame, pausing first when playing (M6-12).
@@ -207,10 +262,8 @@ enum ControlId {
     SeekBackward,
     SeekForward,
     SkipSegment,
-    ChapterMenu,
+    SettingsMenu,
     PipToggle,
-    SpeedMenu,
-    SecondarySubtitleMenu,
     FrameBack,
     FrameForward,
     AbLoop,
@@ -221,14 +274,59 @@ enum ControlId {
     Fullscreen,
 }
 
-const THEATER_BG: Color32 = Color32::from_rgb(24, 25, 27);
-const OSD_ACCENT: Color32 = Color32::from_rgb(0x00, 0xA4, 0xDC);
-const OSD_CONTROL: Color32 = Color32::from_rgb(46, 49, 53);
-const OSD_CONTROL_HOVER: Color32 = Color32::from_rgb(66, 70, 75);
+/// Video chrome stays neutral white-on-black whatever the app theme is, because it sits on
+/// arbitrary film frames. The accent is a soft white rather than the old bright blue.
+const OSD_ACCENT: Color32 = Color32::from_rgb(0xF2, 0xF4, 0xF5);
+const OSD_TRACK: Color32 = Color32::from_rgba_premultiplied(54, 54, 54, 54);
+const OSD_BUFFERED: Color32 = Color32::from_rgba_premultiplied(92, 92, 92, 92);
 const OSD_FOCUS: Color32 = Color32::from_rgb(0x7D, 0xD8, 0xF4);
 const OSD_TEXT: Color32 = Color32::from_rgb(242, 244, 245);
-const OSD_MUTED: Color32 = Color32::from_rgb(164, 170, 174);
+const OSD_MUTED: Color32 = Color32::from_rgb(176, 182, 188);
+const OSD_POPOVER: Color32 = Color32::from_rgb(20, 21, 23);
 const SYNCED_SPEED_TOOLTIP: &str = "Playback speed is synchronized by Watch Together.";
+
+/// Multiply `color`'s opacity. `gamma_multiply` scales the premultiplied channels, which is the
+/// correct result for a translucent overlay on video.
+fn faded(color: Color32, opacity: f32) -> Color32 {
+    color.gamma_multiply(opacity.clamp(0.0, 1.0))
+}
+
+/// The chrome fade duration for an egui style. The app sets `animation_time` to zero when the
+/// viewer asked for reduced motion, and then every transition snaps.
+pub fn fade_seconds(animation_time: f32) -> f32 {
+    if animation_time > 0.0 {
+        CHROME_FADE
+    } else {
+        0.0
+    }
+}
+
+/// Move an opacity value toward `target` by the fraction of `over` that `elapsed` represents.
+pub fn advance_fade(current: f32, target: f32, elapsed: Duration, over: Duration) -> f32 {
+    let current = current.clamp(0.0, 1.0);
+    let target = target.clamp(0.0, 1.0);
+    if over.is_zero() {
+        return target;
+    }
+    let step = (elapsed.as_secs_f32() / over.as_secs_f32()).clamp(0.0, 1.0);
+    if target >= current {
+        (current + step).min(target)
+    } else {
+        (current - step).max(target)
+    }
+}
+
+/// Keep the chrome visible while the existing OSD timer says so, while a control has keyboard
+/// focus, or while any popup is open. This is a decision on top of `OsdVisibility`, not a second
+/// inactivity timer.
+pub fn player_controls_visible(timed: bool, focused: bool, popup_open: bool) -> bool {
+    timed || focused || popup_open
+}
+
+/// Whether the centered play affordance should be offered.
+pub fn center_play_visible(paused: Option<bool>, media_active: bool) -> bool {
+    media_active && paused == Some(true)
+}
 
 /// Draw compact, keyboard-accessible playback controls and return user actions. The automatic
 /// skip seeks without a press. The button seeks on press and appears only while a segment is
@@ -310,8 +408,88 @@ fn seek_position_at(rect: egui::Rect, x: f32, seek_end: Duration) -> Option<Dura
     let width = rect.width();
     (width > 0.0).then(|| {
         let fraction = ((x - rect.left()) / width).clamp(0.0, 1.0);
-        Duration::from_secs_f64(f64::from(fraction) * seek_end.as_secs_f64())
+        position_at_fraction(fraction, seek_end)
     })
+}
+
+/// Fraction of the seekable timeline that `time` occupies.
+fn timeline_fraction(time: Duration, seek_end: Duration) -> f32 {
+    if seek_end.is_zero() {
+        return 0.0;
+    }
+    (time.as_secs_f64() / seek_end.as_secs_f64()).clamp(0.0, 1.0) as f32
+}
+
+/// Progress of the played position on the bar, where the seekable end is one second before the
+/// reported duration. That keeps the thumb reachable at the end of the item.
+fn seek_fraction(position: Duration, duration: Option<Duration>) -> f32 {
+    let Some(duration) = duration.filter(|duration| !duration.is_zero()) else {
+        return 0.0;
+    };
+    timeline_fraction(position, duration.saturating_sub(Duration::from_secs(1)))
+}
+
+/// The position at `fraction` of a bar ending at `seek_end`.
+fn position_at_fraction(fraction: f32, seek_end: Duration) -> Duration {
+    Duration::from_secs_f64(f64::from(fraction.clamp(0.0, 1.0)) * seek_end.as_secs_f64())
+}
+
+/// The chapter that contains `position`, using mpv's zero-based chapter index.
+fn current_chapter_index(chapters: &[ChapterChoice], position: Duration) -> Option<usize> {
+    chapters
+        .iter()
+        .filter(|chapter| chapter.time <= position)
+        .map(|chapter| chapter.index)
+        .next_back()
+}
+
+/// Layout tiers for the control row. A narrow window sheds secondary controls into the settings
+/// popover instead of wrapping into a second dense row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ChromeLayout {
+    roomy: bool,
+    medium: bool,
+    compact: bool,
+    /// Below this tier even Previous/Next and the clock make the row wider than the window.
+    tiny: bool,
+}
+
+fn chrome_layout(width: f32) -> ChromeLayout {
+    ChromeLayout {
+        roomy: width >= 720.0,
+        medium: width >= 470.0,
+        compact: width >= 350.0,
+        tiny: width < 330.0,
+    }
+}
+
+/// The sections the single settings popover shows this frame. Empty track and chapter sections
+/// are omitted rather than left as dead headings.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SettingsSections {
+    audio: bool,
+    subtitles: bool,
+    secondary: bool,
+    speed: bool,
+    chapters: bool,
+    playback: bool,
+    media_info: bool,
+}
+
+fn settings_sections(view: &PlayerControlsView<'_>, layout: ChromeLayout) -> SettingsSections {
+    SettingsSections {
+        audio: view.audio_tracks.is_some_and(|tracks| !tracks.is_empty()),
+        subtitles: view
+            .subtitle_tracks
+            .is_some_and(|tracks| !tracks.is_empty()),
+        secondary: !view.secondary_subtitles.is_empty(),
+        speed: true,
+        chapters: !view.chapters.is_empty(),
+        // Below the roomy tier the row hides secondary playback controls; the popover is where
+        // they remain reachable.
+        playback: !layout.roomy,
+        media_info: true,
+    }
 }
 
 /// Paints the time at the pointer above the seek bar, and the trickplay thumbnail above it when
@@ -322,12 +500,17 @@ fn paint_seek_preview(
     x: f32,
     time: Duration,
     thumbnail: Option<SeekThumbnail>,
+    opacity: f32,
 ) {
     let painter = ui.ctx().layer_painter(egui::LayerId::new(
         egui::Order::Tooltip,
         egui::Id::unique("kattri-seek-preview"),
     ));
-    let label = painter.layout_no_wrap(format_time(time), egui::FontId::monospace(13.0), OSD_TEXT);
+    let label = painter.layout_no_wrap(
+        format_time(time),
+        egui::FontId::monospace(13.0),
+        faded(OSD_TEXT, opacity),
+    );
     let image_size = thumbnail.map(|thumbnail| {
         egui::vec2(
             SEEK_PREVIEW_WIDTH,
@@ -345,27 +528,343 @@ fn paint_seek_preview(
     let left = (x - size.x / 2.0)
         .min(screen.right() - size.x - 4.0)
         .max(screen.left() + 4.0);
-    let top = (bar.top() - 8.0 - size.y).max(screen.top() + 4.0);
+    let top = (bar.top() - 10.0 - size.y).max(screen.top() + 4.0);
     let frame = egui::Rect::from_min_size(egui::pos2(left, top), size);
     painter.rect_filled(
         frame,
         egui::CornerRadius::same(8),
-        THEATER_BG.gamma_multiply(0.95),
+        faded(OSD_POPOVER, opacity),
     );
     painter.rect_stroke(
         frame,
         egui::CornerRadius::same(8),
-        egui::Stroke::new(1.0, Color32::from_white_alpha(40)),
+        egui::Stroke::new(1.0, faded(Color32::from_white_alpha(40), opacity)),
         egui::StrokeKind::Inside,
     );
     let mut cursor = frame.min + egui::vec2(padding, padding);
     if let (Some(thumbnail), Some(image_size)) = (thumbnail, image_size) {
         let image = egui::Rect::from_min_size(cursor, image_size);
-        painter.image(thumbnail.texture, image, thumbnail.uv, Color32::WHITE);
+        painter.image(
+            thumbnail.texture,
+            image,
+            thumbnail.uv,
+            faded(Color32::WHITE, opacity),
+        );
         cursor.y += image_size.y + padding;
     }
     let label_left = frame.center().x - label.size().x / 2.0;
-    painter.galley(egui::pos2(label_left, cursor.y), label, OSD_TEXT);
+    painter.galley(
+        egui::pos2(label_left, cursor.y),
+        label,
+        faded(OSD_TEXT, opacity),
+    );
+}
+
+/// Paints the bottom-on-top gradient that replaces the old floating card. `screen` is the full
+/// video area, so the scrim runs edge to edge while the row keeps its own margins.
+pub fn paint_bottom_scrim(painter: &egui::Painter, screen: egui::Rect, opacity: f32) {
+    let top = (screen.bottom() - BOTTOM_SCRIM_HEIGHT).max(screen.top());
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(screen.left(), top),
+        egui::pos2(screen.right(), screen.bottom()),
+    );
+    paint_vertical_scrim(painter, rect, 0, scale_alpha(236, opacity));
+}
+
+/// Paints the top scrim under the back chevron, title and Player details actions.
+pub fn paint_top_scrim(painter: &egui::Painter, screen: egui::Rect, opacity: f32) {
+    let bottom = (screen.top() + TOP_SCRIM_HEIGHT).min(screen.bottom());
+    let rect = egui::Rect::from_min_max(screen.left_top(), egui::pos2(screen.right(), bottom));
+    paint_vertical_scrim(painter, rect, scale_alpha(214, opacity), 0);
+}
+
+fn scale_alpha(alpha: u8, opacity: f32) -> u8 {
+    (f32::from(alpha) * opacity.clamp(0.0, 1.0)).round() as u8
+}
+
+fn paint_vertical_scrim(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    top_alpha: u8,
+    bottom_alpha: u8,
+) {
+    if rect.height() <= 0.0 || (top_alpha == 0 && bottom_alpha == 0) {
+        return;
+    }
+    let mut mesh = egui::Mesh::default();
+    for (pos, alpha) in [
+        (rect.left_top(), top_alpha),
+        (rect.right_top(), top_alpha),
+        (rect.left_bottom(), bottom_alpha),
+        (rect.right_bottom(), bottom_alpha),
+    ] {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos,
+            uv: egui::epaint::WHITE_UV,
+            color: Color32::from_black_alpha(alpha),
+        });
+    }
+    mesh.indices.extend_from_slice(&[0, 1, 2, 2, 1, 3]);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// What the top overlay asked the host to do this frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TopChromeAction {
+    /// No action.
+    None,
+    /// Leave the video, as the old Back pill did.
+    Back,
+    /// Open the Player details panel.
+    PlayerDetails,
+}
+
+/// Everything the top overlay draws.
+pub struct TopChromeView<'a> {
+    /// Item title.
+    pub title: Option<&'a str>,
+    /// Secondary line, normally the current chapter.
+    pub subtitle: Option<&'a str>,
+    /// Opacity from the shared OSD fade.
+    pub opacity: f32,
+}
+
+/// Draw the top overlay: a back chevron, the title block, and the Player details action. The host
+/// paints [`paint_top_scrim`] behind this, and the whole row hides with the bottom controls.
+pub fn draw_top_chrome(ui: &mut egui::Ui, view: TopChromeView<'_>) -> TopChromeAction {
+    let opacity = view.opacity.clamp(0.0, 1.0);
+    let mut action = TopChromeAction::None;
+    egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: 18,
+            right: 18,
+            top: 10,
+            bottom: 14,
+        })
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if chrome_icon_text_button(ui, OsdIcon::Back, "Back", opacity) {
+                    action = TopChromeAction::Back;
+                }
+                ui.add_space(10.0);
+                ui.vertical(|ui| {
+                    if let Some(title) = view.title.map(str::trim).filter(|t| !t.is_empty()) {
+                        ui.label(
+                            RichText::new(title)
+                                .size(17.0)
+                                .strong()
+                                .color(faded(OSD_TEXT, opacity)),
+                        );
+                    }
+                    if let Some(subtitle) = view.subtitle.map(str::trim).filter(|t| !t.is_empty()) {
+                        ui.label(
+                            RichText::new(subtitle)
+                                .size(12.0)
+                                .color(faded(OSD_MUTED, opacity)),
+                        );
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if chrome_text_button(ui, "Player details", opacity) {
+                        action = TopChromeAction::PlayerDetails;
+                    }
+                });
+            });
+        });
+    action
+}
+
+/// The large centered play affordance while paused. Returns true when it was clicked.
+pub fn draw_center_play(
+    ctx: &egui::Context,
+    stage: egui::Rect,
+    paused: Option<bool>,
+    media_active: bool,
+    opacity: f32,
+) -> bool {
+    if !center_play_visible(paused, media_active) || opacity <= 0.0 {
+        return false;
+    }
+    let opacity = opacity.clamp(0.0, 1.0);
+    let mut clicked = false;
+    egui::Area::new(egui::Id::unique("kattri-center-play"))
+        .order(egui::Order::Foreground)
+        .anchor(
+            egui::Align2::CENTER_CENTER,
+            stage.center() - ctx.content_rect().center(),
+        )
+        .show(ctx, |ui| {
+            let (rect, response) = ui.allocate_exact_size(egui::vec2(84.0, 84.0), Sense::click());
+            let fill = if response.hovered() {
+                Color32::from_white_alpha(48)
+            } else {
+                Color32::from_white_alpha(28)
+            };
+            ui.painter()
+                .circle_filled(rect.center(), rect.width() / 2.0, faded(fill, opacity));
+            ui.painter().circle_stroke(
+                rect.center(),
+                rect.width() / 2.0,
+                egui::Stroke::new(1.0, faded(Color32::from_white_alpha(70), opacity)),
+            );
+            player_icons::paint(
+                ui.painter(),
+                icon_area(rect, 0.42),
+                OsdIcon::Play,
+                faded(Color32::WHITE, opacity),
+            );
+            focus_ring(ui, &response, egui::CornerRadius::same(42), opacity);
+            response.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Play"));
+            clicked = response.on_hover_text("Play").clicked();
+        });
+    clicked
+}
+
+/// The current seek bar frame: the seek the host should perform, and the position the bar drew.
+struct SeekBar {
+    action: Option<PlayerControlAction>,
+    displayed: Duration,
+}
+
+fn seek_bar(
+    ui: &mut egui::Ui,
+    view: &PlayerControlsView<'_>,
+    opacity: f32,
+    observe: &mut impl FnMut(ControlId, egui::Rect),
+    preview: &mut impl FnMut(Duration) -> Option<SeekThumbnail>,
+) -> SeekBar {
+    let duration = view.duration.unwrap_or_default();
+    let seek_end = duration.saturating_sub(Duration::from_secs(1));
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(1.0), SEEK_HIT_HEIGHT),
+        Sense::click_and_drag(),
+    );
+    observe(ControlId::SeekBar, rect);
+
+    let active = response.hovered() || response.dragged() || response.has_focus();
+    let grow = ui.ctx().animate_bool_with_time(
+        response.id.with("grow"),
+        active,
+        fade_seconds(ui.style().animation_time),
+    );
+    let height = SEEK_TRACK_REST + (SEEK_TRACK_HOVER - SEEK_TRACK_REST) * grow;
+    let track = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), height));
+
+    let pointer_x = response
+        .interact_pointer_pos()
+        .or_else(|| response.hover_pos())
+        .map(|pointer| pointer.x);
+    let pointer_time = pointer_x.and_then(|x| seek_position_at(rect, x, seek_end));
+    let pressed = response.clicked() || response.dragged() || response.is_pointer_button_down_on();
+    let displayed = pointer_time
+        .filter(|_| pressed)
+        .unwrap_or_else(|| view.position.min(seek_end));
+
+    let mut action = None;
+    if pressed && let Some(time) = pointer_time {
+        action = Some(PlayerControlAction::SeekAbsolute(time));
+        response.request_focus();
+    }
+    if response.has_focus() && action.is_none() {
+        let mut seek = None;
+        ui.input_mut(|input| {
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) {
+                seek = Some(-10);
+            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) {
+                seek = Some(10);
+            }
+        });
+        if let Some(delta) = seek {
+            action = Some(PlayerControlAction::SeekRelative(delta));
+        }
+    }
+
+    paint_seek_track(ui, view, track, displayed, opacity, grow);
+    if let (Some(x), Some(time)) = (pointer_x, pointer_time)
+        && (response.hovered() || response.dragged())
+    {
+        paint_seek_preview(ui, rect, x, time, preview(time), opacity);
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(3.0),
+            egui::CornerRadius::same(8),
+            egui::Stroke::new(2.0, faded(OSD_FOCUS, opacity)),
+            egui::StrokeKind::Outside,
+        );
+    }
+    response.widget_info(|| {
+        WidgetInfo::slider(
+            true,
+            f64::from(seek_fraction(displayed, view.duration)),
+            "Playback position",
+        )
+    });
+    response.on_hover_text("Playback position");
+
+    SeekBar { action, displayed }
+}
+
+fn paint_seek_track(
+    ui: &egui::Ui,
+    view: &PlayerControlsView<'_>,
+    track: egui::Rect,
+    displayed: Duration,
+    opacity: f32,
+    grow: f32,
+) {
+    let painter = ui.painter();
+    let rounding = egui::CornerRadius::same((track.height() / 2.0).round() as u8);
+    let width = track.width();
+    let duration = view.duration.unwrap_or_default();
+    let seek_end = duration.saturating_sub(Duration::from_secs(1));
+    painter.rect_filled(track, rounding, faded(OSD_TRACK, opacity));
+
+    if let Some(buffered) = view.buffered {
+        let loaded = timeline_fraction(buffered.min(seek_end), seek_end);
+        if loaded > 0.0 {
+            let rect = egui::Rect::from_min_max(
+                track.left_top(),
+                egui::pos2(track.left() + width * loaded, track.bottom()),
+            );
+            painter.rect_filled(rect, rounding, faded(OSD_BUFFERED, opacity));
+        }
+    }
+
+    let played = timeline_fraction(displayed, seek_end);
+    if played > 0.0 {
+        let rect = egui::Rect::from_min_max(
+            track.left_top(),
+            egui::pos2(track.left() + width * played, track.bottom()),
+        );
+        painter.rect_filled(rect, rounding, faded(OSD_ACCENT, opacity));
+    }
+
+    if !seek_end.is_zero() {
+        for chapter in view.chapters.iter().take(MAX_CHAPTER_CHOICES) {
+            let fraction = timeline_fraction(chapter.time, seek_end);
+            if fraction <= 0.0 || fraction >= 1.0 {
+                continue;
+            }
+            let x = track.left() + width * fraction;
+            let tick = egui::Rect::from_center_size(
+                egui::pos2(x, track.center().y),
+                egui::vec2(1.5, track.height() + 4.0),
+            );
+            painter.rect_filled(
+                tick,
+                egui::CornerRadius::same(1),
+                faded(Color32::from_white_alpha(150), opacity),
+            );
+        }
+    }
+
+    let x = track.left() + width * played;
+    painter.circle_filled(
+        egui::pos2(x, track.center().y),
+        4.5 + 2.5 * grow,
+        faded(OSD_ACCENT, opacity),
+    );
 }
 
 fn draw_controls(
@@ -376,6 +875,7 @@ fn draw_controls(
     extra: impl FnOnce(&mut egui::Ui),
     mut preview: impl FnMut(Duration) -> Option<SeekThumbnail>,
 ) -> Vec<PlayerControlAction> {
+    let opacity = view.opacity.clamp(0.0, 1.0);
     let seek_available = view.seek_enabled && view.duration.is_some_and(|d| !d.is_zero());
     let mut actions = keyboard_seek_actions(ui.ctx(), seek_available);
 
@@ -401,120 +901,61 @@ fn draw_controls(
         }
     }
 
-    // The position readout is drawn on the transport row, so the bar stays three rows tall
-    // (timeline, transport, secondary) no matter how wide the window is.
     let mut timeline: Option<(Duration, Duration)> = None;
+    let horizontal_margin = if ui.available_width() < 360.0 { 10 } else { 18 };
 
-    let horizontal_margin = if ui.available_width() < 360.0 { 8 } else { 12 };
     egui::Frame::new()
-        .fill(THEATER_BG.gamma_multiply(0.97))
-        .stroke(egui::Stroke::new(1.0, Color32::from_white_alpha(24)))
-        .corner_radius(egui::CornerRadius::same(18))
-        .inner_margin(egui::Margin::symmetric(horizontal_margin, 8))
+        .inner_margin(egui::Margin {
+            left: horizontal_margin,
+            right: horizontal_margin,
+            top: 6,
+            bottom: 14,
+        })
         .show(ui, |ui| {
             ui.set_min_width(0.0);
-            ui.visuals_mut().selection.bg_fill = OSD_ACCENT;
-            ui.visuals_mut().selection.stroke.color = OSD_TEXT;
-            // Unpressed controls are borderless; only hover and the primary button carry a fill.
+            ui.visuals_mut().selection.bg_fill = faded(OSD_ACCENT, opacity);
+            ui.visuals_mut().selection.stroke.color = faded(OSD_TEXT, opacity);
             ui.visuals_mut().widgets.inactive.bg_fill = Color32::TRANSPARENT;
             ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
-            ui.visuals_mut().widgets.inactive.fg_stroke.color = OSD_TEXT;
-            ui.visuals_mut().widgets.hovered.bg_fill = OSD_CONTROL_HOVER;
+            ui.visuals_mut().widgets.inactive.fg_stroke.color = faded(OSD_TEXT, opacity);
+            ui.visuals_mut().widgets.hovered.bg_fill = Color32::from_white_alpha(34);
             ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;
-            ui.visuals_mut().widgets.hovered.fg_stroke.color = OSD_TEXT;
-            ui.visuals_mut().widgets.active.bg_fill = OSD_ACCENT;
-            ui.visuals_mut().widgets.active.fg_stroke.color = OSD_TEXT;
+            ui.visuals_mut().widgets.hovered.fg_stroke.color = faded(OSD_TEXT, opacity);
+            ui.visuals_mut().widgets.active.bg_fill = Color32::from_white_alpha(54);
+            ui.visuals_mut().widgets.active.fg_stroke.color = faded(OSD_TEXT, opacity);
             ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
 
-            if let Some(title) = view.title.map(str::trim).filter(|t| !t.is_empty()) {
-                ui.label(
-                    RichText::new(title)
-                        .size(12.5)
-                        .strong()
-                        .color(OSD_TEXT),
-                );
-            }
-
             if seek_available {
-                let duration = view.duration.unwrap_or_default();
-                let seek_end = duration.saturating_sub(Duration::from_secs(1));
-                let mut position = view
-                    .position
-                    .as_secs_f64()
-                    .clamp(0.0, seek_end.as_secs_f64());
-                // Keep the timeline inside the OSD at every window width.
-                ui.spacing_mut().slider_width = ui.available_width().max(1.0);
-                ui.spacing_mut().slider_rail_height = 4.0;
-                let slider = egui::Slider::new(&mut position, 0.0..=seek_end.as_secs_f64())
-                    .show_value(false)
-                    .clamping(egui::SliderClamping::Always);
-                let response = ui.add(slider);
-                observe(ControlId::SeekBar, response.rect);
-                response.widget_info(|| {
-                    WidgetInfo::labeled(Role::Slider, true, "Playback position")
-                });
-                let seek_to_pointer = || {
-                    let pointer = response.interact_pointer_pos()?;
-                    seek_position_at(response.rect, pointer.x, seek_end)
-                };
-                // Jellyfin Web's seek bubble: the time (and trickplay thumbnail) under the
-                // pointer while it hovers or drags the bar.
-                let preview_x = if response.dragged() {
-                    response.interact_pointer_pos()
-                } else {
-                    response.hover_pos()
+                let seek = seek_bar(ui, &view, opacity, &mut observe, &mut preview);
+                if let Some(action) = seek.action {
+                    actions.push(action);
                 }
-                .map(|pointer| pointer.x);
-                if let Some(x) = preview_x
-                    && let Some(time) = seek_position_at(response.rect, x, seek_end)
-                {
-                    paint_seek_preview(ui, response.rect, x, time, preview(time));
-                }
-                let displayed_position = if response.changed() {
-                    let seek_target = Duration::from_secs_f64(position);
-                    actions.push(PlayerControlAction::SeekAbsolute(seek_target));
-                    seek_target
-                } else if response.clicked() && let Some(seek_target) = seek_to_pointer() {
-                    // egui may classify a pointer press/release in one input frame as a click
-                    // without changing the Slider's value. Keep click-to-seek working alongside
-                    // normal drag and keyboard-slider interaction.
-                    actions.push(PlayerControlAction::SeekAbsolute(seek_target));
-                    seek_target
-                } else {
-                    view.position.min(seek_end)
-                };
-                timeline = Some((displayed_position, duration));
+                timeline = Some((seek.displayed, view.duration.unwrap_or_default()));
             }
 
-            ui.add_space(2.0);
-            // Transport row: the position readout, item and chapter stepping around the one
-            // primary control.
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.spacing_mut().item_spacing.y = 6.0;
-                if let Some((elapsed, total)) = timeline {
-                    ui.label(
-                        RichText::new(format_time(elapsed))
-                            .monospace()
-                            .size(12.0)
-                            .strong()
-                            .color(OSD_TEXT),
-                    );
-                    ui.label(
-                        RichText::new(format!("/ {}", format_time(total)))
-                            .monospace()
-                            .size(12.0)
-                            .color(OSD_MUTED),
-                    );
-                    ui.separator();
+            ui.add_space(4.0);
+            let layout = chrome_layout(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                if let Some((elapsed, total)) = timeline
+                    && !layout.tiny
+                {
+                    draw_time_label(ui, &format_time(elapsed), opacity, true);
+                    draw_time_label(ui, &format!("/ {}", format_time(total)), opacity, false);
+                    ui.add_space(4.0);
                 }
-                if icon_button(
-                    ui,
-                    OsdIcon::PreviousItem,
-                    "Previous (a track restarts after 3 seconds)",
-                    view.previous_track_enabled,
-                    |rect| observe(ControlId::PreviousTrack, rect),
-                ) {
+
+                if !layout.tiny
+                    && icon_button(
+                        ui,
+                        OsdIcon::PreviousItem,
+                        "Previous (a track restarts after 3 seconds)",
+                        view.previous_track_enabled,
+                        opacity,
+                        |rect| observe(ControlId::PreviousTrack, rect),
+                    )
+                    .clicked()
+                {
                     actions.push(PlayerControlAction::PreviousTrack);
                 }
 
@@ -523,8 +964,11 @@ fn draw_controls(
                     OsdIcon::Rewind,
                     "Seek backward 10 seconds",
                     seek_available,
+                    opacity,
                     |rect| observe(ControlId::SeekBackward, rect),
-                ) {
+                )
+                .clicked()
+                {
                     actions.push(PlayerControlAction::SeekRelative(-10));
                 }
 
@@ -534,8 +978,11 @@ fn draw_controls(
                     play_icon,
                     play_accessible,
                     view.paused.is_some(),
+                    opacity,
                     |rect| observe(ControlId::PlayPause, rect),
-                ) {
+                )
+                .clicked()
+                {
                     actions.push(PlayerControlAction::TogglePause);
                 }
 
@@ -544,34 +991,45 @@ fn draw_controls(
                     OsdIcon::Forward,
                     "Seek forward 10 seconds",
                     seek_available,
+                    opacity,
                     |rect| observe(ControlId::SeekForward, rect),
-                ) {
+                )
+                .clicked()
+                {
                     actions.push(PlayerControlAction::SeekRelative(10));
                 }
 
-                if icon_button(
-                    ui,
-                    OsdIcon::NextItem,
-                    "Next",
-                    view.next_track_enabled,
-                    |rect| observe(ControlId::NextTrack, rect),
-                ) {
+                if !layout.tiny
+                    && icon_button(
+                        ui,
+                        OsdIcon::NextItem,
+                        "Next",
+                        view.next_track_enabled,
+                        opacity,
+                        |rect| observe(ControlId::NextTrack, rect),
+                    )
+                    .clicked()
+                {
                     actions.push(PlayerControlAction::NextTrack);
                 }
 
-                if icon_button(
-                    ui,
-                    OsdIcon::Stop,
-                    "Stop playback",
-                    view.stop_enabled,
-                    |rect| observe(ControlId::Stop, rect),
-                ) {
+                if layout.medium
+                    && icon_button(
+                        ui,
+                        OsdIcon::Stop,
+                        "Stop playback",
+                        view.stop_enabled,
+                        opacity,
+                        |rect| observe(ControlId::Stop, rect),
+                    )
+                    .clicked()
+                {
                     actions.push(PlayerControlAction::Stop);
                 }
 
                 if let Some(decision) = offered.as_ref() {
                     let label = skip_label(decision.kind);
-                    if labeled_button(ui, label, label, true, |rect| {
+                    if labeled_button(ui, label, label, true, opacity, |rect| {
                         observe(ControlId::SkipSegment, rect);
                     }) {
                         if let Some(controls) = skip.as_mut() {
@@ -583,15 +1041,17 @@ fn draw_controls(
                     }
                 }
 
-                if !view.chapters.is_empty() {
-                    ui.separator();
+                if layout.roomy && !view.chapters.is_empty() {
                     if icon_button(
                         ui,
                         OsdIcon::ChapterPrevious,
                         "Previous chapter",
                         seek_available,
+                        opacity,
                         |rect| observe(ControlId::ChapterPrevious, rect),
-                    ) {
+                    )
+                    .clicked()
+                    {
                         actions.push(PlayerControlAction::StepChapter { forward: false });
                     }
                     if icon_button(
@@ -599,110 +1059,40 @@ fn draw_controls(
                         OsdIcon::ChapterNext,
                         "Next chapter",
                         seek_available,
+                        opacity,
                         |rect| observe(ControlId::ChapterNext, rect),
-                    ) {
+                    )
+                    .clicked()
+                    {
                         actions.push(PlayerControlAction::StepChapter { forward: true });
                     }
-                    let response = egui::ComboBox::from_id_salt("player-control-chapter")
-                        .width(ui.available_width().clamp(1.0, 180.0))
-                        .selected_text("Chapters")
-                        .show_ui(ui, |ui| {
-                            for chapter in view.chapters.iter().take(MAX_CHAPTER_CHOICES) {
-                                let title = if chapter.title.trim().is_empty() {
-                                    format!("Chapter {}", chapter.index.saturating_add(1))
-                                } else {
-                                    chapter.title.clone()
-                                };
-                                let label = format!("{} · {}", title, format_time(chapter.time));
-                                let response = ui.button(label.clone());
-                                response.widget_info(|| {
-                                    WidgetInfo::labeled(Role::Button, true, label.clone())
-                                });
-                                if response.clicked() {
-                                    actions.push(PlayerControlAction::SelectChapter(chapter.index));
-                                }
-                            }
-                        });
-                    response.response.widget_info(|| {
-                        WidgetInfo::labeled(Role::ComboBox, true, "Chapters")
-                    });
-                    observe(ControlId::ChapterMenu, response.response.rect);
                 }
 
-                // Shown only with two or more subtitle tracks (the candidate list is empty
-                // otherwise). The offset applies to the primary track only; say so here.
-                if !view.secondary_subtitles.is_empty() {
-                    let selected_text = view
-                        .secondary_subtitles
-                        .iter()
-                        .find(|choice| Some(choice.track) == view.secondary_selected)
-                        .map_or_else(|| "Secondary: Off".to_owned(), |choice| {
-                            format!("Secondary: {}", compact_label(&choice.title, 18))
-                        });
-                    let secondary_menu = egui::ComboBox::from_id_salt("player-control-secondary-subtitle")
-                        .width(ui.available_width().clamp(1.0, 260.0))
-                        .selected_text(selected_text)
-                        .show_ui(ui, |ui| {
-                            let off_selected = view.secondary_selected.is_none();
-                            if ui.selectable_label(off_selected, "Off").clicked() && !off_selected {
-                                actions.push(PlayerControlAction::SelectSecondarySubtitle(None));
-                            }
-                            for choice in view.secondary_subtitles {
-                                let selected = Some(choice.track) == view.secondary_selected;
-                                if ui.selectable_label(selected, &choice.title).clicked()
-                                    && !selected
-                                {
-                                    actions.push(PlayerControlAction::SelectSecondarySubtitle(
-                                        Some(choice.track),
-                                    ));
-                                }
-                            }
-                        })
-                        .response
-                        .on_hover_text(
-                            "Second subtitle track, placed at the saved secondary position. The subtitle offset moves only the primary track.",
-                        );
-                    secondary_menu.widget_info(|| {
-                        WidgetInfo::labeled(
-                            Role::ComboBox,
-                            true,
-                            "Secondary subtitle track",
-                        )
-                    });
-                    observe(ControlId::SecondarySubtitleMenu, secondary_menu.rect);
-                    ui.small(
-                        RichText::new("Subtitle offset affects the primary track only.")
-                            .color(OSD_MUTED),
-                    );
-                }
-            });
-
-            // Secondary row: volume, frame stepping, speed and the window toggles. It wraps, so a
-            // narrow window moves controls to another line instead of clipping them.
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.spacing_mut().item_spacing.y = 6.0;
-                let (mute_icon, mute_accessible) = OsdIcon::for_mute(view.muted);
-                if icon_button(ui, mute_icon, mute_accessible, true, |rect| {
-                    observe(ControlId::MuteToggle, rect);
-                }) {
-                    actions.push(PlayerControlAction::ToggleMute);
+                if layout.medium {
+                    let (mute_icon, mute_accessible) = OsdIcon::for_mute(view.muted);
+                    if icon_button(ui, mute_icon, mute_accessible, true, opacity, |rect| {
+                        observe(ControlId::MuteToggle, rect);
+                    })
+                    .clicked()
+                    {
+                        actions.push(PlayerControlAction::ToggleMute);
+                    }
                 }
 
-                if let Some(percent) = view.volume_percent {
+                if layout.roomy
+                    && let Some(percent) = view.volume_percent
+                {
                     let max = f64::from(view.volume_max_percent.max(1));
                     let mut value = percent.clamp(0.0, max);
-                    // Inside a wrapped row `available_width` spans the whole container, so the
-                    // slider is sized from the room left after the mute button and the percent
-                    // label that follows it.
-                    let room = (ui.available_rect_before_wrap().right() - ui.cursor().min.x).max(0.0);
-                    ui.spacing_mut().slider_width = (room - 56.0).clamp(60.0, 240.0);
-                    ui.spacing_mut().slider_rail_height = 5.0;
-                    let slider = egui::Slider::new(&mut value, 0.0..=max)
-                        .show_value(false)
-                        .clamping(egui::SliderClamping::Always);
-                    let response = ui.add(slider);
+                    ui.visuals_mut().widgets.inactive.bg_fill = faded(OSD_TRACK, opacity);
+                    ui.visuals_mut().selection.bg_fill = faded(OSD_ACCENT, opacity);
+                    ui.spacing_mut().slider_width = 64.0;
+                    ui.spacing_mut().slider_rail_height = 3.0;
+                    let response = ui.add(
+                        egui::Slider::new(&mut value, 0.0..=max)
+                            .show_value(false)
+                            .clamping(egui::SliderClamping::Always),
+                    );
                     response.widget_info(|| WidgetInfo::labeled(Role::Slider, true, "Volume"));
                     observe(ControlId::VolumeSlider, response.rect);
                     if response.changed() {
@@ -711,127 +1101,598 @@ fn draw_controls(
                     ui.label(
                         RichText::new(format!("{:.0}%", value))
                             .monospace()
-                            .size(12.0)
-                            .color(OSD_MUTED),
+                            .size(11.0)
+                            .color(faded(OSD_MUTED, opacity)),
                     );
                 }
 
-                ui.separator();
-                // Frame stepping and the A-B control need the same seek capability as the
-                // timeline: neither can act on live or unknown-length media.
-                if icon_button(
-                    ui,
-                    OsdIcon::FrameBack,
-                    "Step back one frame",
-                    seek_available,
-                    |rect| observe(ControlId::FrameBack, rect),
-                ) {
-                    actions.push(PlayerControlAction::StepFrame { backward: true });
-                }
-
-                if icon_button(
-                    ui,
-                    OsdIcon::FrameForward,
-                    "Step forward one frame",
-                    seek_available,
-                    |rect| observe(ControlId::FrameForward, rect),
-                ) {
-                    actions.push(PlayerControlAction::StepFrame { backward: false });
-                }
-
-                let (_, loop_accessible) = ab_loop_label(view.ab_loop_a, view.ab_loop_b);
-                if icon_button(
-                    ui,
-                    OsdIcon::Loop,
-                    loop_accessible,
-                    seek_available,
-                    |rect| observe(ControlId::AbLoop, rect),
-                ) {
-                    actions.push(PlayerControlAction::CycleAbLoop);
-                }
-
-                let speed_menu = ui.add_enabled_ui(view.speed_enabled, |ui| {
-                    egui::ComboBox::from_id_salt("player-control-speed")
-                        .width(78.0)
-                        .selected_text(speed_label(view.speed_multiplier))
-                        .show_ui(ui, |ui| {
-                            for speed in PlaybackSpeed::ALL {
-                                let selected = view.speed_multiplier.is_some_and(|value| {
-                                    (value - speed.multiplier()).abs() < 0.001
-                                });
-                                let response = ui.selectable_label(
-                                    selected,
-                                    speed_label(Some(speed.multiplier())),
-                                );
-                                response.widget_info(|| {
-                                    WidgetInfo::selected(
-                                        Role::RadioButton,
-                                        response.enabled(),
-                                        selected,
-                                        format!(
-                                            "Playback speed {}",
-                                            speed_label(Some(speed.multiplier()))
-                                        ),
-                                    )
-                                });
-                                if response.clicked() && !selected {
-                                    actions.push(PlayerControlAction::SetSpeed(speed));
-                                }
-                            }
-                        })
-                });
-                let speed_response = speed_menu.inner.response;
-                speed_response.widget_info(|| {
-                    WidgetInfo::labeled(
-                        Role::ComboBox,
-                        speed_response.enabled(),
-                        "Playback speed",
+                if layout.roomy {
+                    if icon_button(
+                        ui,
+                        OsdIcon::FrameBack,
+                        "Step back one frame",
+                        seek_available,
+                        opacity,
+                        |rect| observe(ControlId::FrameBack, rect),
                     )
-                });
-                let _ = speed_response.ctx.accesskit_node_builder(speed_response.id, |node| {
-                    if view.speed_enabled {
-                        node.clear_description();
-                    } else {
-                        node.set_description(SYNCED_SPEED_TOOLTIP);
+                    .clicked()
+                    {
+                        actions.push(PlayerControlAction::StepFrame { backward: true });
                     }
-                });
-                observe(ControlId::SpeedMenu, speed_response.rect);
-                if !view.speed_enabled {
-                    let _ = speed_response.on_disabled_hover_text(SYNCED_SPEED_TOOLTIP);
+                    if icon_button(
+                        ui,
+                        OsdIcon::FrameForward,
+                        "Step forward one frame",
+                        seek_available,
+                        opacity,
+                        |rect| observe(ControlId::FrameForward, rect),
+                    )
+                    .clicked()
+                    {
+                        actions.push(PlayerControlAction::StepFrame { backward: false });
+                    }
+                    let (_, loop_accessible) = ab_loop_label(view.ab_loop_a, view.ab_loop_b);
+                    if icon_button(
+                        ui,
+                        OsdIcon::Loop,
+                        loop_accessible,
+                        seek_available,
+                        opacity,
+                        |rect| observe(ControlId::AbLoop, rect),
+                    )
+                    .clicked()
+                    {
+                        actions.push(PlayerControlAction::CycleAbLoop);
+                    }
                 }
 
-                let (pip_icon, pip_accessible) = if view.pip_active {
-                    (OsdIcon::Pip, "Exit picture-in-picture")
-                } else {
-                    (OsdIcon::Pip, "Picture-in-picture")
-                };
-                if icon_button(
+                let settings = icon_button(
                     ui,
-                    pip_icon,
-                    pip_accessible,
-                    view.pip_active || view.pip_available,
-                    |rect| observe(ControlId::PipToggle, rect),
-                ) {
-                    actions.push(PlayerControlAction::TogglePip);
-                }
-
-                let (fullscreen_icon, fullscreen_accessible) =
-                    fullscreen_icon_label(view.fullscreen);
-                if icon_button(
-                    ui,
-                    fullscreen_icon,
-                    fullscreen_accessible,
+                    OsdIcon::Settings,
+                    "Player settings",
                     true,
-                    |rect| observe(ControlId::Fullscreen, rect),
-                ) {
-                    actions.push(PlayerControlAction::ToggleFullscreen);
+                    opacity,
+                    |rect| observe(ControlId::SettingsMenu, rect),
+                );
+                if let Some(action) = settings_popover(ui, &settings, &view, layout, opacity, extra)
+                {
+                    actions.push(action);
                 }
 
-                extra(ui);
+                if layout.compact {
+                    let (pip_icon, pip_accessible) = if view.pip_active {
+                        (OsdIcon::Pip, "Exit picture-in-picture")
+                    } else {
+                        (OsdIcon::Pip, "Picture-in-picture")
+                    };
+                    if icon_button(
+                        ui,
+                        pip_icon,
+                        pip_accessible,
+                        view.pip_active || view.pip_available,
+                        opacity,
+                        |rect| observe(ControlId::PipToggle, rect),
+                    )
+                    .clicked()
+                    {
+                        actions.push(PlayerControlAction::TogglePip);
+                    }
+
+                    let (fullscreen_icon, fullscreen_accessible) =
+                        fullscreen_icon_label(view.fullscreen);
+                    if icon_button(
+                        ui,
+                        fullscreen_icon,
+                        fullscreen_accessible,
+                        true,
+                        opacity,
+                        |rect| observe(ControlId::Fullscreen, rect),
+                    )
+                    .clicked()
+                    {
+                        actions.push(PlayerControlAction::ToggleFullscreen);
+                    }
+                }
             });
         });
 
     actions
+}
+
+fn draw_time_label(ui: &mut egui::Ui, text: &str, opacity: f32, primary: bool) {
+    let color = if primary { OSD_TEXT } else { OSD_MUTED };
+    ui.label(
+        RichText::new(text)
+            .monospace()
+            .size(12.0)
+            .color(faded(color, opacity)),
+    );
+}
+
+/// The single settings popover. It replaces the old Chapters combo, the Speed combo, the
+/// secondary-subtitle combo, and the host's "Audio & subtitles" menu. `extra` lets the host add
+/// its subtitle-sync section inside the same surface.
+fn settings_popover(
+    ui: &mut egui::Ui,
+    anchor: &egui::Response,
+    view: &PlayerControlsView<'_>,
+    layout: ChromeLayout,
+    opacity: f32,
+    extra: impl FnOnce(&mut egui::Ui),
+) -> Option<PlayerControlAction> {
+    let popup_id = egui::Id::unique(SETTINGS_POPOVER_ID);
+    let was_open_id = popup_id.with("was-open");
+    let was_open = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(was_open_id))
+        .unwrap_or(false);
+    let opening = anchor.clicked() && !was_open;
+    let width = (ui.ctx().content_rect().width() - 40.0).clamp(220.0, POPOVER_WIDTH);
+    let max_height = (ui.ctx().content_rect().height() * 0.62).max(180.0);
+    let frame = egui::Frame::new()
+        .fill(faded(OSD_POPOVER, opacity.max(0.92)))
+        .stroke(egui::Stroke::new(
+            1.0,
+            faded(Color32::from_white_alpha(26), opacity.max(0.92)),
+        ))
+        .corner_radius(egui::CornerRadius::same(12))
+        .inner_margin(egui::Margin::same(8));
+    let mut chosen = None;
+    egui::Popup::menu(anchor)
+        .id(popup_id)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .align(egui::RectAlign::TOP_END)
+        .gap(8.0)
+        .width(width)
+        .frame(frame)
+        .show(|ui| {
+            ui.set_max_width(width - 16.0);
+            let sections = settings_sections(view, layout);
+            let mut first_row = true;
+            egui::ScrollArea::vertical()
+                .max_height(max_height)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    if sections.audio {
+                        settings_heading(ui, "Audio", opacity);
+                        if let Some(tracks) = view.audio_tracks {
+                            for choice in tracks {
+                                if settings_row(
+                                    ui,
+                                    &compact_label(&choice.label, 38),
+                                    choice.selected,
+                                    true,
+                                    opacity,
+                                    opening && first_row,
+                                ) {
+                                    chosen =
+                                        Some(PlayerControlAction::SelectAudioTrack(choice.value));
+                                }
+                                first_row = false;
+                            }
+                        }
+                    }
+                    if sections.subtitles {
+                        settings_heading(ui, "Subtitles", opacity);
+                        if let Some(tracks) = view.subtitle_tracks {
+                            for choice in tracks {
+                                if settings_row(
+                                    ui,
+                                    &compact_label(&choice.label, 38),
+                                    choice.selected,
+                                    true,
+                                    opacity,
+                                    opening && first_row,
+                                ) {
+                                    chosen = Some(PlayerControlAction::SelectSubtitleTrack(
+                                        choice.value,
+                                    ));
+                                }
+                                first_row = false;
+                            }
+                        }
+                    }
+                    if sections.secondary {
+                        settings_heading(ui, "Secondary subtitles", opacity);
+                        if settings_row(
+                            ui,
+                            "Off",
+                            view.secondary_selected.is_none(),
+                            true,
+                            opacity,
+                            opening && first_row,
+                        ) {
+                            chosen = Some(PlayerControlAction::SelectSecondarySubtitle(None));
+                        }
+                        first_row = false;
+                        for choice in view.secondary_subtitles {
+                            let selected = Some(choice.track) == view.secondary_selected;
+                            if settings_row(
+                                ui,
+                                &compact_label(&choice.title, 38),
+                                selected,
+                                true,
+                                opacity,
+                                opening && first_row,
+                            ) && !selected
+                            {
+                                chosen = Some(PlayerControlAction::SelectSecondarySubtitle(Some(
+                                    choice.track,
+                                )));
+                            }
+                            first_row = false;
+                        }
+                    }
+                    if sections.speed {
+                        settings_heading(ui, "Speed", opacity);
+                        if view.speed_enabled {
+                            for speed in PlaybackSpeed::ALL {
+                                let selected = view.speed_multiplier.is_some_and(|value| {
+                                    (value - speed.multiplier()).abs() < 0.001
+                                });
+                                if settings_row(
+                                    ui,
+                                    &speed_label(Some(speed.multiplier())),
+                                    selected,
+                                    true,
+                                    opacity,
+                                    opening && first_row,
+                                ) {
+                                    chosen = Some(PlayerControlAction::SetSpeed(speed));
+                                }
+                                first_row = false;
+                            }
+                        } else {
+                            settings_disabled_note(
+                                ui,
+                                "Playback speed",
+                                SYNCED_SPEED_TOOLTIP,
+                                opacity,
+                                opening && first_row,
+                            );
+                            first_row = false;
+                        }
+                    }
+                    if sections.chapters {
+                        settings_heading(ui, "Chapters", opacity);
+                        let current = current_chapter_index(view.chapters, view.position);
+                        for chapter in view.chapters.iter().take(MAX_CHAPTER_CHOICES) {
+                            let title = if chapter.title.trim().is_empty() {
+                                format!("Chapter {}", chapter.index.saturating_add(1))
+                            } else {
+                                compact_label(&chapter.title, 28)
+                            };
+                            let label = format!("{} · {}", title, format_time(chapter.time));
+                            let selected = current == Some(chapter.index);
+                            if settings_row(
+                                ui,
+                                &label,
+                                selected,
+                                true,
+                                opacity,
+                                opening && first_row,
+                            ) {
+                                chosen = Some(PlayerControlAction::SelectChapter(chapter.index));
+                            }
+                            first_row = false;
+                        }
+                    }
+                    if sections.playback {
+                        settings_heading(ui, "Playback", opacity);
+                        settings_playback_rows(
+                            ui,
+                            view,
+                            layout,
+                            opacity,
+                            opening,
+                            &mut first_row,
+                            &mut chosen,
+                        );
+                    }
+                    if sections.media_info {
+                        settings_heading(ui, "Media", opacity);
+                        if settings_row(
+                            ui,
+                            "Media info",
+                            false,
+                            true,
+                            opacity,
+                            opening && first_row,
+                        ) {
+                            chosen = Some(PlayerControlAction::ToggleMediaInfo);
+                        }
+                    }
+                    ui.add_space(2.0);
+                    ui.separator();
+                    extra(ui);
+                });
+        });
+    let open_now = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(was_open_id, open_now));
+    chosen
+}
+
+fn settings_playback_rows(
+    ui: &mut egui::Ui,
+    view: &PlayerControlsView<'_>,
+    layout: ChromeLayout,
+    opacity: f32,
+    opening: bool,
+    first_row: &mut bool,
+    chosen: &mut Option<PlayerControlAction>,
+) {
+    let seek_available = view.seek_enabled && view.duration.is_some_and(|d| !d.is_zero());
+    if layout.tiny {
+        if settings_row(
+            ui,
+            "Previous",
+            false,
+            view.previous_track_enabled,
+            opacity,
+            opening && *first_row,
+        ) {
+            *chosen = Some(PlayerControlAction::PreviousTrack);
+        }
+        *first_row = false;
+        if settings_row(
+            ui,
+            "Next",
+            false,
+            view.next_track_enabled,
+            opacity,
+            opening && *first_row,
+        ) {
+            *chosen = Some(PlayerControlAction::NextTrack);
+        }
+        *first_row = false;
+    }
+    if !layout.medium {
+        if settings_row(
+            ui,
+            "Stop playback",
+            false,
+            view.stop_enabled,
+            opacity,
+            opening && *first_row,
+        ) {
+            *chosen = Some(PlayerControlAction::Stop);
+        }
+        *first_row = false;
+        let (_, mute_accessible) = OsdIcon::for_mute(view.muted);
+        if settings_row(
+            ui,
+            mute_accessible,
+            false,
+            true,
+            opacity,
+            opening && *first_row,
+        ) {
+            *chosen = Some(PlayerControlAction::ToggleMute);
+        }
+        *first_row = false;
+    }
+    if let Some(percent) = view.volume_percent {
+        let max = f64::from(view.volume_max_percent.max(1));
+        let bounded = percent.clamp(0.0, max);
+        if settings_row(
+            ui,
+            &format!("Volume up · {:.0}%", bounded),
+            false,
+            bounded < max,
+            opacity,
+            opening && *first_row,
+        ) {
+            *chosen = Some(PlayerControlAction::SetVolume(
+                (bounded + 5.0).min(max).round() as u32,
+            ));
+        }
+        *first_row = false;
+        if settings_row(
+            ui,
+            &format!("Volume down · {:.0}%", bounded),
+            false,
+            bounded > 0.0,
+            opacity,
+            opening && *first_row,
+        ) {
+            *chosen = Some(PlayerControlAction::SetVolume(
+                (bounded - 5.0).max(0.0).round() as u32,
+            ));
+        }
+        *first_row = false;
+    }
+    if seek_available {
+        if settings_row(
+            ui,
+            "Step back one frame",
+            false,
+            true,
+            opacity,
+            opening && *first_row,
+        ) {
+            *chosen = Some(PlayerControlAction::StepFrame { backward: true });
+        }
+        *first_row = false;
+        if settings_row(
+            ui,
+            "Step forward one frame",
+            false,
+            true,
+            opacity,
+            opening && *first_row,
+        ) {
+            *chosen = Some(PlayerControlAction::StepFrame { backward: false });
+        }
+        *first_row = false;
+        let (_, loop_accessible) = ab_loop_label(view.ab_loop_a, view.ab_loop_b);
+        if settings_row(
+            ui,
+            loop_accessible,
+            false,
+            true,
+            opacity,
+            opening && *first_row,
+        ) {
+            *chosen = Some(PlayerControlAction::CycleAbLoop);
+        }
+        *first_row = false;
+    }
+    if !view.chapters.is_empty() && seek_available {
+        if settings_row(
+            ui,
+            "Previous chapter",
+            false,
+            true,
+            opacity,
+            opening && *first_row,
+        ) {
+            *chosen = Some(PlayerControlAction::StepChapter { forward: false });
+        }
+        *first_row = false;
+        if settings_row(
+            ui,
+            "Next chapter",
+            false,
+            true,
+            opacity,
+            opening && *first_row,
+        ) {
+            *chosen = Some(PlayerControlAction::StepChapter { forward: true });
+        }
+        *first_row = false;
+    }
+    if !layout.compact {
+        let (_, pip_accessible) = if view.pip_active {
+            (OsdIcon::Pip, "Exit picture-in-picture")
+        } else {
+            (OsdIcon::Pip, "Picture-in-picture")
+        };
+        if settings_row(
+            ui,
+            pip_accessible,
+            false,
+            view.pip_active || view.pip_available,
+            opacity,
+            opening && *first_row,
+        ) {
+            *chosen = Some(PlayerControlAction::TogglePip);
+        }
+        *first_row = false;
+        let (_, fullscreen_accessible) = fullscreen_icon_label(view.fullscreen);
+        if settings_row(
+            ui,
+            fullscreen_accessible,
+            false,
+            true,
+            opacity,
+            opening && *first_row,
+        ) {
+            *chosen = Some(PlayerControlAction::ToggleFullscreen);
+        }
+        *first_row = false;
+    }
+}
+
+fn settings_heading(ui: &mut egui::Ui, label: &str, opacity: f32) {
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(label)
+            .size(11.0)
+            .strong()
+            .color(faded(OSD_MUTED, opacity)),
+    );
+    ui.add_space(2.0);
+}
+
+fn settings_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: bool,
+    enabled: bool,
+    opacity: f32,
+    focus: bool,
+) -> bool {
+    let width = ui.available_width().max(1.0);
+    let (rect, response) = ui
+        .add_enabled_ui(enabled, |ui| {
+            ui.allocate_exact_size(egui::vec2(width, 30.0), Sense::click())
+        })
+        .inner;
+    if focus {
+        response.request_focus();
+    }
+    let hover = response.hovered() && enabled;
+    let fill = if selected {
+        Color32::from_white_alpha(24)
+    } else if hover {
+        Color32::from_white_alpha(14)
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(8), faded(fill, opacity));
+    if selected {
+        player_icons::paint(
+            ui.painter(),
+            egui::Rect::from_center_size(
+                egui::pos2(rect.left() + 14.0, rect.center().y),
+                egui::vec2(14.0, 14.0),
+            ),
+            OsdIcon::Check,
+            faded(OSD_ACCENT, opacity),
+        );
+    }
+    let color = if enabled { OSD_TEXT } else { OSD_MUTED };
+    ui.painter().text(
+        egui::pos2(rect.left() + 28.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(13.0),
+        faded(color, opacity),
+    );
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            egui::CornerRadius::same(8),
+            egui::Stroke::new(2.0, faded(OSD_FOCUS, opacity)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.widget_info(|| WidgetInfo::selected(Role::RadioButton, enabled, selected, label));
+    response.clicked()
+}
+
+fn settings_disabled_note(ui: &mut egui::Ui, label: &str, note: &str, opacity: f32, focus: bool) {
+    let width = ui.available_width().max(1.0);
+    // A disabled clickable response still registers an accessibility node, so the note is
+    // announced and explains why speed cannot change.
+    let (rect, response) = ui
+        .add_enabled_ui(false, |ui| {
+            ui.allocate_exact_size(egui::vec2(width, 42.0), Sense::click())
+        })
+        .inner;
+    if focus {
+        response.request_focus();
+    }
+    ui.painter().text(
+        egui::pos2(rect.left() + 8.0, rect.center().y - 8.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(13.0),
+        faded(OSD_MUTED, opacity),
+    );
+    ui.painter().text(
+        egui::pos2(rect.left() + 8.0, rect.center().y + 9.0),
+        egui::Align2::LEFT_CENTER,
+        note,
+        egui::FontId::proportional(11.0),
+        faded(Color32::from_white_alpha(150), opacity),
+    );
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, false, label));
+    let _ = response
+        .ctx
+        .accesskit_node_builder(response.id, |node| node.set_description(note));
 }
 
 /// A widget in the audio and subtitle section (M2-18). Entries are observed only while their
@@ -860,7 +1721,10 @@ pub fn track_section<A: Copy, S: Copy>(
 /// Draw audio and subtitle track menus without a collapsible header.
 ///
 /// The returned values are selections made in this frame. Full track names remain in each menu;
-/// the selected value is compacted to keep the labeled controls within narrow panels.
+/// the selected value is compacted to keep the labeled controls within narrow panels. The player
+/// overlay now uses the single settings popover; this remains the Player details panel's path and
+/// is kept under test.
+#[cfg(test)]
 pub fn track_menu_contents<A: Copy, S: Copy>(
     ui: &mut egui::Ui,
     audio: Option<&[TrackChoice<A>]>,
@@ -1043,80 +1907,190 @@ fn keyboard_seek_actions(ctx: &egui::Context, seek_available: bool) -> Vec<Playe
     actions
 }
 
+/// A white pill for the skip action. It is the only filled label on the row, and it is the one
+/// action that must never be missed.
 fn labeled_button(
     ui: &mut egui::Ui,
     label: &str,
     accessible_name: &str,
     enabled: bool,
+    opacity: f32,
     observe: impl FnOnce(egui::Rect),
 ) -> bool {
-    let response = ui.add_enabled(
-        enabled,
-        egui::Button::new(RichText::new(label).size(14.0).color(OSD_TEXT))
-            .min_size(egui::vec2(46.0, ICON_BUTTON))
-            .corner_radius(egui::CornerRadius::same(11)),
+    let text_color = faded(Color32::from_rgb(14, 15, 16), opacity);
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(13.0),
+        text_color,
     );
-    focus_ring(ui, &response, egui::CornerRadius::same(11));
-    observe(response.rect);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, response.enabled(), accessible_name));
+    let size = egui::vec2((galley.size().x + 28.0).max(70.0), 32.0);
+    let (rect, response) = ui
+        .add_enabled_ui(enabled, |ui| ui.allocate_exact_size(size, Sense::click()))
+        .inner;
+    let fill = if response.hovered() {
+        Color32::from_white_alpha(250)
+    } else {
+        Color32::from_white_alpha(226)
+    };
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(9), faded(fill, opacity));
+    ui.painter().galley(
+        egui::pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        text_color,
+    );
+    focus_ring(ui, &response, egui::CornerRadius::same(9), opacity);
+    observe(rect);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, accessible_name));
     response.clicked()
 }
 
-/// An icon-only button. The glyph is painted, not typeset, so it cannot fall back to a box,
-/// and the accessible name carries the meaning for screen readers and the tooltip.
+/// An icon-only button painted by the chrome rather than by egui's button visuals, so the whole
+/// row can fade as one surface. A hover wash is the only resting decoration; the accessible name
+/// carries the meaning for screen readers and the tooltip.
 fn icon_button(
     ui: &mut egui::Ui,
     icon: OsdIcon,
     accessible_name: &str,
     enabled: bool,
+    opacity: f32,
     observe: impl FnOnce(egui::Rect),
-) -> bool {
-    let rounding = egui::CornerRadius::same(11);
-    let response = ui.add_enabled(
-        enabled,
-        egui::Button::new("")
-            .min_size(egui::vec2(ICON_BUTTON, ICON_BUTTON))
-            .corner_radius(rounding),
-    );
+) -> egui::Response {
+    let rounding = egui::CornerRadius::same(8);
+    let (rect, response) = ui
+        .add_enabled_ui(enabled, |ui| {
+            ui.allocate_exact_size(egui::vec2(ICON_BUTTON, ICON_BUTTON), Sense::click())
+        })
+        .inner;
+    let hover = response.hovered() && enabled;
+    let fill = if hover {
+        Color32::from_white_alpha(38)
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter()
+        .rect_filled(rect, rounding, faded(fill, opacity));
     let color = if !enabled {
         OSD_MUTED
-    } else if response.hovered() {
+    } else if hover {
         Color32::WHITE
     } else {
         OSD_TEXT
     };
-    player_icons::paint(ui.painter(), icon_area(response.rect, 0.56), icon, color);
-    focus_ring(ui, &response, rounding);
-    observe(response.rect);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, response.enabled(), accessible_name));
-    let clicked = response.clicked();
-    response.on_hover_text(accessible_name);
-    clicked
+    player_icons::paint(
+        ui.painter(),
+        icon_area(rect, 0.54),
+        icon,
+        faded(color, opacity),
+    );
+    focus_ring(ui, &response, rounding, opacity);
+    observe(rect);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, accessible_name));
+    response.on_hover_text(accessible_name)
 }
 
-/// The play/pause button. It is the only filled control on the bar, so the eye lands on it.
+/// The play/pause button. It is the one control with a filled circle, so the eye lands on it.
 fn primary_icon_button(
     ui: &mut egui::Ui,
     icon: OsdIcon,
     accessible_name: &str,
     enabled: bool,
+    opacity: f32,
     observe: impl FnOnce(egui::Rect),
-) -> bool {
-    let rounding = egui::CornerRadius::same(15);
-    let response = ui.add_enabled(
-        enabled,
-        egui::Button::new("")
-            .fill(if enabled { OSD_ACCENT } else { OSD_CONTROL })
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(0x78, 0xD5, 0xF1)))
-            .min_size(egui::vec2(PRIMARY_BUTTON, PRIMARY_BUTTON))
-            .corner_radius(rounding),
-    );
+) -> egui::Response {
+    let rounding = egui::CornerRadius::same((PRIMARY_BUTTON / 2.0) as u8);
+    let (rect, response) = ui
+        .add_enabled_ui(enabled, |ui| {
+            ui.allocate_exact_size(egui::vec2(PRIMARY_BUTTON, PRIMARY_BUTTON), Sense::click())
+        })
+        .inner;
+    let fill = if response.hovered() {
+        Color32::from_white_alpha(58)
+    } else {
+        Color32::from_white_alpha(30)
+    };
+    ui.painter()
+        .rect_filled(rect, rounding, faded(fill, opacity));
     let color = if enabled { Color32::WHITE } else { OSD_MUTED };
-    player_icons::paint(ui.painter(), icon_area(response.rect, 0.52), icon, color);
-    focus_ring(ui, &response, rounding);
-    observe(response.rect);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, response.enabled(), accessible_name));
-    response.clicked()
+    player_icons::paint(
+        ui.painter(),
+        icon_area(rect, 0.48),
+        icon,
+        faded(color, opacity),
+    );
+    focus_ring(ui, &response, rounding, opacity);
+    observe(rect);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, accessible_name));
+    response.on_hover_text(accessible_name)
+}
+
+/// A borderless text action such as "Player details".
+fn chrome_text_button(ui: &mut egui::Ui, label: &str, opacity: f32) -> bool {
+    let text_color = faded(OSD_TEXT, opacity);
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(13.5),
+        text_color,
+    );
+    let size = egui::vec2(galley.size().x + 24.0, 34.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let fill = if response.hovered() {
+        Color32::from_white_alpha(30)
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(17), faded(fill, opacity));
+    ui.painter().galley(
+        egui::pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        text_color,
+    );
+    focus_ring(ui, &response, egui::CornerRadius::same(17), opacity);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
+    response.on_hover_text(label).clicked()
+}
+
+/// A back-chevron plus label for the top overlay.
+fn chrome_icon_text_button(ui: &mut egui::Ui, icon: OsdIcon, label: &str, opacity: f32) -> bool {
+    let text_color = faded(OSD_TEXT, opacity);
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(13.5),
+        text_color,
+    );
+    let size = egui::vec2(galley.size().x + 52.0, 34.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let fill = if response.hovered() {
+        Color32::from_white_alpha(30)
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(17), faded(fill, opacity));
+    player_icons::paint(
+        ui.painter(),
+        egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 18.0, rect.center().y),
+            egui::vec2(20.0, 20.0),
+        ),
+        icon,
+        text_color,
+    );
+    ui.painter().galley(
+        egui::pos2(rect.left() + 32.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        text_color,
+    );
+    focus_ring(ui, &response, egui::CornerRadius::same(17), opacity);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
+    response.on_hover_text(label).clicked()
 }
 
 /// The square an icon is drawn in, centred in a button. `fraction` sets how much of the button
@@ -1126,12 +2100,17 @@ fn icon_area(button: egui::Rect, fraction: f32) -> egui::Rect {
     egui::Rect::from_center_size(button.center(), egui::vec2(side, side))
 }
 
-fn focus_ring(ui: &egui::Ui, response: &egui::Response, rounding: egui::CornerRadius) {
+fn focus_ring(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    rounding: egui::CornerRadius,
+    opacity: f32,
+) {
     if response.has_focus() {
         ui.painter().rect_stroke(
             response.rect.expand(3.0),
             rounding,
-            egui::Stroke::new(2.0, OSD_FOCUS),
+            egui::Stroke::new(2.0, faded(OSD_FOCUS, opacity)),
             egui::StrokeKind::Outside,
         );
     }
@@ -1222,10 +2201,12 @@ mod tests {
     use super::{
         ChapterChoice, ControlId, GamepadPlayerAction, MAX_CHAPTER_CHOICES, PlayerControlAction,
         PlayerControlsView, SecondarySubtitleChoice, SkipControls, TrackChoice, TrackControl,
-        auto_skip_action, compact_label, draw, draw_inner, draw_inner_with_skip, draw_with_skip,
-        duration_to_ticks, format_time, gamepad_player_action, keyboard_seek_actions,
-        player_shortcut_action, screenshot_key_pressed, skip_settings, speed_label,
-        ticks_to_duration, track_menu_contents, track_section_inner,
+        advance_fade, auto_skip_action, center_play_visible, chrome_layout, compact_label,
+        current_chapter_index, draw, draw_inner, draw_inner_with_skip, draw_with_skip,
+        duration_to_ticks, fade_seconds, format_time, gamepad_player_action, keyboard_seek_actions,
+        player_controls_visible, player_shortcut_action, position_at_fraction,
+        screenshot_key_pressed, seek_fraction, settings_sections, skip_settings, speed_label,
+        ticks_to_duration, timeline_fraction, track_menu_contents, track_section_inner,
     };
     use crate::player_icons::OsdIcon;
 
@@ -1283,17 +2264,170 @@ mod tests {
             pip_available: true,
             ab_loop_a: None,
             ab_loop_b: None,
-            title: Some("Test item"),
             volume_percent: Some(80.0),
             volume_max_percent: 100,
             muted: Some(false),
             fullscreen: false,
+            buffered: None,
+            audio_tracks: None,
+            subtitle_tracks: None,
+            opacity: 1.0,
         }
     }
 
     fn run_ui(context: &Context, input: RawInput, run: impl FnMut(&mut egui::Ui)) {
         let mut output = context.run_ui(input, run);
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn chrome_fade_snaps_for_reduced_motion_and_steps_to_its_target() {
+        assert_eq!(fade_seconds(0.0), 0.0, "reduced motion has no fade");
+        assert_eq!(fade_seconds(0.12), super::CHROME_FADE);
+
+        let half = advance_fade(
+            0.0,
+            1.0,
+            Duration::from_millis(120),
+            Duration::from_millis(240),
+        );
+        assert!(
+            (half - 0.5).abs() < 0.001,
+            "half of the fade is half opacity"
+        );
+        assert_eq!(
+            advance_fade(0.5, 1.0, Duration::from_secs(1), Duration::from_millis(240)),
+            1.0,
+            "the fade clamps at its target"
+        );
+        assert_eq!(
+            advance_fade(
+                1.0,
+                0.0,
+                Duration::from_millis(120),
+                Duration::from_millis(240)
+            ),
+            0.5
+        );
+        assert_eq!(
+            advance_fade(0.4, 1.0, Duration::from_secs(1), Duration::ZERO),
+            1.0,
+            "a zero duration snaps"
+        );
+    }
+
+    #[test]
+    fn seek_fractions_and_chapter_positions_follow_the_timeline() {
+        let duration = Some(Duration::from_secs(120));
+        // The seekable end is one second before the duration, matching the bar and the host.
+        assert!((seek_fraction(Duration::from_secs(30), duration) - 30.0 / 119.0).abs() < 0.001);
+        assert_eq!(seek_fraction(Duration::from_secs(500), duration), 1.0);
+        assert_eq!(seek_fraction(Duration::from_secs(10), None), 0.0);
+
+        let seek_end = Duration::from_secs(119);
+        assert!((position_at_fraction(0.5, seek_end).as_secs_f64() - 59.5).abs() < 0.01);
+        assert_eq!(position_at_fraction(2.0, seek_end), seek_end);
+        assert!(
+            (timeline_fraction(Duration::from_secs(30), seek_end) - 30.0 / 119.0).abs() < 0.001
+        );
+        assert_eq!(
+            timeline_fraction(Duration::from_secs(30), Duration::ZERO),
+            0.0
+        );
+    }
+
+    #[test]
+    fn the_current_chapter_is_the_last_one_at_or_before_the_playhead() {
+        let chapters = [
+            ChapterChoice {
+                index: 0,
+                title: "Opening".into(),
+                time: Duration::ZERO,
+            },
+            ChapterChoice {
+                index: 1,
+                title: "Middle".into(),
+                time: Duration::from_secs(10),
+            },
+            ChapterChoice {
+                index: 2,
+                title: "End".into(),
+                time: Duration::from_secs(20),
+            },
+        ];
+        assert_eq!(current_chapter_index(&chapters, Duration::ZERO), Some(0));
+        assert_eq!(
+            current_chapter_index(&chapters, Duration::from_secs(15)),
+            Some(1)
+        );
+        assert_eq!(
+            current_chapter_index(&chapters, Duration::from_secs(25)),
+            Some(2)
+        );
+        assert_eq!(current_chapter_index(&[], Duration::from_secs(5)), None);
+    }
+
+    #[test]
+    fn the_settings_popover_shows_only_sections_with_content() {
+        use mpv_render_proof::TrackSelection;
+        let roomy = chrome_layout(1000.0);
+        let empty = settings_sections(&view(&[]), roomy);
+        assert!(!empty.audio && !empty.subtitles && !empty.secondary);
+        assert!(!empty.chapters);
+        assert!(empty.speed && empty.media_info);
+        assert!(
+            !empty.playback,
+            "a roomy row keeps the playback controls outside the popover"
+        );
+        assert!(
+            settings_sections(&view(&[]), chrome_layout(400.0)).playback,
+            "a narrow row folds playback controls into the popover"
+        );
+
+        let audio = [TrackChoice {
+            value: TrackSelection::Automatic,
+            label: "Automatic".into(),
+            selected: true,
+        }];
+        let subtitles = [TrackChoice {
+            value: TrackSelection::Disabled,
+            label: "Off".into(),
+            selected: true,
+        }];
+        let secondary = [SecondarySubtitleChoice {
+            track: 3,
+            title: "English".into(),
+        }];
+        let chapters = [ChapterChoice {
+            index: 0,
+            title: "Opening".into(),
+            time: Duration::ZERO,
+        }];
+        let filled = settings_sections(
+            &PlayerControlsView {
+                audio_tracks: Some(&audio),
+                subtitle_tracks: Some(&subtitles),
+                secondary_subtitles: &secondary,
+                chapters: &chapters,
+                ..view(&[])
+            },
+            roomy,
+        );
+        assert!(filled.audio && filled.subtitles && filled.secondary && filled.chapters);
+    }
+
+    #[test]
+    fn the_chrome_auto_hides_only_when_the_timer_focus_and_menus_are_clear() {
+        assert!(!player_controls_visible(false, false, false));
+        assert!(player_controls_visible(true, false, false));
+        assert!(player_controls_visible(false, true, false));
+        assert!(player_controls_visible(false, false, true));
+        assert!(player_controls_visible(false, true, true));
+
+        assert!(center_play_visible(Some(true), true));
+        assert!(!center_play_visible(Some(false), true));
+        assert!(!center_play_visible(Some(true), false));
+        assert!(!center_play_visible(None, true));
     }
 
     #[test]
@@ -1423,11 +2557,14 @@ mod tests {
         );
         output.textures_delta.clear();
         assert!(rects.iter().any(|(id, _)| *id == ControlId::SeekBar));
-        assert!(rects.iter().any(|(id, _)| *id == ControlId::ChapterMenu));
+        // The narrow tier keeps the transport essentials and folds everything else into the one
+        // settings popover, so every drawn control still fits.
+        assert!(rects.iter().any(|(id, _)| *id == ControlId::SettingsMenu));
         assert!(
             rects
                 .iter()
-                .any(|(id, _)| *id == ControlId::SecondarySubtitleMenu)
+                .all(|(id, _)| !matches!(id, ControlId::ChapterPrevious | ControlId::PipToggle)),
+            "secondary controls are folded into the popover at 240 px"
         );
         for (id, rect) in rects {
             assert!(
@@ -1578,32 +2715,29 @@ mod tests {
     }
 
     #[test]
-    fn chapter_selector_is_conditional_and_entries_are_bounded() {
+    fn chapter_section_is_conditional_and_entries_are_bounded() {
         assert_eq!(MAX_CHAPTER_CHOICES, 128);
-        let context = Context::default();
-        let mut chapter_menu = false;
-        run_ui(&context, RawInput::default(), |ui| {
-            CentralPanel::default().show(ui, |ui| {
-                let _ = draw_inner(ui, view(&[]), |id, _| {
-                    chapter_menu |= id == ControlId::ChapterMenu;
-                });
-            });
-        });
-        assert!(!chapter_menu);
+        let layout = chrome_layout(1000.0);
+        assert!(!settings_sections(&view(&[]), layout).chapters);
         let chapters = [ChapterChoice {
             index: 0,
             title: "Opening".into(),
             time: Duration::ZERO,
         }];
-        let context = Context::default();
-        run_ui(&context, RawInput::default(), |ui| {
-            CentralPanel::default().show(ui, |ui| {
-                let _ = draw_inner(ui, view(&chapters), |id, _| {
-                    chapter_menu |= id == ControlId::ChapterMenu;
-                });
-            });
-        });
-        assert!(chapter_menu);
+        assert!(settings_sections(&view(&chapters), layout).chapters);
+
+        let many: Vec<_> = (0..MAX_CHAPTER_CHOICES + 8)
+            .map(|index| ChapterChoice {
+                index,
+                title: format!("Chapter {index}"),
+                time: Duration::from_secs(index as u64 * 30),
+            })
+            .collect();
+        assert_eq!(
+            many.iter().take(MAX_CHAPTER_CHOICES).count(),
+            MAX_CHAPTER_CHOICES,
+            "the popover iterates at most MAX_CHAPTER_CHOICES entries"
+        );
     }
 
     #[test]
@@ -2348,7 +3482,7 @@ mod tests {
     /// Every control in draw order, with the skip button offered (position 20 s is inside the
     /// intro), chapters present, and a second subtitle track present. Tab must reach them in
     /// this order (M2-18).
-    const DRAW_ORDER: [ControlId; 20] = [
+    const DRAW_ORDER: [ControlId; 18] = [
         ControlId::SeekBar,
         ControlId::PreviousTrack,
         ControlId::SeekBackward,
@@ -2359,14 +3493,12 @@ mod tests {
         ControlId::SkipSegment,
         ControlId::ChapterPrevious,
         ControlId::ChapterNext,
-        ControlId::ChapterMenu,
-        ControlId::SecondarySubtitleMenu,
         ControlId::MuteToggle,
         ControlId::VolumeSlider,
         ControlId::FrameBack,
         ControlId::FrameForward,
         ControlId::AbLoop,
-        ControlId::SpeedMenu,
+        ControlId::SettingsMenu,
         ControlId::PipToggle,
         ControlId::Fullscreen,
     ];
@@ -2385,16 +3517,14 @@ mod tests {
             ControlId::SkipSegment => 7,
             ControlId::ChapterPrevious => 8,
             ControlId::ChapterNext => 9,
-            ControlId::ChapterMenu => 10,
-            ControlId::SecondarySubtitleMenu => 11,
-            ControlId::MuteToggle => 12,
-            ControlId::VolumeSlider => 13,
-            ControlId::FrameBack => 14,
-            ControlId::FrameForward => 15,
-            ControlId::AbLoop => 16,
-            ControlId::SpeedMenu => 17,
-            ControlId::PipToggle => 18,
-            ControlId::Fullscreen => 19,
+            ControlId::MuteToggle => 10,
+            ControlId::VolumeSlider => 11,
+            ControlId::FrameBack => 12,
+            ControlId::FrameForward => 13,
+            ControlId::AbLoop => 14,
+            ControlId::SettingsMenu => 15,
+            ControlId::PipToggle => 16,
+            ControlId::Fullscreen => 17,
         }
     }
 
@@ -2587,6 +3717,23 @@ mod tests {
             speed_enabled: false,
             ..view(&[])
         };
+        // Open the popover from the keyboard path, exactly as a viewer would, so its anchor is
+        // known before the accessibility tree is read.
+        let layout = overlay_frame(&context, RawInput::default(), state);
+        let center = layout
+            .rects
+            .iter()
+            .find(|(id, _)| *id == ControlId::SettingsMenu)
+            .map(|(_, rect)| rect.center())
+            .expect("settings gear is drawn");
+        overlay_frame(
+            &context,
+            RawInput {
+                events: click_events(center),
+                ..RawInput::default()
+            },
+            state,
+        );
         let mut output = context.run_ui(RawInput::default(), |ui| {
             CentralPanel::default().show(ui, |ui| {
                 let _ = draw_inner(ui, state, |_, _| {});
@@ -2601,10 +3748,10 @@ mod tests {
             .nodes
             .iter()
             .find(|(_, node)| {
-                node.role() == egui::Role::ComboBox && node.label() == Some("Playback speed")
+                node.role() == egui::Role::Button && node.label() == Some("Playback speed")
             })
             .map(|(_, node)| node)
-            .expect("playback speed combo is exposed");
+            .expect("the disabled playback speed row is exposed");
         assert!(speed.is_disabled());
         assert_eq!(speed.description(), Some(super::SYNCED_SPEED_TOOLTIP));
     }
@@ -2619,36 +3766,33 @@ mod tests {
         };
         let keyboard_context = Context::default();
         assert!(
-            !tab_to(&keyboard_context, state, ControlId::SpeedMenu),
-            "Tab skips a speed menu disabled by Watch Together"
+            tab_to(&keyboard_context, state, ControlId::SettingsMenu),
+            "the settings gear stays reachable"
         );
-
+        // Open the one settings surface; the disabled speed note offers no enabled speed row.
+        for _ in 0..TAB_WALK_LIMIT {
+            let frame = overlay_frame(&keyboard_context, key_press(egui::Key::Tab), state);
+            if !frame.actions.is_empty() {
+                break;
+            }
+        }
         let pointer_context = Context::default();
-        let frame = overlay_frame(&pointer_context, RawInput::default(), state);
-        let center = frame
-            .rects
-            .iter()
-            .find(|(id, _)| *id == ControlId::SpeedMenu)
-            .map(|(_, rect)| rect.center())
-            .expect("speed menu remains visible");
-        let mut actions = Vec::new();
-        let mut output = pointer_context.run_ui(
-            RawInput {
-                events: click_events(center),
-                ..RawInput::default()
-            },
-            |ui| {
-                CentralPanel::default().show(ui, |ui| {
-                    actions = draw_inner(ui, state, |_, _| {});
-                });
-            },
+        egui::Popup::open_id(
+            &pointer_context,
+            egui::Id::unique(super::SETTINGS_POPOVER_ID),
         );
+        let mut actions = Vec::new();
+        let mut output = pointer_context.run_ui(RawInput::default(), |ui| {
+            CentralPanel::default().show(ui, |ui| {
+                actions = draw_inner(ui, state, |_, _| {});
+            });
+        });
         output.textures_delta.clear();
         assert!(
             !actions
                 .iter()
                 .any(|action| matches!(action, PlayerControlAction::SetSpeed(_))),
-            "clicking a synchronized speed menu cannot change local speed"
+            "a synchronized session never offers a local speed change"
         );
     }
 
@@ -2656,11 +3800,7 @@ mod tests {
     fn live_playback_value_changes_keep_keyboard_focus_on_the_control() {
         let chapters = [];
         let secondary = [];
-        for target in [
-            ControlId::PlayPause,
-            ControlId::SeekBar,
-            ControlId::SpeedMenu,
-        ] {
+        for target in [ControlId::PlayPause, ControlId::SeekBar] {
             let context = Context::default();
             let state = keyboard_view(&chapters, &secondary);
             assert!(tab_to(&context, state, target), "Tab reaches {target:?}");
@@ -2672,10 +3812,6 @@ mod tests {
                 },
                 ControlId::SeekBar => PlayerControlsView {
                     position: Duration::from_secs(30),
-                    ..state
-                },
-                ControlId::SpeedMenu => PlayerControlsView {
-                    speed_multiplier: Some(2.0),
                     ..state
                 },
                 _ => unreachable!("only controls with changing playback values are covered"),
@@ -2810,7 +3946,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_items_can_be_chosen_from_the_keyboard() {
+    fn popover_items_can_be_chosen_from_the_keyboard() {
         let chapters = [ChapterChoice {
             index: 0,
             title: "Opening".into(),
@@ -2821,34 +3957,33 @@ mod tests {
             title: "English".into(),
         }];
         type IsChoice = fn(&PlayerControlAction) -> bool;
-        let menus: [(ControlId, IsChoice); 3] = [
-            (ControlId::SpeedMenu, |action| {
-                matches!(action, PlayerControlAction::SetSpeed(_))
-            }),
-            (ControlId::ChapterMenu, |action| {
-                matches!(action, PlayerControlAction::SelectChapter(_))
-            }),
-            (ControlId::SecondarySubtitleMenu, |action| {
-                matches!(action, PlayerControlAction::SelectSecondarySubtitle(_))
-            }),
+        let choices: [IsChoice; 3] = [
+            |action| matches!(action, PlayerControlAction::SetSpeed(_)),
+            |action| matches!(action, PlayerControlAction::SelectChapter(_)),
+            |action| matches!(action, PlayerControlAction::SelectSecondarySubtitle(_)),
         ];
-        for (menu, is_choice) in menus {
+        for is_choice in choices {
             let context = Context::default();
             let state = keyboard_view(&chapters, &secondary);
-            assert!(tab_to(&context, state, menu), "Tab reaches {menu:?}");
+            assert!(tab_to(&context, state, ControlId::SettingsMenu));
             let opened = overlay_frame(&context, key_press(egui::Key::Enter), state);
-            assert!(opened.actions.is_empty(), "Enter opens {menu:?}");
+            assert!(
+                opened.actions.is_empty(),
+                "Enter opens the settings popover"
+            );
+            // One idle frame lets the popover take focus on its first row.
+            overlay_frame(&context, RawInput::default(), state);
             let mut chosen = Vec::new();
             for _ in 0..TAB_WALK_LIMIT {
-                overlay_frame(&context, key_press(egui::Key::ArrowDown), state);
                 chosen.extend(overlay_frame(&context, key_press(egui::Key::Enter), state).actions);
                 if chosen.iter().any(is_choice) {
                     break;
                 }
+                overlay_frame(&context, key_press(egui::Key::Tab), state);
             }
             assert!(
                 chosen.iter().any(is_choice),
-                "{menu:?} takes an item with arrows and Enter, got {chosen:?}"
+                "the settings popover takes an item with Tab and Enter, got {chosen:?}"
             );
         }
     }

@@ -47,6 +47,12 @@ pub(crate) enum OsdIcon {
     EnterFullscreen,
     /// Exit from fullscreen: four corners pointing inward.
     ExitFullscreen,
+    /// Leave the video: a chevron pointing left.
+    Back,
+    /// Player settings: a gear with eight teeth.
+    Settings,
+    /// The selected row in a menu: a check mark.
+    Check,
 }
 
 impl OsdIcon {
@@ -183,6 +189,17 @@ pub(crate) fn shapes(rect: Rect, icon: OsdIcon, color: Color32) -> Vec<Shape> {
             polyline(&[(14.5, 20.0), (14.5, 14.5), (20.0, 14.5)], stroke),
             polyline(&[(9.5, 14.5), (4.0, 14.5), (9.5, 20.0)], stroke),
         ],
+        OsdIcon::Back => vec![polyline(&[(14.5, 5.5), (8.0, 12.0), (14.5, 18.5)], stroke)],
+        // A mixing-console settings mark: three rails with a knob on each.
+        OsdIcon::Settings => vec![
+            polyline(&[(4.0, 6.0), (20.0, 6.0)], thin),
+            polyline(&[(4.0, 12.0), (20.0, 12.0)], thin),
+            polyline(&[(4.0, 18.0), (20.0, 18.0)], thin),
+            Shape::circle_filled(point(9.0, 6.0), 2.1 * scale, color),
+            Shape::circle_filled(point(15.0, 12.0), 2.1 * scale, color),
+            Shape::circle_filled(point(7.5, 18.0), 2.1 * scale, color),
+        ],
+        OsdIcon::Check => vec![polyline(&[(4.5, 12.5), (9.5, 17.5), (19.5, 6.5)], stroke)],
     }
 }
 
@@ -196,7 +213,7 @@ mod tests {
     use super::{OsdIcon, shapes};
     use egui::Color32;
 
-    const ALL: [OsdIcon; 16] = [
+    const ALL: [OsdIcon; 19] = [
         OsdIcon::Play,
         OsdIcon::Pause,
         OsdIcon::Stop,
@@ -213,6 +230,9 @@ mod tests {
         OsdIcon::Pip,
         OsdIcon::EnterFullscreen,
         OsdIcon::ExitFullscreen,
+        OsdIcon::Back,
+        OsdIcon::Settings,
+        OsdIcon::Check,
     ];
 
     #[test]
