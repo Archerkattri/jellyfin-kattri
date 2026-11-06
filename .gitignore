@@ -25,6 +25,7 @@ _dbg_audio/
 /rust-client/
 **/*.md
 !/README.md
+!/CHANGELOG.md
 
 # Credentials and signing material
 .env

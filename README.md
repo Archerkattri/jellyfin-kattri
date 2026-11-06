@@ -145,8 +145,8 @@ Every action can be rebound in Settings → Input. A gamepad can drive menus and
   upstream origin, refuses redirects and copies only allow-listed response headers.
 - JSON, image, manifest and stream inputs are bounded; logs and error messages are redacted.
 - Remote plain HTTP requires an explicit opt-in. No telemetry is collected.
-- The security review for this release, including accepted risks, is in
-  `docs/security/review-0.7.0.md`.
+- A source security review for this release, including its accepted risks, is kept with the
+  project's private documentation.
 
 ## Status and limitations
 
@@ -259,7 +259,8 @@ clients.
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md). Release history is in
+Issues and pull requests are welcome. Run the development checks above before sending a
+change; formatting, strict Clippy and the workspace tests must pass. Release history is in
 [CHANGELOG.md](CHANGELOG.md).
 
 ## License
