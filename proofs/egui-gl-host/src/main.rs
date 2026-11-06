@@ -453,6 +453,10 @@ impl<'session> GlHost<'session> {
         if let Some(generation) = self.mpv.take_playback_loaded() {
             self.kattri_app.playback_loaded(generation);
         }
+        let playback_end = self.mpv.take_playback_end();
+        if playback_end.is_some() {
+            self.kattri_app.on_playback_stopped();
+        }
         if let Some(mpv_host::PlaybackEnd {
             reason,
             item_id: Some(item_id),
@@ -460,7 +464,7 @@ impl<'session> GlHost<'session> {
             generation,
             was_loaded,
             position_ticks,
-        }) = self.mpv.take_playback_end()
+        }) = playback_end
         {
             self.sync_play_bridge.end(generation);
             #[cfg(debug_assertions)]
@@ -531,6 +535,8 @@ impl<'session> GlHost<'session> {
             self.egui
                 .request_repaint_after(mpv_host::AUDIO_FILTER_APPLY_GAP);
         }
+        self.mpv
+            .sync_subtitle_style(self.kattri_app.subtitle_settings());
         if let Some(devices) = self.mpv.take_audio_devices() {
             self.kattri_app.set_audio_devices(devices);
         }
@@ -1170,6 +1176,8 @@ impl<'session> GlHost<'session> {
         }
 
         if let Some(stream_url) = self.kattri_app.take_stream_url() {
+            // A direct stream address has no item, so no per-title subtitle style applies.
+            self.kattri_app.on_playback_stopped();
             let audio_settings = self.kattri_app.playback_audio_settings();
             let load = ItemLoadSettings {
                 audio: &audio_settings,

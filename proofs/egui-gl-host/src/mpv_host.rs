@@ -33,7 +33,7 @@ use kattri_client_core::playback_reporting::{
 use kattri_client_core::remote::LocalAction as RemoteAction;
 use kattri_client_core::segments::{MediaSegment, SegmentSkipper};
 use kattri_client_core::stream_url::StreamUrl;
-use kattri_client_core::subtitle_style::{SubtitleStyle, subtitle_background_option};
+use kattri_client_core::subtitle_style::subtitle_background_option;
 use kattri_client_core::subtitle_sync::{OffsetDirection, OffsetStep, SubtitleOffset};
 use kattri_client_core::subtitles::{
     ReselectObservation, SecondaryRefusal, SecondarySelection, SelectionOrigin,
@@ -188,8 +188,8 @@ impl CommandQueue for MpvSession {
 
 /// Queue validated settings writes in order. A refused or unqueued write is logged by setting key
 /// only, so a path or font name never reaches the log through an error.
-fn queue_validated(
-    session: &MpvSession,
+fn queue_validated<Q: CommandQueue + ?Sized>(
+    queue: &Q,
     setting: &'static str,
     options: Result<Vec<ValidatedOption>, MpvOptionError>,
 ) {
@@ -201,7 +201,7 @@ fn queue_validated(
         }
     };
     for option in options {
-        if let Err(error) = session.command(&["set", option.name, &option.value]) {
+        if let Err(error) = queue.enqueue(&["set", option.name, &option.value]) {
             tracing::warn!(setting, %error, "setting was not queued");
         }
     }
@@ -277,6 +277,34 @@ fn local_file_layout_options(
         .into_iter()
         .chain(subtitle_layout_options(subtitles))
         .collect()
+}
+
+/// Detect a changed subtitle settings snapshot while media is open and queue the same validated
+/// layout writes the load path uses. The first snapshot is seeded by the load path, so a file
+/// that just opened is not written twice and an unchanged frame writes nothing.
+#[derive(Default)]
+struct SubtitleStyleSync {
+    applied: Option<SubtitleSettings>,
+}
+
+impl SubtitleStyleSync {
+    /// Record the snapshot the load path just queued, without writing it again.
+    fn seed(&mut self, subtitles: &SubtitleSettings) {
+        self.applied = Some(subtitles.clone());
+    }
+
+    /// Queue the layout writes when `subtitles` differs from the seeded or last written
+    /// snapshot. Returns true when writes were queued.
+    fn sync<Q: CommandQueue + ?Sized>(&mut self, queue: &Q, subtitles: &SubtitleSettings) -> bool {
+        if self.applied.as_ref() == Some(subtitles) {
+            return false;
+        }
+        self.applied = Some(subtitles.clone());
+        for (setting, options) in subtitle_layout_options(subtitles) {
+            queue_validated(queue, setting, options);
+        }
+        true
+    }
 }
 
 /// Settings-driven writes that mpv reads when a file opens (M2-06, M2-07, M2-16, M2-22). Each value
@@ -945,6 +973,8 @@ pub(crate) struct MpvHost<'session> {
     /// what moved, and when (a slider drag is applied at most every [`AUDIO_FILTER_APPLY_GAP`]).
     audio_filter_ledger: OptionWriteLedger,
     audio_filter_applied_at: Option<Instant>,
+    /// The subtitle settings snapshot already queued for the current file.
+    subtitle_style: SubtitleStyleSync,
     capability_warning: Option<ProbeWarning>,
     gpu_identity: String,
     driver_identity: String,
@@ -966,8 +996,6 @@ struct PlaybackPolicyState {
     subtitle_user_choice: bool,
     /// The secondary subtitle track, when one is set.
     secondary_subtitle: Option<SubtitleTrackId>,
-    /// Last value written for each subtitle style option. Style writes survive item changes.
-    style_writes: OptionWriteLedger,
     /// `sid` = the track, queued again after a refused M2-21 write. Retried each frame until the
     /// queue admits it. Cleared when the viewer picks a subtitle or the item changes.
     pending_sid_restore: Option<ValidatedOption>,
@@ -1070,6 +1098,7 @@ impl<'session> MpvHost<'session> {
                 audio_devices: None,
                 audio_filter_ledger: OptionWriteLedger::new(),
                 audio_filter_applied_at: None,
+                subtitle_style: SubtitleStyleSync::default(),
                 capability_warning: Some(ProbeWarning::RuntimeUnavailable),
                 gpu_identity,
                 driver_identity,
@@ -1178,6 +1207,7 @@ impl<'session> MpvHost<'session> {
                     audio_devices: None,
                     audio_filter_ledger: OptionWriteLedger::new(),
                     audio_filter_applied_at: None,
+                    subtitle_style: SubtitleStyleSync::default(),
                     capability_warning,
                     gpu_identity,
                     driver_identity,
@@ -1254,6 +1284,7 @@ impl<'session> MpvHost<'session> {
             audio_devices: None,
             audio_filter_ledger: OptionWriteLedger::new(),
             audio_filter_applied_at: None,
+            subtitle_style: SubtitleStyleSync::default(),
             capability_warning,
             gpu_identity,
             driver_identity,
@@ -1288,6 +1319,7 @@ impl<'session> MpvHost<'session> {
                 for (setting, options) in local_file_layout_options(video, subtitles) {
                     queue_validated(session, setting, options);
                 }
+                self.subtitle_style.seed(subtitles);
                 match session.command(&["loadfile", &path, "replace"]) {
                     Ok(command) => {
                         self.media_load.pending = Some(PendingMediaLoad {
@@ -1360,6 +1392,7 @@ impl<'session> MpvHost<'session> {
         for (setting, options) in subtitle_layout_options(load.subtitles) {
             queue_validated(session, setting, options);
         }
+        self.subtitle_style.seed(load.subtitles);
         // mpv reads hwdec when the file opens, so it must be queued before loadfile.
         queue_hwdec(session, load.video.decode_mode);
         Ok(())
@@ -3086,30 +3119,14 @@ impl<'session> MpvHost<'session> {
         }
     }
 
-    /// Write the subtitle style pairs, sending only the options whose value changed.
-    #[allow(dead_code)] // Called when the subtitle style settings reach the host.
-    pub(crate) fn apply_subtitle_style(&mut self, style: &SubtitleStyle) {
+    /// Apply a changed subtitle settings snapshot to the running player. The load path seeds the
+    /// snapshot, so only a change made after the file opened writes, and nothing is written while
+    /// no session exists.
+    pub(crate) fn sync_subtitle_style(&mut self, subtitles: &SubtitleSettings) -> bool {
         let Some(session) = self.session else {
-            self.sync_feedback = SyncFeedback::error("libmpv is unavailable.");
-            return;
+            return false;
         };
-        let options = match style.to_validated_mpv_options() {
-            Ok(options) => options,
-            Err(error) => {
-                tracing::warn!(%error, "subtitle style option rejected by the mpv allowlist");
-                self.controls_feedback = Some("Could not apply the subtitle settings.".into());
-                return;
-            }
-        };
-        let pairs: Vec<_> = options
-            .iter()
-            .map(|option| (option.name, option.value.clone()))
-            .collect();
-        for (name, value) in self.policy.style_writes.changed_writes(&pairs) {
-            if session.command(&["set", name, &value]).is_err() {
-                self.controls_feedback = Some(format!("Could not apply the subtitle {name}."));
-            }
-        }
+        self.subtitle_style.sync(session, subtitles)
     }
 
     /// Route one playback key to its control. Keys are ignored while no file is loaded.
@@ -4618,5 +4635,58 @@ mod pre_load_tests {
             ],
             "unexpected subtitle writes in {got:?}"
         );
+    }
+
+    /// A command queue that records writes instead of talking to libmpv.
+    #[derive(Default)]
+    struct RecordingQueue {
+        writes: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl RecordingQueue {
+        fn writes(&self) -> Vec<String> {
+            self.writes.borrow().clone()
+        }
+    }
+
+    impl CommandQueue for RecordingQueue {
+        fn enqueue(&self, arguments: &[&str]) -> Result<(), MpvError> {
+            self.writes.borrow_mut().push(arguments.join(" "));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn subtitle_style_sync_writes_a_changed_snapshot_and_nothing_for_an_unchanged_one() {
+        let baseline = SubtitleSettings::default();
+        let mut sync = SubtitleStyleSync::default();
+        sync.seed(&baseline);
+
+        let queue = RecordingQueue::default();
+        assert!(!sync.sync(&queue, &baseline));
+        assert!(queue.writes().is_empty(), "unchanged snapshot wrote");
+
+        let changed = SubtitleSettings {
+            bold: true,
+            size: 40,
+            ..baseline.clone()
+        };
+        assert!(sync.sync(&queue, &changed));
+        let writes = queue.writes();
+        assert!(
+            writes.iter().any(|write| write == "set sub-bold yes"),
+            "bold write missing from {writes:?}"
+        );
+        assert!(
+            writes
+                .iter()
+                .any(|write| write.starts_with("set sub-scale ")),
+            "size write missing from {writes:?}"
+        );
+
+        // The changed snapshot is now the applied one, so a later frame is quiet.
+        let written = queue.writes().len();
+        assert!(!sync.sync(&queue, &changed));
+        assert_eq!(queue.writes().len(), written);
     }
 }

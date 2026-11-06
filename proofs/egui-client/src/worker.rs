@@ -23,10 +23,10 @@ use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
 use jellyfin_api::remote_command::RemoteCommand;
 use jellyfin_api::websocket::MAX_SYNCPLAY_QUEUE_ITEMS;
 use jellyfin_api::{
-    AdminUser, AdminUserPolicyChanges, ApiError, BackdropImageError, BaseItemDto, ClientConfig,
-    DeviceProfile, ErrorClass, GuideWindow, ItemFilter, ItemQuery, ItemSortBy, ItemSortOrder,
-    ItemsResponse, JellyfinClient, JellyfinTicks, LiveTvChannelPage, LiveTvProgramPage,
-    MediaSegmentType, PlayMethod, PlaybackInfoRequest, PlaybackInfoResponse,
+    AdminUser, AdminUserPolicyChanges, ApiError, BackdropImageError, BaseItemDto, BurnInSubtitle,
+    ClientConfig, DeviceProfile, ErrorClass, GuideWindow, ItemFilter, ItemQuery, ItemSortBy,
+    ItemSortOrder, ItemsResponse, JellyfinClient, JellyfinTicks, LiveTvChannelPage,
+    LiveTvProgramPage, MediaSegmentType, PlayMethod, PlaybackInfoRequest, PlaybackInfoResponse,
     PlaybackSourceRequestOptions, PlaylistEntry, PublicSystemInfo, QuickConnectRequest,
     QuickConnectStatus, Session, UserDto, UserItemDataDto, UserView,
 };
@@ -132,6 +132,15 @@ pub struct PreparedPlayback {
     start_time_ticks: Option<i64>,
     /// Series GUID for an episode, used by the per-series language memory (M2-10).
     series_id: Option<String>,
+}
+
+/// Start-of-playback choices that are not part of the negotiated source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlaybackStartOptions {
+    /// Resume position in Jellyfin ticks. Zero and negative values mean the start.
+    pub start_time_ticks: Option<i64>,
+    /// Burn the selected subtitle into a server transcode (`subtitles.burn_in`).
+    pub burn_in_subtitles: bool,
 }
 
 impl PreparedPlayback {
@@ -1373,6 +1382,8 @@ pub(crate) enum WorkerCommand {
         source_index: usize,
         play_method: PlayMethod,
         start_time_ticks: Option<i64>,
+        /// Burn the selected subtitle into a server transcode (settings `subtitles.burn_in`).
+        burn_in_subtitles: bool,
         live_device_profile: Option<Box<DeviceProfile>>,
         live_tune_started_at: Option<std::time::Instant>,
     },
@@ -2340,7 +2351,7 @@ impl ApiWorker {
         item_id: String,
         source_index: usize,
         play_method: PlayMethod,
-        start_time_ticks: Option<i64>,
+        start: PlaybackStartOptions,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::PreparePlayback {
             request_id,
@@ -2348,7 +2359,8 @@ impl ApiWorker {
             item_id,
             source_index,
             play_method,
-            start_time_ticks,
+            start_time_ticks: start.start_time_ticks,
+            burn_in_subtitles: start.burn_in_subtitles,
             live_device_profile: None,
             live_tune_started_at: None,
         })
@@ -2368,6 +2380,7 @@ impl ApiWorker {
             source_index: 0,
             play_method: PlayMethod::DirectPlay,
             start_time_ticks: None,
+            burn_in_subtitles: false,
             live_device_profile: Some(Box::new(device_profile.clone())),
             live_tune_started_at: Some(tune_started_at),
         })
@@ -5430,6 +5443,7 @@ async fn execute_command(
                 source_index,
                 play_method,
                 start_time_ticks,
+                burn_in_subtitles,
                 live_device_profile,
                 live_tune_started_at,
             } => {
@@ -5454,6 +5468,7 @@ async fn execute_command(
                             source_index,
                             play_method,
                             start_time_ticks,
+                            burn_in_subtitles,
                         }),
                     },
                     _ => Err("Connect to a Jellyfin server before starting playback.".into()),
@@ -7395,6 +7410,21 @@ struct PlaybackPreparation<'a> {
     source_index: usize,
     play_method: PlayMethod,
     start_time_ticks: Option<i64>,
+    burn_in_subtitles: bool,
+}
+
+/// The burn-in option to hand the URL builder. Burn-in needs all three: the setting, a server
+/// transcode, and a selected subtitle track. Direct play and direct stream keep their URL.
+fn burn_in_subtitle(
+    enabled: bool,
+    play_method: PlayMethod,
+    subtitle_stream_index: Option<i32>,
+) -> Option<BurnInSubtitle> {
+    if !enabled || play_method != PlayMethod::Transcode {
+        return None;
+    }
+    let stream_index = u32::try_from(subtitle_stream_index?).ok()?;
+    Some(BurnInSubtitle { stream_index })
 }
 
 fn prepare_playback(preparation: PlaybackPreparation<'_>) -> Result<PreparedPlayback, String> {
@@ -7407,6 +7437,7 @@ fn prepare_playback(preparation: PlaybackPreparation<'_>) -> Result<PreparedPlay
         source_index,
         play_method,
         start_time_ticks,
+        burn_in_subtitles,
     } = preparation;
     let (Some(client), Some(session)) = (client, session) else {
         return Err("Connect to a Jellyfin server before starting playback.".into());
@@ -7433,7 +7464,12 @@ fn prepare_playback(preparation: PlaybackPreparation<'_>) -> Result<PreparedPlay
     let request = if cached.is_audio {
         client.build_audio_playback_source_request(session, options)
     } else {
-        client.build_playback_source_request(session, options)
+        let burn_in = burn_in_subtitle(
+            burn_in_subtitles,
+            play_method,
+            media_source.default_subtitle_stream_index,
+        );
+        client.build_playback_source_request_with_burn_in_subtitle(session, options, burn_in)
     }
     .map_err(|error| error.to_string())?;
     let allowed_origin = client.server_origin();
@@ -7540,6 +7576,7 @@ async fn tune_live_tv(
             source_index,
             play_method,
             start_time_ticks: None,
+            burn_in_subtitles: false,
         })?;
         playback.report_metadata.live_stream_id = Some(live_stream_id.clone());
         playback.report_metadata.live_tune_started_at = Some(tune_started_at);
@@ -8134,10 +8171,10 @@ mod people_command_tests {
 
 #[cfg(test)]
 mod playback_preparation_tests {
-    use super::{CachedPlaybackInfo, PlaybackPreparation, prepare_playback};
+    use super::{CachedPlaybackInfo, PlaybackPreparation, burn_in_subtitle, prepare_playback};
     use jellyfin_api::{
-        ClientConfig, ItemQuery, JellyfinClient, PlayMethod, PlaybackInfoRequest,
-        baseline_device_profile,
+        ClientConfig, ItemQuery, JellyfinClient, MediaSourceInfo, PlayMethod, PlaybackInfoRequest,
+        PlaybackSourceRequestOptions, baseline_device_profile,
     };
     use kattri_client_core::playback_plan::{
         PlaybackMethod, select_playback_info_source_for_profile,
@@ -8148,6 +8185,155 @@ mod playback_preparation_tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,
     };
+
+    #[test]
+    fn burn_in_requires_the_setting_a_transcode_and_a_selected_track() {
+        use jellyfin_api::BurnInSubtitle;
+        assert_eq!(
+            burn_in_subtitle(true, PlayMethod::Transcode, Some(7)),
+            Some(BurnInSubtitle { stream_index: 7 })
+        );
+        assert_eq!(
+            burn_in_subtitle(false, PlayMethod::Transcode, Some(7)),
+            None,
+            "setting off"
+        );
+        assert_eq!(
+            burn_in_subtitle(true, PlayMethod::DirectPlay, Some(7)),
+            None,
+            "direct play"
+        );
+        assert_eq!(
+            burn_in_subtitle(true, PlayMethod::DirectStream, Some(7)),
+            None,
+            "direct stream"
+        );
+        assert_eq!(
+            burn_in_subtitle(true, PlayMethod::Transcode, None),
+            None,
+            "no selected track"
+        );
+        assert_eq!(
+            burn_in_subtitle(true, PlayMethod::Transcode, Some(-1)),
+            None,
+            "invalid stream index"
+        );
+    }
+
+    /// The URL builder test: burn-in parameters appear only when all three conditions hold, and
+    /// the default URL is byte-identical when they do not.
+    #[tokio::test]
+    async fn burn_in_parameters_appear_only_on_the_transcode_url() {
+        let server = spawn(MockConfig::default())
+            .await
+            .expect("start mock Jellyfin");
+        let client = JellyfinClient::new(
+            ClientConfig::new(
+                &server.base_url(),
+                "Kattri test",
+                "test device",
+                "device-id",
+                "test-version",
+            )
+            .expect("valid loopback config"),
+        )
+        .expect("create client");
+        let session = client
+            .authenticate("demo", "demo")
+            .await
+            .expect("authenticate to mock server");
+
+        let transcode: MediaSourceInfo = serde_json::from_value(serde_json::json!({
+            "Id": "source-id",
+            "Container": "mkv",
+            "SupportsTranscoding": true,
+            "DefaultSubtitleStreamIndex": 3,
+            "TranscodingUrl": "/Videos/item-id/master.m3u8?VideoCodec=h264"
+        }))
+        .expect("transcode source fixture");
+        let options = || PlaybackSourceRequestOptions {
+            item_id: "item-id",
+            media_source: &transcode,
+            play_method: PlayMethod::Transcode,
+            play_session_id: None,
+            audio_stream_index: None,
+            subtitle_stream_index: transcode.default_subtitle_stream_index,
+            start_time_ticks: None,
+        };
+        let default_url = client
+            .build_playback_source_request(&session, options())
+            .expect("default transcode URL")
+            .into_parts()
+            .0;
+        let explicit_none_url = client
+            .build_playback_source_request_with_burn_in_subtitle(
+                &session,
+                options(),
+                burn_in_subtitle(true, PlayMethod::Transcode, None),
+            )
+            .expect("no-track transcode URL")
+            .into_parts()
+            .0;
+        assert_eq!(default_url.as_str(), explicit_none_url.as_str());
+
+        let burn_in_url = client
+            .build_playback_source_request_with_burn_in_subtitle(
+                &session,
+                options(),
+                burn_in_subtitle(
+                    true,
+                    PlayMethod::Transcode,
+                    transcode.default_subtitle_stream_index,
+                ),
+            )
+            .expect("burn-in transcode URL")
+            .into_parts()
+            .0;
+        assert!(
+            burn_in_url
+                .as_str()
+                .contains("SubtitleMethod=Encode&SubtitleStreamIndex=3"),
+            "burn-in parameters missing from {burn_in_url:?}"
+        );
+
+        for method in [PlayMethod::DirectPlay, PlayMethod::DirectStream] {
+            let direct: MediaSourceInfo = serde_json::from_value(serde_json::json!({
+                "Id": "source-id",
+                "Container": "mkv",
+                "SupportsDirectPlay": true,
+                "SupportsDirectStream": true,
+                "DefaultSubtitleStreamIndex": 3
+            }))
+            .expect("direct source fixture");
+            let direct_options = PlaybackSourceRequestOptions {
+                item_id: "item-id",
+                media_source: &direct,
+                play_method: method,
+                play_session_id: None,
+                audio_stream_index: None,
+                subtitle_stream_index: direct.default_subtitle_stream_index,
+                start_time_ticks: None,
+            };
+            let default_url = client
+                .build_playback_source_request(&session, direct_options)
+                .expect("default direct URL")
+                .into_parts()
+                .0;
+            let with_burn_in = client
+                .build_playback_source_request_with_burn_in_subtitle(
+                    &session,
+                    direct_options,
+                    burn_in_subtitle(true, method, direct.default_subtitle_stream_index),
+                )
+                .expect("direct URL with burn-in option")
+                .into_parts()
+                .0;
+            assert_eq!(default_url.as_str(), with_burn_in.as_str(), "{method:?}");
+            assert!(!with_burn_in.as_str().contains("SubtitleMethod"));
+        }
+
+        server.shutdown().await;
+    }
 
     #[tokio::test]
     async fn negotiated_play_methods_are_handed_to_mpv_only_through_loopback_relay() {
@@ -8203,6 +8389,7 @@ mod playback_preparation_tests {
                 source_index: 0,
                 play_method,
                 start_time_ticks: Some(123_456_789),
+                burn_in_subtitles: false,
             })
             .expect("build the negotiated media source relay");
             let (url, relay, metadata, start_time_ticks) = playback.into_parts();
@@ -8223,6 +8410,7 @@ mod playback_preparation_tests {
                 source_index: 0,
                 play_method: PlayMethod::DirectPlay,
                 start_time_ticks,
+                burn_in_subtitles: false,
             })
             .expect("build playback with absent or invalid resume position");
             let (_, relay, _, resume_ticks) = playback.into_parts();
@@ -8288,6 +8476,7 @@ mod playback_preparation_tests {
             source_index,
             play_method: PlayMethod::DirectPlay,
             start_time_ticks: None,
+            burn_in_subtitles: false,
         })
         .expect("prepare audio stream through credential-isolating relay");
         let (url, relay, _, _) = playback.into_parts();
@@ -8518,6 +8707,7 @@ mod live_tv_worker_tests {
             source_index: 0,
             play_method: PlayMethod::DirectPlay,
             start_time_ticks: None,
+            burn_in_subtitles: false,
             live_device_profile: Some(Box::new(profile)),
             live_tune_started_at: Some(std::time::Instant::now()),
         }

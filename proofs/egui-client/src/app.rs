@@ -18,8 +18,9 @@ use crate::worker::downloads_batch::{
 use crate::worker::update::{ApplyRequest, UpdateState, UpdateStatus, prepare};
 use crate::worker::{
     AdminUserOperation, ApiWorker, ClientTlsFiles, HomeCatalogData, HomeCatalogKind, HomeRowKind,
-    LIBRARY_TAB_LIMIT, PlaylistMutationKind, PreparedPlayback, SavedSignInRequest, ServerIdentity,
-    SyncPlayAction, SyncPlayCommand, WorkerEvent, WorkerSubmitError,
+    LIBRARY_TAB_LIMIT, PlaybackStartOptions, PlaylistMutationKind, PreparedPlayback,
+    SavedSignInRequest, ServerIdentity, SyncPlayAction, SyncPlayCommand, WorkerEvent,
+    WorkerSubmitError,
 };
 use jellyfin_api::remote_command::RemoteCommand;
 use jellyfin_api::session_reporting::QueueItem;
@@ -908,6 +909,68 @@ pub(crate) struct AutoPlay {
     start_over: bool,
 }
 
+/// The item whose per-title subtitle style is in effect while it plays. A series record covers
+/// its episodes when the episode itself has no override.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActiveSubtitleTitle {
+    item_id: String,
+    series_id: Option<String>,
+}
+
+/// The global subtitle settings with the matching per-title override applied. The item record
+/// wins over the series record; every `None` field inherits from `global`.
+fn effective_subtitle_settings(
+    global: &kattri_settings::SubtitleSettings,
+    target: Option<&ActiveSubtitleTitle>,
+) -> kattri_settings::SubtitleSettings {
+    let Some(target) = target else {
+        return global.clone();
+    };
+    let style = global
+        .title_styles
+        .iter()
+        .rev()
+        .find(|style| style.item_id == target.item_id)
+        .or_else(|| {
+            target.series_id.as_deref().and_then(|series_id| {
+                global
+                    .title_styles
+                    .iter()
+                    .rev()
+                    .find(|style| style.item_id == series_id)
+            })
+        });
+    let Some(style) = style else {
+        return global.clone();
+    };
+    let mut effective = global.clone();
+    if let Some(font) = style.font.clone() {
+        effective.font = font;
+    }
+    if let Some(bold) = style.bold {
+        effective.bold = bold;
+    }
+    if let Some(size) = style.size {
+        effective.size = size;
+    }
+    if let Some(color) = style.color.clone() {
+        effective.color = Some(color);
+    }
+    if let Some(border_color) = style.border_color.clone() {
+        effective.border_color = Some(border_color);
+    }
+    if let Some(border_size) = style.border_size {
+        effective.border_size = border_size;
+    }
+    if let Some(background_color) = style.background_color.clone() {
+        effective.background_color = Some(background_color);
+    }
+    if let Some(placement) = style.placement.clone() {
+        effective.placement = Some(placement);
+    }
+    effective
+}
+
 struct PendingLaunchIntent {
     server_url: String,
     item_id: String,
@@ -1282,6 +1345,11 @@ pub struct KattriApp {
     pub(crate) reduce_motion: bool,
     pub(crate) interface_size: kattri_settings::InterfaceSize,
     pub(crate) settings: SettingsState,
+    /// The title whose per-title subtitle style is active, while media is open.
+    active_subtitle_title: Option<ActiveSubtitleTitle>,
+    /// Global subtitle settings merged with the active title's override. The native host reads
+    /// this at load and every frame, so a change reaches the running player.
+    effective_subtitles: kattri_settings::SubtitleSettings,
     /// Profile picker window, open while `Some`. Opened from Settings or at launch.
     pub(crate) profile_picker: Option<PickerState>,
     /// The "Open stream address" dialog while it is open (M6-15).
@@ -1581,6 +1649,7 @@ impl KattriApp {
             _ => (None, None),
         };
         let playback_overrides = playback_overrides_from_settings(settings.settings());
+        let effective_subtitles = settings.settings().subtitles.clone();
         let high_contrast = settings.settings().general.high_contrast;
         let reduce_motion = settings.settings().general.reduce_motion;
         let interface_size = settings.settings().general.interface_size;
@@ -1819,6 +1888,8 @@ impl KattriApp {
             interface_size,
             reduce_motion,
             settings,
+            active_subtitle_title: None,
+            effective_subtitles,
             profile_picker: None,
             open_url: None,
             pending_stream_url: None,
@@ -1996,9 +2067,109 @@ impl KattriApp {
         self.settings.settings().input.global_shortcuts
     }
 
-    /// Subtitle settings of the running profile, including the secondary position (M2-09).
+    /// Subtitle settings in effect for the title being played: the global settings with the
+    /// matching per-title override applied. The host reads this at load and every frame.
     pub fn subtitle_settings(&self) -> &kattri_settings::SubtitleSettings {
-        &self.settings.settings().subtitles
+        &self.effective_subtitles
+    }
+
+    /// Rebuild the effective subtitle settings from the current profile and active title. Called
+    /// when playback starts or stops and after any settings commit.
+    fn refresh_effective_subtitles(&mut self) {
+        let effective = effective_subtitle_settings(
+            &self.settings.settings().subtitles,
+            self.active_subtitle_title.as_ref(),
+        );
+        self.effective_subtitles = effective;
+    }
+
+    /// Playback ended: no title-specific style applies until the next file loads.
+    pub fn on_playback_stopped(&mut self) {
+        self.active_subtitle_title = None;
+        self.refresh_effective_subtitles();
+    }
+
+    /// Save the current subtitle style as an override for `item_id` (or its series, when it has
+    /// one, so every episode of a show shares it). Replaces an existing record for that id.
+    pub(crate) fn save_title_subtitle_style(
+        &mut self,
+        item_id: &str,
+        series_id: Option<&str>,
+    ) -> bool {
+        let target = ActiveSubtitleTitle {
+            item_id: item_id.to_owned(),
+            series_id: series_id
+                .filter(|series| !series.is_empty())
+                .map(str::to_owned),
+        };
+        let key = target
+            .series_id
+            .clone()
+            .unwrap_or_else(|| target.item_id.clone());
+        if key.is_empty() || key.chars().count() > kattri_settings::MAX_TITLE_STYLE_ITEM_ID_CHARS {
+            self.show_toast(ui_text(ids::SUBTITLE_STYLE_SAVE_FAILED).to_owned());
+            return false;
+        }
+
+        // The settings page edits the global style, so that is what "save current style" pins to
+        // the title. Replacing an older override with it is how a title's style is changed.
+        let effective = self.settings.settings().subtitles.clone();
+        let record = kattri_settings::TitleSubtitleStyleSetting {
+            item_id: key.clone(),
+            font: Some(effective.font),
+            bold: Some(effective.bold),
+            size: Some(effective.size),
+            color: effective.color,
+            border_color: effective.border_color,
+            border_size: Some(effective.border_size),
+            background_color: effective.background_color,
+            placement: effective.placement,
+            ..kattri_settings::TitleSubtitleStyleSetting::default()
+        };
+
+        let before = self.settings.settings().clone();
+        let has_existing = self
+            .settings
+            .settings()
+            .subtitles
+            .title_styles
+            .iter()
+            .any(|style| style.item_id == key);
+        let at_capacity = self.settings.settings().subtitles.title_styles.len()
+            >= kattri_settings::MAX_TITLE_STYLE_ENTRIES;
+        if !has_existing && at_capacity {
+            self.show_toast(ui_text(ids::SUBTITLE_STYLE_SAVE_FAILED).to_owned());
+            return false;
+        }
+        let styles = &mut self.settings.settings_mut().subtitles.title_styles;
+        if let Some(existing) = styles.iter_mut().find(|style| style.item_id == key) {
+            *existing = record;
+        } else {
+            styles.push(record);
+        }
+        self.settings.save_if_changed(&before);
+        self.refresh_effective_subtitles();
+        if self.settings.notice().is_some() {
+            self.show_toast(ui_text(ids::SUBTITLE_STYLE_SAVE_FAILED).to_owned());
+            false
+        } else {
+            self.show_toast(ui_text(ids::SUBTITLE_STYLE_SAVED).to_owned());
+            true
+        }
+    }
+
+    /// Remove the stored per-title override for `item_id`.
+    pub(crate) fn remove_title_subtitle_style(&mut self, item_id: &str) -> bool {
+        let before = self.settings.settings().clone();
+        let styles = &mut self.settings.settings_mut().subtitles.title_styles;
+        let original_len = styles.len();
+        styles.retain(|style| style.item_id != item_id);
+        if styles.len() == original_len {
+            return false;
+        }
+        self.settings.save_if_changed(&before);
+        self.refresh_effective_subtitles();
+        true
     }
 
     /// Title of an item by id, for chrome such as the player's on-screen title. Falls back to the
@@ -2947,6 +3118,9 @@ impl KattriApp {
         self.settings.save_if_changed(before);
         let current = self.settings.settings().clone();
         self.apply_settings(&current);
+        // A subtitle change made while media is open must reach the running player and keep any
+        // per-title override in effect.
+        self.refresh_effective_subtitles();
     }
 
     /// Open the launch picker when several profiles exist and `--profile` was not given.
@@ -7587,6 +7761,7 @@ impl KattriApp {
         self.playback_start_error = None;
         self.playback_start_status = Some(ui_text(ids::PLAYBACK_STATUS_PREPARING_LOCAL).into());
         self.pending_playback = None;
+        let burn_in_subtitles = self.settings.settings().subtitles.burn_in;
         let result = self
             .worker
             .as_ref()
@@ -7598,7 +7773,10 @@ impl KattriApp {
                     item_id,
                     source_index,
                     play_method,
-                    start_time_ticks,
+                    PlaybackStartOptions {
+                        start_time_ticks,
+                        burn_in_subtitles,
+                    },
                 )
             });
         if result.is_err() {
@@ -7859,6 +8037,11 @@ impl KattriApp {
 
     fn hand_over_playback(&mut self, item_id: String, mut playback: Box<PreparedPlayback>) {
         let series_id = self.playing_series_id(&item_id).flatten();
+        self.active_subtitle_title = Some(ActiveSubtitleTitle {
+            item_id: item_id.clone(),
+            series_id: series_id.clone(),
+        });
+        self.refresh_effective_subtitles();
         playback.set_series_id(series_id);
         if playback.live_stream_id().is_none() {
             self.request_media_segments(&item_id);
@@ -16068,5 +16251,152 @@ mod library_tab_tests {
             !text_positions(&output, "Suggested Movie").is_empty(),
             "the suggestions result is drawn in the same card grid"
         );
+    }
+}
+
+#[cfg(test)]
+mod subtitle_style_tests {
+    use super::{ActiveSubtitleTitle, KattriApp, effective_subtitle_settings};
+    use crate::settings_state::SettingsState;
+    use egui::Context;
+    use kattri_settings::{SubtitleSettings, TitleSubtitleStyleSetting};
+    use std::path::PathBuf;
+
+    fn app_with_temp_store(label: &str) -> (PathBuf, KattriApp) {
+        let dir = std::env::temp_dir().join(format!(
+            "kattri-subtitle-style-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut app = KattriApp::new(Context::default());
+        app.settings = SettingsState::open(Some(&dir), None);
+        (dir, app)
+    }
+
+    fn cleanup(dir: PathBuf) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn style(item_id: &str) -> TitleSubtitleStyleSetting {
+        TitleSubtitleStyleSetting {
+            item_id: item_id.to_owned(),
+            ..TitleSubtitleStyleSetting::default()
+        }
+    }
+
+    fn title(item_id: &str, series_id: Option<&str>) -> ActiveSubtitleTitle {
+        ActiveSubtitleTitle {
+            item_id: item_id.to_owned(),
+            series_id: series_id.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn per_title_overrides_choose_item_then_series_and_inherit_none_fields() {
+        let mut global = SubtitleSettings {
+            font: "global-font".into(),
+            size: 20,
+            bold: false,
+            ..SubtitleSettings::default()
+        };
+        global.title_styles = vec![
+            TitleSubtitleStyleSetting {
+                font: Some("series-font".into()),
+                bold: Some(true),
+                ..style("show")
+            },
+            TitleSubtitleStyleSetting {
+                size: Some(42),
+                ..style("episode")
+            },
+        ];
+
+        let episode = effective_subtitle_settings(&global, Some(&title("episode", Some("show"))));
+        assert_eq!(episode.size, 42, "the item record wins");
+        assert_eq!(episode.font, "global-font", "None fields inherit global");
+        assert!(!episode.bold, "the series record does not leak through");
+
+        let sibling = effective_subtitle_settings(&global, Some(&title("other", Some("show"))));
+        assert_eq!(sibling.font, "series-font", "the series record applies");
+        assert!(sibling.bold);
+        assert_eq!(sibling.size, 20, "the item record's size does not leak");
+
+        let movie = effective_subtitle_settings(&global, Some(&title("movie", None)));
+        assert_eq!(movie.font, "global-font");
+        assert_eq!(movie.size, 20);
+    }
+
+    #[test]
+    fn saving_replaces_the_existing_record_and_removing_deletes_it() {
+        let (dir, mut app) = app_with_temp_store("save-remove");
+        app.settings.settings_mut().subtitles.font = "chosen-font".into();
+        assert!(app.save_title_subtitle_style("movie-1", None));
+        assert_eq!(app.settings.settings().subtitles.title_styles.len(), 1);
+
+        app.settings.settings_mut().subtitles.font = "second-font".into();
+        assert!(app.save_title_subtitle_style("movie-1", None));
+        let styles = &app.settings.settings().subtitles.title_styles;
+        assert_eq!(styles.len(), 1, "the same item id replaces its record");
+        assert_eq!(styles[0].font.as_deref(), Some("second-font"));
+
+        assert!(app.remove_title_subtitle_style("movie-1"));
+        assert!(app.settings.settings().subtitles.title_styles.is_empty());
+        assert!(!app.remove_title_subtitle_style("movie-1"));
+        drop(app);
+        cleanup(dir);
+    }
+
+    #[test]
+    fn stopping_playback_reverts_to_the_global_subtitle_settings() {
+        let (dir, mut app) = app_with_temp_store("stop");
+        app.settings.settings_mut().subtitles.font = "global-font".into();
+        app.settings.settings_mut().subtitles.title_styles = vec![TitleSubtitleStyleSetting {
+            font: Some("title-font".into()),
+            ..style("movie-1")
+        }];
+        app.active_subtitle_title = Some(title("movie-1", None));
+        app.refresh_effective_subtitles();
+        assert_eq!(app.subtitle_settings().font, "title-font");
+
+        app.on_playback_stopped();
+        assert_eq!(app.subtitle_settings().font, "global-font");
+        drop(app);
+        cleanup(dir);
+    }
+
+    #[test]
+    fn committing_global_settings_keeps_the_active_title_override() {
+        let (dir, mut app) = app_with_temp_store("commit");
+        app.settings.settings_mut().subtitles.title_styles = vec![TitleSubtitleStyleSetting {
+            bold: Some(true),
+            ..style("movie-1")
+        }];
+        app.active_subtitle_title = Some(title("movie-1", None));
+        app.refresh_effective_subtitles();
+
+        let before = app.settings.settings().clone();
+        app.settings.settings_mut().subtitles.size = 33;
+        app.commit_settings(&before);
+        assert_eq!(app.subtitle_settings().size, 33);
+        assert!(app.subtitle_settings().bold, "the title override remains");
+        drop(app);
+        cleanup(dir);
+    }
+
+    #[test]
+    fn saving_a_show_uses_the_series_id_so_every_episode_matches() {
+        let (dir, mut app) = app_with_temp_store("series");
+        app.settings.settings_mut().subtitles.font = "chosen-font".into();
+        assert!(app.save_title_subtitle_style("episode-1", Some("show-1")));
+        let styles = &app.settings.settings().subtitles.title_styles;
+        assert_eq!(styles.len(), 1);
+        assert_eq!(styles[0].item_id, "show-1");
+        // The effective settings still pick the series record for the episode.
+        let effective = effective_subtitle_settings(
+            &app.settings.settings().subtitles,
+            Some(&title("episode-1", Some("show-1"))),
+        );
+        assert_eq!(effective.font, "chosen-font");
+        drop(app);
+        cleanup(dir);
     }
 }

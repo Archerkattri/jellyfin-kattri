@@ -498,6 +498,21 @@ fn current_preset(gains: &[f32; EQUALIZER_BANDS]) -> Option<Preset> {
 
 pub(super) fn subtitles_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
     let before = app.settings.settings().clone();
+    // Resolve each stored override to a readable title before the settings are borrowed mutably.
+    // An unloaded item keeps a short id so the row still identifies its record.
+    let title_labels: std::collections::BTreeMap<String, String> = before
+        .subtitles
+        .title_styles
+        .iter()
+        .map(|style| {
+            let label = app
+                .item_title(&style.item_id)
+                .map(str::to_owned)
+                .unwrap_or_else(|| short_title_id(&style.item_id));
+            (style.item_id.clone(), label)
+        })
+        .collect();
+    let mut removals = Vec::new();
     settings_card(ui, |ui| {
         let subtitles = &mut app.settings.settings_mut().subtitles;
         ui.horizontal(|ui| {
@@ -554,8 +569,65 @@ pub(super) fn subtitles_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) 
             ui_text(ids::SETTINGS_MEDIA_SUBTITLE_ASS_OVERRIDE_HELP),
             12.0,
         );
+        ui.separator();
+        ui.checkbox(
+            &mut subtitles.burn_in,
+            ui_text(ids::SETTINGS_MEDIA_SUBTITLE_BURN_IN),
+        );
+        muted(
+            ui,
+            colors,
+            ui_text(ids::SETTINGS_MEDIA_SUBTITLE_BURN_IN_HELP),
+            12.0,
+        );
+        ui.separator();
+        ui.label(RichText::new(ui_text(ids::SETTINGS_MEDIA_SUBTITLE_TITLE_STYLES)).strong());
+        muted(
+            ui,
+            colors,
+            ui_text(ids::SETTINGS_MEDIA_SUBTITLE_TITLE_STYLES_HELP),
+            12.0,
+        );
+        if subtitles.title_styles.is_empty() {
+            muted(
+                ui,
+                colors,
+                ui_text(ids::SETTINGS_MEDIA_SUBTITLE_TITLE_STYLES_EMPTY),
+                12.0,
+            );
+        } else {
+            for style in &subtitles.title_styles {
+                ui.horizontal(|ui| {
+                    let label = title_labels
+                        .get(&style.item_id)
+                        .map(String::as_str)
+                        .unwrap_or(style.item_id.as_str());
+                    ui.label(label);
+                    if ui
+                        .button(ui_text(ids::SETTINGS_MEDIA_SUBTITLE_TITLE_STYLES_REMOVE))
+                        .clicked()
+                    {
+                        removals.push(style.item_id.clone());
+                    }
+                });
+            }
+        }
     });
+    for item_id in removals {
+        app.remove_title_subtitle_style(&item_id);
+    }
     finish_page(ui, app, colors, &before);
+}
+
+/// A short, stable label for a stored per-title record whose item is not loaded: the first eight
+/// id characters followed by a marker. Ids are GUIDs, which are unreadable in full.
+fn short_title_id(item_id: &str) -> String {
+    const KEEP: usize = 8;
+    let mut label: String = item_id.chars().take(KEEP).collect();
+    if item_id.chars().count() > KEEP {
+        label.push_str("...");
+    }
+    label
 }
 
 pub(super) fn video_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
@@ -687,5 +759,12 @@ mod sound_tests {
         assert_eq!(labels[4], "500 Hz");
         assert_eq!(labels[5], "1 kHz");
         assert_eq!(labels[9], "16 kHz");
+    }
+
+    #[test]
+    fn a_stored_title_id_is_shortened_only_when_it_is_long() {
+        assert_eq!(super::short_title_id("abc"), "abc");
+        assert_eq!(super::short_title_id("01234567"), "01234567");
+        assert_eq!(super::short_title_id("0123456789abcdef"), "01234567...");
     }
 }

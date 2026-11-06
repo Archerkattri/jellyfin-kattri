@@ -705,6 +705,18 @@ pub const SETTINGS_MEDIA_SUBTITLE_SIZE: &str = "settings.media.subtitle.size";
 pub const SETTINGS_MEDIA_SUBTITLE_OUTLINE_SIZE: &str = "settings.media.subtitle.outline_size";
 pub const SETTINGS_MEDIA_SUBTITLE_SECONDARY_POSITION: &str =
     "settings.media.subtitle.secondary_position";
+pub const SETTINGS_MEDIA_SUBTITLE_BURN_IN: &str = "settings.media.subtitle.burn_in";
+pub const SETTINGS_MEDIA_SUBTITLE_BURN_IN_HELP: &str = "settings.media.subtitle.burn_in_help";
+pub const SETTINGS_MEDIA_SUBTITLE_TITLE_STYLES: &str = "settings.media.subtitle.title_styles";
+pub const SETTINGS_MEDIA_SUBTITLE_TITLE_STYLES_HELP: &str =
+    "settings.media.subtitle.title_styles_help";
+pub const SETTINGS_MEDIA_SUBTITLE_TITLE_STYLES_EMPTY: &str =
+    "settings.media.subtitle.title_styles_empty";
+pub const SETTINGS_MEDIA_SUBTITLE_TITLE_STYLES_REMOVE: &str =
+    "settings.media.subtitle.title_styles_remove";
+pub const DETAIL_BUTTON_SAVE_SUBTITLE_STYLE: &str = "detail.button.save_subtitle_style";
+pub const SUBTITLE_STYLE_SAVED: &str = "subtitle_style.saved";
+pub const SUBTITLE_STYLE_SAVE_FAILED: &str = "subtitle_style.save_failed";
 pub const SETTINGS_MEDIA_VIDEO_HARDWARE_DECODE: &str = "settings.media.video.hardware_decode";
 pub const SETTINGS_MEDIA_VIDEO_DEINTERLACE: &str = "settings.media.video.deinterlace";
 pub const SETTINGS_MEDIA_VIDEO_ASPECT_RATIO: &str = "settings.media.video.aspect_ratio";
@@ -1738,6 +1750,15 @@ pub const ALL: &[&str] = &[
     SETTINGS_MEDIA_SUBTITLE_SIZE,
     SETTINGS_MEDIA_SUBTITLE_OUTLINE_SIZE,
     SETTINGS_MEDIA_SUBTITLE_SECONDARY_POSITION,
+    SETTINGS_MEDIA_SUBTITLE_BURN_IN,
+    SETTINGS_MEDIA_SUBTITLE_BURN_IN_HELP,
+    SETTINGS_MEDIA_SUBTITLE_TITLE_STYLES,
+    SETTINGS_MEDIA_SUBTITLE_TITLE_STYLES_HELP,
+    SETTINGS_MEDIA_SUBTITLE_TITLE_STYLES_EMPTY,
+    SETTINGS_MEDIA_SUBTITLE_TITLE_STYLES_REMOVE,
+    DETAIL_BUTTON_SAVE_SUBTITLE_STYLE,
+    SUBTITLE_STYLE_SAVED,
+    SUBTITLE_STYLE_SAVE_FAILED,
     SETTINGS_MEDIA_VIDEO_HARDWARE_DECODE,
     SETTINGS_MEDIA_VIDEO_DEINTERLACE,
     SETTINGS_MEDIA_VIDEO_ASPECT_RATIO,

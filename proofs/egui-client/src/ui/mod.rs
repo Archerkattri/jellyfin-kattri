@@ -2986,6 +2986,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     let mut person_to_open = None;
     let mut similar_item_to_open = None;
     let mut download_target: Option<(String, String)> = None;
+    let mut save_subtitle_style_target: Option<(String, Option<String>)> = None;
     egui::Frame::new()
         .fill(colors.panel)
         .corner_radius(CornerRadius::same(16))
@@ -3016,6 +3017,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                     colors,
                                     &mut play_request,
                                     &mut download_target,
+                                    &mut save_subtitle_style_target,
                                 );
                             });
                         detail_back |= header.back;
@@ -3496,6 +3498,9 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     if let Some((item_id, title)) = download_target {
         app.start_download(&item_id, &title);
     }
+    if let Some((item_id, series_id)) = save_subtitle_style_target {
+        app.save_title_subtitle_style(&item_id, series_id.as_deref());
+    }
     if let Some(start_over) = play_request
         && detail_error_action.is_none()
         && let Some(item_id) = app.selected_item_id.clone()
@@ -3634,9 +3639,14 @@ fn detail_play_buttons(
     colors: Palette,
     play_request: &mut Option<bool>,
     download_target: &mut Option<(String, String)>,
+    save_subtitle_style_target: &mut Option<(String, Option<String>)>,
 ) {
     let playable = is_playable_item_type(item.item_type.as_deref());
     let downloadable = is_downloadable_item_type(item.item_type.as_deref());
+    let subtitle_style_savable = matches!(
+        item.item_type.as_deref(),
+        Some("Movie" | "Episode" | "Video")
+    );
     if !playable && !downloadable {
         return;
     }
@@ -3702,6 +3712,20 @@ fn detail_play_buttons(
                 .clicked()
         {
             *download_target = Some((item.id.clone(), item.name.clone()));
+        }
+        if subtitle_style_savable
+            && ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(ui_text(ids::DETAIL_BUTTON_SAVE_SUBTITLE_STYLE)).size(16.0),
+                    )
+                    .fill(Color32::from_white_alpha(46))
+                    .corner_radius(CornerRadius::same(24))
+                    .min_size(egui::vec2(160.0, 48.0)),
+                )
+                .clicked()
+        {
+            *save_subtitle_style_target = Some((item.id.clone(), item.series_id.clone()));
         }
         if busy {
             ui.spinner();
