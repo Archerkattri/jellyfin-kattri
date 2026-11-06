@@ -60,19 +60,18 @@ fn publish_custom_theme(custom: CustomTheme) {
 fn current_preset() -> ThemePreset {
     match CURRENT_PRESET.load(Ordering::Relaxed) {
         1 => ThemePreset::WarmDark,
-        2 => ThemePreset::Light,
         _ => ThemePreset::JellyfinDark,
     }
 }
 
 /// Set the preset used by the existing shared palette and apply entry points.
+///
+/// Light mode is retired: the Light and System presets are still accepted so old settings files
+/// keep loading, but both resolve to Jellyfin Dark. Only the two dark presets remain selectable.
 pub fn set_current_preset(preset: ThemePreset) {
     let value = match preset {
-        ThemePreset::JellyfinDark => 0,
         ThemePreset::WarmDark => 1,
-        ThemePreset::Light => 2,
-        // apply_with_preset resolves the OS preference before publishing the palette.
-        ThemePreset::System => return,
+        ThemePreset::JellyfinDark | ThemePreset::Light | ThemePreset::System => 0,
     };
     CURRENT_PRESET.store(value, Ordering::Relaxed);
 }
@@ -160,7 +159,7 @@ pub fn palette_for(preset: ThemePreset, high_contrast: bool) -> Palette {
         }
     } else {
         match preset {
-            ThemePreset::JellyfinDark | ThemePreset::System => Palette {
+            ThemePreset::JellyfinDark | ThemePreset::Light | ThemePreset::System => Palette {
                 background: NIGHT_SLATE,
                 panel: PANEL,
                 raised: RAISED,
@@ -183,18 +182,6 @@ pub fn palette_for(preset: ThemePreset, high_contrast: bool) -> Palette {
                 divider: Color32::from_rgb(0x55, 0x3B, 0x2E),
                 warning: WARNING_TEXT,
                 danger: DANGER_TEXT,
-            },
-            ThemePreset::Light => Palette {
-                background: Color32::from_rgb(0xF4, 0xF5, 0xF7),
-                panel: Color32::WHITE,
-                raised: Color32::from_rgb(0xE5, 0xE8, 0xED),
-                text: Color32::from_rgb(0x18, 0x20, 0x2A),
-                muted: Color32::from_rgb(0x4B, 0x57, 0x66),
-                accent: Color32::from_rgb(0x00, 0x60, 0x86),
-                focus: Color32::from_rgb(0x00, 0x55, 0x80),
-                divider: Color32::from_rgb(0xB5, 0xBE, 0xC9),
-                warning: Color32::from_rgb(0x85, 0x48, 0x00),
-                danger: Color32::from_rgb(0xAB, 0x20, 0x20),
             },
         }
     }
@@ -381,7 +368,7 @@ fn apply_to_context(
     custom: CustomTheme,
     publish_active: bool,
 ) {
-    let preset = resolve_preset(requested, ctx.system_theme());
+    let preset = resolve_preset(requested);
     if publish_active {
         set_current_preset(preset);
         publish_custom_theme(custom);
@@ -405,21 +392,11 @@ fn apply_to_context(
     let custom_surfaces = !high_contrast
         && custom.enabled
         && (custom.background.is_some() || custom.surface.is_some());
-    ctx.set_theme(if high_contrast {
-        egui::ThemePreference::Dark
-    } else if requested == ThemePreset::System {
-        egui::ThemePreference::System
-    } else if preset == ThemePreset::Light && !high_contrast {
-        egui::ThemePreference::Light
-    } else {
-        egui::ThemePreference::Dark
-    });
+    // Light mode is retired; the interface is always dark. Old Light/System settings still load
+    // but resolve to Jellyfin Dark above.
+    ctx.set_theme(egui::ThemePreference::Dark);
     ctx.global_style_mut(|style| {
-        style.visuals = if preset == ThemePreset::Light && !high_contrast {
-            egui::Visuals::light()
-        } else {
-            egui::Visuals::dark()
-        };
+        style.visuals = egui::Visuals::dark();
         style.visuals.panel_fill = colors.background;
         style.visuals.window_fill = colors.panel;
         style.visuals.extreme_bg_color = colors.background;
@@ -427,8 +404,6 @@ fn apply_to_context(
             colors.panel
         } else if high_contrast {
             FIELD
-        } else if preset == ThemePreset::Light {
-            Color32::WHITE
         } else if preset == ThemePreset::WarmDark {
             Color32::from_rgb(0x30, 0x22, 0x1B)
         } else {
@@ -442,10 +417,10 @@ fn apply_to_context(
         } else {
             match (high_contrast, preset) {
                 (true, _) => ACTIVE_FILL_HIGH_CONTRAST,
-                (false, ThemePreset::JellyfinDark) => SELECTION_BLUE,
                 (false, ThemePreset::WarmDark) => Color32::from_rgb(0x4A, 0x35, 0x28),
-                (false, ThemePreset::Light) => Color32::from_rgb(0xD8, 0xE5, 0xEC),
-                (false, ThemePreset::System) => SELECTION_BLUE,
+                (false, ThemePreset::JellyfinDark) => SELECTION_BLUE,
+                // Light and System are resolved to Jellyfin Dark before this point.
+                (false, ThemePreset::Light | ThemePreset::System) => SELECTION_BLUE,
             }
         };
         style.visuals.selection.stroke = Stroke::new(1.0, colors.text);
@@ -466,8 +441,6 @@ fn apply_to_context(
             colors.raised
         } else if high_contrast {
             HOVER_FILL
-        } else if preset == ThemePreset::Light {
-            Color32::from_rgb(0xD8, 0xE5, 0xEC)
         } else if preset == ThemePreset::WarmDark {
             Color32::from_rgb(0x4A, 0x35, 0x28)
         } else {
@@ -481,10 +454,10 @@ fn apply_to_context(
         } else {
             match (high_contrast, preset) {
                 (true, _) => ACTIVE_FILL_HIGH_CONTRAST,
-                (false, ThemePreset::JellyfinDark) => SELECTION_BLUE,
                 (false, ThemePreset::WarmDark) => Color32::from_rgb(0x4A, 0x35, 0x28),
-                (false, ThemePreset::Light) => Color32::from_rgb(0xD8, 0xE5, 0xEC),
-                (false, ThemePreset::System) => SELECTION_BLUE,
+                (false, ThemePreset::JellyfinDark) => SELECTION_BLUE,
+                // Light and System are resolved to Jellyfin Dark before this point.
+                (false, ThemePreset::Light | ThemePreset::System) => SELECTION_BLUE,
             }
         };
         style.visuals.widgets.active.fg_stroke.color = colors.text;
@@ -516,11 +489,14 @@ fn apply_to_context(
     });
 }
 
-fn resolve_preset(preset: ThemePreset, system: Option<egui::Theme>) -> ThemePreset {
-    match (preset, system) {
-        (ThemePreset::System, Some(egui::Theme::Light)) => ThemePreset::Light,
-        (ThemePreset::System, _) => ThemePreset::JellyfinDark,
-        (chosen, _) => chosen,
+/// Resolve a saved preset to one of the two dark themes. Light and System are accepted for
+/// backward compatibility but never produce a light interface.
+fn resolve_preset(preset: ThemePreset) -> ThemePreset {
+    match preset {
+        ThemePreset::WarmDark => ThemePreset::WarmDark,
+        ThemePreset::JellyfinDark | ThemePreset::Light | ThemePreset::System => {
+            ThemePreset::JellyfinDark
+        }
     }
 }
 
@@ -943,13 +919,17 @@ mod tests {
     }
 
     #[test]
-    fn system_theme_follows_os_changes_and_high_contrast_takes_precedence() {
+    fn light_mode_is_retired_and_every_saved_preset_stays_dark() {
+        let dark = palette_for(ThemePreset::JellyfinDark, false);
+        assert_eq!(palette_for(ThemePreset::Light, false), dark);
+        assert_eq!(palette_for(ThemePreset::System, false), dark);
+
         let ctx = egui::Context::default();
-        for (system, high_contrast, expected_dark) in [
-            (egui::Theme::Light, false, false),
-            (egui::Theme::Dark, false, true),
-            (egui::Theme::Light, true, true),
-            (egui::Theme::Light, false, false),
+        for (preset, system, high_contrast) in [
+            (ThemePreset::System, egui::Theme::Light, false),
+            (ThemePreset::System, egui::Theme::Dark, false),
+            (ThemePreset::Light, egui::Theme::Light, false),
+            (ThemePreset::Light, egui::Theme::Light, true),
         ] {
             let mut output = ctx.run_ui(
                 egui::RawInput {
@@ -959,13 +939,16 @@ mod tests {
                 |ui| {
                     apply_to_context(
                         ui.ctx(),
-                        ThemePreset::System,
+                        preset,
                         high_contrast,
                         true,
                         CustomTheme::default(),
                         false,
                     );
-                    assert_eq!(ui.ctx().global_style().visuals.dark_mode, expected_dark);
+                    assert!(
+                        ui.ctx().global_style().visuals.dark_mode,
+                        "{preset:?} with {system:?} must stay dark"
+                    );
                 },
             );
             output.textures_delta.clear();

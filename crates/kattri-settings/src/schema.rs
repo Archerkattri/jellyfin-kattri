@@ -294,9 +294,11 @@ pub enum ThemePreset {
     JellyfinDark,
     /// A dark brown and amber color scheme.
     WarmDark,
-    /// A light neutral color scheme.
+    /// Retired light preset, kept so older settings files still load. Resolves to
+    /// [`Self::JellyfinDark`] and is no longer offered in Settings.
     Light,
-    /// Follow the operating system's light/dark preference.
+    /// Retired follow-the-OS preset, kept so older settings files still load. Resolves to
+    /// [`Self::JellyfinDark`] and is no longer offered in Settings.
     System,
 }
 

@@ -63,7 +63,7 @@ server, produced by `scripts/qa_clickthrough.ps1` on 2026-10-30. No mock data is
 | **Administration** | Edit metadata, Identify, Edit images, Add to collection, Refresh metadata and confirmed Delete; administrator user listing, creation, rename and access-policy editing with confirmation |
 | **Settings** | General, playback, audio, subtitles (style, per-title overrides, burn-in), video, input, server (private CA and client certificate), About; versioned TOML per profile |
 | **Input** | Rebindable keyboard map, gamepad menus and player control, full focus navigation, optional Windows-wide playback shortcuts (Ctrl+Alt+Space / Left / Right / M) |
-| **Interface** | Jellyfin Dark, Warm Dark, Light and system themes with optional custom accent, background and surface colors; SF Pro Display typeface (Inter fallback); ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu, idle screensaver, cursor auto-hide in fullscreen |
+| **Interface** | Dark-only Jellyfin Dark and Warm Dark themes (saved Light/System values load as Jellyfin Dark) with optional custom accent, background and surface colors; SF Pro Display typeface (Inter fallback); ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu, idle screensaver, cursor auto-hide in fullscreen |
 
 ## Install
 

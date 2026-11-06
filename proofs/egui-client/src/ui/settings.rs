@@ -679,24 +679,15 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
                     ThemePreset::WarmDark,
                     ui_text(ids::SETTINGS_GENERAL_THEME_WARM_DARK),
                 ),
-                (
-                    ThemePreset::Light,
-                    ui_text(ids::SETTINGS_GENERAL_THEME_LIGHT),
-                ),
-                (
-                    ThemePreset::System,
-                    ui_text(ids::SETTINGS_GENERAL_THEME_SYSTEM),
-                ),
             ],
         );
         crate::theme::set_current_preset(general.theme_preset);
-        let default_preset = if general.theme_preset == ThemePreset::System {
-            match ui.ctx().system_theme() {
-                Some(egui::Theme::Light) => ThemePreset::Light,
-                _ => ThemePreset::JellyfinDark,
+        // Light mode is retired; a saved Light or System preset previews as Jellyfin Dark.
+        let default_preset = match general.theme_preset {
+            ThemePreset::WarmDark => ThemePreset::WarmDark,
+            ThemePreset::JellyfinDark | ThemePreset::Light | ThemePreset::System => {
+                ThemePreset::JellyfinDark
             }
-        } else {
-            general.theme_preset
         };
         custom_theme_controls(
             ui,
