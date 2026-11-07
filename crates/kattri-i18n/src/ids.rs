@@ -494,8 +494,6 @@ pub const SETTINGS_GENERAL_INTERFACE_SIZE_HELP: &str = "settings.general.interfa
 pub const SETTINGS_GENERAL_THEME: &str = "settings.general.theme";
 pub const SETTINGS_GENERAL_THEME_JELLYFIN_DARK: &str = "settings.general.theme.jellyfin_dark";
 pub const SETTINGS_GENERAL_THEME_WARM_DARK: &str = "settings.general.theme.warm_dark";
-pub const SETTINGS_GENERAL_THEME_LIGHT: &str = "settings.general.theme.light";
-pub const SETTINGS_GENERAL_THEME_SYSTEM: &str = "settings.general.theme.system";
 pub const CONNECT_DISCOVERY_START: &str = "connect.discovery.start";
 pub const CONNECT_DISCOVERY_SCANNING: &str = "connect.discovery.scanning";
 pub const CONNECT_DISCOVERY_CANCEL: &str = "connect.discovery.cancel";
@@ -1550,8 +1548,6 @@ pub const ALL: &[&str] = &[
     SETTINGS_GENERAL_THEME,
     SETTINGS_GENERAL_THEME_JELLYFIN_DARK,
     SETTINGS_GENERAL_THEME_WARM_DARK,
-    SETTINGS_GENERAL_THEME_LIGHT,
-    SETTINGS_GENERAL_THEME_SYSTEM,
     CONNECT_DISCOVERY_START,
     CONNECT_DISCOVERY_SCANNING,
     CONNECT_DISCOVERY_CANCEL,
