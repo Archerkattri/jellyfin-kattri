@@ -30,16 +30,18 @@ pub enum ChannelListState {
     NotSetUp,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 enum TunePhase {
     Opening,
-    Negotiating,
+    /// The open returned a stream ID; negotiation is in flight.
+    Negotiating {
+        live_stream_id: String,
+    },
 }
 
 struct TuneAttempt {
     generation: u64,
     channel_id: String,
-    live_stream_id: Option<String>,
     phase: TunePhase,
 }
 
@@ -79,7 +81,7 @@ impl LiveTuneCoordinator {
     pub fn begin(&mut self, channel_id: String) -> Vec<LiveTuneEffect> {
         let mut effects = Vec::with_capacity(2);
         if let Some(previous) = self.current.take()
-            && let Some(live_stream_id) = previous.live_stream_id
+            && let TunePhase::Negotiating { live_stream_id } = previous.phase
         {
             effects.push(LiveTuneEffect::Close { live_stream_id });
         }
@@ -87,7 +89,6 @@ impl LiveTuneCoordinator {
         self.current = Some(TuneAttempt {
             generation: self.generation,
             channel_id: channel_id.clone(),
-            live_stream_id: None,
             phase: TunePhase::Opening,
         });
         effects.push(LiveTuneEffect::Open {
@@ -103,8 +104,9 @@ impl LiveTuneCoordinator {
         }) else {
             return vec![LiveTuneEffect::Close { live_stream_id }];
         };
-        attempt.live_stream_id = Some(live_stream_id.clone());
-        attempt.phase = TunePhase::Negotiating;
+        attempt.phase = TunePhase::Negotiating {
+            live_stream_id: live_stream_id.clone(),
+        };
         vec![LiveTuneEffect::Negotiate {
             generation,
             channel_id: attempt.channel_id.clone(),
@@ -113,21 +115,27 @@ impl LiveTuneCoordinator {
     }
 
     pub fn prepared(&self, generation: u64) -> Option<LiveTuneEffect> {
-        let attempt = self.current.as_ref().filter(|attempt| {
-            attempt.generation == generation && attempt.phase == TunePhase::Negotiating
-        })?;
+        let attempt = self
+            .current
+            .as_ref()
+            .filter(|attempt| attempt.generation == generation)?;
+        let TunePhase::Negotiating { live_stream_id } = &attempt.phase else {
+            return None;
+        };
         Some(LiveTuneEffect::Start {
             generation,
             channel_id: attempt.channel_id.clone(),
-            live_stream_id: attempt.live_stream_id.clone()?,
+            live_stream_id: live_stream_id.clone(),
         })
     }
 
     pub fn stop(&mut self) -> Option<LiveTuneEffect> {
-        let attempt = self.current.take()?;
-        attempt
-            .live_stream_id
-            .map(|live_stream_id| LiveTuneEffect::Close { live_stream_id })
+        match self.current.take()?.phase {
+            TunePhase::Negotiating { live_stream_id } => {
+                Some(LiveTuneEffect::Close { live_stream_id })
+            }
+            TunePhase::Opening => None,
+        }
     }
 
     pub fn is_current(&self, generation: u64) -> bool {
