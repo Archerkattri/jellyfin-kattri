@@ -811,6 +811,9 @@ struct PendingMediaLoad<T> {
     relay: Option<T>,
     resume_seconds: Option<f64>,
     item: ItemPlaybackState,
+    /// Reporting metadata for the file this load will start. It travels with the load so a
+    /// `StartFile` for one entry can never consume another entry's metadata.
+    report_metadata: Option<PlaybackReportMetadata>,
 }
 
 struct MediaLoadState<T> {
@@ -866,16 +869,15 @@ impl<T> MediaLoadState<T> {
         true
     }
 
-    fn reject_command(&mut self, command_id: u64) -> bool {
+    fn reject_command(&mut self, command_id: u64) -> Option<PendingMediaLoad<T>> {
         if self
             .pending
             .as_ref()
             .is_none_or(|load| load.command_id != command_id)
         {
-            return false;
+            return None;
         }
-        self.pending = None;
-        true
+        self.pending.take()
     }
 
     fn load_segments(
@@ -940,7 +942,6 @@ pub(crate) struct MpvHost<'session> {
     pending_subtitle_add: Option<u64>,
     /// Set only at launch by the debug QA host; normal product sessions report as usual.
     reporting_enabled: bool,
-    pending_report_metadata: Option<PlaybackReportMetadata>,
     report_metadata: Option<PlaybackReportMetadata>,
     report_session: Option<PlaybackReportSessionId>,
     report_started_at: Option<Instant>,
@@ -1071,7 +1072,6 @@ impl<'session> MpvHost<'session> {
                 pending_track_selection: None,
                 pending_subtitle_add: None,
                 reporting_enabled: true,
-                pending_report_metadata: None,
                 report_metadata: None,
                 report_session: None,
                 report_started_at: None,
@@ -1180,7 +1180,6 @@ impl<'session> MpvHost<'session> {
                     pending_track_selection: None,
                     pending_subtitle_add: None,
                     reporting_enabled: true,
-                    pending_report_metadata: None,
                     report_metadata: None,
                     report_session: None,
                     report_started_at: None,
@@ -1257,7 +1256,6 @@ impl<'session> MpvHost<'session> {
             pending_track_selection: None,
             pending_subtitle_add: None,
             reporting_enabled: true,
-            pending_report_metadata: None,
             report_metadata: None,
             report_session: None,
             report_started_at: None,
@@ -1328,8 +1326,8 @@ impl<'session> MpvHost<'session> {
                             relay: None,
                             resume_seconds: None,
                             item: ItemPlaybackState::default(),
+                            report_metadata: None,
                         });
-                        self.pending_report_metadata = None;
                         self.status = "Loading local media".into();
                     }
                     Err(error) => self.status = format!("Could not queue local media: {error}"),
@@ -1426,8 +1424,8 @@ impl<'session> MpvHost<'session> {
             relay: None,
             resume_seconds: None,
             item: ItemPlaybackState::default(),
+            report_metadata: None,
         });
-        self.pending_report_metadata = None;
         self.status = format!("Loading stream {}", url.redacted());
         self.sync_controller.reset();
         self.policy.reset_item();
@@ -1474,8 +1472,8 @@ impl<'session> MpvHost<'session> {
                 language_memory: load.language_memory,
                 ..ItemPlaybackState::default()
             },
+            report_metadata: Some(report_metadata),
         });
-        self.pending_report_metadata = Some(report_metadata);
         self.status = "Loading the Jellyfin stream through the local relay".into();
         self.sync_controller.reset();
         self.policy.reset_item();
@@ -1602,10 +1600,11 @@ impl<'session> MpvHost<'session> {
                         self.active_generation = load.generation;
                         self.pending_resume_seconds = load.resume_seconds;
                         self.item = load.item;
+                        self.report_metadata = load.report_metadata;
                     } else {
                         self.active_generation = None;
+                        self.report_metadata = None;
                     }
-                    self.report_metadata = self.pending_report_metadata.take();
                     self.report_session = self.next_report_session();
                     self.report_started_at = None;
                     self.resume_seek_command = None;
@@ -1688,8 +1687,10 @@ impl<'session> MpvHost<'session> {
                         .pending
                         .as_ref()
                         .and_then(|load| load.generation);
-                    let _ = self.media_load.reject_command(event.request_id);
-                    let metadata = self.pending_report_metadata.take();
+                    let rejected = self.media_load.reject_command(event.request_id);
+                    let metadata = rejected
+                        .as_ref()
+                        .and_then(|load| load.report_metadata.clone());
                     self.playback_end_reason = Some(EndFileReason::Error);
                     self.playback_end_generation = generation;
                     self.playback_end_was_loaded = false;
@@ -2043,18 +2044,34 @@ impl<'session> MpvHost<'session> {
             .map(|metadata| metadata.item_id.as_str())
     }
 
+    /// Reporting metadata of the load that has not reached `StartFile` yet, if any.
+    fn pending_report_metadata(&self) -> Option<&PlaybackReportMetadata> {
+        self.media_load
+            .pending
+            .as_ref()
+            .and_then(|load| load.report_metadata.as_ref())
+    }
+
+    fn pending_report_metadata_mut(&mut self) -> Option<&mut PlaybackReportMetadata> {
+        self.media_load
+            .pending
+            .as_mut()
+            .and_then(|load| load.report_metadata.as_mut())
+    }
+
     pub(crate) fn live_stream_active(&self) -> bool {
         self.report_metadata
             .as_ref()
-            .or(self.pending_report_metadata.as_ref())
+            .or_else(|| self.pending_report_metadata())
             .is_some_and(|metadata| metadata.live_stream_id.is_some())
     }
 
     pub(crate) fn take_live_tune_elapsed(&mut self) -> Option<Duration> {
-        let metadata = self
-            .report_metadata
-            .as_mut()
-            .or(self.pending_report_metadata.as_mut())?;
+        let metadata = if let Some(metadata) = self.report_metadata.as_mut() {
+            metadata
+        } else {
+            self.pending_report_metadata_mut()?
+        };
         let started_at = metadata.live_tune_started_at.take()?;
         Some(started_at.elapsed())
     }
@@ -2767,7 +2784,9 @@ impl<'session> MpvHost<'session> {
 
     pub(crate) fn finish_playback_reporting(&mut self) {
         self.stop_playback_report(false);
-        self.pending_report_metadata = None;
+        if let Some(load) = self.media_load.pending.as_mut() {
+            load.report_metadata = None;
+        }
     }
 
     /// Debug-only stream validation must never create a reporting lifecycle on the owner's
@@ -2790,7 +2809,9 @@ impl<'session> MpvHost<'session> {
     pub(crate) fn clear_reporting_for_connection_change(&mut self) -> ReportCounts {
         self.report_session = None;
         self.report_metadata = None;
-        self.pending_report_metadata = None;
+        if let Some(load) = self.media_load.pending.as_mut() {
+            load.report_metadata = None;
+        }
         self.report_started_at = None;
         self.report_scheduler = playback_report_scheduler(self.reporting_enabled);
         self.report_actions.clear_for_connection_change()
@@ -2799,7 +2820,7 @@ impl<'session> MpvHost<'session> {
     pub(crate) fn has_reporting_context(&self) -> bool {
         self.report_session.is_some()
             || self.report_metadata.is_some()
-            || self.pending_report_metadata.is_some()
+            || self.pending_report_metadata().is_some()
             || self.report_actions.has_pending()
     }
 
@@ -3346,7 +3367,7 @@ impl<'session> MpvHost<'session> {
     }
 
     pub(crate) fn has_media(&self) -> bool {
-        self.file_loaded || self.pending_report_metadata.is_some()
+        self.file_loaded || self.pending_report_metadata().is_some()
     }
 }
 
@@ -3812,6 +3833,7 @@ mod tests {
                 relay: Some("new relay"),
                 resume_seconds: Some(8.0),
                 item: ItemPlaybackState::default(),
+                report_metadata: None,
             }),
         };
         assert!(state.ended(Some(11)));
@@ -3843,14 +3865,53 @@ mod tests {
                 relay: Some("queued relay"),
                 resume_seconds: None,
                 item: ItemPlaybackState::default(),
+                report_metadata: None,
             }),
         };
-        assert!(!state.reject_command(41));
+        assert!(state.reject_command(41).is_none());
         assert!(state.pending.is_some());
-        assert!(state.reject_command(42));
+        assert!(state.reject_command(42).is_some());
         assert!(state.pending.is_none());
         assert_eq!(state.active, Some("currently playing"));
         assert_eq!(state.active_entry_id, Some(11));
+    }
+
+    #[test]
+    fn a_started_load_carries_its_own_report_metadata() {
+        let metadata = PlaybackReportMetadata {
+            item_id: "new-item".into(),
+            media_source_id: None,
+            live_stream_id: None,
+            live_tune_started_at: None,
+            audio_stream_index: None,
+            subtitle_stream_index: None,
+            play_session_id: None,
+            play_method: jellyfin_api::PlayMethod::DirectPlay,
+            can_seek: None,
+            repeat_mode: None,
+            playback_order: None,
+            now_playing_queue: None,
+        };
+        let mut state = MediaLoadState::<()> {
+            active: None,
+            active_entry_id: None,
+            pending: Some(PendingMediaLoad {
+                command_id: 1,
+                generation: Some(7),
+                relay: None,
+                resume_seconds: None,
+                item: ItemPlaybackState::default(),
+                report_metadata: Some(metadata),
+            }),
+        };
+
+        let load = state.started(Some(3)).expect("matching load");
+        assert_eq!(
+            load.report_metadata.map(|metadata| metadata.item_id),
+            Some("new-item".to_owned())
+        );
+        assert_eq!(state.active_entry_id, Some(3));
+        assert!(state.started(Some(4)).is_none(), "one start per load");
     }
 
     #[test]
@@ -3871,6 +3932,7 @@ mod tests {
                     segment_item_id: Some("new".into()),
                     ..Default::default()
                 },
+                report_metadata: None,
             }),
         };
         state.load_segments(&mut active, "new", vec![]);
