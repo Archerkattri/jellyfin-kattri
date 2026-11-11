@@ -38,7 +38,7 @@ mod update;
 
 use crate::app::{
     AppView, BrowseContext, CatalogPlayedFilter, CatalogSort, ConnectionStatus, KattriApp,
-    LibraryTab, Page, duration_from_egui_time,
+    LibraryTab, Page, PlaybackUiPhase, duration_from_egui_time,
 };
 use crate::catalog::{MediaItem, MediaKind};
 use crate::sign_in::{pending_code, status_text};
@@ -1402,7 +1402,7 @@ fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
         ui.label(RichText::new(notice).color(colors.muted));
     }
     if app.live_tv_retry_available
-        && !app.playback_start_loading
+        && app.playback_ui_phase() != PlaybackUiPhase::Starting
         && ui
             .button(ui_text(ids::LIVE_TV_BUTTON_RETRY_CHANNEL))
             .clicked()
@@ -3419,7 +3419,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                             });
                     }
                 }
-                if app.playback_start_loading {
+                if app.playback_ui_phase() == PlaybackUiPhase::Starting {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label(
@@ -3681,7 +3681,7 @@ fn detail_play_buttons(
             item.run_time_ticks,
         )
     });
-    let busy = app.playback_loading || app.playback_start_loading || app.auto_play.is_some();
+    let busy = app.playback_busy();
     if item.item_type.as_deref() == Some("Book") {
         ui.label(RichText::new(ui_text(ids::DETAIL_BOOK_NOT_PLAYABLE)).color(colors.muted));
         ui.add_space(6.0);
@@ -3765,7 +3765,7 @@ fn detail_play_buttons(
         }
         if busy {
             ui.spinner();
-            let status = if app.playback_start_loading {
+            let status = if app.playback_ui_phase() == PlaybackUiPhase::Starting {
                 ui_text(ids::PLAYBACK_STATUS_PREPARING)
             } else {
                 ui_text(ids::PLAYBACK_STATUS_REQUESTING)

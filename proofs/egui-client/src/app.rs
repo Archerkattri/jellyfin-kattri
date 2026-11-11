@@ -72,6 +72,21 @@ const MAX_LIVE_TV_LOGO_TEXTURES: usize = 128;
 /// Cast portraits are small, but a long session across many titles would keep every one.
 const MAX_PERSON_ARTWORK_TEXTURES: usize = 48;
 const CATALOG_PAGE_SIZE: u32 = 50;
+
+/// Items asked for in one catalog page, and the size the end-of-list check compares against.
+///
+/// Both sides of the round trip call this, so a page can never be requested with one size and
+/// judged complete against another. Search pages are smaller because the server mixes item
+/// kinds into one response.
+fn catalog_page_limit(searching: bool, page: Page) -> u32 {
+    if searching {
+        30
+    } else if page == Page::Photos {
+        100
+    } else {
+        CATALOG_PAGE_SIZE
+    }
+}
 const QUICK_CONNECT_PROBE_DELAY: Duration = Duration::from_millis(500);
 /// How often the download list is re-read while a transfer runs.
 const DOWNLOAD_REFRESH: Duration = Duration::from_millis(750);
@@ -1061,6 +1076,56 @@ fn plan_album_download(
     plan_batch(tracks.to_vec()).map_err(|_| AlbumDownloadError::TooManyItems)
 }
 
+/// Where the playback surface is. Derived from the fields that encode it, so the UI asks one
+/// question instead of recombining five booleans in every panel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PlaybackUiPhase {
+    /// Nothing is selected for playback.
+    Idle,
+    /// The server has not answered PlaybackInfo yet.
+    Negotiating,
+    /// PlaybackInfo failed or named no playable source.
+    Unavailable,
+    /// A source was chosen and the stream is being prepared.
+    Starting,
+    /// A source is prepared and waiting for the player window.
+    Prepared,
+    /// An automatic retry of another source is in progress.
+    Recovering,
+    /// The player owns playback.
+    Active,
+}
+
+impl PlaybackUiPhase {
+    /// True while a playback request the user is waiting on is in flight.
+    pub(crate) const fn is_busy(self) -> bool {
+        matches!(self, Self::Negotiating | Self::Starting | Self::Recovering)
+    }
+}
+
+/// Which playback fields a reset drops.
+///
+/// The three cases exist because the app really has three intents, and spelling them out here
+/// keeps the field sets from drifting between the call sites that used to inline them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PlaybackReset {
+    /// Renegotiate the selected item's options. Playback that is already running continues.
+    Options,
+    /// The selected item changed or went away: drop everything that belongs to the old item.
+    Selection,
+    /// The session ended: also drop the player handle and playback-report accounting.
+    Session,
+}
+
+/// The one app-owned modal dialog that is open. Two are never open at once: opening an admin
+/// dialog closes the subtitle search and the other way round.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OpenDialog {
+    None,
+    MetadataEditor,
+    SubtitleSearch,
+}
+
 pub struct KattriApp {
     pub(crate) worker: Option<ApiWorker>,
     /// Download list and page state. The worker owns the jobs; this copy is what the page reads.
@@ -1458,6 +1523,84 @@ pub struct KattriApp {
 }
 
 impl KattriApp {
+    /// The phase the playback surface is in, derived from the fields that encode it.
+    ///
+    /// Precedence: an owned player wins over a retry, which wins over a start, which wins over a
+    /// prepared stream, which wins over an options request, which wins over an options error.
+    pub(crate) fn playback_ui_phase(&self) -> PlaybackUiPhase {
+        if self.active_playback.is_some() {
+            return PlaybackUiPhase::Active;
+        }
+        if self.playback_recovery.is_some() {
+            return PlaybackUiPhase::Recovering;
+        }
+        if self.playback_start_loading {
+            return PlaybackUiPhase::Starting;
+        }
+        if self.pending_playback.is_some() || self.held_playback.is_some() {
+            return PlaybackUiPhase::Prepared;
+        }
+        if self.playback_loading {
+            return PlaybackUiPhase::Negotiating;
+        }
+        if self.playback_error.is_some()
+            || self
+                .playback_info
+                .as_ref()
+                .is_some_and(|info| info.error_code.is_some() || info.media_sources.is_empty())
+        {
+            return PlaybackUiPhase::Unavailable;
+        }
+        PlaybackUiPhase::Idle
+    }
+
+    /// The modal dialog that owns input, if any. Metadata editor wins when both fields are set
+    /// (only possible through direct state edits, which tests do); the openers keep them exclusive.
+    pub(crate) fn open_dialog(&self) -> OpenDialog {
+        if self.metadata_editor.is_some() {
+            OpenDialog::MetadataEditor
+        } else if self.subtitle_search.is_some() {
+            OpenDialog::SubtitleSearch
+        } else {
+            OpenDialog::None
+        }
+    }
+
+    /// True while the user is waiting on a playback request. One-click playback is included
+    /// because it is still negotiating even before the options request goes out.
+    pub(crate) fn playback_busy(&self) -> bool {
+        self.playback_ui_phase().is_busy() || self.auto_play.is_some()
+    }
+
+    /// Discard playback fields through one transition point.
+    ///
+    /// `Options` keeps a running player and its recovery state; `Selection` also drops the held
+    /// and recovering starts that belonged to the old item; `Session` also drops the player
+    /// handle and playback-report accounting.
+    pub(crate) fn reset_playback(&mut self, what: PlaybackReset) {
+        self.playback_info = None;
+        self.playback_loading = false;
+        self.playback_error = None;
+        self.playback_start_loading = false;
+        self.playback_start_error = None;
+        self.playback_start_status = None;
+        self.pending_playback = None;
+        if what != PlaybackReset::Options {
+            self.held_playback = None;
+            self.playback_recovery = None;
+        }
+        if what == PlaybackReset::Session {
+            self.active_playback = None;
+            self.auto_play = None;
+            self.mid_stream_recoveries = 0;
+            self.playback_report_feedback = None;
+            self.pending_playback_report_requests.clear();
+            self.playback_report_session_generation =
+                self.playback_report_session_generation.wrapping_add(1);
+            self.consecutive_progress_report_failures = 0;
+        }
+    }
+
     #[cfg(feature = "photo-counters")]
     #[doc(hidden)]
     pub fn decode_photo_counter_fixture(
@@ -3743,15 +3886,7 @@ impl KattriApp {
         self.catalog_error = None;
         self.details_loading = false;
         self.details_error = None;
-        self.playback_info = None;
-        self.playback_loading = false;
-        self.playback_error = None;
-        self.playback_start_loading = false;
-        self.playback_start_error = None;
-        self.playback_start_status = None;
-        self.playback_report_feedback = None;
-        self.pending_playback_report_requests.clear();
-        self.consecutive_progress_report_failures = 0;
+        self.reset_playback(PlaybackReset::Session);
         self.pending_artwork_requests.clear();
         self.attempted_artwork.clear();
         self.artwork_access_ticks.clear();
@@ -4308,13 +4443,7 @@ impl KattriApp {
             self.details_error = None;
             self.reset_series_detail();
             self.reset_people_detail();
-            self.playback_info = None;
-            self.playback_loading = false;
-            self.playback_error = None;
-            self.playback_start_loading = false;
-            self.playback_start_error = None;
-            self.playback_start_status = None;
-            self.pending_playback = None;
+            self.reset_playback(PlaybackReset::Selection);
         } else if self.page == Page::Collections
             && self
                 .browse_context
@@ -5453,11 +5582,7 @@ impl KattriApp {
         );
         let mut collection_page_items = Vec::new();
         self.catalog_next_index = page_start.saturating_add(page_size);
-        let page_limit = if self.search_browse_group.is_some() {
-            30
-        } else {
-            CATALOG_PAGE_SIZE
-        };
+        let page_limit = catalog_page_limit(self.submitted_search.is_some(), self.page);
         self.catalog_end_reached = page_size < page_limit
             || self
                 .total_record_count
@@ -5991,13 +6116,7 @@ impl KattriApp {
             self.selected_details = None;
             self.details_loading = false;
             self.details_error = None;
-            self.playback_info = None;
-            self.playback_loading = false;
-            self.playback_error = None;
-            self.playback_start_loading = false;
-            self.playback_start_error = None;
-            self.playback_start_status = None;
-            self.pending_playback = None;
+            self.reset_playback(PlaybackReset::Selection);
             self.details_request_id = self.allocate_request_id();
             self.playback_request_id = self.allocate_request_id();
             self.playback_start_request_id = self.allocate_request_id();
@@ -6102,13 +6221,7 @@ impl KattriApp {
                         ItemQuery {
                             recursive: self.page != Page::Photos,
                             start_index,
-                            limit: if is_search || is_search_browse {
-                                30
-                            } else if self.page == Page::Photos {
-                                100
-                            } else {
-                                CATALOG_PAGE_SIZE
-                            },
+                            limit: catalog_page_limit(is_search || is_search_browse, self.page),
                             parent_id,
                             include_item_types,
                             search_term,
@@ -6191,16 +6304,9 @@ impl KattriApp {
         self.detail_backdrop_attempted = false;
         self.detail_artwork_request_id = self.allocate_request_id();
         self.details_error = None;
-        self.playback_info = None;
-        self.playback_loading = false;
-        self.playback_error = None;
+        self.reset_playback(PlaybackReset::Selection);
         self.playback_request_id = self.allocate_request_id();
         self.playback_start_request_id = self.allocate_request_id();
-        self.playback_start_loading = false;
-        self.playback_start_error = None;
-        self.playback_start_status = None;
-        self.pending_playback = None;
-        self.held_playback = None;
         self.load_selected_details(item_id.clone());
         self.request_theme_media(&item_id);
     }
@@ -7372,14 +7478,9 @@ impl KattriApp {
         };
         let request_id = self.allocate_request_id();
         self.playback_request_id = request_id;
-        self.playback_info = None;
-        self.playback_error = None;
+        self.reset_playback(PlaybackReset::Options);
         self.playback_loading = true;
         self.playback_start_request_id = self.allocate_request_id();
-        self.playback_start_loading = false;
-        self.playback_start_error = None;
-        self.playback_start_status = None;
-        self.pending_playback = None;
         let is_audio = self
             .selected_details
             .as_ref()
@@ -8409,10 +8510,6 @@ impl KattriApp {
         self.details_request_id = self.allocate_request_id();
         self.playback_request_id = self.allocate_request_id();
         self.playback_start_request_id = self.allocate_request_id();
-        self.pending_playback_report_requests.clear();
-        self.playback_report_session_generation =
-            self.playback_report_session_generation.wrapping_add(1);
-        self.consecutive_progress_report_failures = 0;
         self.pending_artwork_requests.clear();
         self.attempted_artwork.clear();
         self.artwork_access_ticks.clear();
@@ -8440,17 +8537,7 @@ impl KattriApp {
         self.detail_backdrop_attempted = false;
         self.details_loading = false;
         self.details_error = None;
-        self.playback_info = None;
-        self.playback_loading = false;
-        self.playback_error = None;
-        self.auto_play = None;
-        self.playback_start_loading = false;
-        self.playback_start_error = None;
-        self.playback_start_status = None;
-        self.pending_playback = None;
-        self.held_playback = None;
-        self.playback_recovery = None;
-        self.active_playback = None;
+        self.reset_playback(PlaybackReset::Session);
         self.submitted_search = None;
         self.search_results.clear();
         self.search_stale = false;
@@ -11657,8 +11744,12 @@ impl KattriApp {
             self.apply_item_menu_action(target, action);
         }
         self.draw_delete_confirmation(&ctx);
-        self.draw_metadata_editor(&ctx);
-        self.show_subtitle_search(&ctx);
+        // At most one app-owned modal draws, so neither can paint over the other.
+        match self.open_dialog() {
+            OpenDialog::MetadataEditor => self.draw_metadata_editor(&ctx),
+            OpenDialog::SubtitleSearch => self.show_subtitle_search(&ctx),
+            OpenDialog::None => {}
+        }
         self.draw_toast(&ctx);
     }
 
@@ -11734,6 +11825,8 @@ impl KattriApp {
         if !self.user_can_manage_subtitles {
             return;
         }
+        // One dialog at a time: an open metadata editor would keep drawing over the search.
+        self.metadata_editor = None;
         let title = self
             .item_title(item_id)
             .map_or_else(|| item_id.to_owned(), str::to_owned);
@@ -11784,6 +11877,9 @@ impl KattriApp {
     /// video fills the window, when the catalog is not drawn.
     pub fn show_subtitle_search(&mut self, ctx: &egui::Context) {
         use crate::ui::subtitle_search::{DownloadNotice, SubtitleSearchAction};
+        if self.open_dialog() != OpenDialog::SubtitleSearch {
+            return;
+        }
         let Some(search) = self.subtitle_search.as_mut() else {
             return;
         };
@@ -11879,6 +11975,8 @@ impl KattriApp {
         if !self.user_is_admin {
             return;
         }
+        // One dialog at a time: an open subtitle search would keep drawing over the editor.
+        self.subtitle_search = None;
         self.metadata_thumbnail_requests.clear();
         let (editor, outcome) =
             crate::ui::metadata_editor::MetadataEditor::open(target.item_id, target.title, mode);
@@ -16626,5 +16724,197 @@ mod theme_media_tests {
         // The catalog multi-selection and the music queue are untouched.
         assert!(!app.catalog_selection.is_active());
         assert!(app.music_queue.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod playback_state_tests {
+    use super::*;
+
+    fn direct_play() -> PlaybackSelection {
+        PlaybackSelection {
+            source_index: 0,
+            method: PlaybackMethod::DirectPlay,
+        }
+    }
+
+    fn empty_options() -> PlaybackInfoResponse {
+        PlaybackInfoResponse {
+            media_sources: Vec::new(),
+            play_session_id: None,
+            error_code: None,
+        }
+    }
+
+    #[test]
+    fn selection_reset_keeps_the_player_but_drops_starts_for_the_old_item() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.active_playback = Some(ActivePlayback {
+            item_id: "movie-1".into(),
+            options_request_id: 4,
+            start_request_id: 5,
+            selection: direct_play(),
+        });
+        app.playback_recovery = Some(PlaybackRecovery {
+            item_id: "movie-1".into(),
+            options_request_id: 4,
+            start_time_ticks: None,
+            remaining: VecDeque::new(),
+        });
+        app.playback_info = Some(empty_options());
+        app.playback_loading = true;
+        app.playback_error = Some("stale".into());
+        app.playback_start_loading = true;
+        app.playback_start_error = Some("stale".into());
+        app.playback_start_status = Some("stale".into());
+
+        app.reset_playback(PlaybackReset::Selection);
+
+        assert!(app.playback_info.is_none());
+        assert!(!app.playback_loading);
+        assert!(app.playback_error.is_none());
+        assert!(!app.playback_start_loading);
+        assert!(app.playback_start_error.is_none());
+        assert!(app.playback_start_status.is_none());
+        assert!(app.pending_playback.is_none());
+        assert!(app.held_playback.is_none());
+        assert!(app.playback_recovery.is_none());
+        assert!(app.active_playback.is_some());
+        assert_eq!(app.playback_ui_phase(), PlaybackUiPhase::Active);
+    }
+
+    #[test]
+    fn session_reset_drops_the_player_and_advances_the_report_generation() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.active_playback = Some(ActivePlayback {
+            item_id: "movie-1".into(),
+            options_request_id: 4,
+            start_request_id: 5,
+            selection: direct_play(),
+        });
+        app.auto_play = Some(AutoPlay {
+            item_id: "movie-1".into(),
+            start_over: false,
+        });
+        app.playback_start_loading = true;
+        app.consecutive_progress_report_failures = 3;
+        let generation = app.playback_report_session_generation;
+
+        app.reset_playback(PlaybackReset::Session);
+
+        assert!(app.active_playback.is_none());
+        assert!(app.auto_play.is_none());
+        assert!(!app.playback_start_loading);
+        assert_eq!(app.consecutive_progress_report_failures, 0);
+        assert_eq!(
+            app.playback_report_session_generation,
+            generation.wrapping_add(1)
+        );
+        assert_eq!(app.playback_ui_phase(), PlaybackUiPhase::Idle);
+    }
+
+    #[test]
+    fn phase_reports_unavailable_when_the_server_names_no_source() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.playback_info = Some(empty_options());
+        assert_eq!(app.playback_ui_phase(), PlaybackUiPhase::Unavailable);
+    }
+
+    #[test]
+    fn phase_prefers_the_newest_start_over_an_older_options_error() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.playback_error = Some("negotiation failed".into());
+        app.playback_start_loading = true;
+        assert_eq!(app.playback_ui_phase(), PlaybackUiPhase::Starting);
+        assert!(app.playback_busy());
+    }
+}
+
+#[cfg(test)]
+mod dialog_precedence_tests {
+    use super::*;
+    use crate::ui::item_menu::ItemMenuTarget;
+    use crate::ui::metadata_editor::EditorMode;
+
+    fn target() -> ItemMenuTarget {
+        ItemMenuTarget {
+            item_id: "movie-1".into(),
+            title: "Movie".into(),
+            series_id: None,
+            list_id: None,
+        }
+    }
+
+    #[test]
+    fn opening_the_metadata_editor_closes_the_subtitle_search() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.user_is_admin = true;
+        app.user_can_manage_subtitles = true;
+        app.open_subtitle_search("movie-1", false);
+        assert_eq!(app.open_dialog(), OpenDialog::SubtitleSearch);
+
+        app.open_metadata_editor(target(), EditorMode::Edit);
+
+        assert!(app.subtitle_search.is_none());
+        assert_eq!(app.open_dialog(), OpenDialog::MetadataEditor);
+    }
+
+    #[test]
+    fn opening_the_subtitle_search_closes_the_metadata_editor() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.user_is_admin = true;
+        app.user_can_manage_subtitles = true;
+        app.open_metadata_editor(target(), EditorMode::Edit);
+        assert_eq!(app.open_dialog(), OpenDialog::MetadataEditor);
+
+        app.open_subtitle_search("movie-1", false);
+
+        assert!(app.metadata_editor.is_none());
+        assert_eq!(app.open_dialog(), OpenDialog::SubtitleSearch);
+    }
+}
+
+#[cfg(test)]
+mod catalog_page_tests {
+    use super::*;
+
+    fn item(id: &str) -> BaseItemDto {
+        serde_json::from_value(serde_json::json!({
+            "Id": id,
+            "Name": id,
+            "Type": "Movie",
+        }))
+        .expect("fixture item")
+    }
+
+    #[test]
+    fn one_size_is_used_for_the_request_and_the_end_check() {
+        assert_eq!(catalog_page_limit(true, Page::Movies), 30);
+        assert_eq!(catalog_page_limit(true, Page::Home), 30);
+        assert_eq!(catalog_page_limit(false, Page::Photos), 100);
+        assert_eq!(catalog_page_limit(false, Page::Movies), CATALOG_PAGE_SIZE);
+    }
+
+    #[test]
+    fn a_full_search_page_is_not_the_end_of_the_results() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.submitted_search = Some("term".into());
+        let request_id = app.allocate_request_id();
+        app.catalog_request_id = request_id;
+        let page = ItemsResponse {
+            items: (0..30)
+                .map(|index| item(&format!("item-{index}")))
+                .collect(),
+            total_record_count: Some(120),
+            start_index: 0,
+        };
+
+        assert!(app.apply_catalog_response(request_id, page, None));
+
+        assert_eq!(app.catalog_next_index, 30);
+        assert!(
+            !app.catalog_end_reached,
+            "a full 30-item search page has more pages"
+        );
     }
 }
