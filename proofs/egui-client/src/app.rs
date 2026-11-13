@@ -93,6 +93,8 @@ const DOWNLOAD_REFRESH: Duration = Duration::from_millis(750);
 
 /// Ticks per millisecond in Jellyfin's 100-nanosecond unit.
 const TICKS_PER_MS: i64 = 10_000;
+/// Ticks per second in Jellyfin's 100-nanosecond unit.
+pub(crate) const TICKS_PER_SECOND: i64 = TICKS_PER_MS * 1_000;
 /// How long after an inbound group command the player's own events count as its echo.
 const SYNC_PLAY_ECHO_WINDOW_MS: i64 = 5_000;
 /// Position slack when matching an echo, since the player reports a little after a seek.
@@ -1126,6 +1128,14 @@ pub(crate) enum OpenDialog {
     SubtitleSearch,
 }
 
+/// A sampled player position for matching timed lyrics in the selected track's details.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ActivePlayerPosition {
+    pub(crate) position_ticks: i64,
+    pub(crate) paused: Option<bool>,
+    pub(crate) speed_multiplier: Option<f64>,
+}
+
 pub struct KattriApp {
     pub(crate) worker: Option<ApiWorker>,
     /// Download list and page state. The worker owns the jobs; this copy is what the page reads.
@@ -1310,6 +1320,8 @@ pub struct KattriApp {
     /// Lyrics of the music track on screen.
     pub(crate) track_lyrics: Vec<jellyfin_api::LyricLine>,
     track_lyrics_request_id: u64,
+    /// The latest valid player position, tagged with the exact item that produced it.
+    active_player_position: Option<(String, ActivePlayerPosition)>,
     /// Trailers and special features of the movie or series on screen.
     pub(crate) item_extras: Vec<BaseItemDto>,
     item_extras_request_id: u64,
@@ -1964,6 +1976,7 @@ impl KattriApp {
             preferred_source: None,
             track_lyrics: Vec::new(),
             track_lyrics_request_id: 0,
+            active_player_position: None,
             item_extras: Vec::new(),
             item_extras_request_id: 0,
             season_siblings: Vec::new(),
@@ -5229,6 +5242,46 @@ impl KattriApp {
             return;
         };
         self.music_queue_position_ms = (seconds * 1000.0).min(u64::MAX as f64) as u64;
+    }
+
+    /// Cache the native player's latest position without associating it with a different item.
+    /// The host calls this from its frame snapshot; `None` or invalid samples clear stale data.
+    pub fn observe_active_player_position(
+        &mut self,
+        item_id: Option<&str>,
+        position_seconds: Option<f64>,
+        paused: Option<bool>,
+        speed_multiplier: Option<f64>,
+    ) {
+        self.active_player_position = None;
+        let Some(item_id) = item_id.filter(|item_id| !item_id.is_empty()) else {
+            return;
+        };
+        let Some(position_seconds) =
+            position_seconds.filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        else {
+            return;
+        };
+        let position_ticks = position_seconds * TICKS_PER_SECOND as f64;
+        if !position_ticks.is_finite() || position_ticks >= i64::MAX as f64 {
+            return;
+        }
+        self.active_player_position = Some((
+            item_id.to_owned(),
+            ActivePlayerPosition {
+                position_ticks: position_ticks.floor() as i64,
+                paused,
+                speed_multiplier,
+            },
+        ));
+    }
+
+    /// Returns a player sample only when it belongs to the exact item on the details page.
+    pub(crate) fn active_player_position_for(&self, item_id: &str) -> Option<ActivePlayerPosition> {
+        self.active_player_position
+            .as_ref()
+            .filter(|(active_item_id, _)| active_item_id == item_id)
+            .map(|(_, position)| *position)
     }
 
     /// Hash of the queue's identity and playback state. Two equal fingerprints mean the encoded
@@ -10549,6 +10602,39 @@ impl KattriApp {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod active_player_position_tests {
+    use super::{ActivePlayerPosition, KattriApp};
+
+    #[test]
+    fn player_position_is_available_only_for_the_matching_item() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.observe_active_player_position(Some("track-a"), Some(12.5), Some(false), Some(1.25));
+
+        assert_eq!(
+            app.active_player_position_for("track-a"),
+            Some(ActivePlayerPosition {
+                position_ticks: 125_000_000,
+                paused: Some(false),
+                speed_multiplier: Some(1.25),
+            })
+        );
+        assert_eq!(app.active_player_position_for("track-b"), None);
+    }
+
+    #[test]
+    fn missing_or_invalid_player_samples_clear_the_previous_position() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.observe_active_player_position(Some("track-a"), Some(12.5), Some(false), Some(1.0));
+        app.observe_active_player_position(None, Some(13.0), Some(false), Some(1.0));
+        assert_eq!(app.active_player_position_for("track-a"), None);
+
+        app.observe_active_player_position(Some("track-a"), Some(12.5), Some(false), Some(1.0));
+        app.observe_active_player_position(Some("track-a"), Some(f64::NAN), Some(false), Some(1.0));
+        assert_eq!(app.active_player_position_for("track-a"), None);
     }
 }
 

@@ -70,6 +70,9 @@ pub(crate) const SYNC_MARKER_BUTTONS: [(CalibrationMarker, &str); 2] = [
 ];
 
 const PLAYBACK_REPORT_CADENCE: Duration = Duration::from_secs(10);
+// A broken HLS playlist can make mpv try every segment without ever opening the file.
+const SERVER_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+const OPEN_STOP_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_CONTROL_CHAPTERS: usize = 128;
 
 /// Validation can disable reporting before playback starts. An invalid cadence also leaves
@@ -822,6 +825,30 @@ struct MediaLoadState<T> {
     active_entry_id: Option<i64>,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum StreamOpening {
+    #[default]
+    Idle,
+    Waiting(Instant),
+    TimedOut,
+}
+
+impl StreamOpening {
+    fn delay(self, now: Instant) -> Option<Duration> {
+        match self {
+            Self::Waiting(deadline) => Some(deadline.saturating_duration_since(now)),
+            Self::Idle | Self::TimedOut => None,
+        }
+    }
+
+    fn finish(&mut self, reason: EndFileReason) -> EndFileReason {
+        match std::mem::take(self) {
+            Self::TimedOut => EndFileReason::Error,
+            _ => reason,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RelayLoadError {
     Busy,
@@ -909,6 +936,7 @@ pub(crate) struct MpvHost<'session> {
     playback_end_was_loaded: bool,
     playback_end_position_ticks: Option<i64>,
     active_generation: Option<u64>,
+    stream_opening: StreamOpening,
     playback_loaded_generation: Option<u64>,
     playback_restart_seen: bool,
     subtitle_track_observation: Option<ObservationId>,
@@ -1046,6 +1074,7 @@ impl<'session> MpvHost<'session> {
                 playback_end_was_loaded: false,
                 playback_end_position_ticks: None,
                 active_generation: None,
+                stream_opening: StreamOpening::Idle,
                 playback_loaded_generation: None,
                 playback_restart_seen: false,
                 subtitle_track_observation: None,
@@ -1154,6 +1183,7 @@ impl<'session> MpvHost<'session> {
                     playback_end_was_loaded: false,
                     playback_end_position_ticks: None,
                     active_generation: None,
+                    stream_opening: StreamOpening::Idle,
                     playback_loaded_generation: None,
                     playback_restart_seen: false,
                     subtitle_track_observation,
@@ -1230,6 +1260,7 @@ impl<'session> MpvHost<'session> {
             playback_end_was_loaded: false,
             playback_end_position_ticks: None,
             active_generation: None,
+            stream_opening: StreamOpening::Idle,
             playback_loaded_generation: None,
             playback_restart_seen: false,
             subtitle_track_observation,
@@ -1538,7 +1569,8 @@ impl<'session> MpvHost<'session> {
                     let snapshot = session.take_stream_snapshot(event.request_id);
                     self.media_info.read_finished(snapshot);
                 }
-                EventKind::FileLoaded => {
+                EventKind::FileLoaded if self.stream_opening != StreamOpening::TimedOut => {
+                    self.stream_opening = StreamOpening::Idle;
                     self.file_loaded = true;
                     self.playback_loaded_generation = self.active_generation;
                     self.status = if self.report_metadata.is_some() {
@@ -1605,6 +1637,11 @@ impl<'session> MpvHost<'session> {
                         self.active_generation = None;
                         self.report_metadata = None;
                     }
+                    self.stream_opening = if self.media_load.active.is_some() {
+                        StreamOpening::Waiting(Instant::now() + SERVER_OPEN_TIMEOUT)
+                    } else {
+                        StreamOpening::Idle
+                    };
                     self.report_session = self.next_report_session();
                     self.report_started_at = None;
                     self.resume_seek_command = None;
@@ -1630,6 +1667,8 @@ impl<'session> MpvHost<'session> {
                     if !self.media_load.ended(playlist_entry_id) {
                         continue;
                     }
+                    let open_timed_out = self.stream_opening == StreamOpening::TimedOut;
+                    let reason = self.stream_opening.finish(reason);
                     self.playback_end_reason = Some(reason);
                     self.playback_end_generation = self.active_generation.take();
                     self.playback_end_was_loaded = self.file_loaded;
@@ -1646,7 +1685,9 @@ impl<'session> MpvHost<'session> {
                         .report_metadata
                         .as_ref()
                         .is_some_and(|metadata| metadata.live_stream_id.is_some());
-                    self.status = playback_end_status(event.error);
+                    if !open_timed_out {
+                        self.status = playback_end_status(event.error);
+                    }
                     self.media_info.close();
                     // EndFile is the point at which mpv has stopped consuming
                     // the relay URL. Dropping the handle requests listener shutdown.
@@ -1943,6 +1984,27 @@ impl<'session> MpvHost<'session> {
                 self.sync_feedback = describe_sync_update(update);
             }
         }
+        let now = Instant::now();
+        // If a replacement is already queued, it will end this file itself. A stop
+        // submitted now could cancel the replacement instead.
+        if self.media_load.pending.is_none()
+            && self.stream_opening.delay(now) == Some(Duration::ZERO)
+        {
+            if session.stop_playback().is_ok() {
+                self.stream_opening = StreamOpening::TimedOut;
+                self.media_load.active = None;
+                self.status = "Timed out opening the Jellyfin stream".into();
+            } else {
+                self.stream_opening = StreamOpening::Waiting(now + OPEN_STOP_RETRY_DELAY);
+            }
+        }
+    }
+
+    pub(crate) fn stream_open_retry_delay(&self, now: Instant) -> Option<Duration> {
+        if self.media_load.pending.is_some() {
+            return None;
+        }
+        self.stream_opening.delay(now)
     }
 
     /// Applies a changed equalizer or audio filter setting to the running player. Returns true
@@ -3751,6 +3813,23 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn stream_open_timeout_schedules_one_wakeup_and_turns_stop_into_failure() {
+        let now = Instant::now();
+        let mut opening = StreamOpening::Waiting(now + SERVER_OPEN_TIMEOUT);
+        assert_eq!(opening.delay(now), Some(SERVER_OPEN_TIMEOUT));
+        assert_eq!(
+            opening.delay(now + SERVER_OPEN_TIMEOUT + Duration::from_secs(1)),
+            Some(Duration::ZERO)
+        );
+
+        opening = StreamOpening::TimedOut;
+        assert_eq!(opening.delay(now), None);
+        assert_eq!(opening.finish(EndFileReason::Stop), EndFileReason::Error);
+        assert!(opening == StreamOpening::Idle);
+        assert_eq!(opening.finish(EndFileReason::Stop), EndFileReason::Stop);
+    }
 
     #[test]
     fn remote_volume_writes_are_range_checked_by_the_allowlist() {

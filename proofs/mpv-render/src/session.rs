@@ -1587,6 +1587,12 @@ fn worker_main(
         let option_result = unsafe {
             (api.functions.set_option_string)(handle, option_name.as_ptr(), option_value.as_ptr())
         };
+        // mpv 0.41 and builds without its curl stream backend have no curl
+        // options. The two mandatory lavf redirect limits still apply there.
+        const MPV_ERROR_OPTION_NOT_FOUND: i32 = -5;
+        if option_result == MPV_ERROR_OPTION_NOT_FOUND && option_name == c"curl-max-redirects" {
+            continue;
+        }
         if option_result < 0 {
             // SAFETY: the handle was created above and may be destroyed before init.
             unsafe { (api.functions.terminate_destroy)(handle) };
@@ -1609,25 +1615,6 @@ fn worker_main(
                 code: option_result,
             }));
             return;
-        }
-    }
-    // Debug builds only: with KATTRI_DEBUG_DIR set, mpv writes a verbose log to mpv.log there so
-    // playback problems can be read after the fact. Release builds do not contain this.
-    #[cfg(debug_assertions)]
-    if let Some(dir) = std::env::var_os("KATTRI_DEBUG_DIR") {
-        let log_path = std::path::Path::new(&dir).join("mpv.log");
-        for (name, value) in [
-            ("log-file", log_path.to_string_lossy().into_owned()),
-            ("msg-level", "all=v".to_owned()),
-        ] {
-            if let (Ok(name), Ok(value)) =
-                (std::ffi::CString::new(name), std::ffi::CString::new(value))
-            {
-                // SAFETY: handle is a new, uninitialized mpv instance; mpv copies both strings.
-                unsafe {
-                    (api.functions.set_option_string)(handle, name.as_ptr(), value.as_ptr());
-                }
-            }
         }
     }
     // SAFETY: handle remains owned by this worker; initialization is serialized

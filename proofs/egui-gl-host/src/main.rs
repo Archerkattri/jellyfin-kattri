@@ -647,6 +647,12 @@ impl<'session> GlHost<'session> {
         let track_feedback = self.mpv.track_feedback().map(str::to_owned);
         let controls_snapshot = self.mpv.controls_snapshot();
         let playing_item_id = self.mpv.playing_item_id().map(str::to_owned);
+        self.kattri_app.observe_active_player_position(
+            playing_item_id.as_deref(),
+            controls_snapshot.position_seconds,
+            controls_snapshot.paused,
+            controls_snapshot.speed_multiplier,
+        );
         self.kattri_app.observe_music_queue_position(
             playing_item_id.as_deref(),
             controls_snapshot.position_seconds,
@@ -1419,6 +1425,9 @@ impl<'session> GlHost<'session> {
             next_repaint = next_repaint.min(delay);
         }
         if let Some(delay) = self.report_retry_delay() {
+            next_repaint = next_repaint.min(delay);
+        }
+        if let Some(delay) = self.mpv.stream_open_retry_delay(Instant::now()) {
             next_repaint = next_repaint.min(delay);
         }
         next_repaint

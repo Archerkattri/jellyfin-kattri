@@ -9,6 +9,7 @@ pub mod hero;
 pub mod home;
 pub(crate) mod item_menu;
 pub mod live_tv;
+mod lyrics;
 mod media_source;
 pub(crate) mod metadata_editor;
 pub mod music;
@@ -3082,19 +3083,8 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                 }
                 if !app.track_lyrics.is_empty() {
                     ui.add_space(14.0);
-                    egui::CollapsingHeader::new(ui_text(ids::DETAIL_LYRICS))
-                        .id_salt("detail_lyrics")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            egui::ScrollArea::vertical()
-                                .id_salt("detail_lyrics_scroll")
-                                .max_height(320.0)
-                                .show(ui, |ui| {
-                                    for line in &app.track_lyrics {
-                                        ui.label(RichText::new(&line.text).color(colors.text));
-                                    }
-                                });
-                        });
+                    let active_position = app.active_player_position_for(&item.id);
+                    lyrics::show_track_lyrics(ui, &app.track_lyrics, active_position, colors);
                 }
                 if !app.item_extras.is_empty() {
                     ui.add_space(14.0);

@@ -15,9 +15,8 @@ pub struct MpvLibrary {
 }
 
 impl MpvLibrary {
-    /// Load libmpv: first a copy bundled next to the executable (inside the macOS app bundle's
-    /// `Contents/Frameworks`), then the standard platform library names, which the system
-    /// loader resolves.
+    /// Load libmpv: first a copy in the platform's private bundle/package location, then a
+    /// copy beside the executable, and finally the standard platform library names.
     pub fn load() -> Result<Self, MpvError> {
         let mut candidates: Vec<PathBuf> = std::env::current_exe()
             .ok()
@@ -68,15 +67,23 @@ impl MpvLibrary {
 }
 
 /// Full paths where a packaged build keeps its own libmpv, relative to the executable's
-/// folder. Only paths that exist are tried. On macOS the release bundle copies the library to
-/// `Contents/Frameworks` (packaging/macos/build-app.sh), which `dlopen` does not search for a
-/// bare name.
+/// folder. Only paths that exist are tried. Linux deb/rpm packages keep libmpv in the private
+/// `/usr/lib/kattri` directory so it cannot replace the system library. On macOS the release
+/// bundle copies libmpv to `Contents/Frameworks` (packaging/macos/build-app.sh), which `dlopen`
+/// does not search for a bare name.
 fn bundled_candidates(exe_dir: &Path) -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         vec![exe_dir.join("../Frameworks/libmpv.2.dylib")]
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        vec![
+            exe_dir.join("../lib/kattri/libmpv.so.2"),
+            exe_dir.join("libmpv.so.2"),
+        ]
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         platform_candidates()
             .into_iter()
@@ -122,7 +129,10 @@ mod tests {
             vec![exe_dir.join("../Frameworks/libmpv.2.dylib")]
         );
         #[cfg(target_os = "linux")]
-        assert!(candidates.contains(&exe_dir.join("libmpv.so.2")));
+        {
+            assert_eq!(candidates[0], exe_dir.join("../lib/kattri/libmpv.so.2"));
+            assert_eq!(candidates[1], exe_dir.join("libmpv.so.2"));
+        }
         #[cfg(target_os = "windows")]
         assert!(candidates.contains(&exe_dir.join("libmpv-2.dll")));
     }

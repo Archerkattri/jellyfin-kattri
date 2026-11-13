@@ -25,6 +25,7 @@
 
 use std::time::Duration;
 
+use egui::accesskit::{Action, ActionData};
 use egui::{Color32, RichText, Role, Sense, WidgetInfo};
 use kattri_client_core::controls::PlaybackSpeed;
 use kattri_client_core::segments::{
@@ -422,6 +423,7 @@ fn timeline_fraction(time: Duration, seek_end: Duration) -> f32 {
 
 /// Progress of the played position on the bar, where the seekable end is one second before the
 /// reported duration. That keeps the thumb reachable at the end of the item.
+#[cfg(test)]
 fn seek_fraction(position: Duration, duration: Option<Duration>) -> f32 {
     let Some(duration) = duration.filter(|duration| !duration.is_zero()) else {
         return 0.0;
@@ -778,6 +780,29 @@ fn seek_bar(
             action = Some(PlayerControlAction::SeekRelative(delta));
         }
     }
+    if action.is_none() {
+        action = ui.input(|input| {
+            if let Some(seconds) = input
+                .accesskit_action_requests(response.id, Action::SetValue)
+                .filter_map(|request| match request.data {
+                    Some(ActionData::NumericValue(seconds)) if seconds.is_finite() => Some(seconds),
+                    _ => None,
+                })
+                .last()
+            {
+                return Some(PlayerControlAction::SeekAbsolute(Duration::from_secs_f64(
+                    seconds.clamp(0.0, seek_end.as_secs_f64()),
+                )));
+            }
+            if input.has_accesskit_action_request(response.id, Action::Increment) {
+                return Some(PlayerControlAction::SeekRelative(10));
+            }
+            if input.has_accesskit_action_request(response.id, Action::Decrement) {
+                return Some(PlayerControlAction::SeekRelative(-10));
+            }
+            None
+        });
+    }
 
     paint_seek_track(ui, view, track, displayed, opacity, grow);
     if let (Some(x), Some(time)) = (pointer_x, pointer_time)
@@ -793,12 +818,14 @@ fn seek_bar(
             egui::StrokeKind::Outside,
         );
     }
-    response.widget_info(|| {
-        WidgetInfo::slider(
-            true,
-            f64::from(seek_fraction(displayed, view.duration)),
-            "Playback position",
-        )
+    response.widget_info(|| WidgetInfo::slider(true, displayed.as_secs_f64(), "Playback position"));
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_min_numeric_value(0.0);
+        node.set_max_numeric_value(seek_end.as_secs_f64());
+        node.set_numeric_value_step(10.0);
+        node.add_action(Action::SetValue);
+        node.add_action(Action::Increment);
+        node.add_action(Action::Decrement);
     });
     response.on_hover_text("Playback position");
 
@@ -3924,6 +3951,48 @@ mod tests {
             seeks, 1,
             "one arrow press seeks once, got {:?}",
             frame.actions
+        );
+    }
+
+    #[test]
+    fn assistive_technology_can_set_the_playback_position() {
+        use egui::accesskit::{Action, ActionData, ActionRequest, TreeId};
+
+        let context = Context::default();
+        context.enable_accesskit();
+        let state = keyboard_view(&[], &[]);
+        let mut output = context.run_ui(RawInput::default(), |ui| {
+            CentralPanel::default().show(ui, |ui| {
+                let _ = draw_inner(ui, state, |_, _| {});
+            });
+        });
+        output.textures_delta.clear();
+        let tree = output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree");
+        let (target, node) = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some("Playback position"))
+            .expect("seek slider");
+        assert_eq!(node.min_numeric_value(), Some(0.0));
+        assert!(node.max_numeric_value().is_some_and(|end| end > 25.0));
+        assert!(node.supports_action(Action::SetValue));
+        let input = RawInput {
+            events: vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action: Action::SetValue,
+                target_tree: TreeId::ROOT,
+                target_node: *target,
+                data: Some(ActionData::NumericValue(25.0)),
+            })],
+            ..RawInput::default()
+        };
+        let frame = overlay_frame(&context, input, state);
+        assert!(
+            frame
+                .actions
+                .contains(&PlayerControlAction::SeekAbsolute(Duration::from_secs(25)))
         );
     }
 
