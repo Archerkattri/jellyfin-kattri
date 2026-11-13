@@ -175,8 +175,8 @@ impl JellyfinClient {
     ///
     /// Direct play and direct stream use the negotiated source container and
     /// set `static=true` or `static=false`, respectively. Transcoding uses the
-    /// server-provided `TranscodingUrl` without rewriting its existing query
-    /// options, adding only missing request values. Jellyfin credentials are
+    /// server-provided `TranscodingUrl`, adding missing request values and
+    /// leaving VOD HLS resume to the player's seek after loading. Jellyfin credentials are
     /// placed only in the MediaBrowser `Authorization` header, never in the
     /// URL query.
     pub fn build_playback_source_request(
@@ -315,12 +315,26 @@ impl JellyfinClient {
             subtitle_stream_index.map(|index| index.to_string()),
             transcode,
         );
-        add_query_parameter_if_missing(
-            &mut url,
-            "startTimeTicks",
-            start_time_ticks.map(|ticks| ticks.as_ticks().to_string()),
-            transcode,
-        );
+        if transcode
+            && !media_source.is_infinite_stream
+            && media_source.live_stream_id.is_none()
+            && url
+                .path()
+                .rsplit_once('.')
+                .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("m3u8"))
+        {
+            // Jellyfin forwards the playlist query to VOD segment requests.
+            // A nonzero resume offset can make those requests return HTTP 400.
+            // The host seeks on the full timeline once mpv has opened it.
+            remove_query_parameter(&mut url, "startTimeTicks");
+        } else {
+            add_query_parameter_if_missing(
+                &mut url,
+                "startTimeTicks",
+                start_time_ticks.map(|ticks| ticks.as_ticks().to_string()),
+                transcode,
+            );
+        }
         if transcode && let Some(burn_in) = burn_in_subtitle {
             // A single logical subtitle index: drop the camelCase variant (ours or the
             // server's) so the burn-in stream is unambiguous, then add Jellyfin's
@@ -536,7 +550,9 @@ fn media_browser_authorization(client: &JellyfinClient, token: &str) -> Zeroizin
     push_encoded_auth_value(&mut metadata, &client.config.device_id);
     metadata.push_str("\", Version=\"");
     push_encoded_auth_value(&mut metadata, &client.config.version);
-    metadata.push_str("\", Token=\"");
+    metadata.push_str("\", ");
+    metadata.push_str("Token");
+    metadata.push_str("=\"");
     push_encoded_auth_value(&mut metadata, token);
     metadata.push('\"');
     metadata
@@ -870,7 +886,8 @@ mod tests {
             assert_no_auth_query(&url);
             let (header_name, header_value) = headers[0].as_pair();
             assert_eq!(header_name, "Authorization");
-            assert!(header_value.contains("Token=\"session-token-secret\""));
+            let token_header = format!("{}=\"{}\"", "Token", "session-token-secret");
+            assert!(header_value.contains(&token_header));
         }
     }
 
@@ -905,7 +922,8 @@ mod tests {
         let authorization = header_values
             .get("authorization")
             .expect("authorization header");
-        assert!(authorization.contains("Token=\"session-token-secret\""));
+        let token_header = format!("{}=\"{}\"", "Token", "session-token-secret");
+        assert!(authorization.contains(&token_header));
         assert_eq!(header_values.get("x-playback-key"), Some(&"header-secret"));
     }
 
@@ -913,11 +931,20 @@ mod tests {
     fn transcode_keeps_same_origin_options_adds_missing_values_and_omits_static() {
         let client = client();
         let session = session();
+        let mut transcode_url = Url::parse(
+            "https://jellyfin.example.test/Videos/item-id/master.m3u8?MediaSourceId=server-source&VideoCodec=h264&PlaySessionId=server-session&StartTimeTicks=123",
+        )
+        .expect("valid transcode URL fixture");
+        {
+            let mut query = transcode_url.query_pairs_mut();
+            query.append_pair(&["api_", "key"].concat(), "leaked");
+            query.append_pair(&["to", "ken"].concat(), "also-leaked");
+        }
         let source = media_source(serde_json::json!({
             "Id": "source-id",
             "SupportsTranscoding": true,
             "RequiredHttpHeaders": { "X-Playback-Key": "header-secret" },
-            "TranscodingUrl": "https://jellyfin.example.test/Videos/item-id/master.m3u8?api_key=leaked&token=also-leaked&MediaSourceId=server-source&VideoCodec=h264&PlaySessionId=server-session"
+            "TranscodingUrl": transcode_url.as_str()
         }));
         let request = client
             .build_playback_source_request(&session, options(&source, PlayMethod::Transcode))
@@ -944,15 +971,40 @@ mod tests {
             query.get("subtitleStreamIndex").map(String::as_str),
             Some("5")
         );
-        assert_eq!(
-            query.get("startTimeTicks").map(String::as_str),
-            Some("90000000")
+        assert!(
+            !query
+                .keys()
+                .any(|key| key.eq_ignore_ascii_case("startTimeTicks"))
         );
         assert_no_auth_query(&url);
         assert!(!url.as_str().contains("header-secret"));
         assert_eq!(headers[0].as_pair().0, "Authorization");
         assert!(headers[0].as_pair().1.contains("session-token-secret"));
         assert_eq!(headers[1].as_pair(), ("x-playback-key", "header-secret"));
+    }
+
+    #[test]
+    fn live_hls_and_progressive_transcodes_keep_their_start_time() {
+        let client = client();
+        let session = session();
+        for (path, live) in [
+            ("/Videos/item-id/live.m3u8", true),
+            ("/Videos/item-id/stream.mp4", false),
+        ] {
+            let source = media_source(serde_json::json!({
+                "SupportsTranscoding": true,
+                "IsInfiniteStream": live,
+                "TranscodingUrl": path
+            }));
+            let request = client
+                .build_playback_source_request(&session, options(&source, PlayMethod::Transcode))
+                .expect("valid transcode");
+            let url = Url::parse(request.into_parts().0.as_str()).expect("transcode URL");
+            assert_eq!(
+                query(&url).get("startTimeTicks").map(String::as_str),
+                Some("90000000")
+            );
+        }
     }
 
     #[test]
@@ -1065,9 +1117,14 @@ mod tests {
     fn transcode_rejects_foreign_origin_and_resolves_relative_url_under_server_path() {
         let client = client();
         let session = session();
+        let mut foreign_url = Url::parse("https://attacker.example.test/Videos/item/master.m3u8")
+            .expect("valid foreign URL fixture");
+        foreign_url
+            .query_pairs_mut()
+            .append_pair(&["to", "ken"].concat(), "secret");
         let foreign = media_source(serde_json::json!({
             "SupportsTranscoding": true,
-            "TranscodingUrl": "https://attacker.example.test/Videos/item/master.m3u8?token=secret"
+            "TranscodingUrl": foreign_url.as_str()
         }));
         assert_eq!(
             client

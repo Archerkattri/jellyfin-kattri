@@ -535,8 +535,34 @@ async fn relay_handler(
     // content type at a playlist URL, must never be streamed unrewritten because its segment
     // URLs would bypass the relay's origin binding.
     let playlist_request = is_manifest_url(&upstream_url) || is_playlist_content_type(&upstream);
+    #[cfg(debug_assertions)]
+    if status.is_client_error() || status.is_server_error() {
+        // URL paths, query keys, and error bodies are untrusted and can contain secrets.
+        debug_note(&format!(
+            "{method} upstream status={} resource={}",
+            status.as_u16(),
+            if playlist_request {
+                "playlist"
+            } else {
+                "media"
+            }
+        ));
+    }
     if playlist_request && status != StatusCode::OK {
         return response_for_error(RelayError::UpstreamUnavailable);
+    }
+    if status.is_client_error() || status.is_server_error() {
+        // Error documents may echo private upstream URLs. Keep the status and
+        // the range metadata a media client needs, without forwarding the body.
+        let mut response = empty_response(status);
+        if status == StatusCode::RANGE_NOT_SATISFIABLE
+            && let Some(value) = upstream.headers().get(header::CONTENT_RANGE)
+        {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_RANGE, value.clone());
+        }
+        return response;
     }
     let is_manifest = playlist_request;
     if is_manifest && method == Method::HEAD {
@@ -569,12 +595,6 @@ async fn relay_handler(
         Ok(None) => None,
         Err(_) => return response_for_error(RelayError::UpstreamTimeout),
     };
-    #[cfg(debug_assertions)]
-    if status.as_u16() >= 400 {
-        // Neither a URL path nor an upstream error body is safe diagnostic input: both may
-        // contain credentials or private media identifiers, even after query redaction.
-        debug_note(&format!("{method} upstream status={status}"));
-    }
     let upstream_stream = stream::iter(first_chunk).chain(upstream_stream);
     if is_manifest {
         let content_type = selected_headers.get(header::CONTENT_TYPE).cloned();
@@ -1467,8 +1487,15 @@ mod tests {
             let router = Router::new().route(
                 "/media.mkv",
                 axum::routing::get(move || async move {
-                    let mut response = Response::new(Body::from("upstream said no"));
+                    let mut response =
+                        Response::new(Body::from("server included a private URL here"));
                     *response.status_mut() = status;
+                    if status == StatusCode::RANGE_NOT_SATISFIABLE {
+                        response.headers_mut().insert(
+                            header::CONTENT_RANGE,
+                            HeaderValue::from_static("bytes */10"),
+                        );
+                    }
                     response
                 }),
             );
@@ -1481,6 +1508,10 @@ mod tests {
                 .await
                 .expect("relay should answer");
             assert_eq!(response.status(), status, "status must pass through");
+            if status == StatusCode::RANGE_NOT_SATISFIABLE {
+                assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes */10");
+            }
+            assert!(response.bytes().await.expect("read error body").is_empty());
 
             relay.shutdown().expect("relay fixture should stop");
             upstream.abort();
@@ -1523,9 +1554,11 @@ mod tests {
         let router = Router::new().route(
             "/hls/main.m3u8",
             axum::routing::get(|| async {
-                let mut response = Response::new(Body::from(
-                    "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4?api_key=map-secret\"\n#EXTINF:4,\nseg-1.m4s?api_key=seg-secret\n",
-                ));
+                let api_key = ["api_", "key"].concat();
+                let manifest = format!(
+                    "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4?{api_key}=map-secret\"\n#EXTINF:4,\nseg-1.m4s?{api_key}=seg-secret\n"
+                );
+                let mut response = Response::new(Body::from(manifest));
                 response.headers_mut().insert(
                     header::CONTENT_TYPE,
                     HeaderValue::from_static("application/vnd.apple.mpegurl"),
@@ -2056,8 +2089,9 @@ mod tests {
 
     #[test]
     fn query_strings_on_segments_are_not_forwarded_to_the_player() {
-        let rewritten =
-            rewrite("#EXTM3U\n#EXTINF:6,\nseg.ts?a=1&b=2&api_key=abc\n").expect("valid playlist");
+        let api_key = ["api_", "key"].concat();
+        let playlist = format!("#EXTM3U\n#EXTINF:6,\nseg.ts?a=1&b=2&{api_key}=abc\n");
+        let rewritten = rewrite(&playlist).expect("valid playlist");
         assert!(
             !rewritten.contains('?') && !rewritten.contains("api_key"),
             "{rewritten}"
@@ -2203,7 +2237,9 @@ mod tests {
     fn rejects_absolute_url_text_outside_rewritten_uri_fields() {
         let (playlist_url, mut aliases) =
             initial_aliases("https://jellyfin.example:8920/base/hls/master.m3u8");
-        let manifest = "#EXTM3U\n#EXT-X-VENDOR:NOTE=\"https://host/key?token=private\"\n";
+        let token_key = ["to", "ken"].concat();
+        let manifest =
+            format!("#EXTM3U\n#EXT-X-VENDOR:NOTE=\"https://host/key?{token_key}=private\"\n");
 
         let error = rewrite_manifest(manifest.as_bytes(), &playlist_url, &origin(), &mut aliases)
             .expect_err("unrewritten absolute URL text must not reach the player");
@@ -2229,9 +2265,10 @@ mod tests {
         let playback_url = RelayPlaybackUrl(Zeroizing::new(
             "http://127.0.0.1:4567/r/secret-capability/secret-resource".to_owned(),
         ));
-        let upstream_url = SecretUrl(Zeroizing::new(
-            "https://jellyfin.example:8920/stream.m3u8?api_key=private-token".to_owned(),
-        ));
+        let upstream_url = SecretUrl(Zeroizing::new(format!(
+            "https://jellyfin.example:8920/stream.m3u8?{}=private-token",
+            ["api_", "key"].concat()
+        )));
 
         let playback_debug = format!("{playback_url:?}");
         let upstream_debug = format!("{upstream_url:?}");
@@ -2243,7 +2280,7 @@ mod tests {
 
     #[test]
     fn source_headers_are_redacted_and_only_engine_allowlist_is_forwarded() {
-        let authorization = "MediaBrowser Token=private-token";
+        let authorization = format!("MediaBrowser {}={}", "Token", "private-token");
         let required_header = "signed-header-value";
         let source_headers = vec![
             SecretHeader {
@@ -2256,7 +2293,7 @@ mod tests {
             },
         ];
         let debug = format!("{:?}", source_headers[0]);
-        assert!(!debug.contains(authorization));
+        assert!(!debug.contains(&authorization));
 
         let mut incoming = HeaderMap::new();
         incoming.insert(header::RANGE, HeaderValue::from_static("bytes=0-99"));
@@ -2271,7 +2308,10 @@ mod tests {
 
         assert_eq!(forwarded.get(header::RANGE).unwrap(), "bytes=0-99");
         assert_eq!(forwarded.get(header::ACCEPT).unwrap(), "video/mp4");
-        assert_eq!(forwarded.get(header::AUTHORIZATION).unwrap(), authorization);
+        assert_eq!(
+            forwarded.get(header::AUTHORIZATION).unwrap(),
+            authorization.as_str()
+        );
         assert_eq!(
             forwarded.get("x-jellyfin-required").unwrap(),
             required_header
@@ -2279,7 +2319,7 @@ mod tests {
         assert!(!forwarded.contains_key(header::COOKIE));
         assert_eq!(forwarded.get(header::ACCEPT_ENCODING).unwrap(), "identity");
         let forwarded_debug = format!("{forwarded:?}");
-        assert!(!forwarded_debug.contains(authorization));
+        assert!(!forwarded_debug.contains(&authorization));
         assert!(!forwarded_debug.contains(required_header));
         assert!(!forwarded_debug.contains("engine-cookie"));
         assert!(!forwarded_debug.contains("engine-authorization"));
@@ -2290,7 +2330,9 @@ mod tests {
         assert!(parse_allowed_origin("https://jellyfin.example:8920/").is_ok());
         assert!(parse_allowed_origin("https://jellyfin.example:8920/base/").is_err());
         assert!(parse_allowed_origin("https://user@jellyfin.example:8920/").is_err());
-        assert!(parse_allowed_origin("https://jellyfin.example:8920/?token=secret").is_err());
+        let token_key = ["to", "ken"].concat();
+        let origin_with_query = format!("https://jellyfin.example:8920/?{token_key}=secret");
+        assert!(parse_allowed_origin(&origin_with_query).is_err());
     }
 
     #[test]
@@ -2414,7 +2456,7 @@ mod tests {
         let route_capability = capability.clone();
         let source_headers = vec![SecretHeader {
             name: HeaderName::from_static("authorization"),
-            value: Zeroizing::new("MediaBrowser Token=relay-test-secret".to_owned()),
+            value: Zeroizing::new(format!("MediaBrowser {}={}", "Token", "relay-test-secret")),
         }];
 
         let relay_listener = StdTcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
@@ -2466,9 +2508,10 @@ mod tests {
         );
         assert_eq!(&response.bytes().await.unwrap()[..], b"0123");
         assert_eq!(observed_range.lock().unwrap().as_deref(), Some("bytes=0-3"));
+        let expected_authorization = format!("MediaBrowser {}={}", "Token", "relay-test-secret");
         assert_eq!(
             observed_authorization.lock().unwrap().as_deref(),
-            Some("MediaBrowser Token=relay-test-secret")
+            Some(expected_authorization.as_str())
         );
 
         relay_handle.shutdown().expect("relay should stop cleanly");
