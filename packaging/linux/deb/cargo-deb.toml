@@ -7,10 +7,10 @@
 # Binary sources use cargo-deb's special target/release path so they resolve the
 # workspace target directory. Other paths are relative to the package root.
 #
-# libmpv is a runtime dependency, not a bundled library. The app loads libmpv at run
-# time. Package names differ by release: libmpv1 on Ubuntu 22.04 (mpv 0.34 series),
-# libmpv2 on Ubuntu 24.04 and Debian 12. The minimum libmpv version is not set yet
-# (owner decision, see docs/packaging/target-matrix.md).
+# The release workflow stages the checksum-verified libmpv archive under
+# target/kattri-libmpv. It and the Linux x64 license/build notices are private package assets.
+# libjpeg.so.8 is staged there too for RPM systems that do not provide that ABI; libmpv's
+# $ORIGIN RUNPATH applies only to dependencies in this private directory.
 
 [package.metadata.deb]
 name = "kattri"
@@ -27,15 +27,25 @@ copyright = "2026 Jellyfin Kattri contributors"
 separate-debug-symbols = true
 extended-description = """
 Jellyfin Kattri is a native client for Jellyfin media servers. Playback uses the
-system libmpv, which this package declares as a dependency."""
-depends = "$auto, libmpv2 | libmpv1"
+bundled pinned libmpv runtime and the native libraries listed as package dependencies."""
+depends = "$auto, libass9, libva2, libva-drm2, libuchardet0, libxfixes3, libx11-6, libasound2, libpulse0, libdrm2, libgbm1, libegl1, zlib1g, libstdc++6, libxkbcommon-x11-0"
 assets = [
     ["target/release/jellyfin-kattri", "usr/bin/kattri", "755"],
+    ["../../target/kattri-libmpv/libmpv.so.2", "usr/lib/kattri/libmpv.so.2", "755"],
+    ["../../target/kattri-libmpv/libjpeg.so.8", "usr/lib/kattri/libjpeg.so.8", "755"],
     ["../../packaging/linux/share/kattri.desktop", "usr/share/applications/kattri.desktop", "644"],
     ["../../packaging/linux/icons/kattri.svg", "usr/share/icons/hicolor/scalable/apps/kattri.svg", "644"],
     # Compressed by the release workflow (gzip -9n) before cargo deb runs.
     ["../../target/kattri.1.gz", "usr/share/man/man1/kattri.1.gz", "644"],
-    # Redistribution requires the project license and the libmpv notice.
+    # Ship the project license, pinned archive notice/licenses, build record, and bundled JPEG notice.
     ["../../LICENSE", "usr/share/doc/kattri/LICENSE", "644"],
     ["../../packaging/libmpv/NOTICE.txt", "usr/share/doc/kattri/libmpv-NOTICE.txt", "644"],
+    ["../../target/kattri-libmpv/BUILD-INFO.txt", "usr/share/doc/kattri/libmpv-BUILD-INFO.txt", "644"],
+    ["../../target/kattri-libmpv/BUILD-INFO.libjpeg-turbo.txt", "usr/share/doc/kattri/libjpeg-turbo-BUILD-INFO.txt", "644"],
+    ["../../target/kattri-libmpv/LICENSE.mpv.LGPL", "usr/share/doc/kattri/licenses/libmpv.LGPL", "644"],
+    ["../../target/kattri-libmpv/LICENSE.ffmpeg.LGPL", "usr/share/doc/kattri/licenses/ffmpeg.LGPL", "644"],
+    ["../../target/kattri-libmpv/LICENSE.libplacebo.LGPL", "usr/share/doc/kattri/licenses/libplacebo.LGPL", "644"],
+    ["../../target/kattri-libmpv/LICENSE.dav1d.BSD-2-Clause", "usr/share/doc/kattri/licenses/dav1d.BSD-2-Clause", "644"],
+    ["../../target/kattri-libmpv/LICENSE.libdisplay-info.MIT", "usr/share/doc/kattri/licenses/libdisplay-info.MIT", "644"],
+    ["../../target/kattri-libmpv/LICENSE.libjpeg-turbo", "usr/share/doc/kattri/licenses/libjpeg-turbo", "644"],
 ]

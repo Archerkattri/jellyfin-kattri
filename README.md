@@ -43,7 +43,8 @@ real desktop window, with a keyboard, a gamepad or a mouse.
 | ![Player controls](assets/screenshots/player.jpg) | ![Settings](assets/screenshots/settings.jpg) |
 
 These are framebuffer captures from the running application against a real Jellyfin 12.4.0
-server, produced by `scripts/qa_clickthrough.ps1` on 2026-10-30. No mock data is used.
+server on 2026-11-06, with the debug-only stream-only banner cropped out. No mock data is
+used.
 
 ## Features
 
@@ -52,7 +53,7 @@ server, produced by `scripts/qa_clickthrough.ps1` on 2026-10-30. No mock data is
 | **Sign-in** | Password sign-in, Quick Connect, saved servers, LAN discovery, multiple profiles, stay signed in, forgot-password flow |
 | **Home** | Continue Watching, Next Up, Latest, My Media and Collections shelves, hero banner, per-section visibility and ordering, optional combined Continue Watching/Next Up shelf, local show hiding |
 | **Library** | Paging, sorting, play state, favorites, genre and studio filters, alphabet picker, poster grid or list, adjustable poster size, 1,000-item photo grids, music All/Albums/Songs views, and Jellyfin-style tabs: Suggestions for movies, plus Upcoming and Episodes for shows |
-| **Details** | Metadata, overview, cast, similar titles, seasons and episodes, series Next Up, media info, version picker, trailers and extras, lyrics, theme media, play and download |
+| **Details** | Metadata, overview, cast, similar titles, seasons and episodes, series Next Up, media info, version picker, trailers and extras, synchronized lyrics for the playing track, theme media, play and download |
 | **Search** | Debounced cross-type search grouped by movies, series, episodes, music, playlists, photos, people and channels; subtitle search |
 | **Playback** | Direct play, direct stream and transcode through the relay; resume with optional rewind; playback reporting; audio and subtitle tracks; subtitle delay; subtitle burn-in for transcodes; chapters; speed; segment skip; bounded mid-stream recovery |
 | **Player** | Transport bar, 10-second seek, frame step, chapter step and menu, volume and mute, speed, A-B loop, picture-in-picture, fullscreen; previous/next; Up Next card and auto-play; fullscreen mouse-wheel seek (`Ctrl+1` 1:1 window, `Ctrl+2` 2x speed); track menus; media info (`I`); equalizer and loudness filters; HDR-to-SDR tone mapping; refresh-rate matching on Windows; open a stream address |
@@ -63,7 +64,7 @@ server, produced by `scripts/qa_clickthrough.ps1` on 2026-10-30. No mock data is
 | **Administration** | Edit metadata, Identify, Edit images, Add to collection, Refresh metadata and confirmed Delete; administrator user listing, creation, rename and access-policy editing with confirmation |
 | **Settings** | General, playback, audio, subtitles (style, per-title overrides, burn-in), video, input, server (private CA and client certificate), About; versioned TOML per profile |
 | **Input** | Rebindable keyboard map, gamepad menus and player control, full focus navigation, optional Windows-wide playback shortcuts (Ctrl+Alt+Space / Left / Right / M) |
-| **Interface** | Dark-only Jellyfin Dark and Warm Dark themes (saved Light/System values load as Jellyfin Dark) with optional custom accent, background and surface colors; SF Pro Display typeface (Inter fallback); ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu, idle screensaver, cursor auto-hide in fullscreen |
+| **Interface** | Two dark themes, Jellyfin Dark and Warm Dark (saved Light/System values load as Jellyfin Dark); optional custom accent, background and surface colors; bundled Inter typeface; ambient backdrops with poster fallback, optional local backdrop, reduced-motion support, Standard/Large/TV sizes, narrow-window More menu, idle screensaver, cursor auto-hide in fullscreen |
 
 ## Install
 
@@ -76,7 +77,9 @@ prerelease is **v0.7.0**.
 | Windows x64 | `JellyfinKattri-0.7.0-x64.msi` or `-x64-portable.zip` | libmpv is bundled; the portable zip runs `jellyfin-kattri.exe` |
 | Windows ARM64 | `JellyfinKattri-0.7.0-arm64.msi` or `-arm64-portable.zip` | libmpv is bundled |
 | macOS (universal) | `kattri-0.7.0-macos-universal.dmg` | libmpv is bundled; ad-hoc signed |
-| Linux x64 | `kattri_0.7.0-1_amd64.deb`, `kattri-0.7.0-1.x86_64.rpm`, `kattri-0.7.0-linux-x64.AppImage`, `kattri-0.7.0-linux-x64.flatpak` | deb/rpm use the distro libmpv; AppImage and Flatpak bundle it |
+| Linux x64 | `kattri_0.7.0-1_amd64.deb`, `kattri-0.7.0-1.x86_64.rpm`, `kattri-0.7.0-linux-x64.AppImage`, `kattri-0.7.0-linux-x64.flatpak` | The published 0.7.0 deb/rpm use distro libmpv. The AppImage and Flatpak bundle it. The current packaging workflow stages pinned libmpv for the next Linux deb/rpm release. |
+
+Linux ARM64 has CI build/test coverage but no published release package.
 
 Every download has a matching `.sha256` file. The release also publishes
 `kattri-sbom.json`, `binary-audit.json` and a reproducible-build record.
@@ -163,8 +166,8 @@ Validated so far:
 - A Windows x64 native-window DirectPlay check on November 2: decoded video was visible,
   pause and seek changed the real player, and stop returned to browsing.
 - A Windows RTX 4060 run using NVDEC with an HDR10 source tone-mapped to SDR.
-- Packaging: release artifacts for every platform. Clean-runner install, launch and normal
-  close pass for the macOS DMG and all four Linux formats.
+- Release packages cover Windows x64/ARM64, macOS universal, and Linux x64. Clean-runner
+  install, launch and normal close pass for the macOS DMG and all four Linux formats.
 
 Not yet validated: visible and audible playback on macOS and Linux, GPU decode across
 hardware, HDR passthrough, long HLS sessions, SyncPlay with two clients, physical
@@ -175,8 +178,10 @@ which the GPU-less runners cannot provide.
 Known gaps: in-app automatic updates (the signed fetch and apply path is built, but no
 update host is configured and the release keyring is empty, so updates are manual), code
 signing and notarization, Microsoft Store and Flathub distribution, native macOS window
-menus and Wayland refresh-rate switching, and synchronized lyrics. Theme media plays on
-request from the item page rather than automatically as ambient audio.
+menus and Wayland refresh-rate switching. Synchronized lyrics and the new Linux deb/rpm
+runtime packaging have unit or static checks, with live visual and clean-install validation
+pending. Theme media plays on request from the item page rather than automatically as
+ambient audio.
 
 ## Troubleshooting
 

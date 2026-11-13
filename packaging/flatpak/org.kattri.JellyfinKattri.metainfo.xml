@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.kattri.JellyfinKattri</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <name>Jellyfin Kattri</name>
+  <summary>A fast, native Jellyfin desktop client</summary>
+  <project_license>GPL-3.0-only</project_license>
+  <developer id="org.kattri">
+    <name>Kattri</name>
+  </developer>
+  <icon type="stock">org.kattri.JellyfinKattri</icon>
+
+  <description>
+    <p>
+      Jellyfin Kattri is a native desktop client for Jellyfin. It draws its interface with
+      egui on an OpenGL surface and plays video with libmpv in the same window: no web view,
+      no JavaScript UI, and no server changes.
+    </p>
+    <p>
+      Credentials stay in the system credential store, and the player receives a
+      session-scoped loopback relay URL instead of your server token. Browsing, search,
+      libraries, music, Live TV, downloads, SyncPlay and an optional 10-foot interface are
+      included, with keyboard and gamepad control.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">org.kattri.JellyfinKattri.desktop</launchable>
+  <provides>
+    <binary>kattri</binary>
+  </provides>
+
+  <categories>
+    <category>AudioVideo</category>
+  </categories>
+  <keywords>
+    <keyword>jellyfin</keyword>
+    <keyword>media</keyword>
+    <keyword>player</keyword>
+    <keyword>streaming</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/Archerkattri/jellyfin-kattri</url>
+  <url type="bugtracker">https://github.com/Archerkattri/jellyfin-kattri/issues</url>
+  <url type="vcs-browser">https://github.com/Archerkattri/jellyfin-kattri</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Home screen with continue watching and library rows</caption>
+      <image type="source">https://raw.githubusercontent.com/Archerkattri/jellyfin-kattri/rust-main/assets/screenshots/home.jpg</image>
+    </screenshot>
+    <screenshot>
+      <caption>Movies library</caption>
+      <image type="source">https://raw.githubusercontent.com/Archerkattri/jellyfin-kattri/rust-main/assets/screenshots/library.jpg</image>
+    </screenshot>
+    <screenshot>
+      <caption>Item details</caption>
+      <image type="source">https://raw.githubusercontent.com/Archerkattri/jellyfin-kattri/rust-main/assets/screenshots/detail.jpg</image>
+    </screenshot>
+    <screenshot>
+      <caption>Player</caption>
+      <image type="source">https://raw.githubusercontent.com/Archerkattri/jellyfin-kattri/rust-main/assets/screenshots/player.jpg</image>
+    </screenshot>
+    <screenshot>
+      <caption>Settings</caption>
+      <image type="source">https://raw.githubusercontent.com/Archerkattri/jellyfin-kattri/rust-main/assets/screenshots/settings.jpg</image>
+    </screenshot>
+  </screenshots>
+
+  <releases>
+    <release version="0.7.0" date="2026-11-05">
+      <description>
+        <p>Library tabs, album batch downloads, live and per-title subtitle styles, subtitle burn-in, idle screensaver and theme media.</p>
+      </description>
+    </release>
+    <release version="0.6.0" date="2026-11-02">
+      <description>
+        <p>LAN discovery and jellyfin:// links, administration, SyncPlay, custom request headers and update manifest fetching.</p>
+      </description>
+    </release>
+    <release version="0.5.0" date="2026-10-30">
+      <description>
+        <p>Private CA and mutual-TLS support, a maximized start and a redesigned player bar.</p>
+      </description>
+    </release>
+  </releases>
+
+  <content_rating type="oars-1.1" />
+
+  <requires>
+    <display_length compare="ge">720</display_length>
+  </requires>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>gamepad</control>
+    <control>pointing</control>
+  </recommends>
+</component>

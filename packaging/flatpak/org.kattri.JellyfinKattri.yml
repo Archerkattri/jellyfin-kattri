@@ -104,6 +104,7 @@ modules:
       - mkdir -p /app/share/applications
       - sed 's/^Icon=kattri$/Icon=org.kattri.JellyfinKattri/' packaging/linux/share/kattri.desktop > /app/share/applications/org.kattri.JellyfinKattri.desktop
       - install -Dm644 packaging/linux/icons/kattri.svg /app/share/icons/hicolor/scalable/apps/org.kattri.JellyfinKattri.svg
+      - install -Dm644 packaging/flatpak/org.kattri.JellyfinKattri.metainfo.xml /app/share/metainfo/org.kattri.JellyfinKattri.metainfo.xml
     sources:
       - type: dir
         path: ../..

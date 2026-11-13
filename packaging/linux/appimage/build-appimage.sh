@@ -108,24 +108,52 @@ if [[ ! -f "$ICON" ]]; then
   echo "error: missing scalable SVG icon $ICON" >&2
   exit 1
 fi
-if command -v desktop-file-validate >/dev/null 2>&1; then
-  desktop-file-validate "$DESKTOP"
-fi
-
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/kattri-appimage.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 APPDIR="$WORK/Kattri.AppDir"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
   "$APPDIR/usr/share/icons/hicolor/scalable/apps"
 
+# A Windows checkout may expose CRLF here even though Linux source control stores LF.
+# Normalize only the temporary packaging copy so desktop-file-validate and linuxdeploy
+# see the format required by the freedesktop Desktop Entry specification.
+DESKTOP_NORMALIZED="$WORK/kattri.desktop"
+sed 's/\r$//' "$DESKTOP" > "$DESKTOP_NORMALIZED"
+if command -v desktop-file-validate >/dev/null 2>&1; then
+  desktop-file-validate "$DESKTOP_NORMALIZED"
+fi
+
 install -m 755 "$BINARY" "$APPDIR/usr/bin/kattri"
-install -m 644 "$DESKTOP" "$APPDIR/usr/share/applications/kattri.desktop"
+install -m 644 "$DESKTOP_NORMALIZED" "$APPDIR/usr/share/applications/kattri.desktop"
 install -m 644 "$ICON" "$APPDIR/usr/share/icons/hicolor/scalable/apps/kattri.svg"
+# fetch.sh downloads and verifies the archive before either its library or its licenses are used.
+LIBMPV="$("$ROOT/packaging/libmpv/fetch.sh" linux-x64)"
 # Redistribution requires the project license and the bundled libmpv notice.
 mkdir -p "$APPDIR/usr/share/licenses/kattri"
 install -m 644 "$ROOT/LICENSE" "$APPDIR/usr/share/licenses/kattri/LICENSE"
 install -m 644 "$ROOT/packaging/libmpv/NOTICE.txt" \
   "$APPDIR/usr/share/licenses/kattri/libmpv-NOTICE.txt"
+
+# Include the exact upstream notices and build record from the SHA-256-verified archive.
+# The short project notice explicitly says it does not replace these upstream materials.
+shopt -s nullglob
+LIBMPV_ARCHIVES=("$ROOT"/target/libmpv/linux-x64/*.tar.gz)
+if [[ ${#LIBMPV_ARCHIVES[@]} -ne 1 ]]; then
+  echo "error: expected one checksum-verified Linux libmpv archive, found ${#LIBMPV_ARCHIVES[@]}" >&2
+  exit 1
+fi
+LIBMPV_NOTICES="$WORK/libmpv-notices"
+mkdir -p "$LIBMPV_NOTICES"
+tar -xzf "${LIBMPV_ARCHIVES[0]}" -C "$LIBMPV_NOTICES" --strip-components=1 \
+  --wildcards '*/BUILD-INFO.txt' '*/LICENSE.*'
+for notice in BUILD-INFO.txt LICENSE.mpv.LGPL LICENSE.ffmpeg.LGPL \
+  LICENSE.libplacebo.LGPL LICENSE.dav1d.BSD-2-Clause LICENSE.libdisplay-info.MIT; do
+  if [[ ! -s "$LIBMPV_NOTICES/$notice" ]]; then
+    echo "error: pinned libmpv archive is missing required notice $notice" >&2
+    exit 1
+  fi
+  install -m 644 "$LIBMPV_NOTICES/$notice" "$APPDIR/usr/share/licenses/kattri/$notice"
+done
 
 LINUXDEPLOY_ARGS=(
   --appdir "$APPDIR"
@@ -134,8 +162,17 @@ LINUXDEPLOY_ARGS=(
   --icon-file "$APPDIR/usr/share/icons/hicolor/scalable/apps/kattri.svg"
 )
 # fetch.sh refuses an unpinned or mismatched archive, so no unverified libmpv is bundled.
-LIBMPV="$("$ROOT/packaging/libmpv/fetch.sh" linux-x64)"
-LINUXDEPLOY_ARGS+=(--library "$LIBMPV")
+LIBXKBCOMMON_X11="$(
+  ldconfig -p | awk '
+    $1 == "libxkbcommon-x11.so.0" && !found { library = $NF; found = 1 }
+    END { if (found) print library }
+  '
+)"
+if [[ -z "$LIBXKBCOMMON_X11" || ! -f "$LIBXKBCOMMON_X11" ]]; then
+  echo "error: libxkbcommon-x11.so.0 is required to collect the window backend dependency" >&2
+  exit 1
+fi
+LINUXDEPLOY_ARGS+=(--library "$LIBMPV" --library "$LIBXKBCOMMON_X11")
 
 echo "==> linuxdeploy collects shared libraries"
 "$LINUXDEPLOY" "${LINUXDEPLOY_ARGS[@]}"
@@ -148,6 +185,10 @@ MISSING="$(LD_LIBRARY_PATH="$APPDIR/usr/lib" ldd "$APPDIR/usr/bin/kattri" | grep
 if [[ -n "$MISSING" ]]; then
   echo "error: unresolved libraries in the bundle:" >&2
   echo "$MISSING" >&2
+  exit 1
+fi
+if ! find "$APPDIR/usr/lib" -type f -name 'libxkbcommon-x11.so.0*' -print -quit | grep -q .; then
+  echo 'error: AppImage does not contain the dynamically loaded libxkbcommon-x11 runtime' >&2
   exit 1
 fi
 

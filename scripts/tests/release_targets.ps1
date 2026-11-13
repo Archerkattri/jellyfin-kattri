@@ -59,6 +59,36 @@ try {
         throw 'Linux release workflow does not build and package the jellyfin-kattri host binary.'
     }
 
+    $appImageStart = $linux.IndexOf('  appimage:')
+    $packagesStart = $linux.IndexOf('  packages:')
+    if ($appImageStart -lt 0 -or $packagesStart -le $appImageStart) {
+        throw 'Linux release workflow must retain its AppImage job before deb/rpm packaging.'
+    }
+    $appImageJob = $linux.Substring($appImageStart, $packagesStart - $appImageStart)
+    if ($appImageJob -notmatch 'libxkbcommon-x11-0') {
+        throw 'AppImage build must install libxkbcommon-x11 so linuxdeploy can bundle the runtime-loaded library.'
+    }
+
+    $flatpakStart = $linux.IndexOf('  flatpak:')
+    if ($packagesStart -lt 0 -or $flatpakStart -le $packagesStart) {
+        throw 'Linux release workflow must retain its deb/rpm package job before Flatpak.'
+    }
+    $linuxPackageJob = $linux.Substring($packagesStart, $flatpakStart - $packagesStart)
+    if ($linuxPackageJob -notmatch 'packaging/libmpv/fetch\.sh linux-x64' -or
+        $linuxPackageJob -notmatch 'tar -xzf "\$\{ARCHIVES\[0\]\}" --strip-components=1 -C target/kattri-libmpv' -or
+        $linuxPackageJob -notmatch 'ldconfig -p \| awk' -or
+        $linuxPackageJob -notmatch 'libjpeg\.so\.8" && !found' -or
+        $linuxPackageJob -notmatch 'patchelf --set-rpath ''\$ORIGIN'' target/kattri-libmpv/libmpv\.so\.2' -or
+        $linuxPackageJob -notmatch 'LICENSE\.mpv\.LGPL' -or
+        $linuxPackageJob -notmatch 'LICENSE\.libdisplay-info\.MIT' -or
+        $linuxPackageJob -notmatch 'target/kattri-libmpv/LICENSE\.libjpeg-turbo') {
+        throw 'Linux deb/rpm workflow must stage the verified libmpv archive, private JPEG ABI, and upstream license notices.'
+    }
+    if ($linuxPackageJob -match 'libmpv2\s*\|\s*libmpv1' -or
+        $linuxPackageJob -match 'libmpv\.so\.2\(\)\(64bit\)') {
+        throw 'Linux deb/rpm workflow must not rely on a system libmpv provider.'
+    }
+
     $flatpakToolsCommit = '9d86d336a39b9af38b86f114b6ce5820fe260f91'
     if ($linux -notmatch [regex]::Escape("FBT_COMMIT=$flatpakToolsCommit") -or
         $linux -notmatch 'git -C "\$RUNNER_TEMP/fbt" fetch --depth 1 origin "\$FBT_COMMIT"' -or
@@ -82,6 +112,29 @@ try {
         $rpmMetadata -notmatch 'packaging/linux/icons/kattri\.svg' -or
         $rpmMetadata -notmatch 'icons/hicolor/scalable/apps/kattri\.svg') {
         throw 'Linux package metadata must source jellyfin-kattri, preserve the kattri command, and install the SVG icon.'
+    }
+    if ($debMetadata -notmatch 'target/kattri-libmpv/libmpv\.so\.2.*usr/lib/kattri/libmpv\.so\.2' -or
+        $debMetadata -notmatch 'target/kattri-libmpv/libjpeg\.so\.8.*usr/lib/kattri/libjpeg\.so\.8' -or
+        $debMetadata -notmatch 'usr/share/doc/kattri/licenses/libmpv\.LGPL' -or
+        $debMetadata -notmatch 'usr/share/doc/kattri/libmpv-BUILD-INFO\.txt' -or
+        $debMetadata -match 'libmpv2\s*\|\s*libmpv1' -or
+        $debMetadata -notmatch 'libva2' -or
+        $debMetadata -notmatch 'libxkbcommon-x11-0') {
+        throw 'Deb metadata must bundle libmpv privately, ship its notices, and declare native runtime dependencies.'
+    }
+    if ($rpmMetadata -notmatch 'target/kattri-libmpv/libmpv\.so\.2.*?/usr/lib/kattri/libmpv\.so\.2' -or
+        $rpmMetadata -notmatch 'target/kattri-libmpv/libjpeg\.so\.8.*?/usr/lib/kattri/libjpeg\.so\.8' -or
+        $rpmMetadata -notmatch 'target/kattri-libmpv/LICENSE\.mpv\.LGPL' -or
+        $rpmMetadata -notmatch 'target/kattri-libmpv/BUILD-INFO\.txt' -or
+        $rpmMetadata -match '(?m)^"libmpv\.so\.2\(\)\(64bit\)"' -or
+        $rpmMetadata -notmatch '"libva\.so\.2\(\)\(64bit\)"' -or
+        $rpmMetadata -notmatch '"libxkbcommon-x11\.so\.0\(\)\(64bit\)"') {
+        throw 'RPM metadata must bundle libmpv privately, ship its notices, and declare native runtime dependencies.'
+    }
+    $mpvLibrarySource = Get-Content 'proofs/mpv-render/src/library.rs' -Raw
+    if ($mpvLibrarySource -notmatch 'exe_dir\.join\("\.\./lib/kattri/libmpv\.so\.2"\)' -or
+        $mpvLibrarySource -notmatch '(?s)let mut candidates: Vec<PathBuf> =.*?candidates\.extend\(platform_candidates\(\)') {
+        throw 'Linux libmpv lookup must prefer the private package path before system library names.'
     }
     # The rpm packages a stripped copy of the same host binary, made by the release workflow.
     if ($linux -notmatch 'strip -o target/kattri-stripped target/release/jellyfin-kattri') {
@@ -111,8 +164,23 @@ try {
     $appImageScript = Get-Content 'packaging/linux/appimage/build-appimage.sh' -Raw
     if ($appImageScript -notmatch 'icons/kattri\.svg' -or
         $appImageScript -notmatch 'hicolor/scalable/apps/kattri\.svg' -or
-        $appImageScript -notmatch '--icon-file') {
-        throw 'AppImage packaging must use the scalable SVG icon with linuxdeploy.'
+        $appImageScript -notmatch '--icon-file' -or
+        $appImageScript -notmatch 'LIBXKBCOMMON_X11=' -or
+        $appImageScript -notmatch 'libxkbcommon-x11\.so\.0' -or
+        $appImageScript -notmatch '--library "\$LIBXKBCOMMON_X11"' -or
+        $appImageScript -notmatch 'BUILD-INFO\.txt' -or
+        $appImageScript -notmatch 'LICENSE\.ffmpeg\.LGPL' -or
+        -not $appImageScript.Contains('sed ''s/\r$//'' "$DESKTOP" > "$DESKTOP_NORMALIZED"') -or
+        -not $appImageScript.Contains('desktop-file-validate "$DESKTOP_NORMALIZED"') -or
+        $appImageScript -notmatch 'AppImage does not contain the dynamically loaded libxkbcommon-x11 runtime') {
+        throw 'AppImage packaging must bundle its dynamic XKB library and pinned libmpv notices.'
+    }
+    $installWorkflow = Get-Content '.github/workflows/installation-smoke.yml' -Raw
+    $appImageSmokeLine = @($installWorkflow -split "`n" | Where-Object {
+        $_ -match 'apt-get install.*libfuse2' -and $_ -match 'xvfb'
+    })
+    if ($appImageSmokeLine.Count -ne 1 -or $appImageSmokeLine[0] -match 'libxkbcommon-x11') {
+        throw 'AppImage smoke must not install libxkbcommon-x11 on the host; the bundle must provide it.'
     }
     $flatpakManifest = Get-Content 'packaging/flatpak/org.kattri.JellyfinKattri.yml' -Raw
     if ($flatpakManifest -notmatch 'packaging/linux/icons/kattri\.svg' -or
@@ -183,7 +251,6 @@ try {
         }
     }
 
-    $installWorkflow = Get-Content '.github/workflows/installation-smoke.yml' -Raw
     foreach ($requiredWorkflow in @('Release (Windows packaging)', 'Release macOS universal', 'Release Linux')) {
         if ($installWorkflow -notmatch [regex]::Escape($requiredWorkflow)) {
             throw "Installation smoke workflow must follow $requiredWorkflow."
@@ -231,12 +298,12 @@ try {
     if (([regex]::Matches($installWorkflow, [regex]::Escape('/usr/bin/kattri'))).Count -ne 2) {
         throw 'deb and rpm smoke jobs must both launch /usr/bin/kattri.'
     }
-    # winit loads libxkbcommon-x11 at run time, so no package metadata pulls it in.
-    # Xvfb has no window manager, so the close request needs openbox plus wmctrl.
+    # winit loads libxkbcommon-x11 at run time. AppImage must bundle it, so its smoke host
+    # intentionally omits the library. Xvfb also needs a window manager and wmctrl to close.
     foreach ($linuxJob in @(
         @{ Label = 'deb'; Anchor = './artifacts/kattri_*.deb'; Library = 'libxkbcommon-x11-0' },
         @{ Label = 'rpm'; Anchor = './artifacts/kattri-*.rpm'; Library = 'libxkbcommon-x11' },
-        @{ Label = 'AppImage'; Anchor = 'libfuse2'; Library = 'libxkbcommon-x11-0' },
+        @{ Label = 'AppImage'; Anchor = 'libfuse2'; Library = '' },
         @{ Label = 'Flatpak'; Anchor = 'apt-get install -y flatpak'; Library = 'openbox' }
     )) {
         $installLine = @($installWorkflow -split "`n" | Where-Object {
@@ -245,7 +312,11 @@ try {
         if ($installLine.Count -ne 1) {
             throw "Could not find exactly one Linux $($linuxJob.Label) install step."
         }
-        foreach ($requiredPackage in @($linuxJob.Library, 'openbox', 'wmctrl')) {
+        $requiredPackages = @('openbox', 'wmctrl')
+        if (-not [string]::IsNullOrEmpty($linuxJob.Library)) {
+            $requiredPackages += $linuxJob.Library
+        }
+        foreach ($requiredPackage in $requiredPackages) {
             if (-not $installLine[0].Contains($requiredPackage)) {
                 throw "Linux $($linuxJob.Label) smoke setup must install $requiredPackage."
             }
@@ -271,7 +342,7 @@ try {
         $flatpakManifest -notmatch 'command: kattri' -or
         $flatpakManifest -notmatch 'target/release/jellyfin-kattri /app/bin/kattri' -or
         $flatpakManifest -notmatch 'packaging/linux/share/kattri\.desktop' -or
-        $appImageScript -notmatch 'install -m 644 "\$DESKTOP" "\$APPDIR/usr/share/applications/kattri\.desktop"' -or
+        $appImageScript -notmatch 'install -m 644 "\$DESKTOP_NORMALIZED" "\$APPDIR/usr/share/applications/kattri\.desktop"' -or
         $appImageScript -notmatch 'install -m 755 "\$BINARY" "\$APPDIR/usr/bin/kattri"' -or
         $appImageScript -notmatch '--desktop-file "\$APPDIR/usr/share/applications/kattri\.desktop"') {
         throw 'Linux URI registration must deliver one URL argument through the packaged kattri executable.'

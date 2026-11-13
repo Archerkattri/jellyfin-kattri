@@ -6,8 +6,9 @@
 # workspace root with -p proofs/egui-gl-host. Asset paths resolve from the current
 # directory first, so these paths are workspace-relative.
 #
-# libmpv is a runtime dependency, declared by soname below. Minimum version: not set
-# (owner decision).
+# The release workflow stages the checksum-verified libmpv archive and its notices under
+# target/kattri-libmpv. libjpeg.so.8 is private to this directory and resolved through
+# libmpv's $ORIGIN RUNPATH, so it does not override system libraries.
 
 [package.metadata.generate-rpm]
 name = "kattri"
@@ -17,15 +18,39 @@ url = "https://github.com/Archerkattri/jellyfin-kattri"
 assets = [
     # The release workflow writes this stripped copy of the release binary.
     { source = "target/kattri-stripped", dest = "/usr/bin/kattri", mode = "755" },
+    { source = "target/kattri-libmpv/libmpv.so.2", dest = "/usr/lib/kattri/libmpv.so.2", mode = "755" },
+    { source = "target/kattri-libmpv/libjpeg.so.8", dest = "/usr/lib/kattri/libjpeg.so.8", mode = "755" },
     { source = "packaging/linux/share/kattri.desktop", dest = "/usr/share/applications/kattri.desktop", mode = "644" },
     { source = "packaging/linux/icons/kattri.svg", dest = "/usr/share/icons/hicolor/scalable/apps/kattri.svg", mode = "644" },
     { source = "target/kattri.1.gz", dest = "/usr/share/man/man1/kattri.1.gz", mode = "644", doc = true },
-    # Redistribution requires the project license and the libmpv notice.
+    # Ship the project license, pinned archive notice/licenses, build record, and bundled JPEG notice.
     { source = "LICENSE", dest = "/usr/share/licenses/kattri/LICENSE", mode = "644" },
     { source = "packaging/libmpv/NOTICE.txt", dest = "/usr/share/licenses/kattri/libmpv-NOTICE.txt", mode = "644" },
+    { source = "target/kattri-libmpv/BUILD-INFO.txt", dest = "/usr/share/licenses/kattri/libmpv-BUILD-INFO.txt", mode = "644" },
+    { source = "target/kattri-libmpv/BUILD-INFO.libjpeg-turbo.txt", dest = "/usr/share/licenses/kattri/libjpeg-turbo-BUILD-INFO.txt", mode = "644" },
+    { source = "target/kattri-libmpv/LICENSE.mpv.LGPL", dest = "/usr/share/licenses/kattri/LICENSE.mpv.LGPL", mode = "644" },
+    { source = "target/kattri-libmpv/LICENSE.ffmpeg.LGPL", dest = "/usr/share/licenses/kattri/LICENSE.ffmpeg.LGPL", mode = "644" },
+    { source = "target/kattri-libmpv/LICENSE.libplacebo.LGPL", dest = "/usr/share/licenses/kattri/LICENSE.libplacebo.LGPL", mode = "644" },
+    { source = "target/kattri-libmpv/LICENSE.dav1d.BSD-2-Clause", dest = "/usr/share/licenses/kattri/LICENSE.dav1d.BSD-2-Clause", mode = "644" },
+    { source = "target/kattri-libmpv/LICENSE.libdisplay-info.MIT", dest = "/usr/share/licenses/kattri/LICENSE.libdisplay-info.MIT", mode = "644" },
+    { source = "target/kattri-libmpv/LICENSE.libjpeg-turbo", dest = "/usr/share/licenses/kattri/LICENSE.libjpeg-turbo", mode = "644" },
 ]
 
-# Depend on the library soname, not a package name: Fedora (mpv-libs) and openSUSE (libmpv2)
-# both provide it.
+# The pinned libmpv BUILD-INFO lists these direct shared dependencies. The RPM package
+# manager resolves providers on each supported RPM distribution; libjpeg.so.8 is bundled
+# privately because Fedora's libjpeg-turbo provides the incompatible libjpeg.so.62 ABI.
 [package.metadata.generate-rpm.requires]
-"libmpv.so.2()(64bit)" = "*"
+"libass.so.9()(64bit)" = "*"
+"libz.so.1()(64bit)" = "*"
+"libva.so.2()(64bit)" = "*"
+"libva-drm.so.2()(64bit)" = "*"
+"libuchardet.so.0()(64bit)" = "*"
+"libstdc++.so.6()(64bit)" = "*"
+"libXfixes.so.3()(64bit)" = "*"
+"libX11.so.6()(64bit)" = "*"
+"libasound.so.2()(64bit)" = "*"
+"libpulse.so.0()(64bit)" = "*"
+"libdrm.so.2()(64bit)" = "*"
+"libgbm.so.1()(64bit)" = "*"
+"libEGL.so.1()(64bit)" = "*"
+"libxkbcommon-x11.so.0()(64bit)" = "*"

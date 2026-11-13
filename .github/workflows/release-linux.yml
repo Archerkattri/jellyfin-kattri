@@ -5,10 +5,10 @@
 #
 # The Flatpak job builds packaging/flatpak/org.kattri.JellyfinKattri.yml into a bundle.
 #
-# The v0.2.0 package builds passed. The AppImage bundles the pinned, SHA-256-verified
-# libmpv archive (packaging/libmpv/manifest.toml, linux-x64). Deb and rpm declare the
-# distro libmpv as a dependency instead. installation-smoke.yml installs and launches
-# the produced packages in fresh runners; that is not playback validation.
+# The AppImage, deb, and rpm bundle the pinned, SHA-256-verified libmpv archive
+# (packaging/libmpv/manifest.toml, linux-x64). Deb and rpm keep it in /usr/lib/kattri,
+# with only its required native libraries declared as dependencies. installation-smoke.yml
+# installs and launches the produced packages in fresh runners; that is not playback validation.
 
 name: Release Linux
 
@@ -97,7 +97,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             desktop-file-utils file libfuse2 \
             libass9 libuchardet0 libva2 libva-drm2 libdrm2 libgbm1 libegl1 \
-            libx11-6 libxfixes3 libasound2 libpulse0 libjpeg8 zlib1g
+            libx11-6 libxfixes3 libasound2 libpulse0 libjpeg8 zlib1g libxkbcommon-x11-0
 
       - name: Build AppImage
         env:
@@ -153,7 +153,56 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            dpkg-dev lintian rpmlint pkg-config libudev-dev
+            dpkg-dev lintian rpmlint pkg-config libudev-dev patchelf libjpeg8 \
+            libass9 libuchardet0 libva2 libva-drm2 libdrm2 libgbm1 libegl1 \
+            libx11-6 libxfixes3 libasound2 libpulse0 zlib1g libstdc++6 libxkbcommon-x11-0
+
+      - name: Fetch and stage the pinned libmpv runtime
+        run: |
+          set -euo pipefail
+          LIBMPV="$(packaging/libmpv/fetch.sh linux-x64)"
+          shopt -s nullglob
+          ARCHIVES=(target/libmpv/linux-x64/*.tar.gz)
+          if [[ ${#ARCHIVES[@]} -ne 1 ]]; then
+            echo "error: expected one checksum-verified Linux libmpv archive, found ${#ARCHIVES[@]}" >&2
+            exit 1
+          fi
+          mkdir -p target/kattri-libmpv
+          tar -xzf "${ARCHIVES[0]}" --strip-components=1 -C target/kattri-libmpv
+          cmp "$LIBMPV" target/kattri-libmpv/libmpv.so.2
+          for file in BUILD-INFO.txt \
+            LICENSE.mpv.LGPL LICENSE.ffmpeg.LGPL LICENSE.libplacebo.LGPL \
+            LICENSE.dav1d.BSD-2-Clause LICENSE.libdisplay-info.MIT; do
+            test -s "target/kattri-libmpv/$file"
+          done
+
+          # Fedora does not provide libjpeg.so.8. Keep that ABI beside libmpv and
+          # use $ORIGIN only for libmpv's private dependency lookup.
+          LIBJPEG="$(ldconfig -p | awk '
+            $1 == "libjpeg.so.8" && !found { path = $NF; found = 1 }
+            END { if (found) print path }
+          ')"
+          if [[ -z "$LIBJPEG" || ! -f "$LIBJPEG" ]]; then
+            echo "error: libjpeg.so.8 from Ubuntu's libjpeg8 package was not found" >&2
+            exit 1
+          fi
+          install -m 755 "$LIBJPEG" target/kattri-libmpv/libjpeg.so.8
+          install -m 644 /usr/share/doc/libjpeg-turbo8/copyright \
+            target/kattri-libmpv/LICENSE.libjpeg-turbo
+          dpkg-query -W -f='${Package} ${Version}\n' libjpeg-turbo8 \
+            > target/kattri-libmpv/BUILD-INFO.libjpeg-turbo.txt
+          patchelf --set-rpath '$ORIGIN' target/kattri-libmpv/libmpv.so.2
+          test "$(patchelf --print-rpath target/kattri-libmpv/libmpv.so.2)" = '$ORIGIN'
+          if ldd target/kattri-libmpv/libmpv.so.2 | grep -q 'not found'; then
+            echo "error: the staged libmpv has unresolved native dependencies" >&2
+            ldd target/kattri-libmpv/libmpv.so.2 >&2
+            exit 1
+          fi
+          if ! ldd target/kattri-libmpv/libmpv.so.2 | grep -Fq 'target/kattri-libmpv/libjpeg.so.8'; then
+            echo 'error: libmpv did not resolve its private libjpeg.so.8 through $ORIGIN' >&2
+            ldd target/kattri-libmpv/libmpv.so.2 >&2
+            exit 1
+          fi
 
       - name: Install cargo-deb and cargo-generate-rpm (pinned)
         run: |
