@@ -1,4 +1,4 @@
-//! Bounded intake for macOS `application:openURLs:` callbacks.
+//! Bounded intake for macOS Launch Services URL Apple events.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -21,7 +21,6 @@ enum GateState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MacLinkReject {
     InvalidUrl,
-    TooManyUrls,
     StartupIntentPending,
     EventPending,
     #[cfg(target_os = "macos")]
@@ -97,87 +96,90 @@ pub(crate) fn defer_startup_intent(
     Ok(())
 }
 
-fn check_url_count(count: usize) -> Result<(), MacLinkReject> {
-    if count == 1 {
-        Ok(())
-    } else {
-        Err(MacLinkReject::TooManyUrls)
-    }
-}
-
 #[cfg(target_os = "macos")]
 mod appkit {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use objc2::rc::Retained;
-    use objc2::runtime::ProtocolObject;
-    use objc2::{ClassType, DeclaredClass, declare_class, msg_send_id, mutability};
-    use objc2_app_kit::{NSApplication, NSApplicationDelegate};
-    use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSURL};
+    use objc2::{ClassType, DeclaredClass, declare_class, msg_send, msg_send_id, mutability, sel};
+    use objc2_foundation::{
+        MainThreadMarker, NSAppleEventDescriptor, NSAppleEventManager, NSObject, NSObjectProtocol,
+    };
     use winit::event_loop::EventLoopProxy;
 
     use crate::{HostEvent, macos_links::MacLinkGate};
 
     use kattri_client_core::deep_link::MAX_DEEP_LINK_BYTES;
 
-    use super::{MacLinkReject, check_url_count, parse_open_url};
+    use super::{MacLinkReject, parse_open_url};
 
-    struct UrlDelegateIvars {
+    const URL_EVENT_CLASS: u32 = u32::from_be_bytes(*b"GURL");
+    const URL_EVENT_ID: u32 = u32::from_be_bytes(*b"GURL");
+    const DIRECT_OBJECT_KEY: u32 = u32::from_be_bytes(*b"----");
+
+    struct UrlEventHandlerIvars {
         proxy: EventLoopProxy<HostEvent>,
         gate: MacLinkGate,
     }
 
     declare_class!(
-        struct UrlDelegate;
+        struct UrlEventHandler;
 
-        unsafe impl ClassType for UrlDelegate {
+        unsafe impl ClassType for UrlEventHandler {
             type Super = NSObject;
             type Mutability = mutability::MainThreadOnly;
-            const NAME: &'static str = "KattriMacUrlDelegate";
+            const NAME: &'static str = "KattriMacUrlEventHandler";
         }
 
-        impl DeclaredClass for UrlDelegate {
-            type Ivars = UrlDelegateIvars;
+        impl DeclaredClass for UrlEventHandler {
+            type Ivars = UrlEventHandlerIvars;
         }
 
-        unsafe impl NSObjectProtocol for UrlDelegate {}
+        unsafe impl NSObjectProtocol for UrlEventHandler {}
 
-        unsafe impl NSApplicationDelegate for UrlDelegate {
-            #[method(application:openURLs:)]
-            #[allow(non_snake_case)] // AppKit's delegate selector is camelCase by contract.
-            fn application_openURLs(&self, _application: &NSApplication, urls: &NSArray<NSURL>) {
-                // A panic must not unwind through AppKit's Objective-C callback boundary.
+        impl UrlEventHandler {
+            #[method(handleAppleEvent:withReplyEvent:)]
+            fn handle_apple_event_with_reply_event(
+                &self,
+                event: &NSAppleEventDescriptor,
+                _reply: &NSAppleEventDescriptor,
+            ) {
+                // A panic must not unwind through the Objective-C callback boundary.
                 let _ = catch_unwind(AssertUnwindSafe(|| {
-                    if self.dispatch_urls(urls).is_err() {
-                        eprintln!("rejected macOS Jellyfin URL event");
+                    if self.dispatch_event(event).is_err() {
+                        tracing::warn!("rejected macOS Jellyfin URL Apple event");
                     }
                 }));
             }
         }
     );
 
-    impl UrlDelegate {
+    impl UrlEventHandler {
         fn new(
             mtm: MainThreadMarker,
             proxy: EventLoopProxy<HostEvent>,
             gate: MacLinkGate,
         ) -> Retained<Self> {
-            let ivars = UrlDelegateIvars { proxy, gate };
-            // SAFETY: the delegate is created and retained on AppKit's main thread.
+            let ivars = UrlEventHandlerIvars { proxy, gate };
+            // SAFETY: the handler is created and retained on AppKit's main thread.
             unsafe { msg_send_id![super(mtm.alloc().set_ivars(ivars)), init] }
         }
 
-        fn dispatch_urls(&self, urls: &NSArray<NSURL>) -> Result<(), MacLinkReject> {
-            check_url_count(urls.count())?;
-
-            // SAFETY: count was checked to be exactly one and AppKit supplies NSURL objects.
-            let url = unsafe { urls.objectAtIndex(0) };
-            // SAFETY: NSURL's absoluteString selector is available on the supported macOS floor.
-            let absolute = unsafe { url.absoluteString() }.ok_or(MacLinkReject::InvalidUrl)?;
-            if absolute.len_utf16() > MAX_DEEP_LINK_BYTES || absolute.len() > MAX_DEEP_LINK_BYTES {
+        fn dispatch_event(&self, event: &NSAppleEventDescriptor) -> Result<(), MacLinkReject> {
+            // SAFETY: NSAppleEventDescriptor implements paramDescriptorForKeyword:. The key is
+            // Apple's direct-object parameter, and the nullable result is represented here.
+            let direct: Option<Retained<NSAppleEventDescriptor>> =
+                unsafe { msg_send_id![event, paramDescriptorForKeyword: DIRECT_OBJECT_KEY] };
+            let direct = direct.ok_or(MacLinkReject::InvalidUrl)?;
+            // SAFETY: stringValue is available when NSString support is enabled for this crate.
+            let text = unsafe { direct.stringValue() }.ok_or(MacLinkReject::InvalidUrl)?;
+            if text.len_utf16() > MAX_DEEP_LINK_BYTES {
                 return Err(MacLinkReject::InvalidUrl);
             }
-            let text = absolute.to_string();
+            let text = text.to_string();
+            if text.len() > MAX_DEEP_LINK_BYTES {
+                return Err(MacLinkReject::InvalidUrl);
+            }
             let intent = parse_open_url(&text)?;
 
             self.ivars().gate.reserve()?;
@@ -190,6 +192,7 @@ mod appkit {
                 self.ivars().gate.release_failed_send();
                 return Err(MacLinkReject::EventLoopClosed);
             }
+            tracing::info!("accepted macOS Jellyfin URL Apple event");
             Ok(())
         }
     }
@@ -197,24 +200,23 @@ mod appkit {
     #[derive(Debug)]
     pub(crate) enum RegistrationError {
         NotMainThread,
-        ExistingApplicationDelegate,
     }
 
     impl std::fmt::Display for RegistrationError {
         fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Self::NotMainThread => formatter.write_str("AppKit main thread is unavailable"),
-                Self::ExistingApplicationDelegate => formatter.write_str(
-                    "an application delegate is already registered; preserving its lifecycle",
-                ),
             }
         }
     }
 
     impl std::error::Error for RegistrationError {}
 
+    // Main keeps this value alive through `run_app`, then returns from the process. Keep the
+    // callback retained for that entire lifetime. NSAppleEventManager has no previous-handler
+    // getter; unconditional removal at drop could clobber a later GURL registration.
     pub(crate) struct Registration {
-        _delegate: Retained<UrlDelegate>,
+        _handler: Retained<UrlEventHandler>,
     }
 
     pub(crate) fn register(
@@ -222,21 +224,30 @@ mod appkit {
         gate: MacLinkGate,
     ) -> Result<Registration, RegistrationError> {
         let mtm = MainThreadMarker::new().ok_or(RegistrationError::NotMainThread)?;
-        // Winit's macOS contract requires this call after EventLoop::build.
-        let application = NSApplication::sharedApplication(mtm);
-        // The pinned platform guide permits a custom delegate, but winit 0.30.13's event-loop
-        // source currently installs WinitApplicationDelegate. Preserve it; replacing it can break
-        // winit's launch and teardown callbacks.
-        // SAFETY: AppKit is being accessed on its main thread.
-        if unsafe { application.delegate() }.is_some() {
-            return Err(RegistrationError::ExistingApplicationDelegate);
-        }
+        // Winit installs its application delegate while building the event loop. This separate
+        // Launch Services hook leaves that delegate and its lifecycle callbacks untouched.
+        let manager = unsafe { NSAppleEventManager::sharedAppleEventManager() };
+        let handler = UrlEventHandler::new(mtm, proxy, gate);
 
-        let delegate = UrlDelegate::new(mtm, proxy, gate);
-        application.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-        Ok(Registration {
-            _delegate: delegate,
-        })
+        // NSAppleEventManager replaces a handler registered for the same event pair. Startup
+        // occurs before plugin initialization; a source audit of the host and pinned Winit found
+        // no earlier GURL handler. Its API has no getter for chaining one, so keep this the sole
+        // GURL registration. Other Apple-event pairs remain registered.
+        // SAFETY: handler implements Apple's handleAppleEvent:withReplyEvent: signature, the
+        // selector names that method, and these four-character codes identify Launch Services' URL
+        // event. The manager and handler are used on AppKit's main thread.
+        unsafe {
+            let _: () = msg_send![
+                &*manager,
+                setEventHandler: &*handler
+                andSelector: sel!(handleAppleEvent:withReplyEvent:)
+                forEventClass: URL_EVENT_CLASS
+                andEventID: URL_EVENT_ID
+            ];
+        }
+        tracing::info!("registered macOS Jellyfin URL Apple event handler");
+
+        Ok(Registration { _handler: handler })
     }
 }
 
@@ -245,10 +256,7 @@ pub(crate) use appkit::register;
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        GateState, MacLinkGate, MacLinkReject, check_url_count, defer_startup_intent,
-        parse_open_url,
-    };
+    use super::{GateState, MacLinkGate, MacLinkReject, defer_startup_intent, parse_open_url};
 
     const VALID_URL: &str = "jellyfin://kattri/v1/item/0123456789abcdef0123456789abcdef?server=https%3A%2F%2Fmedia.example%2Fjellyfin";
 
@@ -268,8 +276,6 @@ mod tests {
     #[test]
     fn rejects_oversized_and_malformed_urls_without_echoing_input() {
         assert!(parse_open_url(&"x".repeat(8 * 1024 + 1)).is_err());
-        assert_eq!(check_url_count(0), Err(MacLinkReject::TooManyUrls));
-        assert_eq!(check_url_count(2), Err(MacLinkReject::TooManyUrls));
         assert_eq!(
             parse_open_url("jellyfin://kattri/v1/item/invalid"),
             Err(MacLinkReject::InvalidUrl)

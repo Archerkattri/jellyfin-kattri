@@ -37,4 +37,4 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "=0.5.3", features = ["relax-sign-encoding"] }
 objc2-app-kit = { version = "=0.2.2", features = ["NSApplication", "NSResponder"] }
-objc2-foundation = { version = "=0.2.2", features = ["NSArray", "NSObjCRuntime", "NSObject", "NSString", "NSURL"] }
+objc2-foundation = { version = "=0.2.2", features = ["NSArray", "NSAppleEventDescriptor", "NSAppleEventManager", "NSObjCRuntime", "NSObject", "NSString", "NSURL"] }
