@@ -14,6 +14,8 @@
 #   -LicensePath  License files placed in the archive. Defaults to the repository LICENSE.
 #
 # The zip also carries the libmpv DLL verified by packaging/libmpv/fetch.ps1 and its notice.
+# The pinned Windows archive has no license files, so the verified upstream source texts
+# are included under licenses/libmpv.
 #
 # Output:
 #   <OutputDir>/JellyfinKattri-<Version>-<Platform>-portable.zip
@@ -60,7 +62,9 @@ Assert-PeMachine -Path $exeFull -Platform $Platform
 # fetch.ps1 throws unless the pinned libmpv archive matches its SHA-256, so an
 # unverified DLL cannot reach the zip. Until a build is pinned this step stops the build.
 $libmpvDll = & (Join-Path $PSScriptRoot '..\libmpv\fetch.ps1') -Platform "windows-$Platform"
-$libmpvNotice = (Resolve-Path -LiteralPath (Join-Path $repoRoot 'packaging\libmpv\NOTICE.txt')).Path
+. (Join-Path $PSScriptRoot 'libmpv-licenses.ps1')
+$libmpvLicenseFiles = @(Get-VerifiedLibmpvLicenseFiles)
+$libmpvNotice = Get-LibmpvNoticePath -RepositoryRoot $repoRoot
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $outputFull = (Resolve-Path -LiteralPath $OutputDir).Path
@@ -80,6 +84,11 @@ try {
     Copy-Item -LiteralPath $exeFull -Destination $stageDir
     Copy-Item -LiteralPath $libmpvDll -Destination $stageDir
     Copy-Item -LiteralPath $libmpvNotice -Destination (Join-Path $stageDir 'libmpv-NOTICE.txt')
+    $nativeLicenseDir = Join-Path $stageDir 'licenses\libmpv'
+    New-Item -ItemType Directory -Force -Path $nativeLicenseDir | Out-Null
+    foreach ($license in $libmpvLicenseFiles) {
+        Copy-Item -LiteralPath $license.Path -Destination (Join-Path $nativeLicenseDir $license.Name)
+    }
     foreach ($license in $licenseFiles) {
         Copy-Item -LiteralPath $license -Destination $stageDir
     }
@@ -100,6 +109,54 @@ try {
         Remove-Item -LiteralPath $zipPath -Force
     }
     Compress-Archive -LiteralPath $stageDir -DestinationPath $zipPath -CompressionLevel Optimal
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $package = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+    try {
+        $expectedEntries = @(
+            @{ Entry = "$baseName/$([System.IO.Path]::GetFileName($exeFull))"; Sha256 = (Get-FileHash -LiteralPath $exeFull -Algorithm SHA256).Hash.ToLowerInvariant() },
+            @{ Entry = "$baseName/$([System.IO.Path]::GetFileName($libmpvDll))"; Sha256 = (Get-FileHash -LiteralPath $libmpvDll -Algorithm SHA256).Hash.ToLowerInvariant() },
+            @{ Entry = "$baseName/libmpv-NOTICE.txt"; Sha256 = (Get-FileHash -LiteralPath $libmpvNotice -Algorithm SHA256).Hash.ToLowerInvariant() }
+        )
+        foreach ($license in $licenseFiles) {
+            $expectedEntries += @{
+                Entry = "$baseName/$([System.IO.Path]::GetFileName($license))"
+                Sha256 = (Get-FileHash -LiteralPath $license -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+        }
+        foreach ($license in $libmpvLicenseFiles) {
+            $expectedEntries += @{
+                Entry = "$baseName/licenses/libmpv/$($license.Name)"
+                Sha256 = $license.Sha256
+            }
+        }
+
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            foreach ($expected in $expectedEntries) {
+                $entry = $package.GetEntry($expected.Entry)
+                if ($null -eq $entry) {
+                    throw "Portable zip is missing package file: $($expected.Entry)"
+                }
+                $stream = $entry.Open()
+                try {
+                    $actual = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+                }
+                finally {
+                    $stream.Dispose()
+                }
+                if ($actual -ne $expected.Sha256) {
+                    throw "Portable zip payload hash mismatch: $($expected.Entry)"
+                }
+            }
+        }
+        finally {
+            $sha.Dispose()
+        }
+    }
+    finally {
+        $package.Dispose()
+    }
 }
 finally {
     if (Test-Path -LiteralPath $stageRoot) {

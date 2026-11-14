@@ -155,6 +155,18 @@ for notice in BUILD-INFO.txt LICENSE.mpv.LGPL LICENSE.ffmpeg.LGPL \
   install -m 644 "$LIBMPV_NOTICES/$notice" "$APPDIR/usr/share/licenses/kattri/$notice"
 done
 
+# libmpv also loads the host's libjpeg.so.8. The AppImage includes that ABI when linuxdeploy
+# resolves it, so include the exact copyright metadata and package version from the same build
+# host rather than treating the library as part of the pinned libmpv archive.
+LIBJPEG_COPYRIGHT="/usr/share/doc/libjpeg-turbo8/copyright"
+if [[ ! -s "$LIBJPEG_COPYRIGHT" ]]; then
+  echo "error: missing Ubuntu libjpeg-turbo copyright file $LIBJPEG_COPYRIGHT" >&2
+  exit 1
+fi
+install -m 644 "$LIBJPEG_COPYRIGHT" "$APPDIR/usr/share/licenses/kattri/LICENSE.libjpeg-turbo"
+dpkg-query -W -f='${Package} ${Version}\n' libjpeg-turbo8 \
+  > "$APPDIR/usr/share/licenses/kattri/BUILD-INFO.libjpeg-turbo.txt"
+
 LINUXDEPLOY_ARGS=(
   --appdir "$APPDIR"
   --executable "$APPDIR/usr/bin/kattri"
@@ -191,6 +203,19 @@ if ! find "$APPDIR/usr/lib" -type f -name 'libxkbcommon-x11.so.0*' -print -quit 
   echo 'error: AppImage does not contain the dynamically loaded libxkbcommon-x11 runtime' >&2
   exit 1
 fi
+if [[ ! -e "$APPDIR/usr/lib/libmpv.so.2" ]]; then
+  echo 'error: AppImage does not contain libmpv at usr/lib/libmpv.so.2' >&2
+  exit 1
+fi
+if [[ ! -e "$APPDIR/usr/lib/libjpeg.so.8" ]]; then
+  echo 'error: AppImage does not contain libjpeg.so.8 required by the pinned libmpv build' >&2
+  exit 1
+fi
+if LD_LIBRARY_PATH="$APPDIR/usr/lib" ldd "$APPDIR/usr/lib/libmpv.so.2" | grep -q 'not found'; then
+  echo 'error: bundled libmpv has unresolved native dependencies' >&2
+  LD_LIBRARY_PATH="$APPDIR/usr/lib" ldd "$APPDIR/usr/lib/libmpv.so.2" >&2
+  exit 1
+fi
 
 mkdir -p "$OUT_DIR"
 OUT="$OUT_DIR/kattri-$VERSION-linux-x64.AppImage"
@@ -206,5 +231,27 @@ ARCH=x86_64 "$APPIMAGETOOL" "${APPIMAGETOOL_ARGS[@]}" "$APPDIR" "$OUT"
 chmod 755 "$OUT"
 # Hash the bare file name so `sha256sum -c` works in a directory of downloaded assets.
 (cd "$(dirname "$OUT")" && sha256sum "$(basename "$OUT")" > "$(basename "$OUT").sha256")
+
+# Preserve raw copies of the exact package payloads for the release-native sidecar. They are
+# evidence files in the workflow artifact, not additional published release assets.
+EVIDENCE="$OUT_DIR/release-validation"
+mkdir -p "$EVIDENCE/native" "$EVIDENCE/licenses/libmpv" \
+  "$EVIDENCE/licenses/libjpeg-turbo" "$EVIDENCE/executables"
+cp "$APPDIR/usr/bin/kattri" "$EVIDENCE/executables/kattri"
+cp -L "$APPDIR/usr/lib/libmpv.so.2" "$EVIDENCE/native/libmpv.so.2"
+cp -L "$APPDIR/usr/lib/libjpeg.so.8" "$EVIDENCE/native/libjpeg.so.8"
+for notice in LICENSE.mpv.LGPL LICENSE.ffmpeg.LGPL LICENSE.libplacebo.LGPL \
+  LICENSE.dav1d.BSD-2-Clause LICENSE.libdisplay-info.MIT; do
+  cp "$APPDIR/usr/share/licenses/kattri/$notice" "$EVIDENCE/licenses/libmpv/$notice"
+done
+cp "$APPDIR/usr/share/licenses/kattri/BUILD-INFO.txt" "$EVIDENCE/licenses/libmpv/BUILD-INFO.txt"
+cp "$APPDIR/usr/share/licenses/kattri/libmpv-NOTICE.txt" "$EVIDENCE/licenses/libmpv/libmpv-NOTICE.txt"
+cp "$APPDIR/usr/share/licenses/kattri/LICENSE.libjpeg-turbo" \
+  "$EVIDENCE/licenses/libjpeg-turbo/LICENSE.libjpeg-turbo"
+cp "$APPDIR/usr/share/licenses/kattri/BUILD-INFO.libjpeg-turbo.txt" \
+  "$EVIDENCE/licenses/libjpeg-turbo/BUILD-INFO.libjpeg-turbo.txt"
+find "$APPDIR/usr/lib" \( -type f -o -type l \) -name '*.so*' -printf '%P\n' | sort \
+  > "$EVIDENCE/linuxdeploy-shared-libraries.txt"
+
 echo "==> built $OUT"
 echo "$OUT"

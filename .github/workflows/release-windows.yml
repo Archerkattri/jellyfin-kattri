@@ -126,10 +126,91 @@ jobs:
             "Artifacts in this run were signed through the configured signing service." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           }
 
+      - name: Refresh MSI checksum and write native component sidecar
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $platform = '${{ matrix.platform }}'
+          $msiName = "JellyfinKattri-$env:KATTRI_VERSION-$platform.msi"
+          $zipName = "JellyfinKattri-$env:KATTRI_VERSION-$platform-portable.zip"
+          $msiPath = Join-Path 'dist' $msiName
+          $zipPath = Join-Path 'dist' $zipName
+          # Optional signing changes the MSI after build-msi wrote its initial checksum.
+          $msiHash = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "$msiPath.sha256" -Value "$msiHash  $msiName" -Encoding ascii
+
+          . (Join-Path $env:GITHUB_WORKSPACE 'packaging/windows/libmpv-licenses.ps1')
+          $repoRoot = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+          $pin = Get-LibmpvManifestPin -RepositoryRoot $repoRoot -Platform "windows-$platform"
+          $licenseFiles = @(Get-VerifiedLibmpvLicenseFiles)
+          $evidenceRoot = Join-Path 'dist/release-validation'
+          $nativeEvidence = Join-Path $evidenceRoot 'native/libmpv-2.dll'
+          $licenseEvidenceRoot = Join-Path $evidenceRoot 'licenses/libmpv'
+          $executableEvidence = Join-Path $evidenceRoot 'executables/jellyfin-kattri.exe'
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $nativeEvidence), $licenseEvidenceRoot, (Split-Path -Parent $executableEvidence) | Out-Null
+          Copy-Item -LiteralPath "target/libmpv/windows-$platform/libmpv-2.dll" -Destination $nativeEvidence -Force
+          Copy-Item -LiteralPath "target/release/$env:KATTRI_BIN.exe" -Destination $executableEvidence -Force
+          $noticePath = Get-LibmpvNoticePath -RepositoryRoot $repoRoot
+          $noticeEvidence = Join-Path $licenseEvidenceRoot 'libmpv-NOTICE.txt'
+          Copy-Item -LiteralPath $noticePath -Destination $noticeEvidence -Force
+          foreach ($license in $licenseFiles) {
+            Copy-Item -LiteralPath $license.Path -Destination (Join-Path $licenseEvidenceRoot $license.Name) -Force
+          }
+
+          $packageNames = @($msiName, $zipName)
+          $nativeComponents = foreach ($packageName in $packageNames) {
+            $packagePrefix = if ($packageName -like '*.zip') {
+              '{0}/' -f [System.IO.Path]::GetFileNameWithoutExtension($packageName)
+            } else {
+              'Jellyfin Kattri/'
+            }
+            $licenseRecords = @(
+              @{ path = "${packagePrefix}libmpv-NOTICE.txt"; evidence_file = 'release-validation/licenses/libmpv/libmpv-NOTICE.txt' }
+            ) + @($licenseFiles | ForEach-Object {
+              @{ path = "${packagePrefix}licenses/libmpv/$($_.Name)"; evidence_file = "release-validation/licenses/libmpv/$($_.Name)" }
+            })
+            @{
+              package_file = $packageName
+              name = 'libmpv'
+              manifest_platform = "windows-$platform"
+              packaged_file = "${packagePrefix}libmpv-2.dll"
+              evidence_file = 'release-validation/native/libmpv-2.dll'
+              license_files = $licenseRecords
+            }
+          }
+          $executables = foreach ($packageName in $packageNames) {
+            @{
+              package_file = $packageName
+              file = 'release-validation/executables/jellyfin-kattri.exe'
+              audit_scope = 'The exact packaged executable hash is recorded. This release job did not produce cargo-auditable metadata or a cargo audit bin record.'
+            }
+          }
+          $spec = @{
+            source_commit = $env:GITHUB_SHA
+            target = "windows-$platform"
+            packages = $packageNames
+            native_components = @($nativeComponents)
+            executables = @($executables)
+            inventory_gaps = @('The pinned Windows libmpv archive contains no BUILD-INFO.txt; the source versions and license claim are taken verbatim from packaging/libmpv/manifest.toml.')
+          }
+          $specPath = Join-Path $env:RUNNER_TEMP 'release-native-components-input.json'
+          $spec | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $specPath -Encoding utf8
+          python packaging/write-release-native-sidecar.py `
+            --artifact-root dist `
+            --spec $specPath `
+            --output release-native-components.json `
+            --libmpv-manifest packaging/libmpv/manifest.toml
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: kattri-windows-${{ matrix.platform }}${{ steps.signing-state.outputs.suffix }}
-          path: dist/*
+          path: |
+            dist/JellyfinKattri-*.msi
+            dist/JellyfinKattri-*.msi.sha256
+            dist/JellyfinKattri-*-portable.zip
+            dist/JellyfinKattri-*-portable.zip.sha256
+            dist/release-native-components.json
+            dist/release-validation/**
           if-no-files-found: error
           retention-days: 30

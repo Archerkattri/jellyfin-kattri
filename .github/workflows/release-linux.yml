@@ -120,6 +120,86 @@ jobs:
             packaging/linux/appimage/build-appimage.sh "$VERSION" \
             target/release/jellyfin-kattri dist/linux
 
+      - name: Write AppImage native component sidecar
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          APPIMAGE_NAME="$(basename "$(find dist/linux -maxdepth 1 -name 'kattri-*-linux-x64.AppImage' -print -quit)")"
+          if [[ -z "$APPIMAGE_NAME" ]]; then echo 'AppImage package is missing' >&2; exit 1; fi
+          python3 - "$RUNNER_TEMP/release-native-components-input.json" "$APPIMAGE_NAME" "$SOURCE_COMMIT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          spec_path, package, commit = sys.argv[1:]
+          evidence = "release-validation"
+          libmpv_names = [
+              "BUILD-INFO.txt", "libmpv-NOTICE.txt", "LICENSE.mpv.LGPL", "LICENSE.ffmpeg.LGPL",
+              "LICENSE.libplacebo.LGPL", "LICENSE.dav1d.BSD-2-Clause", "LICENSE.libdisplay-info.MIT",
+          ]
+          libjpeg_copyright = Path("dist/linux/release-validation/licenses/libjpeg-turbo/LICENSE.libjpeg-turbo").read_text(encoding="utf-8")
+          libjpeg_claim = next((line.split(":", 1)[1].strip() for line in libjpeg_copyright.splitlines() if line.startswith("License:")), None)
+          if not libjpeg_claim:
+              raise SystemExit("libjpeg copyright payload has no License field")
+          libjpeg_version = Path("dist/linux/release-validation/licenses/libjpeg-turbo/BUILD-INFO.libjpeg-turbo.txt").read_text(encoding="utf-8").strip()
+          components = [{
+              "package_file": package,
+              "name": "libmpv",
+              "manifest_platform": "linux-x64",
+              "packaged_file": "usr/lib/libmpv.so.2",
+              "evidence_file": f"{evidence}/native/libmpv.so.2",
+              "build_info_path": "usr/share/licenses/kattri/BUILD-INFO.txt",
+              "build_info_evidence_file": f"{evidence}/licenses/libmpv/BUILD-INFO.txt",
+              "license_files": [
+                  {"path": f"usr/share/licenses/kattri/{name}", "evidence_file": f"{evidence}/licenses/libmpv/{name}"}
+                  for name in libmpv_names
+              ],
+          }, {
+              "package_file": package,
+              "name": "libjpeg-turbo",
+              "version": libjpeg_version,
+              "source_url": "https://packages.ubuntu.com/jammy/libjpeg-turbo8",
+              "license_claim": libjpeg_claim,
+              "packaged_file": "usr/lib/libjpeg.so.8",
+              "evidence_file": f"{evidence}/native/libjpeg.so.8",
+              "build_info_path": "usr/share/licenses/kattri/BUILD-INFO.libjpeg-turbo.txt",
+              "build_info_evidence_file": f"{evidence}/licenses/libjpeg-turbo/BUILD-INFO.libjpeg-turbo.txt",
+              "license_files": [{
+                  "path": "usr/share/licenses/kattri/LICENSE.libjpeg-turbo",
+                  "evidence_file": f"{evidence}/licenses/libjpeg-turbo/LICENSE.libjpeg-turbo",
+              }],
+          }]
+          library_list = Path("dist/linux/release-validation/linuxdeploy-shared-libraries.txt").read_text(encoding="utf-8").splitlines()
+          known = {"libmpv.so.2", "libjpeg.so.8"}
+          gaps = [
+              f"AppImage linuxdeploy bundled shared library {name}; per-library source, version, and license metadata were not pinned by this build."
+              for name in library_list if Path(name).name not in known
+          ]
+          gaps.append("libjpeg-turbo8 is copied from the Ubuntu 22.04 runner package; its source archive SHA-256 is not pinned by this workflow.")
+          gaps.append("This release job did not produce a package-specific cargo audit bin record.")
+          spec = {
+              "source_commit": commit,
+              "target": "linux-x64",
+              "packages": [package],
+              "native_components": components,
+              "executables": [{
+                  "package_file": package,
+                  "file": f"{evidence}/executables/kattri",
+                  "audit_scope": "Exact executable payload bytes are exported. This release job did not produce cargo-auditable metadata or a cargo audit bin record.",
+              }],
+              "inventory_gaps": gaps,
+          }
+          with open(spec_path, "w", encoding="utf-8") as output:
+              json.dump(spec, output, indent=2)
+              output.write("\n")
+          PY
+          python3 packaging/write-release-native-sidecar.py \
+            --artifact-root dist/linux \
+            --spec "$RUNNER_TEMP/release-native-components-input.json" \
+            --output release-native-components.json \
+            --libmpv-manifest packaging/libmpv/manifest.toml
+
       - name: Upload AppImage
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
@@ -128,6 +208,8 @@ jobs:
             dist/linux/kattri-*-linux-x64.AppImage
             dist/linux/kattri-*-linux-x64.AppImage.sha256
             dist/linux/kattri-*-linux-x64.AppImage.zsync
+            dist/linux/release-native-components.json
+            dist/linux/release-validation/**
           if-no-files-found: error
           retention-days: 30
 
@@ -248,6 +330,125 @@ jobs:
           cd dist/linux
           for f in kattri_*.deb kattri-*.rpm; do sha256sum "$f" > "$f.sha256"; done
 
+      - name: Stage package evidence and write native component sidecar
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ROOT=dist/linux
+          EVIDENCE="$ROOT/release-validation"
+          mkdir -p "$EVIDENCE/native" "$EVIDENCE/licenses/libmpv" \
+            "$EVIDENCE/licenses/libjpeg-turbo" "$EVIDENCE/executables"
+          cp target/kattri-libmpv/libmpv.so.2 "$EVIDENCE/native/libmpv.so.2"
+          cp target/kattri-libmpv/libjpeg.so.8 "$EVIDENCE/native/libjpeg.so.8"
+          for file in BUILD-INFO.txt LICENSE.mpv.LGPL LICENSE.ffmpeg.LGPL \
+            LICENSE.libplacebo.LGPL LICENSE.dav1d.BSD-2-Clause LICENSE.libdisplay-info.MIT; do
+            cp "target/kattri-libmpv/$file" "$EVIDENCE/licenses/libmpv/$file"
+          done
+          cp packaging/libmpv/NOTICE.txt "$EVIDENCE/licenses/libmpv/libmpv-NOTICE.txt"
+          cp target/kattri-libmpv/LICENSE.libjpeg-turbo "$EVIDENCE/licenses/libjpeg-turbo/LICENSE.libjpeg-turbo"
+          cp target/kattri-libmpv/BUILD-INFO.libjpeg-turbo.txt \
+            "$EVIDENCE/licenses/libjpeg-turbo/BUILD-INFO.libjpeg-turbo.txt"
+
+          # cargo-deb may strip the release executable, so export the exact installed bytes.
+          DEB="$(find "$ROOT" -maxdepth 1 -name 'kattri_*.deb' -print -quit)"
+          if [[ -z "$DEB" ]]; then echo 'no deb package found' >&2; exit 1; fi
+          DEB_STAGE="$(mktemp -d "$RUNNER_TEMP/kattri-deb.XXXXXX")"
+          trap 'rm -rf "$DEB_STAGE"' EXIT
+          dpkg-deb -x "$DEB" "$DEB_STAGE"
+          cp "$DEB_STAGE/usr/bin/kattri" "$EVIDENCE/executables/kattri-deb"
+          cp target/kattri-stripped "$EVIDENCE/executables/kattri-rpm"
+
+          python3 - "$RUNNER_TEMP/release-native-components-input.json" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          root = Path("dist/linux")
+          evidence = "release-validation"
+          packages = sorted([p.name for p in root.glob("kattri_*.deb")] + [p.name for p in root.glob("kattri-*.rpm")])
+          if len(packages) != 2:
+              raise SystemExit(f"expected one deb and one rpm, found {packages}")
+          libjpeg_build = (root / evidence / "licenses/libjpeg-turbo/BUILD-INFO.libjpeg-turbo.txt").read_text(encoding="utf-8").strip()
+          copyright_text = (root / evidence / "licenses/libjpeg-turbo/LICENSE.libjpeg-turbo").read_text(encoding="utf-8")
+          libjpeg_license = next((line.split(":", 1)[1].strip() for line in copyright_text.splitlines() if line.startswith("License:")), None)
+          if not libjpeg_license:
+              raise SystemExit("the installed libjpeg copyright file has no License field")
+          components = []
+          executables = []
+          for package in packages:
+              is_deb = package.endswith(".deb")
+              libmpv_license_root = "usr/share/doc/kattri/licenses" if is_deb else "usr/share/licenses/kattri"
+              libmpv_notice = "usr/share/doc/kattri/libmpv-NOTICE.txt" if is_deb else "usr/share/licenses/kattri/libmpv-NOTICE.txt"
+              libmpv_build = "usr/share/doc/kattri/libmpv-BUILD-INFO.txt" if is_deb else "usr/share/licenses/kattri/libmpv-BUILD-INFO.txt"
+              libmpv_licenses = [
+                  ("libmpv.LGPL", "LICENSE.mpv.LGPL"),
+                  ("ffmpeg.LGPL", "LICENSE.ffmpeg.LGPL"),
+                  ("libplacebo.LGPL", "LICENSE.libplacebo.LGPL"),
+                  ("dav1d.BSD-2-Clause", "LICENSE.dav1d.BSD-2-Clause"),
+                  ("libdisplay-info.MIT", "LICENSE.libdisplay-info.MIT"),
+              ] if is_deb else [
+                  ("LICENSE.mpv.LGPL", "LICENSE.mpv.LGPL"),
+                  ("LICENSE.ffmpeg.LGPL", "LICENSE.ffmpeg.LGPL"),
+                  ("LICENSE.libplacebo.LGPL", "LICENSE.libplacebo.LGPL"),
+                  ("LICENSE.dav1d.BSD-2-Clause", "LICENSE.dav1d.BSD-2-Clause"),
+                  ("LICENSE.libdisplay-info.MIT", "LICENSE.libdisplay-info.MIT"),
+              ]
+              components.append({
+                  "package_file": package,
+                  "name": "libmpv",
+                  "manifest_platform": "linux-x64",
+                  "packaged_file": "usr/lib/kattri/libmpv.so.2",
+                  "evidence_file": f"{evidence}/native/libmpv.so.2",
+                  "build_info_path": libmpv_build,
+                  "build_info_evidence_file": f"{evidence}/licenses/libmpv/BUILD-INFO.txt",
+                  "license_files": [
+                      {"path": libmpv_notice, "evidence_file": f"{evidence}/licenses/libmpv/libmpv-NOTICE.txt"},
+                      *[{"path": f"{libmpv_license_root}/{package_name}", "evidence_file": f"{evidence}/licenses/libmpv/{source_name}"} for package_name, source_name in libmpv_licenses],
+                  ],
+              })
+              jpeg_license_path = "usr/share/doc/kattri/licenses/libjpeg-turbo" if is_deb else "usr/share/licenses/kattri/LICENSE.libjpeg-turbo"
+              jpeg_build_path = "usr/share/doc/kattri/libjpeg-turbo-BUILD-INFO.txt" if is_deb else "usr/share/licenses/kattri/libjpeg-turbo-BUILD-INFO.txt"
+              components.append({
+                  "package_file": package,
+                  "name": "libjpeg-turbo",
+                  "version": libjpeg_build,
+                  "source_url": "https://packages.ubuntu.com/jammy/libjpeg-turbo8",
+                  "license_claim": libjpeg_license,
+                  "packaged_file": "usr/lib/kattri/libjpeg.so.8",
+                  "evidence_file": f"{evidence}/native/libjpeg.so.8",
+                  "build_info_path": jpeg_build_path,
+                  "build_info_evidence_file": f"{evidence}/licenses/libjpeg-turbo/BUILD-INFO.libjpeg-turbo.txt",
+                  "license_files": [{"path": jpeg_license_path, "evidence_file": f"{evidence}/licenses/libjpeg-turbo/LICENSE.libjpeg-turbo"}],
+              })
+              executable = "kattri-deb" if is_deb else "kattri-rpm"
+              executables.append({
+                  "package_file": package,
+                  "file": f"{evidence}/executables/{executable}",
+                  "audit_scope": "Exact executable payload bytes are exported. This release job did not produce cargo-auditable metadata or a cargo audit bin record.",
+              })
+          spec = {
+              "source_commit": os.environ["SOURCE_COMMIT"],
+              "target": "linux-x64",
+              "packages": packages,
+              "native_components": components,
+              "executables": executables,
+              "inventory_gaps": [
+                  "libjpeg-turbo8 is copied from the Ubuntu 22.04 runner package; its package version and Debian copyright metadata are recorded, but no source archive checksum is pinned by this workflow.",
+                  "This release job did not produce package-specific cargo audit bin records.",
+              ],
+          }
+          with open(sys.argv[1], "w", encoding="utf-8") as output:
+              json.dump(spec, output, indent=2)
+              output.write("\n")
+          PY
+          python3 packaging/write-release-native-sidecar.py \
+            --artifact-root "$ROOT" \
+            --spec "$RUNNER_TEMP/release-native-components-input.json" \
+            --output release-native-components.json \
+            --libmpv-manifest packaging/libmpv/manifest.toml
+
       - name: Upload deb and rpm
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
@@ -257,6 +458,8 @@ jobs:
             dist/linux/kattri_*.deb.sha256
             dist/linux/kattri-*.rpm
             dist/linux/kattri-*.rpm.sha256
+            dist/linux/release-native-components.json
+            dist/linux/release-validation/**
           if-no-files-found: error
           retention-days: 30
 
@@ -314,6 +517,100 @@ jobs:
           cd dist/linux
           sha256sum "kattri-${VERSION}-linux-x64.flatpak" > "kattri-${VERSION}-linux-x64.flatpak.sha256"
 
+      - name: Write Flatpak native component sidecar
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ROOT=dist/linux
+          PACKAGE="$(basename "$ROOT"/kattri-*-linux-x64.flatpak)"
+          FILES="$RUNNER_TEMP/build/files"
+          EVIDENCE="$ROOT/release-validation"
+          mkdir -p "$EVIDENCE/native" "$EVIDENCE/licenses/libmpv" \
+            "$EVIDENCE/licenses/libass" "$EVIDENCE/licenses/uchardet" \
+            "$EVIDENCE/licenses/kattri" "$EVIDENCE/executables"
+          cp -L "$FILES/lib/libmpv.so.2" "$EVIDENCE/native/libmpv.so.2"
+          cp -L "$FILES/lib/libass.so.9" "$EVIDENCE/native/libass.so.9"
+          cp -L "$FILES/lib/libuchardet.so.0" "$EVIDENCE/native/libuchardet.so.0"
+          cp "$FILES/bin/kattri" "$EVIDENCE/executables/kattri"
+          cp "$FILES/share/licenses/libmpv/BUILD-INFO.txt" "$EVIDENCE/licenses/libmpv/BUILD-INFO.txt"
+          for license in LICENSE.mpv.LGPL LICENSE.ffmpeg.LGPL LICENSE.libplacebo.LGPL \
+            LICENSE.dav1d.BSD-2-Clause LICENSE.libdisplay-info.MIT; do
+            cp "$FILES/share/licenses/libmpv/$license" "$EVIDENCE/licenses/libmpv/$license"
+          done
+          cp "$FILES/share/licenses/libass/COPYING" "$EVIDENCE/licenses/libass/COPYING"
+          cp "$FILES/share/licenses/uchardet/COPYING" "$EVIDENCE/licenses/uchardet/COPYING"
+          cp "$FILES/share/licenses/org.kattri.JellyfinKattri/LICENSE" "$EVIDENCE/licenses/kattri/LICENSE"
+          python3 - "$RUNNER_TEMP/release-native-input.json" "$PACKAGE" "$SOURCE_COMMIT" <<'PY'
+          import json
+          import sys
+
+          spec_path, package, commit = sys.argv[1:]
+          evidence = "release-validation"
+          components = [{
+              "package_file": package,
+              "name": "libmpv",
+              "manifest_platform": "linux-x64",
+              "packaged_file": "lib/libmpv.so.2",
+              "evidence_file": f"{evidence}/native/libmpv.so.2",
+              "build_info_path": "share/licenses/libmpv/BUILD-INFO.txt",
+              "build_info_evidence_file": f"{evidence}/licenses/libmpv/BUILD-INFO.txt",
+              "license_files": [
+                  {"path": f"share/licenses/libmpv/{name}",
+                   "evidence_file": f"{evidence}/licenses/libmpv/{name}"}
+                  for name in [
+                      "LICENSE.mpv.LGPL", "LICENSE.ffmpeg.LGPL", "LICENSE.libplacebo.LGPL", "LICENSE.dav1d.BSD-2-Clause",
+                      "LICENSE.libdisplay-info.MIT",
+                  ]
+              ],
+          }, {
+              "package_file": package,
+              "name": "libass",
+              "version": "0.17.4",
+              "source_url": "https://github.com/libass/libass/releases/download/0.17.4/libass-0.17.4.tar.xz",
+              "source_archive_sha256": "78f1179b838d025e9c26e8fef33f8092f65611444ffa1bfc0cfac6a33511a05a",
+              "license_claim": "ISC",
+              "packaged_file": "lib/libass.so.9",
+              "evidence_file": f"{evidence}/native/libass.so.9",
+              "license_files": [{"path": "share/licenses/libass/COPYING",
+                                 "evidence_file": f"{evidence}/licenses/libass/COPYING"}],
+          }, {
+              "package_file": package,
+              "name": "uchardet",
+              "version": "0.0.8",
+              "source_url": "https://www.freedesktop.org/software/uchardet/releases/uchardet-0.0.8.tar.xz",
+              "source_archive_sha256": "e97a60cfc00a1c147a674b097bb1422abd9fa78a2d9ce3f3fdcc2e78a34ac5f0",
+              "license_claim": "MPL-1.1",
+              "packaged_file": "lib/libuchardet.so.0",
+              "evidence_file": f"{evidence}/native/libuchardet.so.0",
+              "license_files": [{"path": "share/licenses/uchardet/COPYING",
+                                 "evidence_file": f"{evidence}/licenses/uchardet/COPYING"}],
+          }]
+          spec = {
+              "source_commit": commit,
+              "target": "linux-x64",
+              "packages": [package],
+              "native_components": components,
+              "executables": [{
+                  "package_file": package,
+                  "file": f"{evidence}/executables/kattri",
+                  "audit_scope": "Exact executable payload bytes are exported. This release job did not produce cargo-auditable metadata or a cargo audit bin record.",
+              }],
+              "inventory_gaps": [
+                  "The Flatpak runtime branch is pinned to 25.08, but host-provided runtime libraries are not separately source-hashed in this sidecar.",
+                  "This release job did not produce a package-specific cargo audit bin record.",
+              ],
+          }
+          with open(spec_path, "w", encoding="utf-8") as output:
+              json.dump(spec, output, indent=2)
+              output.write("\n")
+          PY
+          python3 packaging/write-release-native-sidecar.py \
+            --artifact-root "$ROOT" \
+            --spec "$RUNNER_TEMP/release-native-input.json" \
+            --output release-native-components.json \
+            --libmpv-manifest packaging/libmpv/manifest.toml
+
       - name: Upload Flatpak bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
@@ -321,5 +618,7 @@ jobs:
           path: |
             dist/linux/kattri-*-linux-x64.flatpak
             dist/linux/kattri-*-linux-x64.flatpak.sha256
+            dist/linux/release-native-components.json
+            dist/linux/release-validation/**
           if-no-files-found: error
           retention-days: 30

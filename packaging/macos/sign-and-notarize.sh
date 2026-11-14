@@ -113,7 +113,7 @@ xcrun stapler validate "$ARTIFACT"
 
 if [[ "$ARTIFACT" == *.app ]]; then
   rm -rf "$(dirname "$SUBMIT_PATH")"
-  spctl --assess --type execute --verbose=2 "$ARTIFACT" || true
+  spctl --assess --type execute --verbose=2 "$ARTIFACT"
 fi
 
 echo "==> signed and notarized $ARTIFACT"

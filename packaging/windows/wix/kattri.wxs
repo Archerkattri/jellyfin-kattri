@@ -25,6 +25,8 @@
     ExeName      file name of that executable, for example jellyfin-kattri.exe
     LicensePath  full path to the license file to install alongside the executable
     LibmpvPath   full path to the verified libmpv-2.dll, installed next to the executable
+    LibmpvLicenseDirectory  verified upstream license texts for the pinned Windows libmpv build
+    LibmpvNoticePath  project notice describing the bundled libmpv build
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
@@ -47,6 +49,8 @@
       <ComponentRef Id="ExecutableComponent" />
       <ComponentRef Id="LicenseComponent" />
       <ComponentRef Id="LibmpvComponent" />
+      <ComponentRef Id="LibmpvNoticeComponent" />
+      <ComponentRef Id="LibmpvLicensesComponent" />
       <ComponentRef Id="JellyfinUriProtocolComponent" />
       <ComponentRef Id="StartMenuShortcutComponent" />
     </Feature>
@@ -62,6 +66,21 @@
         <Component Id="LibmpvComponent" Guid="*">
           <File Id="LibmpvDll" Source="$(var.LibmpvPath)" Name="libmpv-2.dll" KeyPath="yes" />
         </Component>
+
+        <Component Id="LibmpvNoticeComponent" Guid="*">
+          <File Id="LibmpvNotice" Source="$(var.LibmpvNoticePath)" Name="libmpv-NOTICE.txt" KeyPath="yes" />
+        </Component>
+
+        <Directory Id="LicensesDirectory" Name="licenses">
+          <Directory Id="LibmpvLicensesDirectory" Name="libmpv">
+            <Component Id="LibmpvLicensesComponent" Guid="*">
+              <File Id="MpvLicenseLgpl" Source="$(var.LibmpvLicenseDirectory)\LICENSE.LGPL" Name="LICENSE.LGPL" KeyPath="yes" />
+              <File Id="MpvCopyright" Source="$(var.LibmpvLicenseDirectory)\Copyright" Name="Copyright" />
+              <File Id="FfmpegLicenseLgplv3" Source="$(var.LibmpvLicenseDirectory)\COPYING.LGPLv3" Name="COPYING.LGPLv3" />
+              <File Id="FfmpegLicenseNotice" Source="$(var.LibmpvLicenseDirectory)\LICENSE.md" Name="LICENSE.md" />
+            </Component>
+          </Directory>
+        </Directory>
 
         <Component Id="LicenseComponent" Guid="*">
           <File Id="LicenseFile" Source="$(var.LicensePath)" Name="LICENSE.txt" KeyPath="yes" />

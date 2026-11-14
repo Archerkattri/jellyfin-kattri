@@ -65,9 +65,12 @@ if (-not $wix) {
     throw 'The WiX v4 CLI (wix) was not found on PATH. Install WiX v4 and retry.'
 }
 
-# The verified libmpv DLL is passed to WiX as LibmpvPath. kattri.wxs does not install it yet,
-# so the MSI does not contain libmpv until that file adds a component for the define.
+# The verified libmpv DLL and its pinned upstream license payload are passed to WiX.
 $libmpvDll = & (Join-Path $PSScriptRoot '..\libmpv\fetch.ps1') -Platform "windows-$Platform"
+. (Join-Path $PSScriptRoot 'libmpv-licenses.ps1')
+$libmpvLicenseFiles = @(Get-VerifiedLibmpvLicenseFiles)
+$libmpvLicenseDirectory = Join-Path $PSScriptRoot 'libmpv-licenses'
+$libmpvNoticePath = Get-LibmpvNoticePath -RepositoryRoot $repoRoot
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $msiPath = Join-Path (Resolve-Path $OutputDir).Path "JellyfinKattri-$Version-$Platform.msi"
@@ -85,6 +88,8 @@ $arch = $Platform
     -d "ExeName=$exeName" `
     -d "LicensePath=$licenseFull" `
     -d "LibmpvPath=$libmpvDll" `
+    -d "LibmpvLicenseDirectory=$libmpvLicenseDirectory" `
+    -d "LibmpvNoticePath=$libmpvNoticePath" `
     -d "IconPath=$iconFull" `
     -out $msiPath `
     $wxsPath

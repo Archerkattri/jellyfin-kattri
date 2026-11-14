@@ -96,12 +96,46 @@ fi
 # The app dlopens libmpv and does not link it, so the binary gets no -change entry.
 # MpvLibrary::load (proofs/mpv-render/src/library.rs) tries
 # Contents/Frameworks/libmpv.2.dylib before the bare names. Its own dependencies (FFmpeg
-# and other dylibs) are not bundled here yet.
+# and other dylibs) are not bundled here yet. Copy the pinned archive's original license files
+# and build record into Resources; the short project notice is supplemental.
 LIBMPV_DYLIB="$("$ROOT/packaging/libmpv/fetch.sh" macos-universal)"
 cp "$LIBMPV_DYLIB" "$APP/Contents/Frameworks/libmpv.2.dylib"
 chmod 644 "$APP/Contents/Frameworks/libmpv.2.dylib"
 install_name_tool -id "@rpath/libmpv.2.dylib" "$APP/Contents/Frameworks/libmpv.2.dylib"
 cp "$ROOT/packaging/libmpv/NOTICE.txt" "$APP/Contents/Resources/libmpv-NOTICE.txt"
+
+shopt -s nullglob
+LIBMPV_ARCHIVES=("$ROOT"/target/libmpv/macos-universal/kattri-libmpv-macos-universal-*.tar.gz)
+if [[ ${#LIBMPV_ARCHIVES[@]} -ne 1 ]]; then
+  echo "error: expected one verified macOS libmpv archive, found ${#LIBMPV_ARCHIVES[@]}" >&2
+  exit 1
+fi
+LIBMPV_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/kattri-mpv-licenses.XXXXXX")"
+trap 'rm -rf "$LIBMPV_STAGE"' EXIT
+tar -xzf "${LIBMPV_ARCHIVES[0]}" --strip-components=1 -C "$LIBMPV_STAGE"
+LICENSE_SOURCE="$LIBMPV_STAGE/licenses"
+BUILD_INFO_SOURCE="$LIBMPV_STAGE/BUILD-INFO.txt"
+if [[ ! -s "$BUILD_INFO_SOURCE" || ! -d "$LICENSE_SOURCE" ]]; then
+  echo 'error: pinned macOS libmpv archive is missing its build record or licenses directory' >&2
+  exit 1
+fi
+LIBMPV_LICENSE_DIR="$APP/Contents/Resources/licenses/libmpv"
+mkdir -p "$LIBMPV_LICENSE_DIR"
+LICENSE_FILES=("$LICENSE_SOURCE"/*)
+if [[ ${#LICENSE_FILES[@]} -eq 0 ]]; then
+  echo 'error: pinned macOS libmpv archive has no license files' >&2
+  exit 1
+fi
+for license in "${LICENSE_FILES[@]}"; do
+  if [[ ! -s "$license" || ! -f "$license" ]]; then
+    echo "error: invalid license payload in pinned macOS libmpv archive: $license" >&2
+    exit 1
+  fi
+  install -m 644 "$license" "$LIBMPV_LICENSE_DIR/$(basename "$license")"
+  cmp "$license" "$LIBMPV_LICENSE_DIR/$(basename "$license")"
+done
+install -m 644 "$BUILD_INFO_SOURCE" "$LIBMPV_LICENSE_DIR/BUILD-INFO.txt"
+cmp "$BUILD_INFO_SOURCE" "$LIBMPV_LICENSE_DIR/BUILD-INFO.txt"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

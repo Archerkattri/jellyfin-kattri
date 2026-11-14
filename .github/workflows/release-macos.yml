@@ -138,6 +138,15 @@ jobs:
             packaging/macos/sign-and-notarize.sh "dist/macos/Jellyfin Kattri.app"
           fi
 
+      - name: Verify packaged macOS URL delivery on the ephemeral runner
+        env:
+          APP_PATH: dist/macos/Jellyfin Kattri.app
+          PROFILE_NAME: acceptance-macos-url
+        run: |
+          set -euo pipefail
+          bash scripts/acceptance/setup_macos_runner_profile.sh
+          bash scripts/acceptance/verify_macos_scheme.sh
+
       - name: Build disk image
         run: packaging/macos/make-dmg.sh "dist/macos/Jellyfin Kattri.app" "$KATTRI_VERSION" dist/macos
 
@@ -154,6 +163,76 @@ jobs:
           # before those steps would not match the published artifact.
           (cd "$(dirname "$DMG")" && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256")
           cat "$DMG.sha256"
+
+      - name: Write native component sidecar and executable evidence
+        run: |
+          set -euo pipefail
+          APP='dist/macos/Jellyfin Kattri.app'
+          DMG="kattri-${KATTRI_VERSION}-macos-universal.dmg"
+          EVIDENCE='dist/macos/release-validation'
+          mkdir -p "$EVIDENCE/native" "$EVIDENCE/licenses/libmpv" "$EVIDENCE/executables"
+          cp "$APP/Contents/Frameworks/libmpv.2.dylib" "$EVIDENCE/native/libmpv.2.dylib"
+          cp "$APP/Contents/Resources/licenses/libmpv/BUILD-INFO.txt" "$EVIDENCE/licenses/libmpv/BUILD-INFO.txt"
+          cp "$APP/Contents/Resources/libmpv-NOTICE.txt" "$EVIDENCE/licenses/libmpv/libmpv-NOTICE.txt"
+          for license in fribidi.LGPL ffmpeg.LGPL harfbuzz.MIT dav1d.BSD-2-Clause \
+            libass.ISC libplacebo.LGPL mpv.LGPL freetype.FTL; do
+            cp "$APP/Contents/Resources/licenses/libmpv/$license" "$EVIDENCE/licenses/libmpv/$license"
+          done
+          cp "$APP/Contents/MacOS/jellyfin-kattri" "$EVIDENCE/executables/jellyfin-kattri"
+          python3 - "$RUNNER_TEMP/release-native-input.json" "$DMG" "$GITHUB_SHA" <<'PY'
+          import json
+          import sys
+
+          spec_path, package, commit = sys.argv[1:]
+          license_names = [
+              "BUILD-INFO.txt", "libmpv-NOTICE.txt", "fribidi.LGPL", "ffmpeg.LGPL",
+              "harfbuzz.MIT", "dav1d.BSD-2-Clause", "libass.ISC", "libplacebo.LGPL",
+              "mpv.LGPL", "freetype.FTL",
+          ]
+          component = {
+              "package_file": package,
+              "name": "libmpv",
+              "manifest_platform": "macos-universal",
+              "packaged_file": "Jellyfin Kattri.app/Contents/Frameworks/libmpv.2.dylib",
+              "evidence_file": "release-validation/native/libmpv.2.dylib",
+              "build_info_path": "Jellyfin Kattri.app/Contents/Resources/licenses/libmpv/BUILD-INFO.txt",
+              "build_info_evidence_file": "release-validation/licenses/libmpv/BUILD-INFO.txt",
+              "license_files": [
+                  {
+                      "path": (
+                          "Jellyfin Kattri.app/Contents/Resources/libmpv-NOTICE.txt"
+                          if name == "libmpv-NOTICE.txt"
+                          else f"Jellyfin Kattri.app/Contents/Resources/licenses/libmpv/{name}"
+                      ),
+                      "evidence_file": f"release-validation/licenses/libmpv/{name}",
+                  }
+                  for name in license_names
+              ],
+          }
+          executable_records = [{
+              "file": "release-validation/executables/jellyfin-kattri",
+              "package_file": package,
+              "audit_scope": "Exact universal executable bytes from the packaged app (arm64 and x86_64); no cargo-auditable metadata or cargo audit bin record was produced.",
+          }]
+          spec = {
+              "source_commit": commit,
+              "target": "macos-universal",
+              "packages": [package],
+              "native_components": [component],
+              "executables": executable_records,
+              "inventory_gaps": [
+                  "The pinned macOS libmpv archive has no per-dependency source archive checksums; its BUILD-INFO and upstream license files are included.",
+              ],
+          }
+          with open(spec_path, "w", encoding="utf-8") as output:
+              json.dump(spec, output, indent=2)
+              output.write("\n")
+          PY
+          python3 packaging/write-release-native-sidecar.py \
+            --artifact-root dist/macos \
+            --spec "$RUNNER_TEMP/release-native-input.json" \
+            --output release-native-components.json \
+            --libmpv-manifest packaging/libmpv/manifest.toml
 
       - name: Mark artifact signing state
         id: signing-state
@@ -176,5 +255,7 @@ jobs:
             dist/macos/kattri-*-macos-universal.dmg
             dist/macos/kattri-*-macos-universal.dmg.sha256
             dist/macos/BUILD-INFO.txt
+            dist/macos/release-native-components.json
+            dist/macos/release-validation/**
           if-no-files-found: error
           retention-days: 30

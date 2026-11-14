@@ -57,9 +57,27 @@ modules:
         url: https://www.freedesktop.org/software/uchardet/releases/uchardet-0.0.8.tar.xz
         sha256: e97a60cfc00a1c147a674b097bb1422abd9fa78a2d9ce3f3fdcc2e78a34ac5f0
 
+  - name: uchardet-license
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 COPYING /app/share/licenses/uchardet/COPYING
+    sources:
+      - type: archive
+        url: https://www.freedesktop.org/software/uchardet/releases/uchardet-0.0.8.tar.xz
+        sha256: e97a60cfc00a1c147a674b097bb1422abd9fa78a2d9ce3f3fdcc2e78a34ac5f0
+
   - name: libass
     config-opts:
       - --disable-static
+    sources:
+      - type: archive
+        url: https://github.com/libass/libass/releases/download/0.17.4/libass-0.17.4.tar.xz
+        sha256: 78f1179b838d025e9c26e8fef33f8092f65611444ffa1bfc0cfac6a33511a05a
+
+  - name: libass-license
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 COPYING /app/share/licenses/libass/COPYING
     sources:
       - type: archive
         url: https://github.com/libass/libass/releases/download/0.17.4/libass-0.17.4.tar.xz
@@ -101,6 +119,7 @@ modules:
     build-commands:
       - cargo --offline build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri
       - install -Dm755 target/release/jellyfin-kattri /app/bin/kattri
+      - install -Dm644 LICENSE /app/share/licenses/org.kattri.JellyfinKattri/LICENSE
       - mkdir -p /app/share/applications
       - sed 's/^Icon=kattri$/Icon=org.kattri.JellyfinKattri/' packaging/linux/share/kattri.desktop > /app/share/applications/org.kattri.JellyfinKattri.desktop
       - install -Dm644 packaging/linux/icons/kattri.svg /app/share/icons/hicolor/scalable/apps/org.kattri.JellyfinKattri.svg
