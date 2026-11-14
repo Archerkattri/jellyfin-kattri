@@ -17,10 +17,10 @@ use crate::worker::downloads_batch::{
 };
 use crate::worker::update::{ApplyRequest, UpdateState, UpdateStatus, prepare};
 use crate::worker::{
-    AdminUserOperation, ApiWorker, ClientTlsFiles, HomeCatalogData, HomeCatalogKind, HomeRowKind,
-    LIBRARY_TAB_LIMIT, PlaybackStartOptions, PlaylistMutationKind, PreparedPlayback,
-    SavedSignInRequest, ServerIdentity, SyncPlayAction, SyncPlayCommand, WorkerEvent,
-    WorkerSubmitError,
+    AdminUserOperation, ApiWorker, BurnInSubtitleReplacement, ClientTlsFiles, HomeCatalogData,
+    HomeCatalogKind, HomeRowKind, LIBRARY_TAB_LIMIT, PlaybackStartOptions, PlaylistMutationKind,
+    PreparedPlayback, SavedSignInRequest, ServerIdentity, SyncPlayAction, SyncPlayCommand,
+    WorkerEvent, WorkerSubmitError,
 };
 use jellyfin_api::remote_command::RemoteCommand;
 use jellyfin_api::session_reporting::QueueItem;
@@ -68,6 +68,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 const MAX_PENDING_ARTWORK_REQUESTS: usize = 3;
 const MAX_CACHED_ARTWORK_TEXTURES: usize = 36;
+const MAX_BURN_IN_SUBTITLE_CHOICES: usize = 128;
 const MAX_LIVE_TV_LOGO_TEXTURES: usize = 128;
 /// Cast portraits are small, but a long session across many titles would keep every one.
 const MAX_PERSON_ARTWORK_TEXTURES: usize = 48;
@@ -1009,6 +1010,38 @@ struct ActivePlayback {
     options_request_id: u64,
     start_request_id: u64,
     selection: PlaybackSelection,
+    burn_in_subtitle_stream_index: Option<i32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingBurnInSubtitleReplacement {
+    request_id: u64,
+    playback_generation: u64,
+    item_id: String,
+    subtitle_stream_index: Option<i32>,
+    position_ticks: i64,
+    was_paused: bool,
+    rollback: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BurnInSubtitleReplacementLoad {
+    playback_generation: u64,
+    item_id: String,
+    previous_subtitle_stream_index: Option<i32>,
+    subtitle_stream_index: Option<i32>,
+    position_ticks: i64,
+    was_paused: bool,
+    rollback: bool,
+    queued: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BurnInReplacementEnd {
+    None,
+    Suppress,
+    Recovering,
+    Failed,
 }
 
 /// The theme item chosen for the open detail page: the first theme video, else the first song.
@@ -1266,6 +1299,10 @@ pub struct KattriApp {
     pending_playback: Option<PreparedPlayback>,
     playback_recovery: Option<PlaybackRecovery>,
     active_playback: Option<ActivePlayback>,
+    pending_burn_in_subtitle_replacement: Option<PendingBurnInSubtitleReplacement>,
+    burn_in_subtitle_replacement_load: Option<BurnInSubtitleReplacementLoad>,
+    burn_in_subtitle_feedback: Option<String>,
+    terminal_burn_in_replacement_failure_generation: Option<u64>,
     mid_stream_recoveries: u8,
     /// A prepared episode waiting for its item record, which carries the series ID (M2-10).
     /// Kept with its start request ID, so a newer request drops it.
@@ -1590,6 +1627,19 @@ impl KattriApp {
     /// and recovering starts that belonged to the old item; `Session` also drops the player
     /// handle and playback-report accounting.
     pub(crate) fn reset_playback(&mut self, what: PlaybackReset) {
+        let replacement_was_paused = self
+            .pending_burn_in_subtitle_replacement
+            .take()
+            .map(|pending| pending.was_paused)
+            .or_else(|| {
+                self.burn_in_subtitle_replacement_load
+                    .take()
+                    .filter(|replacement| !replacement.queued)
+                    .map(|replacement| replacement.was_paused)
+            });
+        if replacement_was_paused == Some(false) {
+            self.queue_player_intent(LocalAction::Play, false);
+        }
         self.playback_info = None;
         self.playback_loading = false;
         self.playback_error = None;
@@ -1597,7 +1647,12 @@ impl KattriApp {
         self.playback_start_error = None;
         self.playback_start_status = None;
         self.pending_playback = None;
+        self.pending_burn_in_subtitle_replacement = None;
+        self.burn_in_subtitle_replacement_load = None;
+        self.burn_in_subtitle_feedback = None;
+        self.terminal_burn_in_replacement_failure_generation = None;
         if what != PlaybackReset::Options {
+            self.invalidate_track_lyrics();
             self.held_playback = None;
             self.playback_recovery = None;
         }
@@ -1928,6 +1983,10 @@ impl KattriApp {
             pending_playback: None,
             playback_recovery: None,
             active_playback: None,
+            pending_burn_in_subtitle_replacement: None,
+            burn_in_subtitle_replacement_load: None,
+            burn_in_subtitle_feedback: None,
+            terminal_burn_in_replacement_failure_generation: None,
             mid_stream_recoveries: 0,
             held_playback: None,
             page: Page::Home,
@@ -2278,6 +2337,202 @@ impl KattriApp {
         &self.effective_subtitles
     }
 
+    /// Server source subtitles available for an active transcode with burn-in enabled. Each
+    /// tuple contains the Jellyfin stream index, a safe display label, and current selection.
+    pub fn burn_in_subtitle_choices(&self) -> Option<Vec<(Option<i32>, String, bool)>> {
+        let active = self.active_playback.as_ref()?;
+        if !self.media_playing
+            || self.pending_playback.is_some()
+            || self.burn_in_subtitle_replacement_load.is_some()
+            || self.selected_item_id.as_deref() != Some(active.item_id.as_str())
+            || active.start_request_id != self.playback_start_request_id
+            || active.selection.method != PlaybackMethod::Transcode
+            || !self.settings.settings().subtitles.burn_in
+        {
+            return None;
+        }
+        let source = self
+            .playback_info
+            .as_ref()?
+            .media_sources
+            .get(active.selection.source_index)?;
+        let streams = source.media_streams.as_ref()?;
+        let selected = self
+            .pending_burn_in_subtitle_replacement
+            .as_ref()
+            .filter(|pending| pending.playback_generation == active.start_request_id)
+            .map(|pending| pending.subtitle_stream_index)
+            .unwrap_or(active.burn_in_subtitle_stream_index);
+        let mut choices = vec![(None, "Off".to_owned(), selected.is_none())];
+        let mut seen = HashSet::new();
+        for stream in streams
+            .iter()
+            .filter(|stream| {
+                stream.stream_type.as_deref() == Some("Subtitle")
+                    && stream.index.is_some_and(|index| index >= 0)
+            })
+            .take(MAX_BURN_IN_SUBTITLE_CHOICES)
+        {
+            let Some(index) = stream.index else {
+                continue;
+            };
+            if !seen.insert(index) {
+                continue;
+            }
+            let label = stream
+                .display_title
+                .as_deref()
+                .or(stream.title.as_deref())
+                .or(stream.localized_language.as_deref())
+                .or(stream.language.as_deref())
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| {
+                    text.chars()
+                        .filter(|character| !character.is_control())
+                        .take(80)
+                        .collect::<String>()
+                })
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_else(|| format!("Subtitle {}", index.saturating_add(1)));
+            choices.push((Some(index), label, selected == Some(index)));
+        }
+        (choices.len() > 1).then_some(choices)
+    }
+
+    pub fn burn_in_subtitle_feedback(&self) -> Option<&str> {
+        self.burn_in_subtitle_feedback.as_deref()
+    }
+
+    /// A terminal rollback failure must end the host's generation-scoped SyncPlay bridge.
+    pub fn take_terminal_burn_in_replacement_failure(&mut self) -> Option<u64> {
+        self.terminal_burn_in_replacement_failure_generation.take()
+    }
+
+    /// Ask the worker to renegotiate and replace only the current transcoded subtitle track.
+    /// The active request generation stays fixed; a separate operation ID drops stale responses.
+    pub fn select_burn_in_subtitle(&mut self, subtitle_stream_index: Option<i32>) -> Option<bool> {
+        let active = self.active_playback.clone()?;
+        if self.burn_in_subtitle_choices().is_none_or(|choices| {
+            !choices
+                .iter()
+                .any(|(index, _, _)| *index == subtitle_stream_index)
+        }) {
+            self.burn_in_subtitle_feedback = Some("That subtitle is no longer available.".into());
+            return None;
+        }
+        if self
+            .pending_burn_in_subtitle_replacement
+            .as_ref()
+            .is_some_and(|pending| pending.subtitle_stream_index == subtitle_stream_index)
+            || (self.pending_burn_in_subtitle_replacement.is_none()
+                && active.burn_in_subtitle_stream_index == subtitle_stream_index)
+        {
+            return None;
+        }
+        let pending_position = self
+            .pending_burn_in_subtitle_replacement
+            .as_ref()
+            .filter(|pending| pending.playback_generation == active.start_request_id)
+            .map(|pending| (pending.position_ticks, pending.was_paused));
+        let (position_ticks, was_paused) = if let Some(pending) = pending_position {
+            pending
+        } else {
+            let Some(position) = self.active_player_position_for(&active.item_id) else {
+                self.burn_in_subtitle_feedback =
+                    Some("The player position is not available; try again shortly.".into());
+                return None;
+            };
+            let Some(paused) = position.paused else {
+                self.burn_in_subtitle_feedback =
+                    Some("The player pause state is not available; try again shortly.".into());
+                return None;
+            };
+            (position.position_ticks, paused)
+        };
+        self.queue_burn_in_subtitle_replacement(
+            active,
+            subtitle_stream_index,
+            position_ticks,
+            was_paused,
+            false,
+        )
+        .then_some(was_paused)
+    }
+
+    fn queue_burn_in_subtitle_replacement(
+        &mut self,
+        active: ActivePlayback,
+        subtitle_stream_index: Option<i32>,
+        position_ticks: i64,
+        was_paused: bool,
+        rollback: bool,
+    ) -> bool {
+        let request_id = self.allocate_request_id();
+        let result = self
+            .worker
+            .as_ref()
+            .ok_or(WorkerSubmitError::Stopped)
+            .and_then(|worker| {
+                worker.replace_transcoded_subtitle(
+                    request_id,
+                    BurnInSubtitleReplacement {
+                        playback_generation: active.start_request_id,
+                        negotiation_id: active.options_request_id,
+                        item_id: active.item_id.clone(),
+                        source_index: active.selection.source_index,
+                        subtitle_stream_index,
+                        start_time_ticks: Some(position_ticks),
+                    },
+                )
+            });
+        if result.is_ok() {
+            self.pending_burn_in_subtitle_replacement = Some(PendingBurnInSubtitleReplacement {
+                request_id,
+                playback_generation: active.start_request_id,
+                item_id: active.item_id,
+                subtitle_stream_index,
+                position_ticks,
+                was_paused,
+                rollback,
+            });
+            self.burn_in_subtitle_feedback = Some(if rollback {
+                "Restoring the previous subtitle stream…".into()
+            } else {
+                "Preparing the subtitle change…".into()
+            });
+            true
+        } else {
+            self.burn_in_subtitle_feedback = Some(if rollback {
+                "Could not restore the previous subtitle stream.".into()
+            } else {
+                "Could not queue the subtitle change.".into()
+            });
+            false
+        }
+    }
+
+    fn burn_in_replacement_matches(
+        &self,
+        request_id: u64,
+        playback_generation: u64,
+        item_id: &str,
+    ) -> bool {
+        self.pending_burn_in_subtitle_replacement
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.request_id == request_id
+                    && pending.playback_generation == playback_generation
+                    && pending.item_id == item_id
+                    && self.playback_start_request_id == playback_generation
+                    && self.selected_item_id.as_deref() == Some(item_id)
+                    && self.active_playback.as_ref().is_some_and(|active| {
+                        active.item_id == item_id
+                            && active.start_request_id == playback_generation
+                            && active.selection.method == PlaybackMethod::Transcode
+                    })
+            })
+    }
+
     /// Rebuild the effective subtitle settings from the current profile and active title. Called
     /// when playback starts or stops and after any settings commit.
     fn refresh_effective_subtitles(&mut self) {
@@ -2292,6 +2547,148 @@ impl KattriApp {
     pub fn on_playback_stopped(&mut self) {
         self.active_subtitle_title = None;
         self.refresh_effective_subtitles();
+    }
+
+    /// Mark the old file's end as the intentional handoff between two relay URLs for one item.
+    pub fn playback_subtitle_replacement_opening(
+        &mut self,
+        generation: u64,
+        subtitle_stream_index: Option<i32>,
+    ) {
+        if self.playback_start_request_id != generation {
+            return;
+        }
+        if let Some(replacement) = self.burn_in_subtitle_replacement_load.as_mut()
+            && replacement.playback_generation == generation
+            && replacement.subtitle_stream_index == subtitle_stream_index
+            && self.active_playback.as_ref().is_some_and(|active| {
+                active.start_request_id == generation && active.item_id == replacement.item_id
+            })
+        {
+            replacement.queued = true;
+            self.burn_in_subtitle_feedback = None;
+        }
+    }
+
+    /// Keep the prior relay selected until mpv confirms the replacement has loaded. If opening
+    /// the replacement fails after the old relay ended, make one fresh request for the prior
+    /// subtitle at the captured position and pause state.
+    pub fn on_playback_end(
+        &mut self,
+        generation: Option<u64>,
+        was_loaded: bool,
+        is_error: bool,
+        command_submission_failed: bool,
+    ) -> BurnInReplacementEnd {
+        if generation.is_some_and(|generation| generation != self.playback_start_request_id) {
+            return BurnInReplacementEnd::None;
+        }
+        let replacement_matches = generation.is_some_and(|generation| {
+            self.burn_in_subtitle_replacement_load
+                .as_ref()
+                .is_some_and(|replacement| {
+                    replacement.queued && replacement.playback_generation == generation
+                })
+        });
+        if replacement_matches {
+            if command_submission_failed && was_loaded {
+                if let Some(replacement) = self.burn_in_subtitle_replacement_load.take() {
+                    if !replacement.was_paused {
+                        self.queue_player_intent(LocalAction::Play, false);
+                    }
+                    self.burn_in_subtitle_feedback = Some(if replacement.rollback {
+                        "Could not restore the previous subtitle stream.".into()
+                    } else {
+                        "Could not open the updated subtitle stream.".into()
+                    });
+                    if replacement.rollback {
+                        self.playback_failed(&replacement.item_id);
+                        return BurnInReplacementEnd::Failed;
+                    }
+                }
+                return BurnInReplacementEnd::Suppress;
+            }
+            if was_loaded {
+                // This is the old file ending as the queued load replaces it. FileLoaded clears
+                // the state before a later mid-stream failure can take this path.
+                return BurnInReplacementEnd::Suppress;
+            }
+            if is_error || command_submission_failed {
+                let Some(replacement) = self.burn_in_subtitle_replacement_load.take() else {
+                    return BurnInReplacementEnd::None;
+                };
+                if replacement.rollback {
+                    self.burn_in_subtitle_feedback =
+                        Some("Could not restore the previous subtitle stream.".into());
+                    self.playback_failed(&replacement.item_id);
+                    return BurnInReplacementEnd::Failed;
+                }
+                let active = self.active_playback.clone();
+                let queued = active.is_some_and(|active| {
+                    active.start_request_id == replacement.playback_generation
+                        && active.item_id == replacement.item_id
+                        && self.queue_burn_in_subtitle_replacement(
+                            active,
+                            replacement.previous_subtitle_stream_index,
+                            replacement.position_ticks,
+                            replacement.was_paused,
+                            true,
+                        )
+                });
+                if queued {
+                    return BurnInReplacementEnd::Recovering;
+                }
+                self.burn_in_subtitle_feedback =
+                    Some("Could not restore the previous subtitle stream.".into());
+                self.playback_failed(&replacement.item_id);
+                return BurnInReplacementEnd::Failed;
+            }
+            self.burn_in_subtitle_replacement_load = None;
+            self.pending_burn_in_subtitle_replacement = None;
+        }
+        if let Some(generation) = generation {
+            if self
+                .pending_burn_in_subtitle_replacement
+                .as_ref()
+                .is_some_and(|pending| pending.playback_generation == generation)
+            {
+                self.pending_burn_in_subtitle_replacement = None;
+            }
+            if self
+                .burn_in_subtitle_replacement_load
+                .as_ref()
+                .is_some_and(|replacement| {
+                    replacement.playback_generation == generation && !replacement.queued
+                })
+            {
+                self.burn_in_subtitle_replacement_load = None;
+                self.pending_playback = None;
+            }
+        }
+        self.on_playback_stopped();
+        BurnInReplacementEnd::None
+    }
+
+    /// A synchronous load failure leaves the prior relay selected. A rollback load failure is
+    /// terminal because the original relay has already ended.
+    pub fn playback_subtitle_replacement_failed(&mut self, generation: u64) -> bool {
+        if self.playback_start_request_id == generation
+            && let Some(replacement) = self.burn_in_subtitle_replacement_load.take()
+        {
+            if !replacement.was_paused {
+                self.queue_player_intent(LocalAction::Play, false);
+            }
+            self.burn_in_subtitle_feedback = Some(if replacement.rollback {
+                "Could not restore the previous subtitle stream.".into()
+            } else {
+                "Could not open the updated subtitle stream.".into()
+            });
+            if replacement.rollback {
+                self.playback_failed(&replacement.item_id);
+                return true;
+            }
+        }
+        false
     }
 
     /// Save the current subtitle style as an override for `item_id` (or its series, when it has
@@ -5429,6 +5826,7 @@ impl KattriApp {
         self.search_query = input.to_owned();
         self.search_browse_group = None;
         self.search_active = true;
+        self.invalidate_track_lyrics();
         self.selected_item_id = None;
         self.selected_details = None;
         self.details_request_id = self.allocate_request_id();
@@ -6055,6 +6453,7 @@ impl KattriApp {
         self.search_results.clear();
         self.search_stale = false;
         self.loaded_search = None;
+        self.invalidate_track_lyrics();
         self.selected_item_id = None;
         self.selected_details = None;
         self.details_loading = false;
@@ -7773,8 +8172,7 @@ impl KattriApp {
 
     /// For a music track page, asks for its lyrics.
     fn request_track_lyrics(&mut self) {
-        self.track_lyrics.clear();
-        self.track_lyrics_request_id = self.allocate_request_id();
+        self.invalidate_track_lyrics();
         let Some(item_id) = self
             .selected_details
             .as_ref()
@@ -7786,6 +8184,12 @@ impl KattriApp {
         if let Some(worker) = self.worker.as_ref() {
             let _ = worker.get_lyrics(request_id, item_id);
         }
+    }
+
+    /// Clear timed lines as soon as their item stops being the selected detail.
+    fn invalidate_track_lyrics(&mut self) {
+        self.track_lyrics.clear();
+        self.track_lyrics_request_id = self.allocate_request_id();
     }
 
     /// For a movie or series page, asks for its trailers and special features.
@@ -7990,6 +8394,20 @@ impl KattriApp {
         };
         let request_id = self.allocate_request_id();
         self.playback_start_request_id = request_id;
+        self.pending_burn_in_subtitle_replacement = None;
+        self.burn_in_subtitle_replacement_load = None;
+        self.burn_in_subtitle_feedback = None;
+        let burn_in_subtitles = self.settings.settings().subtitles.burn_in;
+        let burn_in_subtitle_stream_index = (burn_in_subtitles
+            && play_method == jellyfin_api::PlayMethod::Transcode)
+            .then(|| {
+                self.playback_info
+                    .as_ref()
+                    .and_then(|info| info.media_sources.get(source_index))
+                    .and_then(|source| source.default_subtitle_stream_index)
+                    .filter(|index| *index >= 0)
+            })
+            .flatten();
         self.sync_play_playback_handoff = self
             .sync_play_auto_target
             .as_ref()
@@ -8011,12 +8429,12 @@ impl KattriApp {
                 source_index,
                 method: selection_method(play_method),
             },
+            burn_in_subtitle_stream_index,
         });
         self.playback_start_loading = true;
         self.playback_start_error = None;
         self.playback_start_status = Some(ui_text(ids::PLAYBACK_STATUS_PREPARING_LOCAL).into());
         self.pending_playback = None;
-        let burn_in_subtitles = self.settings.settings().subtitles.burn_in;
         let result = self
             .worker
             .as_ref()
@@ -8334,6 +8752,21 @@ impl KattriApp {
     pub fn playback_loaded(&mut self, generation: u64) {
         if self.playback_start_request_id == generation {
             self.playback_recovery = None;
+        }
+        let replacement_loaded =
+            self.burn_in_subtitle_replacement_load
+                .as_ref()
+                .is_some_and(|replacement| {
+                    replacement.playback_generation == generation && replacement.queued
+                });
+        if replacement_loaded
+            && let Some(replacement) = self.burn_in_subtitle_replacement_load.take()
+            && let Some(active) = self.active_playback.as_mut()
+            && active.start_request_id == generation
+            && active.item_id == replacement.item_id
+        {
+            active.burn_in_subtitle_stream_index = replacement.subtitle_stream_index;
+            self.burn_in_subtitle_feedback = None;
         }
     }
 
@@ -10395,6 +10828,79 @@ impl KattriApp {
                     }
                     drop(playback);
                 }
+                WorkerEvent::PlaybackSubtitleReplacementPrepared {
+                    request_id,
+                    playback_generation,
+                    item_id,
+                    mut playback,
+                } if self.burn_in_replacement_matches(
+                    request_id,
+                    playback_generation,
+                    &item_id,
+                ) =>
+                {
+                    let Some(pending) = self.pending_burn_in_subtitle_replacement.take() else {
+                        self.pending_burn_in_subtitle_replacement = None;
+                        drop(playback);
+                        continue;
+                    };
+                    let Some(previous_subtitle_stream_index) = self
+                        .active_playback
+                        .as_ref()
+                        .filter(|active| {
+                            active.start_request_id == playback_generation
+                                && active.item_id == item_id
+                        })
+                        .map(|active| active.burn_in_subtitle_stream_index)
+                    else {
+                        drop(playback);
+                        continue;
+                    };
+                    playback.set_resume_position_ticks(Some(pending.position_ticks));
+                    playback.set_preserve_paused(Some(pending.was_paused));
+                    self.burn_in_subtitle_replacement_load = Some(BurnInSubtitleReplacementLoad {
+                        playback_generation,
+                        item_id: item_id.clone(),
+                        previous_subtitle_stream_index,
+                        subtitle_stream_index: pending.subtitle_stream_index,
+                        position_ticks: pending.position_ticks,
+                        was_paused: pending.was_paused,
+                        rollback: pending.rollback,
+                        queued: false,
+                    });
+                    self.burn_in_subtitle_feedback = None;
+                    self.hand_over_playback(item_id, playback);
+                }
+                WorkerEvent::PlaybackSubtitleReplacementPrepared { playback, .. } => {
+                    drop(playback);
+                }
+                WorkerEvent::PlaybackSubtitleReplacementFailed {
+                    request_id,
+                    playback_generation,
+                    item_id,
+                } if self.burn_in_replacement_matches(
+                    request_id,
+                    playback_generation,
+                    &item_id,
+                ) =>
+                {
+                    if let Some(pending) = self.pending_burn_in_subtitle_replacement.take() {
+                        if !pending.was_paused {
+                            self.queue_player_intent(LocalAction::Play, false);
+                        }
+                        if pending.rollback {
+                            self.burn_in_subtitle_feedback =
+                                Some("Could not restore the previous subtitle stream.".into());
+                            self.playback_failed(&item_id);
+                            self.terminal_burn_in_replacement_failure_generation =
+                                Some(playback_generation);
+                        } else {
+                            self.burn_in_subtitle_feedback =
+                                Some("Could not rebuild the server subtitle stream.".into());
+                        }
+                    }
+                }
+                WorkerEvent::PlaybackSubtitleReplacementFailed { .. } => {}
                 WorkerEvent::PlaybackPrepareFailed {
                     request_id,
                     message,
@@ -16840,6 +17346,7 @@ mod playback_state_tests {
             options_request_id: 4,
             start_request_id: 5,
             selection: direct_play(),
+            burn_in_subtitle_stream_index: None,
         });
         app.playback_recovery = Some(PlaybackRecovery {
             item_id: "movie-1".into(),
@@ -16877,6 +17384,7 @@ mod playback_state_tests {
             options_request_id: 4,
             start_request_id: 5,
             selection: direct_play(),
+            burn_in_subtitle_stream_index: None,
         });
         app.auto_play = Some(AutoPlay {
             item_id: "movie-1".into(),
@@ -17002,5 +17510,419 @@ mod catalog_page_tests {
             !app.catalog_end_reached,
             "a full 30-item search page has more pages"
         );
+    }
+}
+
+#[cfg(test)]
+mod burn_in_subtitle_replacement_tests {
+    use super::{
+        ActivePlayback, ActiveSubtitleTitle, BurnInReplacementEnd, BurnInSubtitleReplacementLoad,
+        KattriApp, PendingBurnInSubtitleReplacement,
+    };
+    use crate::worker::{ApiWorker, WorkerCommand, WorkerEvent};
+    use kattri_client_core::playback_plan::{PlaybackMethod, PlaybackSelection};
+
+    fn active_transcode_app(paused: bool) -> KattriApp {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.worker = Some(ApiWorker::queued_for_test());
+        app.settings.settings_mut().subtitles.burn_in = true;
+        app.selected_item_id = Some("movie".into());
+        app.playback_request_id = 41;
+        app.playback_start_request_id = 52;
+        app.media_playing = true;
+        app.playback_info = Some(
+            serde_json::from_value(serde_json::json!({
+                "MediaSources": [{
+                    "Id": "source-id",
+                    "SupportsTranscoding": true,
+                    "DefaultSubtitleStreamIndex": 2,
+                    "MediaStreams": [
+                        {"Type": "Subtitle", "Index": 2, "DisplayTitle": "English"},
+                        {"Type": "Subtitle", "Index": 4, "DisplayTitle": "French"}
+                    ]
+                }]
+            }))
+            .expect("playback info fixture"),
+        );
+        app.active_playback = Some(ActivePlayback {
+            item_id: "movie".into(),
+            options_request_id: 41,
+            start_request_id: 52,
+            selection: PlaybackSelection {
+                source_index: 0,
+                method: PlaybackMethod::Transcode,
+            },
+            burn_in_subtitle_stream_index: Some(2),
+        });
+        app.observe_active_player_position(Some("movie"), Some(82.25), Some(paused), Some(1.0));
+        app
+    }
+
+    fn queue_replacement_load(app: &mut KattriApp, rollback: bool, was_paused: bool) {
+        let subtitle_stream_index = if rollback { Some(2) } else { Some(4) };
+        app.burn_in_subtitle_replacement_load = Some(BurnInSubtitleReplacementLoad {
+            playback_generation: 52,
+            item_id: "movie".into(),
+            previous_subtitle_stream_index: Some(2),
+            subtitle_stream_index,
+            position_ticks: 822_500_000,
+            was_paused,
+            rollback,
+            queued: false,
+        });
+        app.playback_subtitle_replacement_opening(52, subtitle_stream_index);
+    }
+
+    #[test]
+    fn changing_a_burned_subtitle_keeps_generation_and_captures_item_position_and_pause() {
+        let mut app = active_transcode_app(false);
+        let choices = app.burn_in_subtitle_choices().expect("burn-in choices");
+        assert!(
+            choices
+                .iter()
+                .any(|(index, _, selected)| *index == Some(2) && *selected)
+        );
+        assert!(
+            choices
+                .iter()
+                .any(|(index, _, selected)| *index == Some(4) && !*selected)
+        );
+
+        assert_eq!(app.select_burn_in_subtitle(Some(4)), Some(false));
+        assert_eq!(app.playback_start_generation(), 52);
+        let command = app
+            .worker
+            .as_ref()
+            .expect("test worker")
+            .take_commands_for_test()
+            .pop()
+            .expect("subtitle replacement command");
+        assert!(matches!(
+            command,
+            WorkerCommand::ReplaceTranscodedSubtitle {
+                request_id: _,
+                playback_generation: 52,
+                negotiation_id: 41,
+                item_id,
+                source_index: 0,
+                subtitle_stream_index: Some(4),
+                start_time_ticks: Some(822_500_000),
+            } if item_id == "movie"
+        ));
+        assert_eq!(
+            app.pending_burn_in_subtitle_replacement
+                .as_ref()
+                .map(|pending| (pending.position_ticks, pending.was_paused)),
+            Some((822_500_000, false))
+        );
+    }
+
+    #[test]
+    fn stale_subtitle_replacement_results_are_rejected_by_operation_and_generation() {
+        let mut app = active_transcode_app(true);
+        app.pending_burn_in_subtitle_replacement = Some(PendingBurnInSubtitleReplacement {
+            request_id: 77,
+            playback_generation: 52,
+            item_id: "movie".into(),
+            subtitle_stream_index: Some(4),
+            position_ticks: 822_500_000,
+            was_paused: true,
+            rollback: false,
+        });
+        assert!(app.burn_in_replacement_matches(77, 52, "movie"));
+        assert!(!app.burn_in_replacement_matches(76, 52, "movie"));
+        assert!(!app.burn_in_replacement_matches(77, 51, "movie"));
+
+        app.playback_start_request_id = 53;
+        assert!(!app.burn_in_replacement_matches(77, 52, "movie"));
+        app.playback_start_request_id = 52;
+        app.selected_item_id = Some("next-movie".into());
+        assert!(!app.burn_in_replacement_matches(77, 52, "movie"));
+    }
+
+    #[test]
+    fn an_expected_old_relay_end_keeps_the_same_item_and_playback_generation() {
+        let mut app = active_transcode_app(true);
+        app.active_subtitle_title = Some(ActiveSubtitleTitle {
+            item_id: "movie".into(),
+            series_id: None,
+        });
+        queue_replacement_load(&mut app, false, true);
+
+        assert_eq!(
+            app.active_playback
+                .as_ref()
+                .and_then(|active| active.burn_in_subtitle_stream_index),
+            Some(2),
+            "the target is not selected before mpv reports FileLoaded"
+        );
+        assert_eq!(
+            app.on_playback_end(Some(52), true, false, false),
+            BurnInReplacementEnd::Suppress
+        );
+        assert_eq!(app.playback_start_generation(), 52);
+        assert_eq!(
+            app.active_subtitle_title
+                .as_ref()
+                .map(|title| title.item_id.as_str()),
+            Some("movie")
+        );
+        app.playback_loaded(52);
+        assert_eq!(
+            app.active_playback
+                .as_ref()
+                .and_then(|active| active.burn_in_subtitle_stream_index),
+            Some(4)
+        );
+        assert_eq!(
+            app.on_playback_end(Some(52), true, false, false),
+            BurnInReplacementEnd::None
+        );
+        assert!(app.active_subtitle_title.is_none());
+    }
+
+    #[test]
+    fn failed_replacement_open_queues_one_rollback_with_position_and_pause() {
+        let mut app = active_transcode_app(true);
+        queue_replacement_load(&mut app, false, true);
+
+        assert_eq!(
+            app.on_playback_end(Some(52), true, false, false),
+            BurnInReplacementEnd::Suppress
+        );
+        assert_eq!(
+            app.on_playback_end(Some(52), false, true, false),
+            BurnInReplacementEnd::Recovering
+        );
+        assert_eq!(
+            app.active_playback
+                .as_ref()
+                .and_then(|active| active.burn_in_subtitle_stream_index),
+            Some(2)
+        );
+        let pending = app
+            .pending_burn_in_subtitle_replacement
+            .as_ref()
+            .expect("rollback request");
+        assert_eq!(
+            (
+                pending.subtitle_stream_index,
+                pending.position_ticks,
+                pending.was_paused,
+                pending.rollback,
+            ),
+            (Some(2), 822_500_000, true, true)
+        );
+        let command = app
+            .worker
+            .as_ref()
+            .expect("test worker")
+            .take_commands_for_test()
+            .pop()
+            .expect("rollback command");
+        assert!(matches!(
+            command,
+            WorkerCommand::ReplaceTranscodedSubtitle {
+                playback_generation: 52,
+                negotiation_id: 41,
+                item_id,
+                source_index: 0,
+                subtitle_stream_index: Some(2),
+                start_time_ticks: Some(822_500_000),
+                ..
+            } if item_id == "movie"
+        ));
+    }
+
+    #[test]
+    fn failed_rollback_is_terminal_and_does_not_queue_another_retry() {
+        let mut app = active_transcode_app(true);
+        queue_replacement_load(&mut app, true, true);
+
+        assert_eq!(
+            app.on_playback_end(Some(52), false, true, false),
+            BurnInReplacementEnd::Failed
+        );
+        assert!(app.pending_burn_in_subtitle_replacement.is_none());
+        assert!(app.burn_in_subtitle_replacement_load.is_none());
+        assert!(app.playback_start_error.is_some());
+        assert!(
+            app.worker
+                .as_ref()
+                .expect("test worker")
+                .take_commands_for_test()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn worker_rollback_failure_requests_host_syncplay_bridge_cleanup() {
+        let mut app = active_transcode_app(true);
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.pending_burn_in_subtitle_replacement = Some(PendingBurnInSubtitleReplacement {
+            request_id: 77,
+            playback_generation: 52,
+            item_id: "movie".into(),
+            subtitle_stream_index: Some(2),
+            position_ticks: 822_500_000,
+            was_paused: true,
+            rollback: true,
+        });
+        sender
+            .try_send(WorkerEvent::PlaybackSubtitleReplacementFailed {
+                request_id: 77,
+                playback_generation: 52,
+                item_id: "movie".into(),
+            })
+            .expect("queue failed rollback result");
+
+        app.update_background(&egui::Context::default());
+
+        assert_eq!(app.playback_start_generation(), 52);
+        assert!(app.playback_start_error.is_some());
+        assert_eq!(app.take_terminal_burn_in_replacement_failure(), Some(52));
+        assert_eq!(app.take_terminal_burn_in_replacement_failure(), None);
+    }
+
+    #[test]
+    fn rejected_replacement_command_keeps_the_loaded_old_subtitle() {
+        let mut app = active_transcode_app(false);
+        queue_replacement_load(&mut app, false, false);
+
+        assert_eq!(
+            app.on_playback_end(Some(52), true, true, true),
+            BurnInReplacementEnd::Suppress
+        );
+        assert_eq!(
+            app.active_playback
+                .as_ref()
+                .and_then(|active| active.burn_in_subtitle_stream_index),
+            Some(2)
+        );
+        assert!(app.burn_in_subtitle_replacement_load.is_none());
+        assert_eq!(app.take_player_intents().len(), 1);
+        assert!(
+            app.worker
+                .as_ref()
+                .expect("test worker")
+                .take_commands_for_test()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn selection_reset_cancels_prepared_replacement_and_rejects_its_late_result() {
+        let mut app = active_transcode_app(false);
+        app.pending_burn_in_subtitle_replacement = Some(PendingBurnInSubtitleReplacement {
+            request_id: 77,
+            playback_generation: 52,
+            item_id: "movie".into(),
+            subtitle_stream_index: Some(4),
+            position_ticks: 822_500_000,
+            was_paused: false,
+            rollback: false,
+        });
+        app.burn_in_subtitle_replacement_load = Some(BurnInSubtitleReplacementLoad {
+            playback_generation: 52,
+            item_id: "movie".into(),
+            previous_subtitle_stream_index: Some(2),
+            subtitle_stream_index: Some(4),
+            position_ticks: 822_500_000,
+            was_paused: false,
+            rollback: false,
+            queued: false,
+        });
+
+        app.reset_playback(super::PlaybackReset::Selection);
+
+        assert!(app.pending_burn_in_subtitle_replacement.is_none());
+        assert!(app.burn_in_subtitle_replacement_load.is_none());
+        assert!(!app.burn_in_replacement_matches(77, 52, "movie"));
+    }
+
+    #[test]
+    fn selection_reset_resumes_the_old_relay_if_prepared_replacement_was_not_queued() {
+        let mut app = active_transcode_app(false);
+        app.burn_in_subtitle_replacement_load = Some(BurnInSubtitleReplacementLoad {
+            playback_generation: 52,
+            item_id: "movie".into(),
+            previous_subtitle_stream_index: Some(2),
+            subtitle_stream_index: Some(4),
+            position_ticks: 822_500_000,
+            was_paused: false,
+            rollback: false,
+            queued: false,
+        });
+
+        app.reset_playback(super::PlaybackReset::Selection);
+
+        assert!(app.burn_in_subtitle_replacement_load.is_none());
+        assert_eq!(app.take_player_intents().len(), 1);
+    }
+
+    #[test]
+    fn stale_old_generation_end_does_not_start_a_subtitle_rollback() {
+        let mut app = active_transcode_app(true);
+        queue_replacement_load(&mut app, false, true);
+        app.playback_start_request_id = 53;
+        app.active_subtitle_title = Some(ActiveSubtitleTitle {
+            item_id: "next-movie".into(),
+            series_id: None,
+        });
+
+        assert_eq!(
+            app.on_playback_end(Some(52), false, true, false),
+            BurnInReplacementEnd::None
+        );
+        assert_eq!(
+            app.active_subtitle_title
+                .as_ref()
+                .map(|title| title.item_id.as_str()),
+            Some("next-movie")
+        );
+        assert!(
+            app.worker
+                .as_ref()
+                .expect("test worker")
+                .take_commands_for_test()
+                .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod lyrics_lifecycle_tests {
+    use super::KattriApp;
+    use crate::worker::{ApiWorker, WorkerEvent};
+    use jellyfin_api::LyricLine;
+
+    #[test]
+    fn selecting_another_item_cancels_the_previous_lyrics_result() {
+        let mut app = KattriApp::new(egui::Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.selected_item_id = Some("old-track".into());
+        app.track_lyrics_request_id = 17;
+        app.track_lyrics = vec![LyricLine {
+            text: "old line".into(),
+            start_ticks: Some(10),
+        }];
+
+        app.select_item("new-track".into());
+
+        assert!(app.track_lyrics.is_empty());
+        assert_ne!(app.track_lyrics_request_id, 17);
+        sender
+            .try_send(WorkerEvent::LyricsLoaded {
+                request_id: 17,
+                lines: vec![LyricLine {
+                    text: "stale line".into(),
+                    start_ticks: Some(20),
+                }],
+            })
+            .expect("queue stale lyrics result");
+        app.update_background(&egui::Context::default());
+        assert!(app.track_lyrics.is_empty());
     }
 }

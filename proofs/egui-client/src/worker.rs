@@ -130,6 +130,9 @@ pub struct PreparedPlayback {
     relay: RelayHandle,
     report_metadata: PlaybackReportMetadata,
     start_time_ticks: Option<i64>,
+    /// A relay replacement for a burned-in subtitle keeps the current pause state.
+    preserve_paused: Option<bool>,
+    subtitle_replacement: bool,
     /// Series GUID for an episode, used by the per-series language memory (M2-10).
     series_id: Option<String>,
 }
@@ -141,6 +144,23 @@ pub struct PlaybackStartOptions {
     pub start_time_ticks: Option<i64>,
     /// Burn the selected subtitle into a server transcode (`subtitles.burn_in`).
     pub burn_in_subtitles: bool,
+}
+
+/// Data needed to replace the subtitle in an active server transcode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BurnInSubtitleReplacement {
+    /// Current playback generation; stale replacements are dropped by the UI.
+    pub playback_generation: u64,
+    /// PlaybackInfo negotiation that selected the active source.
+    pub negotiation_id: u64,
+    /// Item being played.
+    pub item_id: String,
+    /// Media source index from that negotiation.
+    pub source_index: usize,
+    /// Jellyfin subtitle stream index, or `None` to turn burn-in off.
+    pub subtitle_stream_index: Option<i32>,
+    /// Position to resume at after the replacement is ready, in Jellyfin ticks.
+    pub start_time_ticks: Option<i64>,
 }
 
 impl PreparedPlayback {
@@ -159,6 +179,26 @@ impl PreparedPlayback {
 
     pub(crate) fn set_series_id(&mut self, series_id: Option<String>) {
         self.series_id = series_id;
+    }
+
+    pub(crate) fn set_resume_position_ticks(&mut self, position_ticks: Option<i64>) {
+        self.start_time_ticks = position_ticks.filter(|ticks| *ticks >= 0);
+    }
+
+    pub(crate) fn set_preserve_paused(&mut self, paused: Option<bool>) {
+        self.preserve_paused = paused;
+    }
+
+    pub fn preserve_paused(&self) -> Option<bool> {
+        self.preserve_paused
+    }
+
+    pub fn is_subtitle_replacement(&self) -> bool {
+        self.subtitle_replacement
+    }
+
+    pub fn subtitle_stream_index(&self) -> Option<i32> {
+        self.report_metadata.subtitle_stream_index
     }
 
     pub(crate) fn set_queue_report_context(
@@ -759,6 +799,19 @@ pub enum WorkerEvent {
         request_id: u64,
         item_id: String,
         playback: Box<PreparedPlayback>,
+    },
+    /// A newly negotiated transcode relay for the active item's burned-in subtitle.
+    PlaybackSubtitleReplacementPrepared {
+        request_id: u64,
+        playback_generation: u64,
+        item_id: String,
+        playback: Box<PreparedPlayback>,
+    },
+    /// Replacement negotiation failed; the active relay remains untouched.
+    PlaybackSubtitleReplacementFailed {
+        request_id: u64,
+        playback_generation: u64,
+        item_id: String,
     },
     /// Intro and outro segments for one item. Only sent when a skip setting is on (M2-08).
     MediaSegmentsLoaded {
@@ -1402,6 +1455,15 @@ pub(crate) enum WorkerCommand {
         burn_in_subtitles: bool,
         live_device_profile: Option<Box<DeviceProfile>>,
         live_tune_started_at: Option<std::time::Instant>,
+    },
+    ReplaceTranscodedSubtitle {
+        request_id: u64,
+        playback_generation: u64,
+        negotiation_id: u64,
+        item_id: String,
+        source_index: usize,
+        subtitle_stream_index: Option<i32>,
+        start_time_ticks: Option<i64>,
     },
     CloseLiveStream {
         live_stream_id: String,
@@ -2392,6 +2454,23 @@ impl ApiWorker {
             live_device_profile: None,
             live_tune_started_at: None,
         })
+    }
+
+    pub fn replace_transcoded_subtitle(
+        &self,
+        request_id: u64,
+        replacement: BurnInSubtitleReplacement,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::ReplaceTranscodedSubtitle {
+                request_id,
+                playback_generation: replacement.playback_generation,
+                negotiation_id: replacement.negotiation_id,
+                item_id: replacement.item_id,
+                source_index: replacement.source_index,
+                subtitle_stream_index: replacement.subtitle_stream_index,
+                start_time_ticks: replacement.start_time_ticks,
+            })
     }
 
     pub fn tune_live_tv_channel(
@@ -5475,6 +5554,7 @@ async fn execute_command(
                             request_id,
                             item_id,
                             is_audio,
+                            request: *request,
                             response: response.clone(),
                         });
                         send_event(
@@ -5549,6 +5629,7 @@ async fn execute_command(
                             play_method,
                             start_time_ticks,
                             burn_in_subtitles,
+                            subtitle_stream_index_override: None,
                         }),
                     },
                     _ => Err("Connect to a Jellyfin server before starting playback.".into()),
@@ -5576,6 +5657,79 @@ async fn execute_command(
                             },
                         )
                         .await
+                    }
+                }
+            }
+            WorkerCommand::ReplaceTranscodedSubtitle {
+                request_id,
+                playback_generation,
+                negotiation_id,
+                item_id,
+                source_index,
+                subtitle_stream_index,
+                start_time_ticks,
+            } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        prepare_transcoded_subtitle_replacement(
+                            TranscodedSubtitleReplacementPreparation {
+                                client,
+                                session,
+                                cached: playback_info_cache.as_ref(),
+                                replacement: BurnInSubtitleReplacement {
+                                    playback_generation,
+                                    negotiation_id,
+                                    item_id: item_id.clone(),
+                                    source_index,
+                                    subtitle_stream_index,
+                                    start_time_ticks,
+                                },
+                            },
+                        )
+                        .await
+                    }
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                match result {
+                    Ok(playback) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::PlaybackSubtitleReplacementPrepared {
+                                request_id,
+                                playback_generation,
+                                item_id,
+                                playback: Box::new(playback),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(ApiError::ReauthenticationRequired) => {
+                        session = None;
+                        client = None;
+                        server = None;
+                        playback_info_cache = None;
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ReauthenticationRequired {
+                                request_id,
+                                message: "The server requires you to sign in again.".into(),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(_) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::PlaybackSubtitleReplacementFailed {
+                                request_id,
+                                playback_generation,
+                                item_id,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -7478,6 +7632,7 @@ struct CachedPlaybackInfo {
     request_id: u64,
     item_id: String,
     is_audio: bool,
+    request: PlaybackInfoRequest,
     response: PlaybackInfoResponse,
 }
 
@@ -7491,6 +7646,14 @@ struct PlaybackPreparation<'a> {
     play_method: PlayMethod,
     start_time_ticks: Option<i64>,
     burn_in_subtitles: bool,
+    subtitle_stream_index_override: Option<Option<i32>>,
+}
+
+struct TranscodedSubtitleReplacementPreparation<'a> {
+    client: &'a JellyfinClient,
+    session: &'a Session,
+    cached: Option<&'a CachedPlaybackInfo>,
+    replacement: BurnInSubtitleReplacement,
 }
 
 /// The burn-in option to hand the URL builder. Burn-in needs all three: the setting, a server
@@ -7518,6 +7681,7 @@ fn prepare_playback(preparation: PlaybackPreparation<'_>) -> Result<PreparedPlay
         play_method,
         start_time_ticks,
         burn_in_subtitles,
+        subtitle_stream_index_override,
     } = preparation;
     let (Some(client), Some(session)) = (client, session) else {
         return Err("Connect to a Jellyfin server before starting playback.".into());
@@ -7531,6 +7695,8 @@ fn prepare_playback(preparation: PlaybackPreparation<'_>) -> Result<PreparedPlay
     let Some(media_source) = cached.response.media_sources.get(source_index) else {
         return Err("The selected playback source is no longer available.".into());
     };
+    let subtitle_stream_index =
+        subtitle_stream_index_override.unwrap_or(media_source.default_subtitle_stream_index);
     let start_time_ticks = start_time_ticks.filter(|ticks| *ticks > 0);
     let options = PlaybackSourceRequestOptions {
         item_id,
@@ -7538,17 +7704,13 @@ fn prepare_playback(preparation: PlaybackPreparation<'_>) -> Result<PreparedPlay
         play_method,
         play_session_id: cached.response.play_session_id.as_deref(),
         audio_stream_index: media_source.default_audio_stream_index,
-        subtitle_stream_index: media_source.default_subtitle_stream_index,
+        subtitle_stream_index,
         start_time_ticks: start_time_ticks.map(JellyfinTicks::from_ticks),
     };
     let request = if cached.is_audio {
         client.build_audio_playback_source_request(session, options)
     } else {
-        let burn_in = burn_in_subtitle(
-            burn_in_subtitles,
-            play_method,
-            media_source.default_subtitle_stream_index,
-        );
+        let burn_in = burn_in_subtitle(burn_in_subtitles, play_method, subtitle_stream_index);
         client.build_playback_source_request_with_burn_in_subtitle(session, options, burn_in)
     }
     .map_err(|error| error.to_string())?;
@@ -7565,7 +7727,7 @@ fn prepare_playback(preparation: PlaybackPreparation<'_>) -> Result<PreparedPlay
             live_stream_id: media_source.live_stream_id.clone(),
             live_tune_started_at: None,
             audio_stream_index: media_source.default_audio_stream_index,
-            subtitle_stream_index: media_source.default_subtitle_stream_index,
+            subtitle_stream_index,
             play_session_id: cached.response.play_session_id.clone(),
             play_method,
             can_seek: None,
@@ -7574,7 +7736,104 @@ fn prepare_playback(preparation: PlaybackPreparation<'_>) -> Result<PreparedPlay
             now_playing_queue: None,
         },
         series_id: None,
+        preserve_paused: None,
+        subtitle_replacement: false,
     })
+}
+
+async fn prepare_transcoded_subtitle_replacement(
+    preparation: TranscodedSubtitleReplacementPreparation<'_>,
+) -> Result<PreparedPlayback, ApiError> {
+    let TranscodedSubtitleReplacementPreparation {
+        client,
+        session,
+        cached,
+        replacement,
+    } = preparation;
+    let BurnInSubtitleReplacement {
+        negotiation_id,
+        item_id,
+        source_index,
+        subtitle_stream_index,
+        start_time_ticks,
+        ..
+    } = replacement;
+    let (source_id, request) = transcoded_subtitle_replacement_request(
+        cached,
+        negotiation_id,
+        &item_id,
+        source_index,
+        subtitle_stream_index,
+        start_time_ticks,
+    )?;
+    let response = client.playback_info(session, &item_id, &request).await?;
+    if response.error_code.is_some() {
+        return Err(ApiError::InvalidResponse);
+    }
+    let Some(rebuilt_source_index) = response
+        .media_sources
+        .iter()
+        .position(|candidate| candidate.id.as_deref() == Some(source_id.as_str()))
+    else {
+        return Err(ApiError::InvalidResponse);
+    };
+    let rebuilt = CachedPlaybackInfo {
+        request_id: negotiation_id,
+        item_id: item_id.clone(),
+        is_audio: false,
+        request,
+        response,
+    };
+    let mut playback = prepare_playback(PlaybackPreparation {
+        client: Some(client),
+        session: Some(session),
+        cached: Some(&rebuilt),
+        negotiation_id,
+        item_id: &item_id,
+        source_index: rebuilt_source_index,
+        play_method: PlayMethod::Transcode,
+        start_time_ticks,
+        burn_in_subtitles: true,
+        subtitle_stream_index_override: Some(subtitle_stream_index),
+    })
+    .map_err(|_| ApiError::InvalidResponse)?;
+    playback.set_resume_position_ticks(start_time_ticks);
+    playback.subtitle_replacement = true;
+    Ok(playback)
+}
+
+fn transcoded_subtitle_replacement_request(
+    cached: Option<&CachedPlaybackInfo>,
+    negotiation_id: u64,
+    item_id: &str,
+    source_index: usize,
+    subtitle_stream_index: Option<i32>,
+    start_time_ticks: Option<i64>,
+) -> Result<(String, PlaybackInfoRequest), ApiError> {
+    if subtitle_stream_index.is_some_and(|index| index < 0) {
+        return Err(ApiError::InvalidResponse);
+    }
+    let Some(cached) = cached.filter(|cached| {
+        cached.request_id == negotiation_id && cached.item_id == item_id && !cached.is_audio
+    }) else {
+        return Err(ApiError::InvalidResponse);
+    };
+    let Some(source) = cached.response.media_sources.get(source_index) else {
+        return Err(ApiError::InvalidResponse);
+    };
+    let Some(source_id) = source.id.as_deref().filter(|id| !id.is_empty()) else {
+        return Err(ApiError::InvalidResponse);
+    };
+    if !source.supports_transcoding {
+        return Err(ApiError::InvalidResponse);
+    }
+
+    let mut request = cached.request.clone();
+    request.media_source_id = Some(source_id.to_owned());
+    request.subtitle_stream_index = subtitle_stream_index;
+    request.start_time_ticks = start_time_ticks.filter(|ticks| *ticks > 0);
+    request.always_burn_in_subtitle_when_transcoding = Some(subtitle_stream_index.is_some());
+    Ok((source_id.to_owned(), request))
 }
 
 async fn tune_live_tv(
@@ -7645,6 +7904,7 @@ async fn tune_live_tv(
             request_id: 0,
             item_id: channel_id.to_owned(),
             is_audio: false,
+            request: request.clone(),
             response,
         };
         let mut playback = prepare_playback(PlaybackPreparation {
@@ -7657,6 +7917,7 @@ async fn tune_live_tv(
             play_method,
             start_time_ticks: None,
             burn_in_subtitles: false,
+            subtitle_stream_index_override: None,
         })?;
         playback.report_metadata.live_stream_id = Some(live_stream_id.clone());
         playback.report_metadata.live_tune_started_at = Some(tune_started_at);
@@ -8265,10 +8526,15 @@ mod people_command_tests {
 
 #[cfg(test)]
 mod playback_preparation_tests {
-    use super::{CachedPlaybackInfo, PlaybackPreparation, burn_in_subtitle, prepare_playback};
+    use super::{
+        BurnInSubtitleReplacement, CachedPlaybackInfo, PlaybackPreparation,
+        TranscodedSubtitleReplacementPreparation, burn_in_subtitle, prepare_playback,
+        prepare_transcoded_subtitle_replacement, transcoded_subtitle_replacement_request,
+    };
     use jellyfin_api::{
         ClientConfig, ItemQuery, JellyfinClient, MediaSourceInfo, PlayMethod, PlaybackInfoRequest,
-        PlaybackSourceRequestOptions, baseline_device_profile,
+        PlaybackInfoResponse, PlaybackRequestOverrides, PlaybackSourceRequestOptions,
+        baseline_device_profile,
     };
     use kattri_client_core::playback_plan::{
         PlaybackMethod, select_playback_info_source_for_profile,
@@ -8277,7 +8543,7 @@ mod playback_preparation_tests {
     use std::net::SocketAddr;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpStream,
+        net::{TcpListener, TcpStream},
     };
 
     #[test]
@@ -8312,6 +8578,241 @@ mod playback_preparation_tests {
             None,
             "invalid stream index"
         );
+    }
+
+    #[test]
+    fn subtitle_replacement_request_pins_the_source_and_preserves_the_position() {
+        let response: PlaybackInfoResponse = serde_json::from_value(serde_json::json!({
+            "MediaSources": [{
+                "Id": "source-id",
+                "SupportsTranscoding": true
+            }]
+        }))
+        .expect("playback response fixture");
+        let cached = CachedPlaybackInfo {
+            request_id: 41,
+            item_id: "item-id".into(),
+            is_audio: false,
+            request: PlaybackInfoRequest {
+                user_id: Some("user-id".into()),
+                ..PlaybackInfoRequest::default()
+            },
+            response,
+        };
+
+        let (_, request) = transcoded_subtitle_replacement_request(
+            Some(&cached),
+            41,
+            "item-id",
+            0,
+            Some(7),
+            Some(90_000_000),
+        )
+        .expect("valid source subtitle choice");
+        let body = serde_json::to_value(&request).expect("serialize replacement request");
+        assert_eq!(body["UserId"], "user-id");
+        assert_eq!(body["MediaSourceId"], "source-id");
+        assert_eq!(body["SubtitleStreamIndex"], 7);
+        assert_eq!(body["StartTimeTicks"], 90_000_000);
+        assert_eq!(body["AlwaysBurnInSubtitleWhenTranscoding"], true);
+
+        let (_, off_request) = transcoded_subtitle_replacement_request(
+            Some(&cached),
+            41,
+            "item-id",
+            0,
+            None,
+            Some(90_000_000),
+        )
+        .expect("turning the server subtitle off is a valid replacement");
+        let off_body = serde_json::to_value(off_request).expect("serialize subtitle-off request");
+        assert_eq!(off_body["AlwaysBurnInSubtitleWhenTranscoding"], false);
+        assert!(off_body.get("SubtitleStreamIndex").is_none());
+        assert!(
+            transcoded_subtitle_replacement_request(
+                Some(&cached),
+                40,
+                "item-id",
+                0,
+                Some(7),
+                Some(90_000_000),
+            )
+            .is_err()
+        );
+        assert!(
+            transcoded_subtitle_replacement_request(
+                Some(&cached),
+                41,
+                "item-id",
+                0,
+                Some(-1),
+                Some(90_000_000),
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn subtitle_replacement_renegotiates_and_builds_a_new_transcode_relay() {
+        let auth_server = spawn(MockConfig::default())
+            .await
+            .expect("start mock Jellyfin for authentication");
+        let auth_client = JellyfinClient::new(
+            ClientConfig::new(
+                &auth_server.base_url(),
+                "Kattri test",
+                "test device",
+                "device-id",
+                "test-version",
+            )
+            .expect("valid loopback config"),
+        )
+        .expect("create Jellyfin client");
+        let session = auth_client
+            .authenticate("demo", "demo")
+            .await
+            .expect("authenticate to mock server");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind playback negotiation fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let (body_sender, body_receiver) = tokio::sync::oneshot::channel();
+        let fixture = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("accept playback negotiation");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 2048];
+            let header_end = loop {
+                let read = stream.read(&mut chunk).await.expect("read fixture request");
+                if read == 0 {
+                    panic!("request ended before headers");
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .expect("content length");
+            while request.len() < header_end.saturating_add(content_length) {
+                let read = stream.read(&mut chunk).await.expect("read fixture body");
+                if read == 0 {
+                    panic!("request ended before its body");
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body = serde_json::from_slice::<serde_json::Value>(
+                &request[header_end..header_end + content_length],
+            )
+            .expect("playback negotiation body");
+            let _ = body_sender.send(body);
+            let response = serde_json::to_vec(&serde_json::json!({
+                "PlaySessionId": "replacement-play-session",
+                "MediaSources": [{
+                    "Id": "source-id",
+                    "SupportsTranscoding": true,
+                    "TranscodingUrl": "/Videos/item-id/master.m3u8?VideoCodec=h264",
+                    "TranscodingSubProtocol": "hls",
+                    "TranscodingContainer": "ts"
+                }]
+            }))
+            .expect("serialize negotiation response");
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        response.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write fixture response headers");
+            stream
+                .write_all(&response)
+                .await
+                .expect("write fixture response body");
+        });
+        let client = JellyfinClient::new(
+            ClientConfig::new(
+                &format!("http://{address}"),
+                "Kattri test",
+                "test device",
+                "device-id",
+                "test-version",
+            )
+            .expect("valid loopback config"),
+        )
+        .expect("create playback client");
+        let request = PlaybackInfoRequest::for_mpv_profile(
+            baseline_device_profile(),
+            PlaybackRequestOverrides::default(),
+        );
+        let cached = CachedPlaybackInfo {
+            request_id: 52,
+            item_id: "item-id".into(),
+            is_audio: false,
+            request,
+            response: serde_json::from_value(serde_json::json!({
+                "PlaySessionId": "original-play-session",
+                "MediaSources": [{
+                    "Id": "source-id",
+                    "SupportsTranscoding": true,
+                    "DefaultSubtitleStreamIndex": 2,
+                    "TranscodingUrl": "/Videos/item-id/master.m3u8?VideoCodec=h264",
+                    "TranscodingSubProtocol": "hls",
+                    "TranscodingContainer": "ts"
+                }]
+            }))
+            .expect("cached playback response fixture"),
+        };
+
+        let playback =
+            prepare_transcoded_subtitle_replacement(TranscodedSubtitleReplacementPreparation {
+                client: &client,
+                session: &session,
+                cached: Some(&cached),
+                replacement: BurnInSubtitleReplacement {
+                    playback_generation: 91,
+                    negotiation_id: 52,
+                    item_id: "item-id".into(),
+                    source_index: 0,
+                    subtitle_stream_index: Some(7),
+                    start_time_ticks: Some(123_456_789),
+                },
+            })
+            .await
+            .expect("renegotiate and build the replacement relay");
+        let (url, relay, metadata, resume_ticks) = playback.into_parts();
+        assert!(url.as_str().starts_with("http://127.0.0.1:"));
+        assert!(url.as_str().contains("/r/"));
+        assert_eq!(metadata.media_source_id.as_deref(), Some("source-id"));
+        assert_eq!(metadata.play_method, PlayMethod::Transcode);
+        assert_eq!(metadata.subtitle_stream_index, Some(7));
+        assert_eq!(
+            metadata.play_session_id.as_deref(),
+            Some("replacement-play-session")
+        );
+        assert_eq!(resume_ticks, Some(123_456_789));
+        relay.shutdown().expect("stop replacement relay");
+        let body = body_receiver
+            .await
+            .expect("capture renegotiated playback body");
+        assert_eq!(body["MediaSourceId"], "source-id");
+        assert_eq!(body["SubtitleStreamIndex"], 7);
+        assert_eq!(body["StartTimeTicks"], 123_456_789);
+        assert_eq!(body["AlwaysBurnInSubtitleWhenTranscoding"], true);
+        fixture.await.expect("playback fixture task");
+        auth_server.shutdown().await;
     }
 
     /// The URL builder test: burn-in parameters appear only when all three conditions hold, and
@@ -8466,6 +8967,7 @@ mod playback_preparation_tests {
             request_id: 12,
             item_id: item.id.clone(),
             is_audio: false,
+            request: PlaybackInfoRequest::default(),
             response,
         };
 
@@ -8484,6 +8986,7 @@ mod playback_preparation_tests {
                 play_method,
                 start_time_ticks: Some(123_456_789),
                 burn_in_subtitles: false,
+                subtitle_stream_index_override: None,
             })
             .expect("build the negotiated media source relay");
             let (url, relay, metadata, start_time_ticks) = playback.into_parts();
@@ -8505,6 +9008,7 @@ mod playback_preparation_tests {
                 play_method: PlayMethod::DirectPlay,
                 start_time_ticks,
                 burn_in_subtitles: false,
+                subtitle_stream_index_override: None,
             })
             .expect("build playback with absent or invalid resume position");
             let (_, relay, _, resume_ticks) = playback.into_parts();
@@ -8559,6 +9063,7 @@ mod playback_preparation_tests {
             request_id: 22,
             item_id: item.id.clone(),
             is_audio: true,
+            request: PlaybackInfoRequest::default(),
             response,
         };
         let playback = prepare_playback(PlaybackPreparation {
@@ -8571,6 +9076,7 @@ mod playback_preparation_tests {
             play_method: PlayMethod::DirectPlay,
             start_time_ticks: None,
             burn_in_subtitles: false,
+            subtitle_stream_index_override: None,
         })
         .expect("prepare audio stream through credential-isolating relay");
         let (url, relay, _, _) = playback.into_parts();

@@ -128,6 +128,8 @@ pub struct PlayerControlsView<'a> {
     pub audio_tracks: Option<&'a [TrackChoice<TrackSelection>]>,
     /// Primary subtitle choices for the settings popover. `None` while the inventory is loading.
     pub subtitle_tracks: Option<&'a [TrackChoice<TrackSelection>]>,
+    /// Jellyfin source subtitles for an active server-burned transcode.
+    pub burn_in_subtitle_tracks: Option<&'a [TrackChoice<Option<i32>>]>,
     /// Opacity of the whole chrome, from the host's OSD fade. Tests draw at full opacity.
     pub opacity: f32,
 }
@@ -207,6 +209,8 @@ pub enum PlayerControlAction {
     SelectAudioTrack(TrackSelection),
     /// Set the primary subtitle track from the settings popover.
     SelectSubtitleTrack(TrackSelection),
+    /// Re-negotiate the active transcode with this Jellyfin subtitle stream index, or turn it off.
+    SelectBurnInSubtitle(Option<i32>),
     /// Show or hide the existing media-info panel.
     ToggleMediaInfo,
     /// Enter or leave picture-in-picture (M2-12).
@@ -482,8 +486,11 @@ fn settings_sections(view: &PlayerControlsView<'_>, layout: ChromeLayout) -> Set
     SettingsSections {
         audio: view.audio_tracks.is_some_and(|tracks| !tracks.is_empty()),
         subtitles: view
-            .subtitle_tracks
-            .is_some_and(|tracks| !tracks.is_empty()),
+            .burn_in_subtitle_tracks
+            .is_some_and(|tracks| !tracks.is_empty())
+            || view
+                .subtitle_tracks
+                .is_some_and(|tracks| !tracks.is_empty()),
         secondary: !view.secondary_subtitles.is_empty(),
         speed: true,
         chapters: !view.chapters.is_empty(),
@@ -1301,7 +1308,23 @@ fn settings_popover(
                     }
                     if sections.subtitles {
                         settings_heading(ui, "Subtitles", opacity);
-                        if let Some(tracks) = view.subtitle_tracks {
+                        if let Some(tracks) = view.burn_in_subtitle_tracks {
+                            for choice in tracks {
+                                if settings_row(
+                                    ui,
+                                    &compact_label(&choice.label, 38),
+                                    choice.selected,
+                                    true,
+                                    opacity,
+                                    opening && first_row,
+                                ) {
+                                    chosen = Some(PlayerControlAction::SelectBurnInSubtitle(
+                                        choice.value,
+                                    ));
+                                }
+                                first_row = false;
+                            }
+                        } else if let Some(tracks) = view.subtitle_tracks {
                             for choice in tracks {
                                 if settings_row(
                                     ui,
@@ -2298,6 +2321,7 @@ mod tests {
             buffered: None,
             audio_tracks: None,
             subtitle_tracks: None,
+            burn_in_subtitle_tracks: None,
             opacity: 1.0,
         }
     }
@@ -2421,6 +2445,21 @@ mod tests {
             label: "Off".into(),
             selected: true,
         }];
+        let burned_subtitles = [TrackChoice {
+            value: Some(9),
+            label: "English".into(),
+            selected: true,
+        }];
+        assert!(
+            settings_sections(
+                &PlayerControlsView {
+                    burn_in_subtitle_tracks: Some(&burned_subtitles),
+                    ..view(&[])
+                },
+                roomy
+            )
+            .subtitles
+        );
         let secondary = [SecondarySubtitleChoice {
             track: 3,
             title: "English".into(),
@@ -2434,6 +2473,7 @@ mod tests {
             &PlayerControlsView {
                 audio_tracks: Some(&audio),
                 subtitle_tracks: Some(&subtitles),
+                burn_in_subtitle_tracks: None,
                 secondary_subtitles: &secondary,
                 chapters: &chapters,
                 ..view(&[])

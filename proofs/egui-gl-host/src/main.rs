@@ -23,6 +23,7 @@ use glutin::display::{GetGlDisplay, GlDisplay};
 use glutin::prelude::GlSurface;
 use glutin::surface::{SwapInterval, WindowSurface};
 use glutin_winit::{ApiPreference, DisplayBuilder};
+use jellyfin_egui_client::BurnInReplacementEnd;
 use jellyfin_egui_client::KattriApp;
 use kattri_client_core::PlaybackPhase;
 use kattri_client_core::controls::{OsdVisibility, PlaybackSpeed};
@@ -35,8 +36,8 @@ use kattri_client_core::window_state::SavedWindow;
 use kattri_platform::{PowerGuard, PowerInhibitor, PowerStatus, default_power_inhibitor};
 use kattri_plugins::discord::{IpcTransport, PresenceBinding};
 use mpv_host::{
-    ItemLoadSettings, MpvHost, SYNC_MARKER_BUTTONS, SyncFeedbackTone, TrackMemoryEvent,
-    TrackMenuKind, VideoFrameSizeRequest, local_media_path,
+    ItemLoadSettings, MpvHost, RelayLoadOptions, SYNC_MARKER_BUTTONS, SyncFeedbackTone,
+    TrackMemoryEvent, TrackMenuKind, VideoFrameSizeRequest, local_media_path,
 };
 use mpv_render_proof::{
     FboTarget, FrameDecision, MpvLibrary, MpvSession, PROVISIONAL_SCREENSHOT_MODE,
@@ -502,25 +503,46 @@ impl<'session> GlHost<'session> {
             self.kattri_app.playback_loaded(generation);
         }
         let playback_end = self.mpv.take_playback_end();
-        if playback_end.is_some() {
-            self.kattri_app.on_playback_stopped();
-        }
+        let replacement_end = playback_end
+            .as_ref()
+            .map(|end| {
+                self.kattri_app.on_playback_end(
+                    end.generation,
+                    end.was_loaded,
+                    end.reason == mpv_render_proof::EndFileReason::Error,
+                    end.command_submission_failed,
+                )
+            })
+            .unwrap_or(BurnInReplacementEnd::None);
         if let Some(mpv_host::PlaybackEnd {
             reason,
             item_id: Some(item_id),
             was_live,
             generation,
             was_loaded,
+            command_submission_failed: _,
             position_ticks,
         }) = playback_end
         {
-            self.sync_play_bridge.end(generation);
+            if !matches!(
+                replacement_end,
+                BurnInReplacementEnd::Suppress | BurnInReplacementEnd::Recovering
+            ) {
+                self.sync_play_bridge.end(generation);
+            }
             #[cfg(debug_assertions)]
             debug_harness::log_if_changed(
                 "mpv end",
                 &format!("{reason:?} item={item_id} live={was_live}"),
             );
-            if was_live {
+            if matches!(
+                replacement_end,
+                BurnInReplacementEnd::Suppress
+                    | BurnInReplacementEnd::Recovering
+                    | BurnInReplacementEnd::Failed
+            ) {
+                // The subtitle replacement owns this end event and its recovery.
+            } else if was_live {
                 match reason {
                     mpv_render_proof::EndFileReason::Eof
                     | mpv_render_proof::EndFileReason::Error => {
@@ -709,6 +731,21 @@ impl<'session> GlHost<'session> {
         let chrome_present = chrome_opacity > 0.001;
         let osd_hide_after = self.osd_visibility.time_until_hidden(osd_now);
         let controls_feedback = self.mpv.controls_feedback().map(str::to_owned);
+        self.kattri_app.set_media_playing(media_active);
+        let burn_in_subtitle_tracks = self.kattri_app.burn_in_subtitle_choices().map(|choices| {
+            choices
+                .into_iter()
+                .map(|(value, label, selected)| player_controls::TrackChoice {
+                    value,
+                    label,
+                    selected,
+                })
+                .collect::<Vec<_>>()
+        });
+        let burn_in_subtitle_feedback = self
+            .kattri_app
+            .burn_in_subtitle_feedback()
+            .map(str::to_owned);
         let playback_report_feedback = self
             .kattri_app
             .playback_report_feedback()
@@ -807,6 +844,8 @@ impl<'session> GlHost<'session> {
             feedback: controls_feedback.as_deref(),
             audio_tracks: audio_track_options.as_deref(),
             subtitle_tracks: subtitle_track_options.as_deref(),
+            burn_in_subtitle_tracks: burn_in_subtitle_tracks.as_deref(),
+            burn_in_subtitle_feedback: burn_in_subtitle_feedback.as_deref(),
             track_feedback: track_feedback.as_deref(),
         };
         // Theater view: while a video plays, the player fills the window. "Player details"
@@ -817,7 +856,6 @@ impl<'session> GlHost<'session> {
             && !self.show_player_details
             && self.kattri_app.selected_is_video();
         self.kattri_app.set_player_owns_input(theater);
-        self.kattri_app.set_media_playing(media_active);
         let mpv = &mut self.mpv;
         let kattri_app = &mut self.kattri_app;
         let show_player_details = &mut self.show_player_details;
@@ -1169,6 +1207,9 @@ impl<'session> GlHost<'session> {
                 mpv.close_media_info();
             }
         });
+        if let Some(generation) = self.kattri_app.take_terminal_burn_in_replacement_failure() {
+            self.sync_play_bridge.end(Some(generation));
+        }
         self.apply_gamepad_player_actions();
         self.sync_report_connection();
         self.flush_playback_reports();
@@ -1225,6 +1266,8 @@ impl<'session> GlHost<'session> {
         }
         if let Some(playback) = self.kattri_app.take_prepared_playback() {
             let playback_generation = self.kattri_app.playback_start_generation();
+            let subtitle_replacement = playback.is_subtitle_replacement();
+            let preserve_paused = playback.preserve_paused();
             self.sync_play_bridge.capture(
                 playback_generation,
                 self.kattri_app
@@ -1233,6 +1276,9 @@ impl<'session> GlHost<'session> {
             #[cfg(debug_assertions)]
             qa_metrics::playback_queued(Instant::now());
             let series_id = playback.series_id().map(str::to_owned);
+            let replacement_subtitle_stream_index = subtitle_replacement
+                .then(|| playback.subtitle_stream_index())
+                .flatten();
             let (url, relay, report_metadata, resume_position_ticks) = playback.into_parts();
             let live_stream_id = report_metadata.live_stream_id.clone();
             let live_channel_id = live_stream_id
@@ -1252,10 +1298,19 @@ impl<'session> GlHost<'session> {
                 relay,
                 report_metadata,
                 resume_position_ticks,
-                self.kattri_app.playback_start_generation(),
+                RelayLoadOptions {
+                    generation: self.kattri_app.playback_start_generation(),
+                    preserve_paused,
+                },
                 load,
             ) {
                 Ok(()) => {
+                    if subtitle_replacement {
+                        self.kattri_app.playback_subtitle_replacement_opening(
+                            playback_generation,
+                            replacement_subtitle_stream_index,
+                        );
+                    }
                     // Catalog focus must not consume player shortcuts or keep its overlay open.
                     self.egui.memory_mut(|memory| {
                         if let Some(focus) = memory.focused() {
@@ -1266,17 +1321,28 @@ impl<'session> GlHost<'session> {
                     self.kattri_app.playback_start_opening();
                 }
                 Err(error) => {
-                    self.sync_play_bridge.end(Some(playback_generation));
+                    if !subtitle_replacement {
+                        self.sync_play_bridge.end(Some(playback_generation));
+                    }
                     if let Some(live_stream_id) = live_stream_id {
                         self.kattri_app.close_live_tv_stream(live_stream_id);
                     }
                     if let Some(channel_id) = live_channel_id {
                         self.kattri_app.on_live_tv_stream_ended(&channel_id);
                     }
-                    match error {
-                        mpv_host::RelayLoadError::Busy => self.kattri_app.playback_start_busy(),
-                        mpv_host::RelayLoadError::Failed(message) => {
-                            self.kattri_app.playback_start_failed(message)
+                    if subtitle_replacement {
+                        if self
+                            .kattri_app
+                            .playback_subtitle_replacement_failed(playback_generation)
+                        {
+                            self.sync_play_bridge.end(Some(playback_generation));
+                        }
+                    } else {
+                        match error {
+                            mpv_host::RelayLoadError::Busy => self.kattri_app.playback_start_busy(),
+                            mpv_host::RelayLoadError::Failed(message) => {
+                                self.kattri_app.playback_start_failed(message)
+                            }
                         }
                     }
                 }
@@ -1950,6 +2016,8 @@ struct OsdState<'a> {
     feedback: Option<&'a str>,
     audio_tracks: Option<&'a [mpv_host::TrackMenuOption]>,
     subtitle_tracks: Option<&'a [mpv_host::TrackMenuOption]>,
+    burn_in_subtitle_tracks: Option<&'a [player_controls::TrackChoice<Option<i32>>]>,
+    burn_in_subtitle_feedback: Option<&'a str>,
     track_feedback: Option<&'a str>,
 }
 
@@ -2071,6 +2139,7 @@ fn osd_controls(
             buffered: None,
             audio_tracks: osd.audio_tracks,
             subtitle_tracks: osd.subtitle_tracks,
+            burn_in_subtitle_tracks: osd.burn_in_subtitle_tracks,
             opacity: osd.opacity,
         },
         skip,
@@ -2081,7 +2150,7 @@ fn osd_controls(
                     .strong()
                     .color(egui::Color32::from_gray(176)),
             );
-            if let Some(feedback) = osd.track_feedback {
+            if let Some(feedback) = osd.burn_in_subtitle_feedback.or(osd.track_feedback) {
                 ui.small(feedback);
             }
             ui.label("Sync subtitles to speech");
@@ -2160,6 +2229,14 @@ fn osd_controls(
             }
             PlayerControlAction::SelectSubtitleTrack(selection) => {
                 mpv.select_subtitle_track(selection);
+            }
+            PlayerControlAction::SelectBurnInSubtitle(stream_index) => {
+                if kattri_app
+                    .select_burn_in_subtitle(stream_index)
+                    .is_some_and(|was_paused| !was_paused)
+                {
+                    mpv.set_paused(true);
+                }
             }
             PlayerControlAction::ToggleMediaInfo => {
                 mpv.dispatch_playback_key(mpv_host::PlaybackKeyAction::MediaInfo);

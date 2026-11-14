@@ -849,10 +849,22 @@ impl StreamOpening {
     }
 }
 
+fn replacement_pause_plan(preserve_paused: Option<bool>) -> (Option<bool>, Option<bool>) {
+    match preserve_paused {
+        Some(paused) => (Some(true), (!paused).then_some(false)),
+        None => (None, None),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RelayLoadError {
     Busy,
     Failed(&'static str),
+}
+
+pub(crate) struct RelayLoadOptions {
+    pub(crate) generation: u64,
+    pub(crate) preserve_paused: Option<bool>,
 }
 
 pub(crate) struct PlaybackEnd {
@@ -861,6 +873,7 @@ pub(crate) struct PlaybackEnd {
     pub(crate) was_live: bool,
     pub(crate) generation: Option<u64>,
     pub(crate) was_loaded: bool,
+    pub(crate) command_submission_failed: bool,
     /// Last observed position, for reopening a file that failed mid-stream.
     pub(crate) position_ticks: Option<i64>,
 }
@@ -934,6 +947,7 @@ pub(crate) struct MpvHost<'session> {
     playback_end_was_live: bool,
     playback_end_generation: Option<u64>,
     playback_end_was_loaded: bool,
+    playback_end_command_submission_failed: bool,
     playback_end_position_ticks: Option<i64>,
     active_generation: Option<u64>,
     stream_opening: StreamOpening,
@@ -1072,6 +1086,7 @@ impl<'session> MpvHost<'session> {
                 playback_end_was_live: false,
                 playback_end_generation: None,
                 playback_end_was_loaded: false,
+                playback_end_command_submission_failed: false,
                 playback_end_position_ticks: None,
                 active_generation: None,
                 stream_opening: StreamOpening::Idle,
@@ -1181,6 +1196,7 @@ impl<'session> MpvHost<'session> {
                     playback_end_was_live: false,
                     playback_end_generation: None,
                     playback_end_was_loaded: false,
+                    playback_end_command_submission_failed: false,
                     playback_end_position_ticks: None,
                     active_generation: None,
                     stream_opening: StreamOpening::Idle,
@@ -1258,6 +1274,7 @@ impl<'session> MpvHost<'session> {
             playback_end_was_live: false,
             playback_end_generation: None,
             playback_end_was_loaded: false,
+            playback_end_command_submission_failed: false,
             playback_end_position_ticks: None,
             active_generation: None,
             stream_opening: StreamOpening::Idle,
@@ -1473,7 +1490,7 @@ impl<'session> MpvHost<'session> {
         relay: RelayHandle,
         report_metadata: PlaybackReportMetadata,
         resume_position_ticks: Option<i64>,
-        generation: u64,
+        options: RelayLoadOptions,
         load: ItemLoadSettings<'_>,
     ) -> Result<(), RelayLoadError> {
         if self.renderer.is_none() {
@@ -1489,12 +1506,29 @@ impl<'session> MpvHost<'session> {
         };
         self.queue_load_settings(session, &load)
             .map_err(RelayLoadError::Failed)?;
-        let command = session
-            .command(&["loadfile", url.as_str(), "replace"])
-            .map_err(|_| RelayLoadError::Failed("Could not queue the server stream in libmpv."))?;
+        let (pause_before_load, pause_after_load) = replacement_pause_plan(options.preserve_paused);
+        if pause_before_load.is_some() {
+            session.set_paused(true).map_err(|_| {
+                RelayLoadError::Failed("Could not preserve the playback pause state.")
+            })?;
+            if pause_after_load.is_some() {
+                self.controls_feedback = Some("Updating the subtitle; resuming playback…".into());
+            }
+        }
+        let command = match session.command(&["loadfile", url.as_str(), "replace"]) {
+            Ok(command) => command,
+            Err(_) => {
+                if pause_after_load.is_some() {
+                    let _ = session.set_paused(false);
+                }
+                return Err(RelayLoadError::Failed(
+                    "Could not queue the server stream in libmpv.",
+                ));
+            }
+        };
         self.media_load.pending = Some(PendingMediaLoad {
             command_id: command.get(),
-            generation: Some(generation),
+            generation: Some(options.generation),
             relay: Some(relay),
             resume_seconds: resume_position_seconds(resume_position_ticks),
             item: ItemPlaybackState {
@@ -1506,6 +1540,10 @@ impl<'session> MpvHost<'session> {
             report_metadata: Some(report_metadata),
         });
         self.status = "Loading the Jellyfin stream through the local relay".into();
+        if pause_after_load.is_some() && session.set_paused(false).is_err() {
+            self.controls_feedback =
+                Some("The updated stream loaded paused; press Play to continue.".into());
+        }
         self.sync_controller.reset();
         self.policy.reset_item();
         self.subtitle_track_id = None;
@@ -1672,6 +1710,7 @@ impl<'session> MpvHost<'session> {
                     self.playback_end_reason = Some(reason);
                     self.playback_end_generation = self.active_generation.take();
                     self.playback_end_was_loaded = self.file_loaded;
+                    self.playback_end_command_submission_failed = false;
                     self.playback_end_position_ticks = self
                         .file_loaded
                         .then(|| self.playback_position_ticks())
@@ -1734,7 +1773,8 @@ impl<'session> MpvHost<'session> {
                         .and_then(|load| load.report_metadata.clone());
                     self.playback_end_reason = Some(EndFileReason::Error);
                     self.playback_end_generation = generation;
-                    self.playback_end_was_loaded = false;
+                    self.playback_end_was_loaded = self.file_loaded;
+                    self.playback_end_command_submission_failed = true;
                     self.playback_end_position_ticks = None;
                     self.playback_end_item_id = metadata.as_ref().map(|item| item.item_id.clone());
                     self.playback_end_was_live = metadata
@@ -3412,6 +3452,8 @@ impl<'session> MpvHost<'session> {
             let was_live = std::mem::take(&mut self.playback_end_was_live);
             let generation = self.playback_end_generation.take();
             let was_loaded = std::mem::take(&mut self.playback_end_was_loaded);
+            let command_submission_failed =
+                std::mem::take(&mut self.playback_end_command_submission_failed);
             let position_ticks = self.playback_end_position_ticks.take();
             PlaybackEnd {
                 reason,
@@ -3419,6 +3461,7 @@ impl<'session> MpvHost<'session> {
                 was_live,
                 generation,
                 was_loaded,
+                command_submission_failed,
                 position_ticks,
             }
         })
@@ -3792,6 +3835,19 @@ pub(crate) fn local_media_path(arguments: Vec<OsString>) -> Result<Option<String
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subtitle_replacement_pauses_before_load_and_restores_only_when_needed() {
+        assert_eq!(super::replacement_pause_plan(None), (None, None));
+        assert_eq!(
+            super::replacement_pause_plan(Some(true)),
+            (Some(true), None)
+        );
+        assert_eq!(
+            super::replacement_pause_plan(Some(false)),
+            (Some(true), Some(false))
+        );
+    }
+
     #[test]
     fn observation_cleanup_drains_each_registration_once() {
         let mut observations = [Some(1_u64), None, Some(3)];
