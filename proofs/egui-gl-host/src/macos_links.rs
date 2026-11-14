@@ -137,7 +137,7 @@ mod appkit {
 
         unsafe impl NSObjectProtocol for UrlEventHandler {}
 
-        impl UrlEventHandler {
+        unsafe impl UrlEventHandler {
             #[method(handleAppleEvent:withReplyEvent:)]
             fn handle_apple_event_with_reply_event(
                 &self,
