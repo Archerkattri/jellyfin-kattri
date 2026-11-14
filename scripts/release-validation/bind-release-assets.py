@@ -8,8 +8,11 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import uuid
+import zipfile
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -23,6 +26,23 @@ COMMIT_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 TAG_PATTERN = re.compile(r"^v([0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?)$")
 SECRET_ASSIGNMENT = re.compile(r"(?i)(?:api[_-]?key|access[_-]?token|auth(?:orization)?|password|token)\s*[:=]\s*[^\s&#]+")
 SECRET_QUERY_KEYS = {"api_key", "apikey", "token", "access_token", "authorization", "password"}
+MAX_PACKAGE_ZIP_BYTES = 1024 * 1024 * 1024
+MAX_PACKAGE_ZIP_ENTRIES = 4096
+MAX_PACKAGE_ZIP_MEMBER_BYTES = 512 * 1024 * 1024
+MAX_PACKAGE_ZIP_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+MAX_PACKAGE_ZIP_COMPRESSION_RATIO = 1000
+PACKAGE_MEMBER_ROLES = {"executable", "native", "license"}
+WINDOWS_RESERVED_MEMBER_NAMES = {
+    "aux",
+    "con",
+    "conin$",
+    "conout$",
+    "nul",
+    "prn",
+    *("com%d" % index for index in range(1, 10)),
+    *("lpt%d" % index for index in range(1, 10)),
+}
+WINDOWS_INVALID_MEMBER_CHARS = set('<>:"|?*')
 
 
 def contains_secret_like_text(value: str) -> bool:
@@ -165,6 +185,177 @@ def safe_relative_file(root: Path, relative_value: Any, label: str) -> Path:
     if not candidate.is_file() or candidate.is_symlink():
         raise ValueError("%s does not identify a regular file" % label)
     return candidate
+
+
+def safe_package_member_path(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError("package member path must be a non-empty relative path")
+    if contains_secret_like_text(value) or "\\" in value or "\x00" in value:
+        raise ValueError("package member path contains unsafe text")
+    parts = value.split("/")
+    if value.startswith("/") or ":" in parts[0] or any(part in ("", ".", "..") for part in parts):
+        raise ValueError("package member path must stay beneath the package root")
+    for part in parts:
+        if part.endswith((".", " ")) or any(ord(char) < 32 or char in WINDOWS_INVALID_MEMBER_CHARS for char in part):
+            raise ValueError("package member path contains a Windows-invalid segment")
+        device_name = part.split(".", 1)[0].rstrip(" .").casefold()
+        if device_name in WINDOWS_RESERVED_MEMBER_NAMES:
+            raise ValueError("package member path contains a reserved Windows device name")
+    return "/".join(parts)
+
+
+def verify_zip_package_members(package_path: Path, members: list[dict[str, Any]]) -> dict[str, Any]:
+    """Hash bounded, sidecar-declared payload files in a portable ZIP without extracting it."""
+    if package_path.stat().st_size > MAX_PACKAGE_ZIP_BYTES:
+        raise ValueError("ZIP package exceeds the member-verification size limit")
+    try:
+        archive = zipfile.ZipFile(package_path, "r")
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ValueError("ZIP package could not be opened (%s)" % type(exc).__name__) from None
+
+    try:
+        infos = archive.infolist()
+        if not infos or len(infos) > MAX_PACKAGE_ZIP_ENTRIES:
+            raise ValueError("ZIP package entry count is outside the verification limit")
+
+        files: dict[str, zipfile.ZipInfo] = {}
+        directories: set[str] = set()
+        seen_names: set[str] = set()
+        total_uncompressed = 0
+        expected_prefixes: set[str] = set()
+        expected_by_path: dict[str, dict[str, Any]] = {}
+        role_counts = {role: 0 for role in sorted(PACKAGE_MEMBER_ROLES)}
+        for member in members:
+            path = safe_package_member_path(member.get("path"))
+            role = member.get("role")
+            digest = member.get("sha256")
+            size = member.get("size_bytes")
+            if role not in PACKAGE_MEMBER_ROLES:
+                raise ValueError("ZIP package member has an unsupported role")
+            if not isinstance(digest, str) or not HASH_PATTERN.fullmatch(digest):
+                raise ValueError("ZIP package member has an invalid SHA-256")
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0 or size > MAX_PACKAGE_ZIP_MEMBER_BYTES:
+                raise ValueError("ZIP package member size is outside the verification limit")
+            key = path.casefold()
+            if key in expected_by_path:
+                raise ValueError("ZIP sidecar repeats a package member path")
+            expected_by_path[key] = member
+            role_counts[role] += 1
+            parts = path.split("/")
+            for index in range(1, len(parts)):
+                expected_prefixes.add("/".join(parts[:index]).casefold())
+
+        for info in infos:
+            is_directory = info.is_dir()
+            raw_name = info.filename[:-1] if is_directory else info.filename
+            path = safe_package_member_path(raw_name)
+            key = path.casefold()
+            if key in seen_names:
+                raise ValueError("ZIP package contains duplicate or case-colliding member paths")
+            seen_names.add(key)
+
+            mode = (info.external_attr >> 16) & 0o170000
+            if stat.S_ISLNK(mode) or info.external_attr & 0x400:
+                raise ValueError("ZIP package contains a link or reparse-point member")
+            if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                raise ValueError("ZIP package uses an unsupported compression method")
+            if info.file_size < 0 or info.compress_size < 0:
+                raise ValueError("ZIP package contains invalid member sizes")
+            if is_directory:
+                if info.file_size != 0:
+                    raise ValueError("ZIP package directory entry contains data")
+                directories.add(key)
+                if expected_prefixes and key not in expected_prefixes:
+                    # Extra directory records are outside the selected member scope.
+                    continue
+                continue
+            if info.file_size > MAX_PACKAGE_ZIP_MEMBER_BYTES:
+                raise ValueError("ZIP package member exceeds the verification size limit")
+            total_uncompressed += info.file_size
+            if total_uncompressed > MAX_PACKAGE_ZIP_UNCOMPRESSED_BYTES:
+                raise ValueError("ZIP package uncompressed total exceeds the verification limit")
+            if info.file_size and (not info.compress_size or info.file_size / info.compress_size > MAX_PACKAGE_ZIP_COMPRESSION_RATIO):
+                raise ValueError("ZIP package member compression ratio exceeds the verification limit")
+            files[key] = info
+
+        for key in files:
+            parts = key.split("/")
+            if any("/".join(parts[:index]) in files for index in range(1, len(parts))):
+                raise ValueError("ZIP package contains a file/directory prefix collision")
+            if key in directories:
+                raise ValueError("ZIP package contains a file/directory path collision")
+
+        member_digests: dict[str, str] = {}
+        actual_total = 0
+        for key, info in files.items():
+            digest = hashlib.sha256()
+            observed_size = 0
+            try:
+                with archive.open(info, "r") as stream:
+                    while chunk := stream.read(1024 * 1024):
+                        observed_size += len(chunk)
+                        actual_total += len(chunk)
+                        if (
+                            observed_size > info.file_size
+                            or observed_size > MAX_PACKAGE_ZIP_MEMBER_BYTES
+                            or actual_total > MAX_PACKAGE_ZIP_UNCOMPRESSED_BYTES
+                        ):
+                            raise ValueError("ZIP decompression exceeded a configured size limit")
+                        digest.update(chunk)
+            except (OSError, RuntimeError, EOFError, NotImplementedError, zipfile.BadZipFile, zipfile.LargeZipFile, zlib.error) as exc:
+                raise ValueError("ZIP package member could not be safely streamed (%s)" % type(exc).__name__) from None
+            if observed_size != info.file_size:
+                raise ValueError("ZIP package member stream size does not match its central-directory record")
+            member_digests[key] = digest.hexdigest()
+
+        for key, member in expected_by_path.items():
+            info = files.get(key)
+            if info is None:
+                raise ValueError("ZIP package is missing a sidecar-declared member")
+            if info.filename != member["path"]:
+                raise ValueError("ZIP package member path does not exactly match its sidecar")
+            if info.file_size != member["size_bytes"] or member_digests[key] != member["sha256"].lower():
+                raise ValueError("ZIP package member bytes do not match their sidecar evidence")
+
+        return {
+            "status": "verified_declared_members",
+            "verified_member_count": len(expected_by_path),
+            "unverified_file_member_count": len(files) - len(expected_by_path),
+            "uncompressed_bytes_checked": actual_total,
+            "role_counts": role_counts,
+            "scope": "Every file entry was streamed under member and total-size limits; exact SHA-256 and size matches are claimed only for sidecar-declared executable, native, and license members.",
+        }
+    finally:
+        archive.close()
+
+
+def validate_zip_member_claims(
+    members: list[dict[str, Any]],
+    claims: dict[str, list[dict[str, Any]]],
+) -> None:
+    by_path = {member["path"].casefold(): member for member in members}
+    for role in PACKAGE_MEMBER_ROLES:
+        for claim in claims.get(role, []):
+            try:
+                path = safe_package_member_path(claim.get("path"))
+            except ValueError as exc:
+                raise ValueError("ZIP sidecar has an invalid %s member claim" % role) from exc
+            member = by_path.get(path.casefold())
+            digest = claim.get("sha256")
+            if member is None or member["role"] != role:
+                raise ValueError("ZIP sidecar member inventory does not cover a %s claim" % role)
+            if not isinstance(digest, str) or not HASH_PATTERN.fullmatch(digest) or member["sha256"] != digest.lower():
+                raise ValueError("ZIP sidecar member hash does not match its %s claim" % role)
+
+    claimed_paths = {
+        safe_package_member_path(claim["path"]).casefold()
+        for role in PACKAGE_MEMBER_ROLES
+        for claim in claims.get(role, [])
+        if isinstance(claim.get("path"), str)
+    }
+    for member in members:
+        if member["path"].casefold() not in claimed_paths and member["role"] != "license":
+            raise ValueError("ZIP sidecar contains an executable or native member without a matching claim")
 
 
 def load_binary_audit_index(
@@ -601,6 +792,8 @@ def _bind(args: argparse.Namespace) -> int:
         issues.append("release workflow artifacts contain no release-native-components.json sidecars")
 
     package_assets: dict[str, dict[str, Any]] = {}
+    package_members_by_path: dict[str, list[dict[str, Any]]] = {}
+    package_member_claims_by_path: dict[str, dict[str, list[dict[str, Any]]]] = {}
     native_components: list[dict[str, Any]] = []
     disclosed_gaps: list[dict[str, str]] = []
     audit_gaps: list[dict[str, str]] = []
@@ -690,8 +883,8 @@ def _bind(args: argparse.Namespace) -> int:
                 "sha256": actual_sha,
                 "size_bytes": actual_size,
                 "member_content_verification": {
-                    "status": "not_verified_by_binder",
-                    "scope": "The package file and sidecar evidence are hashed separately; this binder does not extract the package to compare internal members.",
+                    "status": "partial",
+                    "scope": "No supported member verification has run for this package.",
                 },
                 "native_component_refs": [],
                 "package_executables": [],
@@ -699,6 +892,65 @@ def _bind(args: argparse.Namespace) -> int:
             }
             package_assets[relative_path] = package_record
             validated_packages[package_file] = package_record
+            package_member_claims_by_path[relative_path] = {role: [] for role in PACKAGE_MEMBER_ROLES}
+
+        member_entries = sidecar.get("package_members", [])
+        if not isinstance(member_entries, list) or len(member_entries) > MAX_PACKAGE_ZIP_ENTRIES:
+            issues.append("package_members must be a list within the verification limit in %s" % sidecar_path.name)
+            member_entries = []
+        seen_member_keys: set[tuple[str, str]] = set()
+        for entry in member_entries:
+            if not isinstance(entry, dict):
+                issues.append("package member record is not an object in %s" % sidecar_path.name)
+                continue
+            package_file = entry.get("package_file")
+            package = validated_packages.get(package_file) if isinstance(package_file, str) else None
+            if package is None:
+                issues.append("package member names an unknown package in %s" % sidecar_path.name)
+                continue
+            if package["format"] != "zip":
+                issues.append("package member records are supported only for ZIP packages")
+                continue
+            try:
+                member_path = safe_package_member_path(entry.get("path"))
+            except ValueError as exc:
+                issues.append("%s: %s" % (sidecar_path.name, exc))
+                continue
+            role = entry.get("role")
+            digest = entry.get("sha256")
+            size = entry.get("size_bytes")
+            evidence_file = entry.get("evidence_file")
+            if role not in PACKAGE_MEMBER_ROLES:
+                issues.append("package member has an unsupported role in %s" % sidecar_path.name)
+                continue
+            if not isinstance(digest, str) or not HASH_PATTERN.fullmatch(digest):
+                issues.append("package member has an invalid SHA-256 in %s" % sidecar_path.name)
+                continue
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0 or size > MAX_PACKAGE_ZIP_MEMBER_BYTES:
+                issues.append("package member size is outside the verification limit in %s" % sidecar_path.name)
+                continue
+            try:
+                evidence_path = safe_relative_file(sidecar_path.parent, evidence_file, "package member evidence file")
+                evidence_size = evidence_path.stat().st_size
+                if evidence_size != size or sha256_file(evidence_path).lower() != digest.lower():
+                    issues.append("package member evidence does not match its sidecar in %s" % sidecar_path.name)
+            except ValueError as exc:
+                issues.append("%s: %s" % (sidecar_path.name, exc))
+                continue
+            member_key = (package_file.casefold(), member_path.casefold())
+            if member_key in seen_member_keys:
+                issues.append("package member paths are duplicated in %s" % sidecar_path.name)
+                continue
+            seen_member_keys.add(member_key)
+            package_members_by_path.setdefault(package["path"], []).append(
+                {
+                    "path": member_path,
+                    "role": role,
+                    "sha256": digest.lower(),
+                    "size_bytes": size,
+                    "evidence_file": evidence_file,
+                }
+            )
 
         native_entries = sidecar.get("native_components")
         if not isinstance(native_entries, list):
@@ -745,6 +997,13 @@ def _bind(args: argparse.Namespace) -> int:
             component["package_sha256"] = package["sha256"]
             component["bom_ref"] = native_component_ref(target, package["sha256"], component)
             package["native_component_refs"].append(component["bom_ref"])
+            package_claims = package_member_claims_by_path[package["path"]]
+            package_claims["native"].append(
+                {"path": component.get("packaged_file"), "sha256": component.get("packaged_sha256")}
+            )
+            package_claims["license"].extend(
+                {"path": item["path"], "sha256": item["sha256"]} for item in component["license_files"]
+            )
             native_components.append(component)
 
         for package_file in validated_packages:
@@ -834,6 +1093,9 @@ def _bind(args: argparse.Namespace) -> int:
             elif binary_audit_index_path is not None:
                 issues.append("package executable is missing from the binary audit index: %s" % package["file"])
             validated_packages[package_file]["package_executables"].append(executable_record)
+            package_member_claims_by_path[validated_packages[package_file]["path"]]["executable"].append(
+                {"path": executable.get("packaged_file"), "sha256": executable_sha.lower()}
+            )
             executable_counts[package_file] = executable_counts.get(package_file, 0) + 1
 
         for package_file in validated_packages:
@@ -867,14 +1129,66 @@ def _bind(args: argparse.Namespace) -> int:
     if not package_assets:
         issues.append("no final release package files were found")
 
-    package_member_gaps = [
-        {
-            "target": package["target"],
-            "package": package["path"],
-            "detail": "The binder does not extract this package to compare embedded native, executable, and license members with sidecar hashes.",
-        }
-        for package in package_assets.values()
-    ]
+    package_member_gaps: list[dict[str, str]] = []
+    for package_path, package in package_assets.items():
+        if package["format"] != "zip":
+            package["member_content_verification"] = {
+                "status": "partial",
+                "verified_member_count": 0,
+                "scope": "Member extraction is not implemented for this package format; the package and evidence files are hashed separately.",
+            }
+            package_member_gaps.append(
+                {
+                    "target": package["target"],
+                    "package": package_path,
+                    "detail": "Member verification does not support this package format.",
+                }
+            )
+            continue
+
+        members = package_members_by_path.get(package_path, [])
+        if not members:
+            package["member_content_verification"] = {
+                "status": "partial",
+                "verified_member_count": 0,
+                "scope": "ZIP member inventory is absent; no internal members were compared.",
+            }
+            package_member_gaps.append(
+                {
+                    "target": package["target"],
+                    "package": package_path,
+                    "detail": "ZIP member inventory is absent.",
+                }
+            )
+            continue
+
+        try:
+            validate_zip_member_claims(members, package_member_claims_by_path.get(package_path, {}))
+            member_result = verify_zip_package_members(Path(asset_root / package_path), members)
+            package["member_content_verification"] = member_result
+            if member_result["unverified_file_member_count"]:
+                package_member_gaps.append(
+                    {
+                        "target": package["target"],
+                        "package": package_path,
+                        "detail": "%d ZIP file members are outside the declared executable/native/license scope."
+                        % member_result["unverified_file_member_count"],
+                    }
+                )
+        except ValueError as exc:
+            issues.append("package member verification failed for %s: %s" % (package["file"], exc))
+            package["member_content_verification"] = {
+                "status": "incomplete",
+                "verified_member_count": 0,
+                "scope": "Declared ZIP member verification failed; see validation issues.",
+            }
+            package_member_gaps.append(
+                {
+                    "target": package["target"],
+                    "package": package_path,
+                    "detail": "ZIP member verification failed.",
+                }
+            )
 
     for package in package_assets.values():
         if not package["native_component_refs"]:
@@ -1069,12 +1383,12 @@ def _bind(args: argparse.Namespace) -> int:
         "native_component_sbom": {
             "file": native_bom_path.name,
             "sha256": native_bom_sha,
-            "scope": "native component claims and byte evidence from platform package sidecars; pinned libmpv fields are cross-checked against packaging/libmpv/manifest.toml; package member bytes are not comprehensively re-extracted by this binder",
+            "scope": "Native claims are cross-checked against pinned manifests and sidecar evidence; declared ZIP native and license members are also hashed from the package, while other package formats remain partial.",
             "inventory_gaps": disclosed_gaps,
         },
         "package_member_verification": {
-            "status": "not_comprehensively_verified" if package_member_gaps else "no_package_assets",
-            "scope": "The package-container SHA-256 and sidecar payload evidence are verified separately; embedded member bytes are not comprehensively re-extracted by this binder.",
+            "status": "partial" if package_member_gaps else ("verified" if package_assets else "no_package_assets"),
+            "scope": "Declared executable, native, and license members in portable ZIPs are compared with sidecar evidence. Other ZIP members and unsupported package formats remain partial.",
             "gaps": package_member_gaps,
         },
         "package_binary_audits": {

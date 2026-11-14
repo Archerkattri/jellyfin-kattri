@@ -12,13 +12,25 @@ import argparse
 import hashlib
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
 HASH = re.compile(r"^[0-9a-fA-F]{64}$")
 COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
 TOML_STRING = re.compile(r'^([a-z0-9_]+)\s*=\s*"([^"]*)"$')
+PACKAGE_MEMBER_ROLES = {"executable", "native", "license"}
+WINDOWS_RESERVED_MEMBER_NAMES = {
+    "aux",
+    "con",
+    "conin$",
+    "conout$",
+    "nul",
+    "prn",
+    *("com%d" % index for index in range(1, 10)),
+    *("lpt%d" % index for index in range(1, 10)),
+}
+WINDOWS_INVALID_MEMBER_CHARS = set('<>:"|?*')
 
 
 def artifact_file(root: Path, relative: Any, label: str) -> tuple[Path, str]:
@@ -27,7 +39,10 @@ def artifact_file(root: Path, relative: Any, label: str) -> tuple[Path, str]:
     candidate = Path(relative)
     if candidate.is_absolute() or any(part in ("", ".", "..") for part in candidate.parts):
         raise ValueError(f"{label} path must be a safe relative file: {relative!r}")
-    resolved = (root / candidate).resolve(strict=True)
+    source_path = root / candidate
+    if source_path.is_symlink():
+        raise ValueError(f"{label} must not be a symlink: {relative!r}")
+    resolved = source_path.resolve(strict=True)
     if not resolved.is_relative_to(root):
         raise ValueError(f"{label} path escapes the artifact directory: {relative!r}")
     if not resolved.is_file():
@@ -47,6 +62,31 @@ def require_string(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be a nonempty string")
     return value
+
+
+def package_member_path(value: Any) -> str:
+    path = require_string(value, "package member path")
+    parts = path.split("/")
+    if (
+        "\\" in path
+        or "\x00" in path
+        or ":" in path
+        or any(ord(char) < 32 for char in path)
+        or len(path) > 4096
+        or path.startswith("/")
+        or any(part in ("", ".", "..") for part in parts)
+        or PurePosixPath(path).is_absolute()
+    ):
+        raise ValueError("package member path must be a safe relative POSIX path")
+    for part in parts:
+        if len(part) > 255 or part.endswith((".", " ")) or any(
+            ord(char) < 32 or char in WINDOWS_INVALID_MEMBER_CHARS for char in part
+        ):
+            raise ValueError("package member path contains a Windows-invalid segment")
+        device_name = part.split(".", 1)[0].rstrip(" .").casefold()
+        if device_name in WINDOWS_RESERVED_MEMBER_NAMES:
+            raise ValueError("package member path contains a reserved Windows device name")
+    return path
 
 
 def read_libmpv_pin(manifest: Path, platform: str) -> dict[str, str]:
@@ -163,8 +203,92 @@ def build_sidecar(root: Path, spec: dict[str, Any], manifest: Path | None) -> di
         executable_path, executable_file = artifact_file(root, executable.get("file"), "executable evidence")
         executable["file"] = executable_file
         executable["sha256"] = sha256_file(executable_path)
+        if executable.get("packaged_file") is not None:
+            executable["packaged_file"] = package_member_path(executable["packaged_file"])
         require_string(executable.get("audit_scope"), "executable audit_scope")
         executables.append(executable)
+
+    package_member_entries = spec.get("package_members", [])
+    if not isinstance(package_member_entries, list) or len(package_member_entries) > 4096:
+        raise ValueError("package_members must be a list containing at most 4096 records")
+    package_members: list[dict[str, str]] = []
+    member_paths: set[tuple[str, str]] = set()
+    for original in package_member_entries:
+        if not isinstance(original, dict):
+            raise ValueError("each package member must be an object")
+        package_file = require_string(original.get("package_file"), "package member package_file")
+        if package_file not in package_paths:
+            raise ValueError("package member names an unknown package: " + package_file)
+        path = package_member_path(original.get("path"))
+        role = require_string(original.get("role"), "package member role")
+        if role not in PACKAGE_MEMBER_ROLES:
+            raise ValueError("package member role must be executable, native, or license")
+        evidence_path, evidence_file = artifact_file(root, original.get("evidence_file"), "package member evidence")
+        member_key = (package_file.casefold(), path.casefold())
+        if member_key in member_paths:
+            raise ValueError("duplicate package member path: " + path)
+        member_paths.add(member_key)
+        package_members.append(
+            {
+                "package_file": package_file,
+                "path": path,
+                "role": role,
+                "evidence_file": evidence_file,
+                "sha256": sha256_file(evidence_path),
+                "size_bytes": evidence_path.stat().st_size,
+            }
+        )
+
+    members_by_package: dict[str, list[dict[str, str]]] = {}
+    for member in package_members:
+        members_by_package.setdefault(member["package_file"], []).append(member)
+    expected_by_package: dict[str, set[tuple[str, str, str, str]]] = {}
+    for executable in executables:
+        expected_by_package.setdefault(executable["package_file"], set()).add(
+            ("executable", executable.get("packaged_file", ""), executable["file"], executable["sha256"])
+        )
+    for component in native_components:
+        expected_by_package.setdefault(component["package_file"], set()).add(
+            ("native", component["packaged_file"], component["evidence_file"], component["packaged_sha256"])
+        )
+        for license_file in component["license_files"]:
+            expected_by_package.setdefault(component["package_file"], set()).add(
+                ("license", license_file["path"], license_file["evidence_file"], license_file["sha256"])
+            )
+    for package_file, (_, normalized_package_file) in package_paths.items():
+        if Path(normalized_package_file).suffix.casefold() != ".zip":
+            continue
+        actual = {
+            (member["role"], member["path"], member["evidence_file"], member["sha256"])
+            for member in members_by_package.get(package_file, [])
+        }
+        missing = expected_by_package.get(package_file, set()) - actual
+        if missing:
+            raise ValueError("ZIP package member manifest does not cover all executable, native, and license claims: " + normalized_package_file)
+        executable_claims = {
+            (member["path"], member["evidence_file"], member["sha256"])
+            for member in members_by_package.get(package_file, [])
+            if member["role"] == "executable"
+        }
+        expected_executables = {
+            (executable.get("packaged_file", ""), executable["file"], executable["sha256"])
+            for executable in executables
+            if executable["package_file"] == package_file
+        }
+        if executable_claims != expected_executables:
+            raise ValueError("ZIP package executable member claims do not match the executable evidence: " + normalized_package_file)
+        native_claims = {
+            (member["path"], member["evidence_file"], member["sha256"])
+            for member in members_by_package.get(package_file, [])
+            if member["role"] == "native"
+        }
+        expected_native = {
+            (component["packaged_file"], component["evidence_file"], component["packaged_sha256"])
+            for component in native_components
+            if component["package_file"] == package_file
+        }
+        if native_claims != expected_native:
+            raise ValueError("ZIP package native member claims do not match native component evidence: " + normalized_package_file)
 
     gaps = spec.get("inventory_gaps", [])
     if not isinstance(gaps, list) or any(not isinstance(gap, str) or not gap.strip() for gap in gaps):
@@ -177,6 +301,7 @@ def build_sidecar(root: Path, spec: dict[str, Any], manifest: Path | None) -> di
         "packages": packages,
         "native_components": native_components,
         "executables": executables,
+        "package_members": package_members,
         "inventory_gaps": gaps,
     }
     if spec.get("audit_scope") is not None:

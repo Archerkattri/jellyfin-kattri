@@ -146,10 +146,12 @@ jobs:
           $evidenceRoot = Join-Path 'dist/release-validation'
           $nativeEvidence = Join-Path $evidenceRoot 'native/libmpv-2.dll'
           $licenseEvidenceRoot = Join-Path $evidenceRoot 'licenses/libmpv'
+          $projectLicenseEvidence = Join-Path $evidenceRoot 'licenses/project/LICENSE'
           $executableEvidence = Join-Path $evidenceRoot 'executables/jellyfin-kattri.exe'
-          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $nativeEvidence), $licenseEvidenceRoot, (Split-Path -Parent $executableEvidence) | Out-Null
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $nativeEvidence), $licenseEvidenceRoot, (Split-Path -Parent $projectLicenseEvidence), (Split-Path -Parent $executableEvidence) | Out-Null
           Copy-Item -LiteralPath "target/libmpv/windows-$platform/libmpv-2.dll" -Destination $nativeEvidence -Force
           Copy-Item -LiteralPath "target/release/$env:KATTRI_BIN.exe" -Destination $executableEvidence -Force
+          Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination $projectLicenseEvidence -Force
           $noticePath = Get-LibmpvNoticePath -RepositoryRoot $repoRoot
           $noticeEvidence = Join-Path $licenseEvidenceRoot 'libmpv-NOTICE.txt'
           Copy-Item -LiteralPath $noticePath -Destination $noticeEvidence -Force
@@ -179,18 +181,61 @@ jobs:
             }
           }
           $executables = foreach ($packageName in $packageNames) {
-            @{
+            $packagePrefix = if ($packageName -like '*.zip') {
+              '{0}/' -f [System.IO.Path]::GetFileNameWithoutExtension($packageName)
+            }
+            $executable = @{
               package_file = $packageName
               file = 'release-validation/executables/jellyfin-kattri.exe'
               audit_scope = 'The exact packaged executable hash is recorded. This release job did not produce cargo-auditable metadata or a cargo audit bin record.'
             }
+            if ($packagePrefix) {
+              $executable.packaged_file = "${packagePrefix}jellyfin-kattri.exe"
+            }
+            $executable
           }
+          $zipPrefix = '{0}/' -f [System.IO.Path]::GetFileNameWithoutExtension($zipName)
+          $packageMembers = @(
+            @{
+              package_file = $zipName
+              path = "${zipPrefix}jellyfin-kattri.exe"
+              role = 'executable'
+              evidence_file = 'release-validation/executables/jellyfin-kattri.exe'
+            },
+            @{
+              package_file = $zipName
+              path = "${zipPrefix}libmpv-2.dll"
+              role = 'native'
+              evidence_file = 'release-validation/native/libmpv-2.dll'
+            },
+            @{
+              package_file = $zipName
+              path = "${zipPrefix}LICENSE"
+              role = 'license'
+              evidence_file = 'release-validation/licenses/project/LICENSE'
+            },
+            @{
+              package_file = $zipName
+              path = "${zipPrefix}libmpv-NOTICE.txt"
+              role = 'license'
+              evidence_file = 'release-validation/licenses/libmpv/libmpv-NOTICE.txt'
+            }
+          )
+          $packageMembers += @($licenseFiles | ForEach-Object {
+            @{
+              package_file = $zipName
+              path = "${zipPrefix}licenses/libmpv/$($_.Name)"
+              role = 'license'
+              evidence_file = "release-validation/licenses/libmpv/$($_.Name)"
+            }
+          })
           $spec = @{
             source_commit = $env:GITHUB_SHA
             target = "windows-$platform"
             packages = $packageNames
             native_components = @($nativeComponents)
             executables = @($executables)
+            package_members = @($packageMembers)
             inventory_gaps = @('The pinned Windows libmpv archive contains no BUILD-INFO.txt; the source versions and license claim are taken verbatim from packaging/libmpv/manifest.toml.')
           }
           $specPath = Join-Path $env:RUNNER_TEMP 'release-native-components-input.json'
