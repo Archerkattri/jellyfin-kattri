@@ -1,92 +1,148 @@
-# Software bill of materials for the Linux release binary.
-#
-# Method, stated once:
-#   1. `cargo auditable build --release` embeds the dependency list (crate names,
-#      versions and sources) in the binary's own section, so the binary carries its
-#      dependency record with it.
-#   2. `cargo audit bin` reads that embedded record from the built binary and checks
-#      it against the RustSec advisory database. A vulnerable dependency fails the job.
-#   3. `cargo cyclonedx` exports a CycloneDX JSON SBOM from the workspace lock file for
-#      the package that ships. This is the SBOM artifact.
-#
-# The SBOM is generated from this job's own build and is not yet tied to the binary
-# attached to a release. Tying them together is a later step.
-#
-# Not verified: this workflow has not been run. The cargo-cyclonedx output flags are
-# unconfirmed for the pinned version and the output path is found by search.
+# Collect the actual outputs of all three tag packaging workflows, then publish a
+# source-bound Rust SBOM, native-component SBOM, and hashes of every release package.
+# This workflow uploads a GitHub Actions artifact only; it never publishes a release.
 
-name: SBOM
+name: Release SBOM and asset binding
 
 on:
-  push:
-    tags:
-      - "v*"
-  workflow_dispatch:
+  workflow_run:
+    workflows: ["Release Linux"]
+    types: [completed]
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: sbom-${{ github.ref }}
+  group: release-sbom-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: true
 
 jobs:
   sbom:
-    name: SBOM and binary advisory scan (ubuntu-22.04)
+    name: SBOM, native inventory, and release asset hashes (ubuntu-22.04)
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 180
+    env:
+      RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+      RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+      LINUX_RUN_ID: ${{ github.event.workflow_run.id }}
+
     steps:
-      - name: Check out source
+      - name: Check out the trusted workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify offline SBOM and artifact-binding helpers
+        run: python3 scripts/release-validation/test-release-validation.py
+
+      - name: Preserve trusted helpers outside the tag checkout
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/kattri-sbom-tools"
+          cp scripts/release-validation/*.py "$RUNNER_TEMP/kattri-sbom-tools/"
+
+      - name: Check out the release source without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
 
       - name: Install pinned Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
 
-      - name: Install system packages for the build
+      - name: Install system packages for the release binary audit
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pkg-config libudev-dev
 
-      - name: Install pinned SBOM and audit tools
+      - name: Collect successful release workflow artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 "$RUNNER_TEMP/kattri-sbom-tools/collect-release-artifacts.py"
+          --repository "$GITHUB_REPOSITORY"
+          --commit "$RELEASE_SHA"
+          --tag "$RELEASE_TAG"
+          --linux-run-id "$LINUX_RUN_ID"
+          --output-dir dist/release-assets
+
+      - name: Install pinned SBOM and advisory tools
         run: |
           set -euo pipefail
           cargo install --locked --version 0.7.7 cargo-auditable
           cargo install --locked --version 0.22.2 cargo-audit
           cargo install --locked --version 0.5.9 cargo-cyclonedx
 
-      # Without debug info: the release profile keeps it, which makes the binary larger than
-      # the 100 MB that cargo audit bin accepts. The embedded dependency data is unaffected.
-      - name: Build release binary with embedded dependency data
+      # This audit binary is a separate auditable build from the exact tag. Its SHA-256
+      # is recorded beside each release package, but it does not claim to be the packaged
+      # Windows/macOS/Linux executable unless the hashes match a package-side executable.
+      - name: Build the source-matched auditable Linux audit binary
         env:
           CARGO_PROFILE_RELEASE_DEBUG: "0"
         run: cargo auditable build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri
 
-      - name: Scan the built binary for advisories
+      - name: Scan the auditable build and hash the audit subject
         run: |
           set -euo pipefail
           mkdir -p dist/sbom
-          cargo audit --json bin target/release/jellyfin-kattri > dist/sbom/binary-audit.json
+          cargo audit --json bin target/release/jellyfin-kattri > dist/sbom/source-build-audit.json
+          sha256sum target/release/jellyfin-kattri > dist/sbom/source-build-audit-binary.sha256
 
-      - name: Export CycloneDX SBOM from the lock file
+      - name: Export the Rust dependency SBOM from Cargo.lock
         run: |
           set -euo pipefail
           cargo cyclonedx --manifest-path proofs/egui-gl-host/Cargo.toml \
-            --format json --override-filename kattri-sbom
+            --format json --override-filename rust-dependencies
           found=0
           while IFS= read -r -d '' file; do
-            mv "$file" dist/sbom/
-            found=1
-          done < <(find . -path ./target -prune -o -name 'kattri-sbom*.json' -print0)
+            cp "$file" dist/sbom/rust-dependencies.cdx.json
+            found=$((found + 1))
+          done < <(find . -path ./target -prune -o -name 'rust-dependencies*.json' -print0)
           if [[ "$found" -ne 1 ]]; then
-            echo "error: no CycloneDX SBOM file was produced" >&2
+            echo "error: expected one cargo-cyclonedx output, found $found" >&2
             exit 1
           fi
-          ls -l dist/sbom
 
-      - name: Upload SBOM and binary audit
+      - name: Scan exact release executable evidence
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/kattri-sbom-tools/audit-release-executables.py" \
+            --asset-root dist/release-assets \
+            --output-dir dist/sbom
+
+      - name: Bind SBOM and audit records to release package hashes
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ ! -f dist/release-assets/collection.json ]]; then
+            echo "error: release workflow artifact collection is missing" >&2
+            exit 1
+          fi
+          python3 "$RUNNER_TEMP/kattri-sbom-tools/bind-release-assets.py" \
+            --asset-root dist/release-assets \
+            --source-commit "$RELEASE_SHA" \
+            --release-tag "$RELEASE_TAG" \
+            --cargo-lock Cargo.lock \
+            --rust-sbom dist/sbom/rust-dependencies.cdx.json \
+            --binary-audit dist/sbom/source-build-audit.json \
+            --audited-binary target/release/jellyfin-kattri \
+            --binary-audit-index dist/sbom/binary-audit-index.json \
+            --libmpv-manifest packaging/libmpv/manifest.toml \
+            --flatpak-manifest packaging/flatpak/org.kattri.JellyfinKattri.yml \
+            --collection dist/release-assets/collection.json \
+            --output-dir dist/sbom
+
+      - name: Upload SBOM and release asset binding evidence
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: kattri-linux-sbom
+          name: kattri-release-sbom-${{ github.event.workflow_run.head_branch }}
           path: dist/sbom/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 90

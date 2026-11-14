@@ -12,6 +12,7 @@ on:
       - completed
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -41,10 +42,16 @@ jobs:
             scope: user
             allusers: '0'
     steps:
+      - name: Check out source from the triggering build
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
       - name: Download artifacts from the triggering build
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          pattern: kattri-windows-${{ matrix.platform }}-*
+          pattern: kattri-windows-${{ matrix.platform }}*
           path: artifacts
           merge-multiple: true
           run-id: ${{ github.event.workflow_run.id }}
@@ -81,7 +88,28 @@ jobs:
           $libmpv = Join-Path $installDir 'libmpv-2.dll'
           if (-not (Test-Path -LiteralPath $exe)) { throw "Installed executable is missing: $exe" }
           if (-not (Test-Path -LiteralPath $libmpv)) { throw "Installed libmpv is missing: $libmpv" }
-          Get-FileHash -LiteralPath $exe, $libmpv -Algorithm SHA256 |
+          $libmpvNotice = Join-Path $installDir 'libmpv-NOTICE.txt'
+          if (-not (Test-Path -LiteralPath $libmpvNotice)) { throw "Installed libmpv notice is missing: $libmpvNotice" }
+          $libmpvLicenseDir = Join-Path $installDir 'licenses\libmpv'
+          $libmpvLicensePaths = @()
+          $payloadComparisons = @(
+            @{ Installed = (Join-Path $installDir 'LICENSE.txt'); Source = (Join-Path $env:GITHUB_WORKSPACE 'LICENSE') },
+            @{ Installed = $libmpvNotice; Source = (Join-Path $env:GITHUB_WORKSPACE 'packaging\libmpv\NOTICE.txt') }
+          )
+          foreach ($licenseName in @('LICENSE.LGPL', 'Copyright', 'COPYING.LGPLv3', 'LICENSE.md')) {
+            $licensePath = Join-Path $libmpvLicenseDir $licenseName
+            if (-not (Test-Path -LiteralPath $licensePath -PathType Leaf)) { throw "Installed libmpv license file is missing: $licensePath" }
+            if ((Get-Item -LiteralPath $licensePath).Length -eq 0) { throw "Installed libmpv license file is empty: $licensePath" }
+            $libmpvLicensePaths += $licensePath
+            $payloadComparisons += @{ Installed = $licensePath; Source = (Join-Path $env:GITHUB_WORKSPACE "packaging\windows\libmpv-licenses\$licenseName") }
+          }
+          foreach ($comparison in $payloadComparisons) {
+            if (-not (Test-Path -LiteralPath $comparison.Installed -PathType Leaf)) { throw "Installed license payload is missing: $($comparison.Installed)" }
+            $expectedHash = (Get-FileHash -LiteralPath $comparison.Source -Algorithm SHA256).Hash
+            $actualHash = (Get-FileHash -LiteralPath $comparison.Installed -Algorithm SHA256).Hash
+            if ($actualHash -ne $expectedHash) { throw "Installed license payload differs from its source: $($comparison.Installed)" }
+          }
+          Get-FileHash -LiteralPath (@($exe, $libmpv, $libmpvNotice) + $libmpvLicensePaths) -Algorithm SHA256 |
             Format-Table -AutoSize | Out-File smoke-logs\installed-hashes.txt
           try {
             # GPU-less runners cannot create a WGL context. The window-smoke mode creates the
@@ -124,7 +152,7 @@ jobs:
           }
           if (Test-Path -LiteralPath $exe) { throw 'Uninstall left the executable behind.' }
           if (Test-Path -LiteralPath $libmpv) { throw 'Uninstall left libmpv behind.' }
-          "PASS: ${{ matrix.scope }} install, real-window startup, normal close, and clean uninstall." |
+          "PASS: ${{ matrix.scope }} install, native license payload, real-window startup, normal close, and clean uninstall." |
             Tee-Object -FilePath smoke-logs\result.txt -Append
 
       - name: Upload installation and startup logs
@@ -144,6 +172,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
       - name: Download artifacts from the triggering build
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
@@ -165,6 +195,16 @@ jobs:
           trap cleanup EXIT
           cp -R "$RUNNER_TEMP/dmg/Jellyfin Kattri.app" "$RUNNER_TEMP/Applications/"
           APP="$RUNNER_TEMP/Applications/Jellyfin Kattri.app"
+          test -s "$APP/Contents/Resources/LICENSE"
+          test -s "$APP/Contents/Resources/libmpv-NOTICE.txt"
+          MPV_LICENSE_DIR="$APP/Contents/Resources/licenses/libmpv"
+          for file in BUILD-INFO.txt LICENSE; do
+            test -s "$MPV_LICENSE_DIR/$file"
+          done
+          for file in fribidi.LGPL ffmpeg.LGPL harfbuzz.MIT dav1d.BSD-2-Clause \
+            libass.ISC libplacebo.LGPL mpv.LGPL freetype.FTL; do
+            test -s "$MPV_LICENSE_DIR/$file"
+          done
           codesign --verify --deep --strict "$APP" 2>&1 | tee smoke-logs/codesign.txt
           codesign -dv --verbose=4 "$APP" 2>&1 | tee -a smoke-logs/codesign.txt
           open -a "$APP"
@@ -206,6 +246,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: kattri-linux-deb-rpm
@@ -221,6 +262,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p smoke-logs
+          KATTRI_SMOKE_EXPECT_LIBMPV_PATH='/usr/lib/kattri/libmpv.so.2' \
+          KATTRI_SMOKE_EXPECT_LIBJPEG_PATH='/usr/lib/kattri/libjpeg.so.8' \
           KATTRI_SMOKE_LOG="$PWD/smoke-logs/application.txt" \
             xvfb-run -a -s '-screen 0 1280x720x24' \
             packaging/linux/smoke-launch.sh /usr/bin/kattri | tee smoke-logs/window.txt
@@ -243,6 +286,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: kattri-linux-deb-rpm
@@ -257,6 +301,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p smoke-logs
+          KATTRI_SMOKE_EXPECT_LIBMPV_PATH='/usr/lib/kattri/libmpv.so.2' \
+          KATTRI_SMOKE_EXPECT_LIBJPEG_PATH='/usr/lib/kattri/libjpeg.so.8' \
           KATTRI_SMOKE_LOG="$PWD/smoke-logs/application.txt" \
             xvfb-run -a -s '-screen 0 1280x720x24' \
             packaging/linux/smoke-launch.sh /usr/bin/kattri | tee smoke-logs/window.txt
@@ -278,6 +324,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: kattri-linux-appimage
@@ -290,10 +337,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfuse2 xvfb openbox wmctrl xdotool x11-utils libgl1-mesa-dri
           chmod +x ./artifacts/kattri-*-linux-x64.AppImage
+          APPIMAGE="$(find artifacts -name 'kattri-*-linux-x64.AppImage' -print -quit)"
+          if [[ -z "$APPIMAGE" ]]; then echo 'No AppImage was downloaded.' >&2; exit 1; fi
+          mkdir -p "$RUNNER_TEMP/kattri-appimage-content"
+          (
+            cd "$RUNNER_TEMP/kattri-appimage-content"
+            "$GITHUB_WORKSPACE/$APPIMAGE" --appimage-extract >/dev/null
+            APPDIR="$RUNNER_TEMP/kattri-appimage-content/squashfs-root"
+            test -s "$APPDIR/usr/bin/kattri"
+            test -s "$APPDIR/usr/lib/libmpv.so.2"
+            test -s "$APPDIR/usr/lib/libjpeg.so.8"
+            test -s "$APPDIR/usr/share/licenses/kattri/LICENSE"
+            test -s "$APPDIR/usr/share/licenses/kattri/libmpv-NOTICE.txt"
+            test -s "$APPDIR/usr/share/licenses/kattri/BUILD-INFO.txt"
+            test -s "$APPDIR/usr/share/licenses/kattri/LICENSE.libjpeg-turbo"
+            test -s "$APPDIR/usr/share/licenses/kattri/BUILD-INFO.libjpeg-turbo.txt"
+            for file in LICENSE.mpv.LGPL LICENSE.ffmpeg.LGPL LICENSE.libplacebo.LGPL \
+              LICENSE.dav1d.BSD-2-Clause LICENSE.libdisplay-info.MIT; do
+              test -s "$APPDIR/usr/share/licenses/kattri/$file"
+            done
+          )
       - name: Require a real application window and normal close
         run: |
           set -euo pipefail
           mkdir -p smoke-logs
+          KATTRI_SMOKE_EXPECT_LIBMPV_PATH='/usr/lib/libmpv.so.2' \
+          KATTRI_SMOKE_EXPECT_LIBJPEG_PATH='/usr/lib/libjpeg.so.8' \
           KATTRI_SMOKE_LOG="$PWD/smoke-logs/application.txt" \
             xvfb-run -a -s '-screen 0 1280x720x24' \
             packaging/linux/smoke-launch.sh ./artifacts/kattri-*-linux-x64.AppImage | tee smoke-logs/window.txt
@@ -315,6 +384,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: kattri-linux-flatpak
@@ -328,13 +398,22 @@ jobs:
           sudo apt-get install -y flatpak xvfb openbox wmctrl xdotool x11-utils libgl1-mesa-dri
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user --noninteractive --bundle ./artifacts/kattri-*-linux-x64.flatpak
+          flatpak run --command=sh org.kattri.JellyfinKattri -c '
+            test -s /app/share/licenses/org.kattri.JellyfinKattri/LICENSE
+            test -s /app/share/licenses/libmpv/BUILD-INFO.txt
+            for file in /app/share/licenses/libmpv/LICENSE.*; do test -s "$file"; done
+            test -s /app/share/licenses/libass/COPYING
+            test -s /app/share/licenses/uchardet/COPYING
+          '
       - name: Require a real application window and normal close
         run: |
           set -euo pipefail
           mkdir -p smoke-logs
+          KATTRI_SMOKE_EXPECT_LIBMPV_PATH='/app/lib/libmpv.so.2' \
+          KATTRI_SMOKE_TRACE_LOADER=0 \
           KATTRI_SMOKE_LOG="$PWD/smoke-logs/application.txt" \
             xvfb-run -a -s '-screen 0 1280x720x24' \
-            packaging/linux/smoke-launch.sh flatpak run org.kattri.JellyfinKattri | tee smoke-logs/window.txt
+            packaging/linux/smoke-launch.sh flatpak run --env=LD_DEBUG=libs org.kattri.JellyfinKattri | tee smoke-logs/window.txt
       - name: Upload Flatpak startup logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

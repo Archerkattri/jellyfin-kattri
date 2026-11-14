@@ -203,9 +203,11 @@ try {
     $sbomWorkflow = Get-Content '.github/workflows/sbom.yml' -Raw
     if ($sbomWorkflow -notmatch 'cargo auditable build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri' -or
         $sbomWorkflow -notmatch 'cargo audit --json bin target/release/jellyfin-kattri' -or
+        $sbomWorkflow -notmatch 'audit-release-executables\.py' -or
+        $sbomWorkflow -notmatch '--binary-audit-index dist/sbom/binary-audit-index\.json' -or
         $sbomWorkflow -notmatch 'cargo cyclonedx --manifest-path proofs/egui-gl-host/Cargo\.toml' -or
         $sbomWorkflow -match 'jellyfin-egui-client') {
-        throw 'SBOM workflow must build, audit, and describe the release GL host package.'
+        throw 'SBOM workflow must keep its source audit distinct, scan exact release executable evidence, and describe the release GL host package.'
     }
 
     $reproWorkflow = Get-Content '.github/workflows/reproducible.yml' -Raw
@@ -225,6 +227,18 @@ try {
         $macosScript -notmatch '(?s)CARGO_PACKAGE=\"\$\{CARGO_PACKAGE:-egui-gl-host-proof\}' -or
         $macosScript -notmatch '(?s)BINARY_NAME=\"\$\{BINARY_NAME:-jellyfin-kattri\}') {
         throw 'macOS release workflow and build script must target the jellyfin-kattri host binary.'
+    }
+    $schemeStepStart = $macosWorkflow.IndexOf('name: Verify packaged macOS URL delivery on the ephemeral runner')
+    $dmgStepStart = $macosWorkflow.IndexOf('name: Build disk image')
+    if ($schemeStepStart -lt 0 -or $dmgStepStart -le $schemeStepStart) {
+        throw 'The macOS packaged URL check must run after app signing and before the DMG is created.'
+    }
+    $schemeStep = $macosWorkflow.Substring($schemeStepStart, $dmgStepStart - $schemeStepStart)
+    if ($schemeStep -notmatch 'APP_PATH:\s*dist/macos/Jellyfin Kattri\.app' -or
+        $schemeStep -notmatch 'PROFILE_NAME:\s*acceptance-macos-url' -or
+        $schemeStep -notmatch 'scripts/acceptance/setup_macos_runner_profile\.sh' -or
+        $schemeStep -notmatch 'scripts/acceptance/verify_macos_scheme\.sh') {
+        throw 'The macOS packaged URL smoke must use the guarded ephemeral-runner profile and verifier.'
     }
     if ($macosScript -notmatch '(?s)<key>CFBundleURLTypes</key>\s*<array>\s*<dict>' -or
         $macosScript -notmatch '(?s)<key>CFBundleURLSchemes</key>\s*<array>\s*<string>jellyfin</string>') {
@@ -255,6 +269,12 @@ try {
         if ($installWorkflow -notmatch [regex]::Escape($requiredWorkflow)) {
             throw "Installation smoke workflow must follow $requiredWorkflow."
         }
+    }
+    $checkoutCount = [regex]::Matches($installWorkflow, [regex]::Escape('actions/checkout@')).Count
+    $nonPersistedCheckoutCount = [regex]::Matches($installWorkflow, [regex]::Escape('persist-credentials: false')).Count
+    if (-not $installWorkflow.Contains('actions: read') -or -not $installWorkflow.Contains('contents: read') -or
+        $checkoutCount -eq 0 -or $checkoutCount -ne $nonPersistedCheckoutCount) {
+        throw 'Cross-run artifact downloads need actions:read, and release-source checkouts must not persist their token.'
     }
     foreach ($requiredCheck in @(
         'github.event.workflow_run.id',
@@ -295,7 +315,7 @@ try {
     if ($installWorkflow -match 'usr/bin/jellyfin-kattri') {
         throw 'Linux smoke setup must launch the packaged /usr/bin/kattri binary.'
     }
-    if (([regex]::Matches($installWorkflow, [regex]::Escape('/usr/bin/kattri'))).Count -ne 2) {
+    if (([regex]::Matches($installWorkflow, 'smoke-launch\.sh /usr/bin/kattri')).Count -ne 2) {
         throw 'deb and rpm smoke jobs must both launch /usr/bin/kattri.'
     }
     # winit loads libxkbcommon-x11 at run time. AppImage must bundle it, so its smoke host
@@ -396,13 +416,21 @@ try {
             throw "macOS URL-dispatch regression test is missing: $requiredMacLinkTest"
         }
     }
-    if ($macosLinks -notmatch 'application:openURLs:' -or
+    if ($macosLinks -notmatch 'handleAppleEvent:withReplyEvent:' -or
+        $macosLinks -notmatch 'URL_EVENT_CLASS: u32 = u32::from_be_bytes\(\*b"GURL"\)' -or
+        $macosLinks -notmatch 'URL_EVENT_ID: u32 = u32::from_be_bytes\(\*b"GURL"\)' -or
+        $macosLinks -notmatch 'DIRECT_OBJECT_KEY: u32 = u32::from_be_bytes\(\*b"----"\)' -or
+        $macosLinks -notmatch 'paramDescriptorForKeyword: DIRECT_OBJECT_KEY' -or
+        $macosLinks -notmatch 'stringValue\(\)' -or
+        $macosLinks -notmatch 'len_utf16\(\) > MAX_DEEP_LINK_BYTES' -or
+        $macosLinks -notmatch 'text\.len\(\) > MAX_DEEP_LINK_BYTES' -or
+        $macosLinks -notmatch 'setEventHandler:' -or
         $macosLinks -notmatch 'send_event\(HostEvent::MacOpenUrl\(intent\)\)' -or
         $macosLinks -notmatch 'catch_unwind\(AssertUnwindSafe' -or
-        $macosLinks -notmatch 'application\.delegate\(\)' -or
+        $macosLinks -match 'application\.delegate\(\)|NSApplicationDelegate|application:openURLs:' -or
         $hostSource -notmatch 'HostEvent::MacOpenUrl\(intent\)' -or
         $hostSource -notmatch 'host\.kattri_app\.apply_launch_intent\(intent\)') {
-        throw 'macOS URL dispatch must validate, bound, preserve AppKit lifecycle, and reuse the launch-intent flow.'
+        throw 'macOS URL dispatch must parse the bounded GURL direct object, reserve/send through the event gate, avoid replacing the AppKit delegate, and reuse the launch-intent flow.'
     }
     $dispatchStart = $hostSource.IndexOf('if let Some(intent) = launch_intent {')
     if ($dispatchStart -lt 0) {
