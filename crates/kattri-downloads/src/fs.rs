@@ -23,7 +23,7 @@ use kattri_client_core::downloads::{DownloadJob, DownloadTransitionError};
 use std::fs::{self, File, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -40,6 +40,8 @@ const NAME_ATTEMPTS: u32 = 8;
 const DISCARD_SUFFIX: &str = ".discarded";
 const TEMP_NAME_HEX_LEN: usize = 16;
 const TEMP_NAME_SUFFIX: &str = ".part";
+const ATOMIC_WRITE_ATTEMPTS: u32 = 32;
+static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
 pub enum FsError {
@@ -338,13 +340,165 @@ pub fn persist_chunk<S: DurableSink>(
         .map_err(ChunkError::Job)
 }
 
-/// Moves a committed temp file to its final path, creating the parent folder.
+/// Replaces a small persistence file without following an existing sibling temp symlink.
+/// A collision uses a unique sibling name, so a stale temp from an earlier crash is preserved.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let (temp, mut file) = create_atomic_temp(path)?;
+    let write_result = file
+        .write_all(bytes)
+        .and_then(|()| file.flush())
+        .and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    let result = fs::rename(&temp, path).and_then(|()| sync_parent(path));
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+fn create_atomic_temp(path: &Path) -> io::Result<(PathBuf, File)> {
+    let mut base_name = path.as_os_str().to_os_string();
+    base_name.push(".tmp");
+    let base = PathBuf::from(base_name);
+    for attempt in 0..ATOMIC_WRITE_ATTEMPTS {
+        let candidate = if attempt == 0 {
+            base.clone()
+        } else {
+            let mut name = base.as_os_str().to_os_string();
+            let suffix = ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            name.push(format!(".{suffix}"));
+            PathBuf::from(name)
+        };
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free atomic-write temporary file name",
+    ))
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> io::Result<()> {
+    match path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(parent) => File::open(parent)?.sync_all(),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Moves a committed temp file to a path beneath the downloads root.
 /// The bytes were fsynced while downloading, so only the rename happens here.
-pub fn commit_final(temp: &Path, final_path: &Path) -> io::Result<()> {
-    if let Some(parent) = final_path.parent() {
-        fs::create_dir_all(parent)?;
+pub(crate) fn commit_final(
+    temp: &Path,
+    downloads_root: &Path,
+    relative_path: &Path,
+) -> io::Result<()> {
+    let components = relative_path.components().collect::<Vec<_>>();
+    if components.is_empty()
+        || components.iter().any(|component| match component {
+            Component::Normal(name) => {
+                let name = name.to_string_lossy();
+                name.is_empty() || name.contains(['\\', ':'])
+            }
+            _ => true,
+        })
+    {
+        return Err(invalid_destination());
+    }
+
+    fs::create_dir_all(downloads_root)?;
+    let root = fs::canonicalize(downloads_root)?;
+    let temp_parent = temp.parent().ok_or_else(invalid_destination)?;
+    let canonical_temp_parent = fs::canonicalize(temp_parent)?;
+    if !canonical_temp_parent.starts_with(&root) {
+        return Err(invalid_destination());
+    }
+    let temp_metadata = fs::symlink_metadata(temp)?;
+    if is_link_or_reparse_point(&temp_metadata) || !temp_metadata.file_type().is_file() {
+        return Err(invalid_destination());
+    }
+
+    let mut parent = root.clone();
+    for component in &components[..components.len() - 1] {
+        let Component::Normal(name) = component else {
+            return Err(invalid_destination());
+        };
+        parent.push(name);
+        match fs::symlink_metadata(&parent) {
+            Ok(metadata)
+                if metadata.file_type().is_dir() && !is_link_or_reparse_point(&metadata) => {}
+            Ok(_) => return Err(invalid_destination()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match fs::create_dir(&parent) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+                let metadata = fs::symlink_metadata(&parent)?;
+                if !metadata.file_type().is_dir() || is_link_or_reparse_point(&metadata) {
+                    return Err(invalid_destination());
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        let canonical_parent = fs::canonicalize(&parent)?;
+        if !canonical_parent.starts_with(&root) {
+            return Err(invalid_destination());
+        }
+    }
+
+    let Component::Normal(file_name) = components[components.len() - 1] else {
+        return Err(invalid_destination());
+    };
+    let final_path = parent.join(file_name);
+    match fs::symlink_metadata(&final_path) {
+        Ok(metadata) if !metadata.file_type().is_file() || is_link_or_reparse_point(&metadata) => {
+            return Err(invalid_destination());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
     fs::rename(temp, final_path)
+}
+
+fn invalid_destination() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "download destination must be a regular file beneath the downloads root",
+    )
+}
+
+fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
 }
 
 /// Free space required beyond the file size, as a percentage (spec M3-09 requirement 5).
@@ -450,6 +604,112 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = TempStore::new(dir.path().join("tmp"));
         (dir, store)
+    }
+
+    fn committed_temp(store: &TempStore, bytes: &[u8]) -> PathBuf {
+        let mut temp = store.create_fresh().expect("create temp");
+        temp.write_all_bytes(bytes).expect("write temp");
+        temp.sync_durable().expect("sync temp");
+        let path = temp.path().to_path_buf();
+        drop(temp);
+        path
+    }
+
+    #[test]
+    fn final_commit_accepts_a_nested_relative_path_inside_the_download_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("downloads");
+        let store = TempStore::new(root.join("tmp"));
+        store.ensure_dir().expect("temp directory");
+        let temp = committed_temp(&store, b"subtitle bytes");
+
+        commit_final(&temp, &root, Path::new("item-1/subtitles/2.srt"))
+            .expect("commit inside root");
+
+        assert_eq!(
+            fs::read(root.join("item-1/subtitles/2.srt")).expect("read committed file"),
+            b"subtitle bytes"
+        );
+        assert!(!temp.exists());
+    }
+
+    #[test]
+    fn final_commit_rejects_traversal_and_keeps_both_files_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("downloads");
+        fs::create_dir_all(&root).expect("root");
+        let store = TempStore::new(root.join("tmp"));
+        store.ensure_dir().expect("temp directory");
+        let temp = committed_temp(&store, b"subtitle bytes");
+        let outside = dir.path().join("outside.srt");
+        fs::write(&outside, b"keep outside").expect("outside file");
+
+        let result = commit_final(&temp, &root, Path::new("../outside.srt"));
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&outside).expect("read outside"), b"keep outside");
+        assert_eq!(fs::read(&temp).expect("read temp"), b"subtitle bytes");
+    }
+
+    #[test]
+    fn final_commit_rejects_a_temp_file_outside_the_download_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("downloads");
+        fs::create_dir_all(&root).expect("root");
+        let store = TempStore::new(root.join("tmp"));
+        store.ensure_dir().expect("temp directory");
+        let outside = dir.path().join("outside.part");
+        fs::write(&outside, b"keep outside").expect("outside temp");
+
+        let result = commit_final(&outside, &root, Path::new("item-1/subtitles/2.srt"));
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&outside).expect("read outside"), b"keep outside");
+        assert!(!root.join("item-1").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_commit_rejects_a_symlinked_destination_directory() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("downloads");
+        fs::create_dir_all(&root).expect("root");
+        let store = TempStore::new(root.join("tmp"));
+        store.ensure_dir().expect("temp directory");
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).expect("outside directory");
+        symlink(&outside, root.join("escape")).expect("destination symlink");
+        let temp = committed_temp(&store, b"subtitle bytes");
+
+        let result = commit_final(&temp, &root, Path::new("escape/nested/2.srt"));
+
+        assert!(result.is_err());
+        assert!(!outside.join("nested").exists());
+        assert_eq!(fs::read(&temp).expect("read temp"), b"subtitle bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_commit_rejects_a_symlink_destination_file() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("downloads");
+        fs::create_dir_all(root.join("item-1/subtitles")).expect("destination directory");
+        let store = TempStore::new(root.join("tmp"));
+        store.ensure_dir().expect("temp directory");
+        let outside = dir.path().join("outside.srt");
+        fs::write(&outside, b"keep outside").expect("outside file");
+        symlink(&outside, root.join("item-1/subtitles/2.srt")).expect("destination symlink");
+        let temp = committed_temp(&store, b"subtitle bytes");
+
+        let result = commit_final(&temp, &root, Path::new("item-1/subtitles/2.srt"));
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&outside).expect("read outside"), b"keep outside");
+        assert_eq!(fs::read(&temp).expect("read temp"), b"subtitle bytes");
     }
 
     #[test]

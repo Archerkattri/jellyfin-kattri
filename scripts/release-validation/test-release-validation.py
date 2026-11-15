@@ -836,7 +836,7 @@ class ReleaseValidationTests(unittest.TestCase):
             self.assertEqual(report["status"], "incomplete")
             self.assertTrue(any("does not match its index subject" in issue for issue in report["issues"]))
 
-    def test_unsupported_installer_format_remains_a_disclosed_member_gap(self) -> None:
+    def test_msi_member_manifest_is_bound_but_remains_a_disclosed_gap(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             asset_root, output_dir, sidecar_path = self._write_binding_fixture(
@@ -846,6 +846,29 @@ class ReleaseValidationTests(unittest.TestCase):
             )
             sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
             sidecar["inventory_gaps"] = []
+            package_name = sidecar["packages"][0]["file"]
+            prefix = "Jellyfin Kattri/"
+            sidecar["executables"][0]["packaged_file"] = prefix + "jellyfin-kattri.exe"
+            member_specs = [
+                ("executable", prefix + "jellyfin-kattri.exe", "jellyfin-kattri.exe"),
+                ("native", prefix + "libmpv-2.dll", "libmpv-2.dll"),
+                ("license", prefix + "LICENSE.LGPL", "LICENSE.LGPL"),
+            ]
+            artifact_dir = asset_root / "release-windows-x64-artifact"
+            sidecar["package_members"] = []
+            for role, path, evidence_name in member_specs:
+                evidence_path = artifact_dir / evidence_name
+                evidence_bytes = evidence_path.read_bytes()
+                sidecar["package_members"].append(
+                    {
+                        "package_file": package_name,
+                        "path": path,
+                        "role": role,
+                        "evidence_file": evidence_name,
+                        "sha256": sha256(evidence_bytes),
+                        "size_bytes": len(evidence_bytes),
+                    }
+                )
             sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
             status = self._bind_quietly(
                 asset_root=asset_root,
@@ -865,6 +888,12 @@ class ReleaseValidationTests(unittest.TestCase):
             self.assertEqual(report["native_component_sbom"]["inventory_gaps"], [])
             self.assertEqual(report["package_member_verification"]["status"], "partial")
             self.assertEqual(len(report["package_member_verification"]["gaps"]), 1)
+            package_report = report["release_assets"][0]["member_content_verification"]
+            self.assertEqual(package_report["status"], "partial")
+            self.assertEqual(package_report["declared_member_count"], 3)
+            self.assertEqual(package_report["verified_member_count"], 0)
+            self.assertIn("does not parse MSI containers", package_report["scope"])
+            self.assertTrue(any("clean-runner installation workflow" in gap["detail"] for gap in report["package_member_verification"]["gaps"]))
             native_bom = json.loads((output_dir / "native-components.cdx.json").read_text(encoding="utf-8"))
             properties = {item["name"]: item["value"] for item in native_bom["metadata"]["properties"]}
             self.assertEqual(properties["kattri:inventory-gap-count"], "0")
@@ -873,6 +902,24 @@ class ReleaseValidationTests(unittest.TestCase):
                 report["native_component_sbom"]["sha256"],
                 sha256((output_dir / "native-components.cdx.json").read_bytes()),
             )
+            sidecar["package_members"] = []
+            sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+            status = self._bind_quietly(
+                asset_root=asset_root,
+                source_commit="a" * 40,
+                release_tag="v1.2.3",
+                cargo_lock=root / "Cargo.lock",
+                rust_sbom=root / "rust-dependencies.cdx.json",
+                binary_audit=root / "source-build-audit.json",
+                audited_binary=root / "source-build.exe",
+                libmpv_manifest=REPO_ROOT / "packaging/libmpv/manifest.toml",
+                collection=asset_root / "collection.json",
+                output_dir=output_dir,
+            )
+            self.assertEqual(status, 0)
+            missing_inventory = json.loads((output_dir / "release-asset-binding.json").read_text(encoding="utf-8"))
+            self.assertEqual(missing_inventory["release_assets"][0]["member_content_verification"]["declared_member_count"], 0)
+            self.assertTrue(any("MSI member inventory is absent" in gap["detail"] for gap in missing_inventory["package_member_verification"]["gaps"]))
 
     def test_platform_sidecar_writer_output_matches_binder_contract(self) -> None:
         writer_path = REPO_ROOT / "packaging" / "write-release-native-sidecar.py"
@@ -987,6 +1034,79 @@ class ReleaseValidationTests(unittest.TestCase):
             report = json.loads((output_dir / "release-asset-binding.json").read_text(encoding="utf-8"))
             self.assertEqual(report["release_assets"][0]["sha256"], sha256(package.read_bytes()))
             self.assertEqual(report["status"], "verified_with_disclosed_gaps")
+
+            msi_name = "JellyfinKattri-1.2.3-x64.msi"
+            msi_path = artifact_dir / msi_name
+            msi_path.write_bytes(b"synthetic MSI container fixture\n")
+            msi_prefix = "Jellyfin Kattri/"
+            (evidence_dir.parent / "licenses" / "project").mkdir(parents=True)
+            project_license_path = evidence_dir.parent / "licenses" / "project" / "LICENSE"
+            project_license_path.write_bytes(b"synthetic project license evidence\n")
+            msi_sidecar = writer.build_sidecar(
+                artifact_dir.resolve(),
+                {
+                    "schema_version": 1,
+                    "source_commit": "a" * 40,
+                    "target": "windows-x64",
+                    "packages": [msi_name],
+                    "native_components": [
+                        {
+                            "name": "libmpv",
+                            "manifest_platform": "windows-x64",
+                            "package_file": msi_name,
+                            "packaged_file": msi_prefix + "libmpv-2.dll",
+                            "evidence_file": "release-validation/native/libmpv-2.dll",
+                            "license_files": [
+                                {
+                                    "path": msi_prefix + "licenses/libmpv/LICENSE.LGPL",
+                                    "evidence_file": "release-validation/native/LICENSE.LGPL",
+                                }
+                            ],
+                        }
+                    ],
+                    "executables": [
+                        {
+                            "package_file": msi_name,
+                            "file": "release-validation/native/jellyfin-kattri.exe",
+                            "packaged_file": msi_prefix + "jellyfin-kattri.exe",
+                            "audit_scope": "No package-specific cargo audit record; source-matched build only.",
+                        }
+                    ],
+                    "package_members": [
+                        {
+                            "package_file": msi_name,
+                            "path": msi_prefix + "jellyfin-kattri.exe",
+                            "role": "executable",
+                            "evidence_file": "release-validation/native/jellyfin-kattri.exe",
+                        },
+                        {
+                            "package_file": msi_name,
+                            "path": msi_prefix + "libmpv-2.dll",
+                            "role": "native",
+                            "evidence_file": "release-validation/native/libmpv-2.dll",
+                        },
+                        {
+                            "package_file": msi_name,
+                            "path": msi_prefix + "licenses/libmpv/LICENSE.LGPL",
+                            "role": "license",
+                            "evidence_file": "release-validation/native/LICENSE.LGPL",
+                        },
+                        {
+                            "package_file": msi_name,
+                            "path": msi_prefix + "LICENSE.txt",
+                            "role": "license",
+                            "evidence_file": "release-validation/licenses/project/LICENSE",
+                        },
+                    ],
+                    "inventory_gaps": [],
+                },
+                REPO_ROOT / "packaging/libmpv/manifest.toml",
+            )
+            self.assertEqual(len(msi_sidecar["package_members"]), 4)
+            self.assertEqual(
+                {member["role"] for member in msi_sidecar["package_members"]},
+                {"executable", "native", "license"},
+            )
 
     def test_flatpak_sidecar_sources_match_pinned_archive_urls_and_checksums(self) -> None:
         writer_path = REPO_ROOT / "packaging" / "write-release-native-sidecar.py"

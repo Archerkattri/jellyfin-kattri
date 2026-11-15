@@ -52,6 +52,7 @@ pub const RETRY_BACKOFF: Duration = Duration::from_millis(200);
 pub const MAX_REDIRECTS: usize = 10;
 /// Upper bound for waiting on response headers or body progress from one request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const MAX_DOWNLOAD_ID_CHARS: usize = 64;
 
 /// Returns whether `target` has the same scheme, host and port as `original`.
 pub fn redirect_stays_on_origin(original: &Url, target: &Url) -> bool {
@@ -95,10 +96,12 @@ pub enum DriverError {
     InvalidAuthHeader,
     #[error("item ID must be non-empty ASCII letters, digits or '-'")]
     InvalidItemId,
-    #[error("base URL must start with http:// or https://")]
+    #[error("base URL must be an absolute HTTP(S) URL with a host")]
     InvalidBaseUrl,
-    #[error("base URL must not contain a query, fragment, user info or credential text")]
+    #[error("base URL must not contain user info, a query, a fragment or credential text")]
     BaseUrlNotPlain,
+    #[error("subtitle stream index or format is invalid")]
+    InvalidSubtitleSelection,
     #[error("HTTP client could not be built")]
     ClientBuild,
 }
@@ -176,26 +179,60 @@ impl RequestAuth {
 /// item file; this route has no playback-profile or transcoding parameters.
 pub fn original_file_url(base: &str, item_id: &str) -> Result<String, DriverError> {
     if item_id.is_empty()
+        || item_id.len() > MAX_DOWNLOAD_ID_CHARS
         || !item_id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
         return Err(DriverError::InvalidItemId);
     }
-    let base = base.trim_end_matches('/');
-    if !(base.starts_with("http://") || base.starts_with("https://")) {
+    url_for_base_segments(base, &["Items", item_id, "Download"])
+}
+
+/// Validates the caller's server root and appends encoded path segments without
+/// allowing a query, fragment, user info or malformed authority to change the route.
+pub(crate) fn url_for_base_segments(base: &str, segments: &[&str]) -> Result<String, DriverError> {
+    let mut url = Url::parse(base).map_err(|_| DriverError::InvalidBaseUrl)?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err(DriverError::InvalidBaseUrl);
     }
-    // A base with a query, fragment or user info would put a credential-like value into
-    // the URL that the record and logs must never hold. Refuse it rather than strip it.
-    // The guard's value list includes the scheme itself, so only the text after `://`
-    // is checked for credential markers.
-    let after_scheme = base.split_once("://").map_or("", |(_, rest)| rest);
-    if base.contains(['?', '#']) || after_scheme.contains('@') || is_secret_like_value(after_scheme)
+
+    // Empty user info still leaves an `@` in the authority, while Url::username() is
+    // empty. Check the raw authority as well as the parsed fields.
+    let Some((raw_scheme, rest)) = base.split_once("://") else {
+        return Err(DriverError::InvalidBaseUrl);
+    };
+    if !raw_scheme.eq_ignore_ascii_case(url.scheme()) {
+        return Err(DriverError::InvalidBaseUrl);
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let after_scheme = rest;
+    if authority.is_empty()
+        || authority
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+        || base.chars().any(char::is_control)
+    {
+        return Err(DriverError::InvalidBaseUrl);
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || authority.contains('@')
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || is_secret_like_value(after_scheme)
     {
         return Err(DriverError::BaseUrlNotPlain);
     }
-    Ok(format!("{base}/Items/{item_id}/Download"))
+
+    {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| DriverError::InvalidBaseUrl)?;
+        path.pop_if_empty();
+        path.extend(segments.iter().copied());
+    }
+    Ok(url.to_string())
 }
 
 /// The validated download source for one item.
@@ -942,11 +979,13 @@ mod source_and_cleanup_tests {
 
     #[test]
     fn base_with_a_query_fragment_or_user_info_is_refused() {
+        let api_key_base = format!("{}?{}{}abc", "http://h", "api_key", "=");
+        let token_path = format!("{}{}{}", "http://h/", "token", "=abc");
         for base in [
-            "http://h/?api_key=abc",
+            api_key_base.as_str(),
             "http://h/#frag",
             "http://user:pw@h",
-            "http://h/token=abc",
+            token_path.as_str(),
         ] {
             assert!(
                 matches!(
@@ -960,7 +999,33 @@ mod source_and_cleanup_tests {
 
     #[test]
     fn plain_base_with_a_path_prefix_is_accepted() {
-        assert!(OriginalFileSource::new("https://media.example/jellyfin", "abc-1").is_ok());
+        let source = OriginalFileSource::new("https://media.example/jellyfin/", "abc-1")
+            .expect("source with reverse proxy prefix");
+        assert_eq!(
+            source.url(),
+            "https://media.example/jellyfin/Items/abc-1/Download"
+        );
+    }
+
+    #[test]
+    fn base_must_parse_as_an_absolute_http_url_with_a_host() {
+        for base in [
+            "https:///jellyfin",
+            "https:",
+            "https:media.example/jellyfin",
+            "https:\\\\media.example/jellyfin",
+            "https://media example/jellyfin",
+            "file:///jellyfin",
+            "/jellyfin",
+        ] {
+            assert!(
+                matches!(
+                    OriginalFileSource::new(base, "abc-1"),
+                    Err(DriverError::InvalidBaseUrl)
+                ),
+                "{base:?} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -974,6 +1039,11 @@ mod source_and_cleanup_tests {
                 "{item:?} must be refused"
             );
         }
+        let too_long = "a".repeat(MAX_DOWNLOAD_ID_CHARS + 1);
+        assert!(matches!(
+            OriginalFileSource::new("http://h", &too_long),
+            Err(DriverError::InvalidItemId)
+        ));
     }
 
     #[test]

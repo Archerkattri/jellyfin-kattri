@@ -301,6 +301,20 @@ try {
         $installWorkflow -notmatch [regex]::Escape("Start-Process msiexec.exe -Wait -PassThru -ArgumentList")) {
         throw 'MSI smoke checks must run msiexec with /i, /qn and inspect its exit code.'
     }
+    foreach ($requiredMemberCheck in @(
+        'release-native-components.json',
+        'sidecar.package_members',
+        'source_commit -cne',
+        'windows-${{ matrix.platform }}',
+        'Sidecar evidence file is missing or outside the artifact directory',
+        'Downloaded MSI hash or size does not match its release sidecar',
+        'Installed MSI member differs from sidecar evidence',
+        'sidecar-member-comparisons.txt'
+    )) {
+        if ($installWorkflow -notmatch [regex]::Escape($requiredMemberCheck)) {
+            throw "MSI smoke checks are missing sidecar member verification: $requiredMemberCheck"
+        }
+    }
     if ((git ls-files --stage packaging/linux/smoke-launch.sh) -notmatch '^100755 ') {
         throw 'Linux smoke launcher must be executable in a fresh checkout.'
     }
@@ -349,6 +363,57 @@ try {
         $linuxSmoke -notmatch 'xdotool windowquit' -or
         $linuxSmoke -notmatch 'xwininfo') {
         throw 'Linux smoke launcher must start a window manager and request a normal close.'
+    }
+    foreach ($requiredAppImagePattern in @(
+        'KATTRI_SMOKE_EXPECT_APPIMAGE_MOUNT',
+        'AppImage mount verification requires loader tracing',
+        [regex]::Escape('calling init: /tmp/\.mount_[^/]+/usr/lib/libmpv\.so\.2$'),
+        [regex]::Escape('calling init: /tmp/\.mount_[^/]+/usr/lib/libjpeg\.so\.8$')
+    )) {
+        if ($linuxSmoke -notmatch $requiredAppImagePattern) {
+            throw "Linux smoke launcher is missing its AppImage mount-path check: $requiredAppImagePattern"
+        }
+    }
+    foreach ($appImageLibrary in @(
+        @{
+            Pattern = 'calling init: /tmp/\.mount_[^/]+/usr/lib/libmpv\.so\.2$'
+            Mounted = 'calling init: /tmp/.mount_kattri123/usr/lib/libmpv.so.2'
+            Host = 'calling init: /usr/lib/libmpv.so.2'
+        },
+        @{
+            Pattern = 'calling init: /tmp/\.mount_[^/]+/usr/lib/libjpeg\.so\.8$'
+            Mounted = 'calling init: /tmp/.mount_kattri123/usr/lib/libjpeg.so.8'
+            Host = 'calling init: /usr/lib/libjpeg.so.8'
+        }
+    )) {
+        if (-not $linuxSmoke.Contains("'$($appImageLibrary.Pattern)'")) {
+            throw 'Linux smoke launcher is missing its exact AppImage mount regex.'
+        }
+        if ($appImageLibrary.Mounted -notmatch $appImageLibrary.Pattern -or
+            $appImageLibrary.Host -match $appImageLibrary.Pattern) {
+            throw 'AppImage loader regex must accept the mounted bundle and reject a host /usr/lib path.'
+        }
+    }
+    $appImageStart = $installWorkflow.IndexOf('  linux-appimage:')
+    $flatpakStart = $installWorkflow.IndexOf('  linux-flatpak:', $appImageStart)
+    if ($appImageStart -lt 0 -or $flatpakStart -le $appImageStart) {
+        throw 'Could not isolate the AppImage installation-smoke job.'
+    }
+    $appImageSmokeJob = $installWorkflow.Substring($appImageStart, $flatpakStart - $appImageStart)
+    if ($appImageSmokeJob -notmatch 'TMPDIR=/tmp' -or
+        $appImageSmokeJob -notmatch 'KATTRI_SMOKE_EXPECT_APPIMAGE_MOUNT=1' -or
+        $appImageSmokeJob -match 'KATTRI_SMOKE_EXPECT_LIBMPV_PATH|KATTRI_SMOKE_EXPECT_LIBJPEG_PATH') {
+        throw 'AppImage installation smoke must assert its mounted library paths and avoid host /usr/lib exact paths.'
+    }
+    if (([regex]::Matches($installWorkflow, [regex]::Escape("KATTRI_SMOKE_EXPECT_LIBMPV_PATH='/usr/lib/kattri/libmpv.so.2'")).Count -ne 2) -or
+        ([regex]::Matches($installWorkflow, [regex]::Escape("KATTRI_SMOKE_EXPECT_LIBJPEG_PATH='/usr/lib/kattri/libjpeg.so.8'")).Count -ne 2)) {
+        throw 'Deb and RPM installation smoke must retain exact installed library-path checks.'
+    }
+    $runtimeLinuxSmoke = Get-Content 'scripts/runtime-ci/linux_runtime_smoke.sh' -Raw
+    if ($runtimeLinuxSmoke -notmatch 'TMPDIR=/tmp' -or
+        $runtimeLinuxSmoke -notmatch 'KATTRI_SMOKE_EXPECT_APPIMAGE_MOUNT=1' -or
+        $runtimeLinuxSmoke -match 'KATTRI_SMOKE_EXPECT_LIBMPV_PATH=.*/usr/lib/libmpv\.so\.2') {
+        throw 'Runtime acceptance must use the shared AppImage mount-path check instead of a host library path.'
     }
 
     $desktopEntry = Get-Content 'packaging/linux/share/kattri.desktop' -Raw

@@ -3090,10 +3090,12 @@ version = "0.7.0"
 dependencies = [
  "axum",
  "form_urlencoded",
+ "jellyfin-api",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "tungstenite",
  "zeroize",
 ]
 

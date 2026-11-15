@@ -329,7 +329,7 @@ def verify_zip_package_members(package_path: Path, members: list[dict[str, Any]]
         archive.close()
 
 
-def validate_zip_member_claims(
+def validate_package_member_claims(
     members: list[dict[str, Any]],
     claims: dict[str, list[dict[str, Any]]],
 ) -> None:
@@ -908,8 +908,8 @@ def _bind(args: argparse.Namespace) -> int:
             if package is None:
                 issues.append("package member names an unknown package in %s" % sidecar_path.name)
                 continue
-            if package["format"] != "zip":
-                issues.append("package member records are supported only for ZIP packages")
+            if package["format"] not in {"zip", "msi"}:
+                issues.append("package member records are supported only for ZIP and MSI packages")
                 continue
             try:
                 member_path = safe_package_member_path(entry.get("path"))
@@ -1131,6 +1131,56 @@ def _bind(args: argparse.Namespace) -> int:
 
     package_member_gaps: list[dict[str, str]] = []
     for package_path, package in package_assets.items():
+        members = package_members_by_path.get(package_path, [])
+        if package["format"] == "msi":
+            if members:
+                try:
+                    validate_package_member_claims(members, package_member_claims_by_path.get(package_path, {}))
+                except ValueError as exc:
+                    issues.append("MSI member manifest validation failed for %s: %s" % (package["file"], exc))
+                    package["member_content_verification"] = {
+                        "status": "incomplete",
+                        "declared_member_count": len(members),
+                        "verified_member_count": 0,
+                        "scope": "The MSI sidecar member manifest does not match its evidence claims.",
+                    }
+                    package_member_gaps.append(
+                        {
+                            "target": package["target"],
+                            "package": package_path,
+                            "detail": "MSI member manifest does not match sidecar claims.",
+                        }
+                    )
+                    continue
+                package["member_content_verification"] = {
+                    "status": "partial",
+                    "declared_member_count": len(members),
+                    "verified_member_count": 0,
+                    "scope": "MSI sidecar member paths and evidence hashes are internally consistent, but the binder does not parse MSI containers; clean-runner installation checks compare installed members.",
+                }
+                package_member_gaps.append(
+                    {
+                        "target": package["target"],
+                        "package": package_path,
+                        "detail": "MSI contents are not parsed by the binder; the clean-runner installation workflow must verify installed members against this sidecar.",
+                    }
+                )
+            else:
+                package["member_content_verification"] = {
+                    "status": "partial",
+                    "declared_member_count": 0,
+                    "verified_member_count": 0,
+                    "scope": "MSI member inventory is absent and the binder does not parse MSI containers.",
+                }
+                package_member_gaps.append(
+                    {
+                        "target": package["target"],
+                        "package": package_path,
+                        "detail": "MSI member inventory is absent and MSI contents are not parsed by the binder.",
+                    }
+                )
+            continue
+
         if package["format"] != "zip":
             package["member_content_verification"] = {
                 "status": "partial",
@@ -1146,7 +1196,6 @@ def _bind(args: argparse.Namespace) -> int:
             )
             continue
 
-        members = package_members_by_path.get(package_path, [])
         if not members:
             package["member_content_verification"] = {
                 "status": "partial",
@@ -1163,7 +1212,7 @@ def _bind(args: argparse.Namespace) -> int:
             continue
 
         try:
-            validate_zip_member_claims(members, package_member_claims_by_path.get(package_path, {}))
+            validate_package_member_claims(members, package_member_claims_by_path.get(package_path, {}))
             member_result = verify_zip_package_members(Path(asset_root / package_path), members)
             package["member_content_verification"] = member_result
             if member_result["unverified_file_member_count"]:
@@ -1383,12 +1432,12 @@ def _bind(args: argparse.Namespace) -> int:
         "native_component_sbom": {
             "file": native_bom_path.name,
             "sha256": native_bom_sha,
-            "scope": "Native claims are cross-checked against pinned manifests and sidecar evidence; declared ZIP native and license members are also hashed from the package, while other package formats remain partial.",
+            "scope": "Native claims are cross-checked against pinned manifests and sidecar evidence; declared ZIP native and license members are hashed from the archive, while MSI member manifests are checked against uploaded evidence and remain partial until the clean-runner installation check compares installed files.",
             "inventory_gaps": disclosed_gaps,
         },
         "package_member_verification": {
             "status": "partial" if package_member_gaps else ("verified" if package_assets else "no_package_assets"),
-            "scope": "Declared executable, native, and license members in portable ZIPs are compared with sidecar evidence. Other ZIP members and unsupported package formats remain partial.",
+            "scope": "Declared executable, native, and license members in portable ZIPs are hashed from the archive. MSI manifests are checked against uploaded evidence and compared with installed files by the clean-runner workflow; MSI container bytes remain unparsed here.",
             "gaps": package_member_gaps,
         },
         "package_binary_audits": {

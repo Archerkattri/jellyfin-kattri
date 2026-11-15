@@ -61,9 +61,99 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $msi = Get-ChildItem -LiteralPath artifacts -Filter '*.msi' | Select-Object -First 1
-          if ($null -eq $msi) { throw 'No MSI was downloaded from the triggering run.' }
+          $artifactRoot = (Resolve-Path -LiteralPath artifacts).Path
+          $msiFiles = @(Get-ChildItem -LiteralPath $artifactRoot -Filter '*.msi' -File)
+          if ($msiFiles.Count -ne 1) { throw "Expected one MSI from the triggering run; found $($msiFiles.Count)." }
+          $msi = $msiFiles[0]
+          $sidecarFiles = @(Get-ChildItem -LiteralPath $artifactRoot -Filter 'release-native-components.json' -File)
+          if ($sidecarFiles.Count -ne 1) { throw "Expected one release-native-components.json sidecar; found $($sidecarFiles.Count)." }
+          $sidecar = Get-Content -LiteralPath $sidecarFiles[0].FullName -Raw | ConvertFrom-Json
+          if ($sidecar.target -cne 'windows-${{ matrix.platform }}' -or
+              $sidecar.source_commit -cne '${{ github.event.workflow_run.head_sha }}') {
+            throw 'Downloaded MSI sidecar target or source commit does not match the triggering release run.'
+          }
+          $packageRecords = @($sidecar.packages | Where-Object { $_.file -ceq $msi.Name })
+          if ($packageRecords.Count -ne 1) { throw "Expected one sidecar package record for $($msi.Name); found $($packageRecords.Count)." }
+          $packageRecord = $packageRecords[0]
+          $msiItem = Get-Item -LiteralPath $msi.FullName
+          $msiHash = (Get-FileHash -LiteralPath $msi.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($packageRecord.sha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+              $packageRecord.sha256.ToLowerInvariant() -ne $msiHash -or
+              $packageRecord.size_bytes -ne $msiItem.Length) {
+            throw 'Downloaded MSI hash or size does not match its release sidecar.'
+          }
+
+          function Get-SafeArtifactFile([string]$RelativePath) {
+            if ([string]::IsNullOrWhiteSpace($RelativePath) -or $RelativePath.Contains('\') -or
+                $RelativePath.Contains(':') -or $RelativePath.StartsWith('/') -or
+                $RelativePath -match '(^|/)\.{1,2}(/|$)') {
+              throw "Sidecar evidence path is not a safe relative path: $RelativePath"
+            }
+            $candidate = [System.IO.Path]::GetFullPath((Join-Path $artifactRoot ($RelativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar))))
+            $rootPrefix = $artifactRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+            if (-not $candidate.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+                -not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+              throw "Sidecar evidence file is missing or outside the artifact directory: $RelativePath"
+            }
+            return (Get-Item -LiteralPath $candidate).FullName
+          }
+
+          $expectedMemberRoles = @{
+            'Jellyfin Kattri/jellyfin-kattri.exe' = 'executable'
+            'Jellyfin Kattri/libmpv-2.dll' = 'native'
+            'Jellyfin Kattri/LICENSE.txt' = 'license'
+            'Jellyfin Kattri/libmpv-NOTICE.txt' = 'license'
+            'Jellyfin Kattri/licenses/libmpv/LICENSE.LGPL' = 'license'
+            'Jellyfin Kattri/licenses/libmpv/Copyright' = 'license'
+            'Jellyfin Kattri/licenses/libmpv/COPYING.LGPLv3' = 'license'
+            'Jellyfin Kattri/licenses/libmpv/LICENSE.md' = 'license'
+          }
+          $expectedMemberEvidence = @{
+            'Jellyfin Kattri/jellyfin-kattri.exe' = 'release-validation/executables/jellyfin-kattri.exe'
+            'Jellyfin Kattri/libmpv-2.dll' = 'release-validation/native/libmpv-2.dll'
+            'Jellyfin Kattri/LICENSE.txt' = 'release-validation/licenses/project/LICENSE'
+            'Jellyfin Kattri/libmpv-NOTICE.txt' = 'release-validation/licenses/libmpv/libmpv-NOTICE.txt'
+            'Jellyfin Kattri/licenses/libmpv/LICENSE.LGPL' = 'release-validation/licenses/libmpv/LICENSE.LGPL'
+            'Jellyfin Kattri/licenses/libmpv/Copyright' = 'release-validation/licenses/libmpv/Copyright'
+            'Jellyfin Kattri/licenses/libmpv/COPYING.LGPLv3' = 'release-validation/licenses/libmpv/COPYING.LGPLv3'
+            'Jellyfin Kattri/licenses/libmpv/LICENSE.md' = 'release-validation/licenses/libmpv/LICENSE.md'
+          }
+          $msiMembers = @($sidecar.package_members | Where-Object { $_.package_file -ceq $msi.Name })
+          if ($msiMembers.Count -ne $expectedMemberRoles.Count) {
+            throw "Expected $($expectedMemberRoles.Count) MSI member claims; found $($msiMembers.Count)."
+          }
+          $seenMemberPaths = @{}
+          $validatedMsiMembers = @()
+          foreach ($member in $msiMembers) {
+            if ($null -eq $member -or -not $expectedMemberRoles.ContainsKey([string]$member.path) -or
+                $member.role -cne $expectedMemberRoles[[string]$member.path] -or
+                $member.evidence_file -cne $expectedMemberEvidence[[string]$member.path]) {
+              throw 'MSI sidecar contains an unexpected member path or role.'
+            }
+            if ($seenMemberPaths.ContainsKey([string]$member.path)) { throw 'MSI sidecar repeats a member path.' }
+            $seenMemberPaths[[string]$member.path] = $true
+            if ($member.sha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+                $member.size_bytes -is [bool] -or $member.size_bytes -lt 0) {
+              throw "MSI sidecar member has an invalid hash or size: $($member.path)"
+            }
+            $evidencePath = Get-SafeArtifactFile ([string]$member.evidence_file)
+            $evidenceItem = Get-Item -LiteralPath $evidencePath
+            $evidenceHash = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($evidenceItem.Length -ne $member.size_bytes -or $evidenceHash -ne $member.sha256.ToLowerInvariant()) {
+              throw "MSI member evidence does not match its sidecar: $($member.path)"
+            }
+            $validatedMsiMembers += $member
+          }
+          foreach ($expectedPath in $expectedMemberRoles.Keys) {
+            if (-not $seenMemberPaths.ContainsKey($expectedPath)) { throw "MSI sidecar is missing member claim: $expectedPath" }
+          }
+
           New-Item -ItemType Directory -Force -Path smoke-logs | Out-Null
+          @("MSI $($msi.Name) size=$($msiItem.Length) sha256=$msiHash") + @(
+            $validatedMsiMembers | Sort-Object path | ForEach-Object {
+              "Evidence $($_.path) size=$($_.size_bytes) sha256=$($_.sha256.ToLowerInvariant())"
+            }
+          ) | Set-Content -LiteralPath smoke-logs\sidecar-member-comparisons.txt
           try {
             Get-CimInstance Win32_VideoController |
               Select-Object Name, DriverVersion, VideoProcessor, Status |
@@ -88,6 +178,21 @@ jobs:
           $libmpv = Join-Path $installDir 'libmpv-2.dll'
           if (-not (Test-Path -LiteralPath $exe)) { throw "Installed executable is missing: $exe" }
           if (-not (Test-Path -LiteralPath $libmpv)) { throw "Installed libmpv is missing: $libmpv" }
+          $comparisonLines = @()
+          foreach ($member in $validatedMsiMembers | Sort-Object path) {
+            $relativeInstalledPath = $member.path.Substring('Jellyfin Kattri/'.Length).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+            $installedPath = Join-Path $installDir $relativeInstalledPath
+            if (-not (Test-Path -LiteralPath $installedPath -PathType Leaf)) {
+              throw "Installed MSI member is missing: $($member.path)"
+            }
+            $installedItem = Get-Item -LiteralPath $installedPath
+            $installedHash = (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($installedItem.Length -ne $member.size_bytes -or $installedHash -ne $member.sha256.ToLowerInvariant()) {
+              throw "Installed MSI member differs from sidecar evidence: $($member.path)"
+            }
+            $comparisonLines += "Installed $($member.path) size=$($installedItem.Length) sha256=$installedHash"
+          }
+          $comparisonLines | Add-Content -LiteralPath smoke-logs\sidecar-member-comparisons.txt
           $libmpvNotice = Join-Path $installDir 'libmpv-NOTICE.txt'
           if (-not (Test-Path -LiteralPath $libmpvNotice)) { throw "Installed libmpv notice is missing: $libmpvNotice" }
           $libmpvLicenseDir = Join-Path $installDir 'licenses\libmpv'
@@ -361,8 +466,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p smoke-logs
-          KATTRI_SMOKE_EXPECT_LIBMPV_PATH='/usr/lib/libmpv.so.2' \
-          KATTRI_SMOKE_EXPECT_LIBJPEG_PATH='/usr/lib/libjpeg.so.8' \
+          TMPDIR=/tmp \
+          KATTRI_SMOKE_EXPECT_APPIMAGE_MOUNT=1 \
           KATTRI_SMOKE_LOG="$PWD/smoke-logs/application.txt" \
             xvfb-run -a -s '-screen 0 1280x720x24' \
             packaging/linux/smoke-launch.sh ./artifacts/kattri-*-linux-x64.AppImage | tee smoke-logs/window.txt

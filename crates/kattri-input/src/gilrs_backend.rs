@@ -94,49 +94,72 @@ fn pad_event(device: usize, button: &'static str, pressed: bool) -> GamepadEvent
 /// name only when it changes.
 #[derive(Debug, Default)]
 struct Translator {
-    /// Names currently pressed, per device index. A repeated press or release of a
-    /// name that is already in the requested state produces no event.
+    /// Button names held directly, per device index. These are kept separately from
+    /// axis state because some pads report their D-pad through both input paths.
+    button_held: BTreeSet<(usize, &'static str)>,
+    /// Logical names currently pressed, per device index. Only aggregate transitions
+    /// are reported, so one source cannot release a name still held by another.
     held: BTreeSet<(usize, &'static str)>,
     /// The name each axis direction currently holds, per device index and axis.
     axis_held: HashMap<(usize, Axis), &'static str>,
 }
 
 impl Translator {
-    fn press(&mut self, device: usize, name: &'static str, out: &mut Vec<GamepadEvent>) {
-        if self.held.insert((device, name)) {
-            out.push(pad_event(device, name, true));
+    fn update_held(&mut self, device: usize, name: &'static str, out: &mut Vec<GamepadEvent>) {
+        let key = (device, name);
+        let held_by_source = self.button_held.contains(&key)
+            || self
+                .axis_held
+                .iter()
+                .any(|((axis_device, _), axis_name)| *axis_device == device && *axis_name == name);
+        let reported = self.held.contains(&key);
+        match (reported, held_by_source) {
+            (false, true) => {
+                self.held.insert(key);
+                out.push(pad_event(device, name, true));
+            }
+            (true, false) => {
+                self.held.remove(&key);
+                out.push(pad_event(device, name, false));
+            }
+            _ => {}
         }
     }
 
-    fn release(&mut self, device: usize, name: &'static str, out: &mut Vec<GamepadEvent>) {
-        if self.held.remove(&(device, name)) {
-            out.push(pad_event(device, name, false));
-        }
+    fn press_button(&mut self, device: usize, name: &'static str, out: &mut Vec<GamepadEvent>) {
+        self.button_held.insert((device, name));
+        self.update_held(device, name, out);
+    }
+
+    fn release_button(&mut self, device: usize, name: &'static str, out: &mut Vec<GamepadEvent>) {
+        self.button_held.remove(&(device, name));
+        self.update_held(device, name, out);
     }
 
     fn apply(&mut self, device: usize, input: RawInput, out: &mut Vec<GamepadEvent>) {
         match input {
             RawInput::Pressed(button) => {
                 if let Some(name) = button_pad_name(button) {
-                    self.press(device, name, out);
+                    self.press_button(device, name, out);
                 }
             }
             RawInput::Released(button) => {
                 if let Some(name) = button_pad_name(button) {
-                    self.release(device, name, out);
+                    self.release_button(device, name, out);
                 }
             }
             RawInput::Axis(axis, value) => self.axis(device, axis, value, out),
             RawInput::Disconnected => {
-                self.axis_held.retain(|(dev, _), _| *dev != device);
                 let stale: Vec<&'static str> = self
                     .held
                     .iter()
                     .filter(|(dev, _)| *dev == device)
                     .map(|(_, name)| *name)
                     .collect();
+                self.button_held.retain(|(dev, _)| *dev != device);
+                self.axis_held.retain(|(dev, _), _| *dev != device);
                 for name in stale {
-                    self.release(device, name, out);
+                    self.update_held(device, name, out);
                 }
             }
         }
@@ -158,12 +181,13 @@ impl Translator {
             return;
         }
         if let Some(name) = current {
-            self.release(device, name, out);
+            self.axis_held.remove(&(device, axis));
+            self.update_held(device, name, out);
         }
         match target {
             Some(name) => {
                 self.axis_held.insert((device, axis), name);
-                self.press(device, name, out);
+                self.update_held(device, name, out);
             }
             None => {
                 self.axis_held.remove(&(device, axis));
@@ -236,6 +260,12 @@ mod tests {
         for input in inputs {
             translator.apply(device, *input, &mut out);
         }
+        out
+    }
+
+    fn feed_one(translator: &mut Translator, device: usize, input: RawInput) -> Vec<GamepadEvent> {
+        let mut out = Vec::new();
+        translator.apply(device, input, &mut out);
         out
     }
 
@@ -418,6 +448,36 @@ mod tests {
         assert_eq!(
             names(&events),
             vec![("DPadUp".to_owned(), true), ("DPadUp".to_owned(), false)]
+        );
+    }
+
+    #[test]
+    fn dpad_direction_stays_held_until_button_and_axis_both_release() {
+        let mut t = Translator::default();
+        assert_eq!(
+            names(&feed_one(&mut t, 0, RawInput::Pressed(Button::DPadUp))),
+            vec![("DPadUp".to_owned(), true)]
+        );
+        assert!(feed_one(&mut t, 0, RawInput::Axis(Axis::DPadY, 1.0)).is_empty());
+        assert!(feed_one(&mut t, 0, RawInput::Released(Button::DPadUp)).is_empty());
+        assert_eq!(
+            names(&feed_one(&mut t, 0, RawInput::Axis(Axis::DPadY, 0.0))),
+            vec![("DPadUp".to_owned(), false)]
+        );
+    }
+
+    #[test]
+    fn dpad_direction_stays_held_until_axis_and_button_both_release() {
+        let mut t = Translator::default();
+        assert_eq!(
+            names(&feed_one(&mut t, 0, RawInput::Axis(Axis::DPadY, 1.0))),
+            vec![("DPadUp".to_owned(), true)]
+        );
+        assert!(feed_one(&mut t, 0, RawInput::Pressed(Button::DPadUp)).is_empty());
+        assert!(feed_one(&mut t, 0, RawInput::Axis(Axis::DPadY, 0.0)).is_empty());
+        assert_eq!(
+            names(&feed_one(&mut t, 0, RawInput::Released(Button::DPadUp))),
+            vec![("DPadUp".to_owned(), false)]
         );
     }
 

@@ -4,7 +4,9 @@ param(
     [int]$DurationSeconds = 75,
 
     [ValidateRange(8, 128)]
-    [int]$MemoryMiB = 32
+    [int]$MemoryMiB = 32,
+
+    [switch]$Windowed
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,4 +16,31 @@ for ($offset = 0; $offset -lt $buffer.Length; $offset += 4096) {
     $buffer[$offset] = 1
 }
 
-Start-Sleep -Seconds $DurationSeconds
+if ($Windowed) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $form = [System.Windows.Forms.Form]::new()
+    $form.Text = 'Kattri runtime monitor fixture'
+    $form.ShowInTaskbar = $false
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $form.Location = [System.Drawing.Point]::new(-32000, -32000)
+    $form.Size = [System.Drawing.Size]::new(1, 1)
+    $form.Opacity = 0.05
+
+    $timer = [System.Windows.Forms.Timer]::new()
+    $timer.Interval = [Math]::Min(($DurationSeconds * 1000), [int]::MaxValue)
+    $timer.Add_Tick({
+        $timer.Stop()
+        $form.Close()
+    }.GetNewClosure())
+    $form.Add_Shown({ $timer.Start() }.GetNewClosure())
+
+    try {
+        $form.Show()
+        [System.Windows.Forms.Application]::Run($form)
+    } finally {
+        $timer.Dispose()
+        $form.Dispose()
+    }
+} else {
+    Start-Sleep -Seconds $DurationSeconds
+}

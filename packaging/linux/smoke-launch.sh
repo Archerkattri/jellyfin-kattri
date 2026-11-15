@@ -5,11 +5,24 @@ if [[ $# -lt 1 || -z "${KATTRI_SMOKE_LOG:-}" ]]; then
   echo "usage: KATTRI_SMOKE_LOG=<path> $0 <application> [arguments...]" >&2
   exit 2
 fi
-# When set, require the fresh process to initialize this exact bundled libmpv path. LD_DEBUG is
-# enabled only for the app process so a normal window-start check also proves runtime selection.
+# Exact paths are used for installed packages. AppImage uses a separate mount-only check because
+# the runtime's FUSE mount path is unique per launch and must never match a host /usr/lib path.
 MPV_PATH="${KATTRI_SMOKE_EXPECT_LIBMPV_PATH:-}"
 JPEG_PATH="${KATTRI_SMOKE_EXPECT_LIBJPEG_PATH:-}"
 TRACE_LOADER="${KATTRI_SMOKE_TRACE_LOADER:-1}"
+APPIMAGE_MOUNT_CHECK="${KATTRI_SMOKE_EXPECT_APPIMAGE_MOUNT:-0}"
+if [[ "$APPIMAGE_MOUNT_CHECK" != "0" && "$APPIMAGE_MOUNT_CHECK" != "1" ]]; then
+  echo "KATTRI_SMOKE_EXPECT_APPIMAGE_MOUNT must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$APPIMAGE_MOUNT_CHECK" == "1" && ( -n "$MPV_PATH" || -n "$JPEG_PATH" ) ]]; then
+  echo "AppImage mount verification cannot be combined with exact library paths" >&2
+  exit 2
+fi
+if [[ "$APPIMAGE_MOUNT_CHECK" == "1" && "$TRACE_LOADER" != "1" ]]; then
+  echo "AppImage mount verification requires loader tracing" >&2
+  exit 2
+fi
 
 # Xvfb starts without a window manager. wmctrl can only request a normal close
 # through one, and destroying the X window instead makes winit panic, so start an
@@ -35,7 +48,7 @@ if command -v wmctrl >/dev/null 2>&1; then
 fi
 
 export LIBGL_ALWAYS_SOFTWARE=1
-if [[ ( -n "$MPV_PATH" || -n "$JPEG_PATH" ) && "$TRACE_LOADER" == "1" ]]; then
+if [[ ( -n "$MPV_PATH" || -n "$JPEG_PATH" || "$APPIMAGE_MOUNT_CHECK" == "1" ) && "$TRACE_LOADER" == "1" ]]; then
   LD_DEBUG=libs "$@" >"$KATTRI_SMOKE_LOG" 2>&1 &
 else
   "$@" >"$KATTRI_SMOKE_LOG" 2>&1 &
@@ -97,6 +110,18 @@ for _ in $(seq 1 15); do
     fi
     if [[ -n "$JPEG_PATH" ]]; then
       echo "application initialized bundled libjpeg from $JPEG_PATH"
+    fi
+    if [[ "$APPIMAGE_MOUNT_CHECK" == "1" ]]; then
+      for library_pattern in \
+        'calling init: /tmp/\.mount_[^/]+/usr/lib/libmpv\.so\.2$' \
+        'calling init: /tmp/\.mount_[^/]+/usr/lib/libjpeg\.so\.8$'; do
+        if ! grep -Eq "$library_pattern" "$KATTRI_SMOKE_LOG"; then
+          echo "AppImage did not initialize the expected library from its /tmp mount: $library_pattern" >&2
+          tail -n 80 "$KATTRI_SMOKE_LOG" >&2
+          exit 1
+        fi
+      done
+      echo "application initialized bundled libmpv and libjpeg from the AppImage mount"
     fi
     echo "application window closed and process exited normally"
     exit 0

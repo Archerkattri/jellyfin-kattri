@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -532,38 +532,7 @@ fn save_list(shared: &Shared) -> Result<(), ManagerError> {
     if bytes.len() as u64 > MAX_LIST_BYTES {
         return Err(ManagerError::ListTooLarge);
     }
-    write_atomic(&shared.list_path, &bytes)?;
-    Ok(())
-}
-
-/// Writes `bytes` to a sibling temp file, flushes and syncs it, and renames it over `path`.
-/// A reader sees either the old list or the new one.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut tmp_name = path.as_os_str().to_owned();
-    tmp_name.push(".tmp");
-    let tmp = PathBuf::from(tmp_name);
-    {
-        let mut file = File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.flush()?;
-        file.sync_all()?;
-    }
-    fs::rename(&tmp, path)?;
-    sync_parent(path)
-}
-
-/// Unix can sync the directory entry after a rename. std has no equivalent on Windows, so
-/// there the rename is atomic but not separately synced.
-#[cfg(unix)]
-fn sync_parent(path: &Path) -> io::Result<()> {
-    match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => File::open(parent)?.sync_all(),
-        _ => Ok(()),
-    }
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> io::Result<()> {
+    crate::fs::write_atomic(&shared.list_path, &bytes)?;
     Ok(())
 }
 

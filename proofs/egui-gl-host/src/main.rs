@@ -122,6 +122,8 @@ struct GlHost<'session> {
     chrome_opacity: f32,
     destroyed: bool,
     show_player_details: bool,
+    player_input_active: bool,
+    focus_before_player: Option<egui::Id>,
     // The screenshot command goes to the same session the MpvHost renders from.
     session: Option<&'session MpvSession>,
     pip: PipController,
@@ -289,12 +291,16 @@ impl<'session> GlHost<'session> {
         // falls back with a notice, and the picker opens when several profiles exist.
         // The app draws the notice and the picker itself from `ui`.
         let mut kattri_app = KattriApp::with_launch_profile(egui.clone(), profile);
+        let resume_saved_sign_in =
+            should_resume_saved_sign_in(&local_media, launch_intent.is_some());
         if let Some(intent) = launch_intent {
             // An external link uses the selected/active profile and requires explicit sign-in.
             kattri_app.apply_launch_intent(intent);
         } else {
             kattri_app.offer_launch_picker();
-            kattri_app.resume_saved_sign_in();
+            if resume_saved_sign_in {
+                kattri_app.resume_saved_sign_in();
+            }
         }
         // Load the local file after the app exists, so its hwdec comes from the launch profile.
         mpv.load_local_media(
@@ -340,6 +346,8 @@ impl<'session> GlHost<'session> {
             chrome_opacity: 0.0,
             destroyed: false,
             show_player_details: false,
+            player_input_active: false,
+            focus_before_player: None,
             session,
             pip: PipController::new(),
             local_stem,
@@ -635,6 +643,44 @@ impl<'session> GlHost<'session> {
             }
             return Duration::MAX;
         }
+        let renderer_available = self.mpv.has_renderer();
+        let media_active = self.mpv.has_media();
+        let pip_active = self.pip.is_pip();
+        let player_surface_active = media_active && !pip_active;
+        let theater = renderer_available
+            && player_surface_active
+            && !self.show_player_details
+            && self.kattri_app.selected_is_video();
+        if player_surface_active && !self.player_input_active {
+            self.focus_before_player = self.egui.memory(|memory| memory.focused());
+            if let Some(focused) = self.focus_before_player {
+                self.egui
+                    .memory_mut(|memory| memory.surrender_focus(focused));
+            }
+        } else if !player_surface_active
+            && self.player_input_active
+            && let Some(focused) = self.focus_before_player.take()
+        {
+            self.egui.memory_mut(|memory| memory.request_focus(focused));
+        }
+        self.player_input_active = player_surface_active;
+        self.kattri_app.set_player_owns_input(player_surface_active);
+        let mut gamepad_actions = if player_surface_active {
+            match self.kattri_app.poll_player_gamepad_actions() {
+                Ok(actions) => actions,
+                Err(error) => {
+                    tracing::warn!(%error, "Could not poll the player gamepad");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        gamepad_actions.extend(self.kattri_app.take_player_nav_actions());
+        if !gamepad_actions.is_empty() {
+            self.osd_visibility.on_input(self.osd_clock.elapsed());
+        }
+        let player_had_focus = self.egui.memory(|memory| memory.focused().is_some());
         let user_activity = has_user_activity(&input.events);
         if user_activity {
             self.osd_visibility.on_input(self.osd_clock.elapsed());
@@ -657,8 +703,6 @@ impl<'session> GlHost<'session> {
             .mpv
             .capability_warning()
             .map(|warning| format!("Runtime capability fallback: {warning:?}"));
-        let renderer_available = self.mpv.has_renderer();
-        let media_active = self.mpv.has_media();
         let shutdown_error = self.shutdown_error.clone();
         let report_handoff_feedback = self
             .mpv
@@ -792,7 +836,6 @@ impl<'session> GlHost<'session> {
         if let Some(action) = player_shortcut {
             self.apply_player_shortcut(action);
         }
-        let pip_active = self.pip.is_pip();
         let pip_available = renderer_available && media_active;
         let mut pip_toggle_requested = false;
         let mut fullscreen_toggle_requested = false;
@@ -850,12 +893,8 @@ impl<'session> GlHost<'session> {
         };
         // Theater view: while a video plays, the player fills the window. "Player details"
         // brings the side panel and diagnostics back.
-        let theater = renderer_available
-            && media_active
-            && !pip_active
-            && !self.show_player_details
-            && self.kattri_app.selected_is_video();
-        self.kattri_app.set_player_owns_input(theater);
+        let activate_without_focus =
+            append_gamepad_navigation_events(&mut input, &gamepad_actions, player_had_focus);
         let mpv = &mut self.mpv;
         let kattri_app = &mut self.kattri_app;
         let show_player_details = &mut self.show_player_details;
@@ -927,6 +966,12 @@ impl<'session> GlHost<'session> {
                             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                             egui::Color32::WHITE,
                         );
+                        let video_surface = ui.interact(
+                            video_rect,
+                            ui.make_persistent_id("kattri-theater-video-surface"),
+                            egui::Sense::hover(),
+                        );
+                        label_video_surface(&video_surface, osd.title);
                         if chrome_present {
                             // Keep the chrome inside the video area, not the whole window: a
                             // debug-only notice or any future top panel must not be covered.
@@ -1076,7 +1121,8 @@ impl<'session> GlHost<'session> {
                     let width = available.x.max(1.0);
                     let height = (width * 9.0 / 16.0).min(available.y.max(1.0));
                     video_size_points = egui::vec2(width, height);
-                    ui.image((video_texture_id, video_size_points));
+                    let video_surface = ui.image((video_texture_id, video_size_points));
+                    label_video_surface(&video_surface, osd.title);
                     if renderer_available && controls_visible {
                         ui.add_space(6.0);
                         osd_controls(
@@ -1210,7 +1256,7 @@ impl<'session> GlHost<'session> {
         if let Some(generation) = self.kattri_app.take_terminal_burn_in_replacement_failure() {
             self.sync_play_bridge.end(Some(generation));
         }
-        self.apply_gamepad_player_actions();
+        self.apply_gamepad_player_actions(&gamepad_actions, activate_without_focus);
         self.sync_report_connection();
         self.flush_playback_reports();
         #[cfg(debug_assertions)]
@@ -1619,17 +1665,19 @@ impl<'session> GlHost<'session> {
 
     /// Queue an mpv screenshot of the current frame (M2-15). The name comes from the settings
     /// template. The command is queued; the write is not confirmed here.
-    /// Apply the gamepad presses the app collected while the video filled the window (M6-18).
-    /// Any press also brings the on-screen controls back.
-    fn apply_gamepad_player_actions(&mut self) {
-        let actions = self.kattri_app.take_player_nav_actions();
-        if actions.is_empty() {
+    /// Apply direct gamepad player actions after egui handles navigation and activation (M6-18).
+    fn apply_gamepad_player_actions(
+        &mut self,
+        actions: &[kattri_client_core::focus::NavAction],
+        activate_without_focus: bool,
+    ) {
+        if actions.is_empty() && !activate_without_focus {
             return;
         }
         self.osd_visibility.on_input(self.osd_clock.elapsed());
         let live_stream_active = self.mpv.live_stream_active();
         for action in actions {
-            match player_controls::gamepad_player_action(action) {
+            match player_controls::gamepad_player_action(*action) {
                 GamepadPlayerAction::Control(PlayerControlAction::TogglePause)
                     if live_stream_active =>
                 {
@@ -1641,11 +1689,20 @@ impl<'session> GlHost<'session> {
                 GamepadPlayerAction::Control(PlayerControlAction::SeekRelative(delta)) => {
                     self.mpv.seek_relative(delta);
                 }
-                GamepadPlayerAction::Control(_) | GamepadPlayerAction::ShowControls => {}
+                GamepadPlayerAction::Control(_)
+                | GamepadPlayerAction::Navigate(_)
+                | GamepadPlayerAction::ActivateFocused => {}
                 GamepadPlayerAction::Leave => self.mpv.stop_playback(),
                 GamepadPlayerAction::ToggleMediaInfo => self
                     .mpv
                     .dispatch_playback_key(mpv_host::PlaybackKeyAction::MediaInfo),
+            }
+        }
+        if activate_without_focus {
+            if live_stream_active {
+                self.mpv.stop_playback();
+            } else {
+                self.mpv.toggle_paused();
             }
         }
         self.window.request_redraw();
@@ -2266,6 +2323,60 @@ fn player_controls_visible(timed: bool, focused: bool, popup_open: bool) -> bool
     player_controls::player_controls_visible(timed, focused, popup_open)
 }
 
+fn append_gamepad_navigation_events(
+    input: &mut egui::RawInput,
+    actions: &[kattri_client_core::focus::NavAction],
+    has_focus: bool,
+) -> bool {
+    let mut initial_focus_queued = false;
+    let has_navigation = actions.iter().any(|action| {
+        matches!(
+            player_controls::gamepad_player_action(*action),
+            GamepadPlayerAction::Navigate(_)
+        )
+    });
+    let mut activate_without_focus = false;
+
+    for action in actions {
+        match player_controls::gamepad_player_action(*action) {
+            GamepadPlayerAction::Navigate(key) if has_focus => {
+                input.events.push(gamepad_key_event(key));
+            }
+            GamepadPlayerAction::Navigate(_) if !initial_focus_queued => {
+                // The first directional press gives the player surface focus; a later press
+                // moves spatially within the visible controls.
+                input.events.push(gamepad_key_event(egui::Key::Tab));
+                initial_focus_queued = true;
+            }
+            GamepadPlayerAction::Navigate(_) => {}
+            GamepadPlayerAction::ActivateFocused if has_focus && !has_navigation => {
+                input.events.push(gamepad_key_event(egui::Key::Enter));
+            }
+            GamepadPlayerAction::ActivateFocused
+                if !has_focus && !initial_focus_queued && !has_navigation =>
+            {
+                activate_without_focus = true;
+            }
+            GamepadPlayerAction::ActivateFocused => {}
+            GamepadPlayerAction::Control(_)
+            | GamepadPlayerAction::Leave
+            | GamepadPlayerAction::ToggleMediaInfo => {}
+        }
+    }
+
+    activate_without_focus
+}
+
+fn gamepad_key_event(key: egui::Key) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }
+}
+
 /// The window client size that shows a decoded frame at 1:1. The theater draws the video into a
 /// 16:9 box, so the window must be the smallest 16:9 box that contains the frame; a wide film
 /// then has black bars above and below rather than being scaled down. Integer arithmetic keeps
@@ -2304,6 +2415,14 @@ fn fit_16_9(available: egui::Vec2) -> egui::Vec2 {
     } else {
         egui::vec2(height * 16.0 / 9.0, height)
     }
+}
+
+fn label_video_surface(response: &egui::Response, title: Option<&str>) {
+    let label = title.map_or_else(
+        || "Video playback surface".to_owned(),
+        |title| format!("Video playback surface: {title}"),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, label.clone()));
 }
 
 /// Whether the bottom status bar has anything to show.
@@ -2963,11 +3082,122 @@ fn stream_only_validation(value: Option<&OsStr>) -> bool {
     value == Some(OsStr::new("1"))
 }
 
+fn should_resume_saved_sign_in(
+    local_media: &Result<Option<String>, String>,
+    has_launch_intent: bool,
+) -> bool {
+    !has_launch_intent && matches!(local_media, Ok(None))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CURSOR_HIDE_AFTER, cursor_should_hide, duration_from_seconds, has_user_activity};
+    use super::{
+        CURSOR_HIDE_AFTER, append_gamepad_navigation_events, cursor_should_hide,
+        duration_from_seconds, has_user_activity, label_video_surface, should_resume_saved_sign_in,
+    };
     use egui::{Event, Key, Modifiers};
     use std::time::Duration;
+
+    #[test]
+    fn gamepad_navigation_uses_the_egui_focus_path() {
+        use kattri_client_core::focus::NavAction;
+
+        let mut first_direction = egui::RawInput::default();
+        assert!(!append_gamepad_navigation_events(
+            &mut first_direction,
+            &[NavAction::Down],
+            false,
+        ));
+        assert!(matches!(
+            first_direction.events.as_slice(),
+            [Event::Key {
+                key: Key::Tab,
+                pressed: true,
+                ..
+            }]
+        ));
+
+        let mut focused_direction = egui::RawInput::default();
+        assert!(!append_gamepad_navigation_events(
+            &mut focused_direction,
+            &[NavAction::Right],
+            true,
+        ));
+        assert!(matches!(
+            focused_direction.events.as_slice(),
+            [Event::Key {
+                key: Key::ArrowRight,
+                pressed: true,
+                ..
+            }]
+        ));
+
+        let mut focused_select = egui::RawInput::default();
+        assert!(!append_gamepad_navigation_events(
+            &mut focused_select,
+            &[NavAction::Select],
+            true,
+        ));
+        assert!(matches!(
+            focused_select.events.as_slice(),
+            [Event::Key {
+                key: Key::Enter,
+                pressed: true,
+                ..
+            }]
+        ));
+
+        let mut unfocused_select = egui::RawInput::default();
+        assert!(append_gamepad_navigation_events(
+            &mut unfocused_select,
+            &[NavAction::Select],
+            false,
+        ));
+        assert!(unfocused_select.events.is_empty());
+    }
+
+    #[test]
+    fn video_surface_is_named_and_does_not_take_keyboard_focus() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let (_, response) =
+                    ui.allocate_exact_size(egui::vec2(320.0, 180.0), egui::Sense::hover());
+                label_video_surface(&response, Some("Sample film"));
+            });
+        });
+        output.textures_delta.clear();
+        let tree = output
+            .platform_output
+            .accesskit_update
+            .expect("AccessKit tree is emitted");
+        let node = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::Image
+                    && node.label() == Some("Video playback surface: Sample film")
+            })
+            .map(|(_, node)| node)
+            .expect("the video surface has an accessible name");
+        assert!(
+            !node.supports_action(egui::accesskit::Action::Focus),
+            "the video surface is not a keyboard focus target"
+        );
+    }
+
+    #[test]
+    fn local_media_and_deep_link_launches_skip_saved_server_resume() {
+        let local_file = Ok(Some("synthetic-video.mp4".to_owned()));
+        let invalid_file = Err("local media is missing".to_owned());
+        let no_file = Ok(None);
+
+        assert!(!should_resume_saved_sign_in(&local_file, false));
+        assert!(!should_resume_saved_sign_in(&invalid_file, false));
+        assert!(!should_resume_saved_sign_in(&no_file, true));
+        assert!(should_resume_saved_sign_in(&no_file, false));
+    }
 
     #[test]
     fn cursor_hides_only_in_a_focused_fullscreen_window_after_idle() {

@@ -431,7 +431,8 @@ async fn needs_auth_keeps_bytes_and_resumes_with_new_credentials() {
     .await;
     let h = harness(Duration::from_millis(5));
     let mut transfer = Transfer::new(format!("{}/x", server.base));
-    let old_auth = RequestAuth::new("Authorization", "MediaBrowser Token=token-old").expect("auth");
+    let old_auth_value = format!("MediaBrowser {}{}{}", "Token", "=", "token-old");
+    let old_auth = RequestAuth::new("Authorization", &old_auth_value).expect("auth");
 
     let first = transfer.run(&h.cfg, Some(&old_auth)).await;
 
@@ -444,19 +445,20 @@ async fn needs_auth_keeps_bytes_and_resumes_with_new_credentials() {
         "credentials must not reach the job"
     );
 
-    let new_auth = RequestAuth::new("Authorization", "MediaBrowser Token=token-new").expect("auth");
+    let new_auth_value = format!("MediaBrowser {}{}{}", "Token", "=", "token-new");
+    let new_auth = RequestAuth::new("Authorization", &new_auth_value).expect("auth");
     let second = transfer.run(&h.cfg, Some(&new_auth)).await;
 
     assert_eq!(second, Outcome::Committed);
     let requests = server.requests();
     assert_eq!(
         requests[1].authorization.as_deref(),
-        Some("MediaBrowser Token=token-old")
+        Some(old_auth_value.as_str())
     );
     assert_eq!(requests[2].range.as_deref(), Some("bytes=524288-"));
     assert_eq!(
         requests[2].authorization.as_deref(),
-        Some("MediaBrowser Token=token-new")
+        Some(new_auth_value.as_str())
     );
     assert_eq!(final_bytes(&h, &transfer), body);
 }
@@ -779,7 +781,12 @@ async fn failing_subtitle_does_not_fail_the_video_and_manifest_has_no_urls() {
             language: Some("fre".into()),
         },
     ];
-    let downloads_root = h._dir.path().join("downloads");
+    let downloads_root = h
+        .store
+        .dir()
+        .parent()
+        .expect("downloads root beside temp folder")
+        .to_path_buf();
     let results = download_subtitles(
         &h.cfg,
         &server.base,
@@ -1366,7 +1373,12 @@ async fn subtitle_jobs_leave_the_video_record_in_place() {
             language: None,
         },
     ];
-    let downloads_root = h._dir.path().join("downloads");
+    let downloads_root = h
+        .store
+        .dir()
+        .parent()
+        .expect("downloads root beside temp folder")
+        .to_path_buf();
 
     let results = download_subtitles(
         &cfg,

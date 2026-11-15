@@ -1,0 +1,136 @@
+# Manual, nonpublishing package and runtime checks on actual macOS/Linux runners.
+# Artifacts contain bounded evidence only; release packages are never uploaded or published.
+name: Runtime acceptance (macOS and Linux, manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: 2
+
+concurrency:
+  group: runtime-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS bundle and URL delivery
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Check out the dispatched revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain and macOS targets
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
+        with:
+          target: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build the universal application bundle
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = \"\(.*\)\"$/\1/p' Cargo.toml | head -n 1)"
+          test -n "$VERSION"
+          CARGO_PACKAGE=egui-gl-host-proof BINARY_NAME=jellyfin-kattri \
+            packaging/macos/build-app.sh "$VERSION"
+
+      - name: Ad-hoc sign and verify the local bundle
+        run: |
+          set -euo pipefail
+          APP='dist/macos/Jellyfin Kattri.app'
+          codesign --force --deep -s - "$APP"
+          codesign --verify --deep --strict "$APP"
+
+      - name: Initialize an isolated runner profile and check URL delivery
+        env:
+          APP_PATH: dist/macos/Jellyfin Kattri.app
+          PROFILE_NAME: acceptance-macos-url
+        run: |
+          set -euo pipefail
+          unset JELLYFIN_TEST_URL JELLYFIN_TEST_USER JELLYFIN_TEST_PASSWORD \
+            KATTRI_DEBUG_URL KATTRI_DEBUG_USER KATTRI_DEBUG_PASSWORD
+          mkdir -p runtime-evidence/macos
+          bash scripts/acceptance/setup_macos_runner_profile.sh \
+            | tee runtime-evidence/macos/profile-setup.txt
+          bash scripts/acceptance/verify_macos_scheme.sh \
+            | tee runtime-evidence/macos/url-delivery.txt
+          bash scripts/runtime-ci/record_macos_evidence.sh \
+            | tee runtime-evidence/macos/summary.txt
+
+      - name: Upload bounded macOS runtime evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: runtime-acceptance-macos-${{ github.run_id }}
+          path: runtime-evidence/macos/
+          if-no-files-found: warn
+          retention-days: 7
+
+  linux:
+    name: Linux AppImage and software-frame acceptance
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out the dispatched revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install Linux build and software-display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            pkg-config libudev-dev \
+            desktop-file-utils file libfuse2 \
+            libass9 libuchardet0 libva2 libva-drm2 libdrm2 libgbm1 libegl1 \
+            libx11-6 libxfixes3 libasound2 libpulse0 libjpeg8 zlib1g \
+            libxkbcommon-x11-0 xvfb openbox wmctrl xdotool x11-utils \
+            libgl1-mesa-dri mesa-utils
+
+      - name: Install the pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
+
+      - name: Build the Linux release binary and AppImage
+        env:
+          CARGO_BUILD_JOBS: 2
+          UPDATE_INFO: ""
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -j 2 -p egui-gl-host-proof --bin jellyfin-kattri
+          chmod 755 target/release/jellyfin-kattri
+          VERSION="$(sed -n 's/^version = \"\(.*\)\"$/\1/p' Cargo.toml | head -n 1)"
+          test -n "$VERSION"
+          packaging/linux/appimage/build-appimage.sh \
+            "$VERSION" target/release/jellyfin-kattri dist/linux
+
+      - name: Build the debug host for framebuffer readback
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: cargo build --locked -j 2 -p egui-gl-host-proof --bin jellyfin-kattri
+
+      - name: Launch the package and capture a synthetic video frame
+        run: |
+          set -euo pipefail
+          APPIMAGE="$(find dist/linux -maxdepth 1 -type f -name 'kattri-*-linux-x64.AppImage' -print -quit)"
+          test -n "$APPIMAGE"
+          xvfb-run -a -s '-screen 0 1280x720x24' \
+            bash scripts/runtime-ci/linux_runtime_smoke.sh \
+            "$APPIMAGE" target/debug/jellyfin-kattri
+
+      - name: Upload bounded Linux runtime evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: runtime-acceptance-linux-${{ github.run_id }}
+          path: runtime-evidence/linux/
+          if-no-files-found: warn
+          retention-days: 7

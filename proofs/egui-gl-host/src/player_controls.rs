@@ -158,29 +158,31 @@ pub struct TrackChoice<T> {
 /// What one gamepad action does while a video fills the window (M6-18).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GamepadPlayerAction {
+    /// Move egui focus in the matching direction without forwarding input to libmpv.
+    Navigate(egui::Key),
+    /// Activate the focused player widget through egui's normal keyboard path.
+    ActivateFocused,
     /// A transport control, the same as pressing it on screen.
     Control(PlayerControlAction),
     /// Leave the video (B / Back), as the on-screen Back button does.
     Leave,
     /// Show or hide the media info panel (Menu).
     ToggleMediaInfo,
-    /// Bring the on-screen controls back without changing playback.
-    ShowControls,
 }
 
-/// Map a gamepad action to the player: A and Play/Pause toggle pause, Left and Right seek ten
-/// seconds, B leaves, Menu toggles media info, Up and Down only reveal the controls.
+/// Map a gamepad action to the player. Directional input follows the focused egui controls;
+/// South activates the focused widget, and Play/Pause remains a direct transport action.
 pub fn gamepad_player_action(action: kattri_client_core::focus::NavAction) -> GamepadPlayerAction {
     use kattri_client_core::focus::NavAction;
     match action {
-        NavAction::Select | NavAction::PlayPause => {
-            GamepadPlayerAction::Control(PlayerControlAction::TogglePause)
-        }
-        NavAction::Left => GamepadPlayerAction::Control(PlayerControlAction::SeekRelative(-10)),
-        NavAction::Right => GamepadPlayerAction::Control(PlayerControlAction::SeekRelative(10)),
+        NavAction::Up => GamepadPlayerAction::Navigate(egui::Key::ArrowUp),
+        NavAction::Down => GamepadPlayerAction::Navigate(egui::Key::ArrowDown),
+        NavAction::Left => GamepadPlayerAction::Navigate(egui::Key::ArrowLeft),
+        NavAction::Right => GamepadPlayerAction::Navigate(egui::Key::ArrowRight),
+        NavAction::Select => GamepadPlayerAction::ActivateFocused,
+        NavAction::PlayPause => GamepadPlayerAction::Control(PlayerControlAction::TogglePause),
         NavAction::Back => GamepadPlayerAction::Leave,
         NavAction::Menu => GamepadPlayerAction::ToggleMediaInfo,
-        NavAction::Up | NavAction::Down => GamepadPlayerAction::ShowControls,
     }
 }
 
@@ -2264,26 +2266,29 @@ mod tests {
     fn a_gamepad_drives_the_player_while_a_video_fills_the_window() {
         use kattri_client_core::focus::NavAction;
         for (pressed, expected) in [
+            (NavAction::Select, GamepadPlayerAction::ActivateFocused),
             (
-                NavAction::Select,
-                GamepadPlayerAction::Control(PlayerControlAction::TogglePause),
+                NavAction::Up,
+                GamepadPlayerAction::Navigate(egui::Key::ArrowUp),
+            ),
+            (
+                NavAction::Down,
+                GamepadPlayerAction::Navigate(egui::Key::ArrowDown),
+            ),
+            (
+                NavAction::Left,
+                GamepadPlayerAction::Navigate(egui::Key::ArrowLeft),
+            ),
+            (
+                NavAction::Right,
+                GamepadPlayerAction::Navigate(egui::Key::ArrowRight),
             ),
             (
                 NavAction::PlayPause,
                 GamepadPlayerAction::Control(PlayerControlAction::TogglePause),
             ),
-            (
-                NavAction::Left,
-                GamepadPlayerAction::Control(PlayerControlAction::SeekRelative(-10)),
-            ),
-            (
-                NavAction::Right,
-                GamepadPlayerAction::Control(PlayerControlAction::SeekRelative(10)),
-            ),
             (NavAction::Back, GamepadPlayerAction::Leave),
             (NavAction::Menu, GamepadPlayerAction::ToggleMediaInfo),
-            (NavAction::Up, GamepadPlayerAction::ShowControls),
-            (NavAction::Down, GamepadPlayerAction::ShowControls),
         ] {
             assert_eq!(gamepad_player_action(pressed), expected, "{pressed:?}");
         }
@@ -3965,6 +3970,55 @@ mod tests {
                 frame.actions.contains(&action),
                 "Enter on {id:?} emits {action:?}, got {:?}",
                 frame.actions
+            );
+        }
+    }
+
+    #[test]
+    fn dpad_navigation_moves_focus_and_south_activates_the_focused_control() {
+        let state = keyboard_view(&[], &[]);
+        let context = Context::default();
+        assert!(tab_to(&context, state, ControlId::PreviousTrack));
+        let before = overlay_frame(&context, RawInput::default(), state);
+        assert_eq!(
+            focused_control(&context, &before.rects),
+            Some(ControlId::PreviousTrack)
+        );
+
+        let moved = overlay_frame(&context, key_press(egui::Key::ArrowRight), state);
+        assert_eq!(
+            focused_control(&context, &moved.rects),
+            Some(ControlId::SeekBackward)
+        );
+
+        let selected = overlay_frame(&context, key_press(egui::Key::Enter), state);
+        assert!(
+            selected
+                .actions
+                .contains(&PlayerControlAction::SeekRelative(-10))
+        );
+    }
+
+    #[test]
+    fn arrows_on_the_focused_volume_slider_adjust_volume_without_seeking() {
+        for key in [egui::Key::ArrowLeft, egui::Key::ArrowRight] {
+            let context = Context::default();
+            let state = keyboard_view(&[], &[]);
+            assert!(tab_to(&context, state, ControlId::VolumeSlider));
+            let frame = overlay_frame(&context, key_press(key), state);
+            assert!(
+                frame
+                    .actions
+                    .iter()
+                    .any(|action| matches!(action, PlayerControlAction::SetVolume(_))),
+                "{key:?} on the focused volume slider must update its value"
+            );
+            assert!(
+                frame.actions.iter().all(|action| !matches!(
+                    action,
+                    PlayerControlAction::SeekRelative(_) | PlayerControlAction::SeekAbsolute(_)
+                )),
+                "{key:?} on the volume slider must not seek"
             );
         }
     }

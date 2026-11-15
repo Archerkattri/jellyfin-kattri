@@ -12,14 +12,18 @@
 //!   The path is `/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/Stream.{format}`.
 //! - Storage: `<downloads>/<itemId>/subtitles/<index>.<format>`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use jellyfin_api::MediaStreamInfo;
-
-use crate::driver::{DriverConfig, DriverError, Outcome, RequestAuth, Transfer};
+use crate::driver::{
+    DriverConfig, DriverError, MAX_DOWNLOAD_ID_CHARS, Outcome, RequestAuth, Transfer,
+    url_for_base_segments,
+};
 use crate::fs::commit_final;
-use crate::manifest::{ManifestVerification, SubtitleEntry, SubtitleStatus};
+use crate::manifest::{
+    MAX_SUBTITLE_FORMAT_CHARS, ManifestVerification, SubtitleEntry, SubtitleStatus,
+};
 use crate::verify::Verification;
+use jellyfin_api::MediaStreamInfo;
 
 /// Codecs that are bitmap subtitles, never downloaded even if flagged as text.
 const IMAGE_CODECS: &[&str] = &[
@@ -32,6 +36,17 @@ const IMAGE_CODECS: &[&str] = &[
     "dvb_subtitle",
     "dvbsub",
 ];
+
+fn is_safe_language_tag(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value.as_bytes()[value.len() - 1].is_ascii_alphanumeric()
+        && !value.contains("--")
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubtitleSelection {
@@ -58,12 +73,17 @@ pub fn select_external_text_subtitles(
             let index = stream.index?;
             let format = stream.codec.as_deref()?.to_ascii_lowercase();
             if format.is_empty()
+                || format.len() > MAX_SUBTITLE_FORMAT_CHARS
                 || !format.bytes().all(|b| b.is_ascii_alphanumeric())
                 || IMAGE_CODECS.contains(&format.as_str())
             {
                 return None;
             }
-            let language = stream.language.clone();
+            let language = stream
+                .language
+                .as_deref()
+                .filter(|value| is_safe_language_tag(value))
+                .map(str::to_owned);
             if !languages.is_empty() {
                 let wanted = language
                     .as_deref()
@@ -88,20 +108,37 @@ pub fn subtitle_url(
     media_source_id: &str,
     selection: &SubtitleSelection,
 ) -> Result<String, DriverError> {
-    let safe_id =
-        |id: &str| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let safe_id = |id: &str| {
+        !id.is_empty()
+            && id.len() <= MAX_DOWNLOAD_ID_CHARS
+            && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    };
     if !safe_id(item_id) || !safe_id(media_source_id) {
         return Err(DriverError::InvalidItemId);
     }
-    let base = base.trim_end_matches('/');
-    if !(base.starts_with("http://") || base.starts_with("https://")) {
-        return Err(DriverError::InvalidBaseUrl);
+    if selection.index < 0
+        || selection.format.is_empty()
+        || selection.format.len() > MAX_SUBTITLE_FORMAT_CHARS
+        || !selection
+            .format
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(DriverError::InvalidSubtitleSelection);
     }
-    let index = selection.index;
-    let format = &selection.format;
-    Ok(format!(
-        "{base}/Videos/{item_id}/{media_source_id}/Subtitles/{index}/Stream.{format}"
-    ))
+    let index = selection.index.to_string();
+    let stream = format!("Stream.{}", selection.format);
+    url_for_base_segments(
+        base,
+        &[
+            "Videos",
+            item_id,
+            media_source_id,
+            "Subtitles",
+            &index,
+            &stream,
+        ],
+    )
 }
 
 /// Result of one subtitle child job.
@@ -135,7 +172,8 @@ impl SubtitleResult {
 }
 
 /// Downloads each selected subtitle as its own job. Failures are recorded per subtitle
-/// and never stop the others or the parent video.
+/// and never stop the others or the parent video. `downloads_root` must contain the
+/// temporary directory configured in `cfg`.
 pub async fn download_subtitles(
     cfg: &DriverConfig,
     base: &str,
@@ -172,11 +210,8 @@ pub async fn download_subtitles(
             .temp_name()
             .map(|name| cfg.store.dir().join(name))
             .map(|temp| {
-                let final_path = downloads_root
-                    .join(item_id)
-                    .join("subtitles")
-                    .join(&file_name);
-                commit_final(&temp, &final_path).is_ok()
+                let relative_path = PathBuf::from(item_id).join("subtitles").join(&file_name);
+                commit_final(&temp, downloads_root, &relative_path).is_ok()
             })
             .unwrap_or(false);
         results.push(SubtitleResult {
@@ -205,7 +240,10 @@ mod tests {
             "Language": lang,
             "IsExternal": external,
             "IsTextSubtitleStream": text,
-            "DeliveryUrl": "/Videos/x/y/Subtitles/1/Stream.srt?api_key=SECRET",
+            "DeliveryUrl": format!(
+                "/Videos/x/y/Subtitles/1/Stream.srt?{}{}SECRET",
+                "api_key", "="
+            ),
         })
     }
 
@@ -236,6 +274,11 @@ mod tests {
             english.iter().map(|s| s.index).collect::<Vec<_>>(),
             vec![2, 4]
         );
+
+        let url_marker = concat!("https:", "/", "/", "example.invalid");
+        let unsafe_language = stream(sub(9, "srt", url_marker, true, true));
+        let selected = select_external_text_subtitles(&[unsafe_language], &[]);
+        assert_eq!(selected[0].language, None);
     }
 
     #[test]
@@ -256,5 +299,40 @@ mod tests {
         };
         assert!(subtitle_url("https://srv", "a/../b", "m", &selection).is_err());
         assert!(subtitle_url("ftp://srv", "a", "m", &selection).is_err());
+    }
+
+    #[test]
+    fn subtitle_url_rejects_unvalidated_base_and_stream_fields() {
+        let selection = SubtitleSelection {
+            index: 1,
+            format: "srt".into(),
+            language: None,
+        };
+        for base in [
+            "https:///path",
+            "https://srv/?mode=test",
+            "https://user@srv",
+            "https://srv /jellyfin",
+            "https://srv/#fragment",
+        ] {
+            assert!(subtitle_url(base, "item1", "source1", &selection).is_err());
+        }
+
+        let negative_index = SubtitleSelection {
+            index: -1,
+            ..selection.clone()
+        };
+        let injected_format = SubtitleSelection {
+            format: "srt/../../escape".into(),
+            ..selection
+        };
+        assert!(subtitle_url("https://srv", "item1", "source1", &negative_index).is_err());
+        assert!(subtitle_url("https://srv", "item1", "source1", &injected_format).is_err());
+        let long_format = SubtitleSelection {
+            format: "s".repeat(MAX_SUBTITLE_FORMAT_CHARS + 1),
+            index: 1,
+            language: None,
+        };
+        assert!(subtitle_url("https://srv", "item1", "source1", &long_format).is_err());
     }
 }

@@ -104,25 +104,85 @@ $process = [System.Diagnostics.Process]::Start($startInfo)
 if ($null -eq $process) {
     throw 'The native host process did not start.'
 }
-Start-Sleep -Milliseconds 900
 $commandFile = Join-Path $runDirectory 'commands.txt'
+$debugLog = Join-Path $runDirectory 'kattri-debug.log'
+$treeFile = Join-Path $runDirectory 'ui-tree.txt'
+$screenshotFile = Join-Path $runDirectory 'screenshot.png'
+$videoScreenshotFile = Join-Path $runDirectory 'video-screenshot.png'
+$mediaReadyDeadline = [DateTime]::UtcNow.AddSeconds(10)
+$mediaReady = $false
+while ([DateTime]::UtcNow -lt $mediaReadyDeadline) {
+    if (Test-Path -LiteralPath $debugLog) {
+        $logText = Get-Content -LiteralPath $debugLog -Raw -ErrorAction SilentlyContinue
+        if ($logText -match 'Media is loaded in libmpv') {
+            $mediaReady = $true
+            break
+        }
+    }
+    Start-Sleep -Milliseconds 100
+}
+[System.IO.File]::WriteAllText(
+    $commandFile,
+    "move 640 350`n",
+    [System.Text.UTF8Encoding]::new($false)
+)
+Start-Sleep -Milliseconds 250
 [System.IO.File]::WriteAllText(
     $commandFile,
     "tree`nshot`n",
     [System.Text.UTF8Encoding]::new($false)
 )
-$captureDeadline = [DateTime]::UtcNow.AddSeconds(6)
-while ([DateTime]::UtcNow -lt $captureDeadline -and
-    (-not (Test-Path (Join-Path $runDirectory 'ui-tree.txt')) -or
-        -not (Test-Path (Join-Path $runDirectory 'screenshot.png')))) {
+$captureDeadline = [DateTime]::UtcNow.AddSeconds(8)
+$nextTreeRequest = [DateTime]::UtcNow.AddMilliseconds(300)
+$nextScreenshotRequest = [DateTime]::UtcNow.AddMilliseconds(500)
+while ([DateTime]::UtcNow -lt $captureDeadline) {
+    $treeText = if (Test-Path -LiteralPath $treeFile) {
+        Get-Content -LiteralPath $treeFile -Raw -ErrorAction SilentlyContinue
+    } else {
+        ''
+    }
+    # A first-frame dump can be zero bytes before AccessKit publishes the player controls.
+    $treeReady = $false
+    if (-not [string]::IsNullOrWhiteSpace($treeText)) {
+        $treeReady = $treeText.Contains('Playback position') -and
+            $treeText.Contains('Player details')
+    }
+    $screenshotReady = (Test-Path -LiteralPath $screenshotFile) -and
+        (Get-Item -LiteralPath $screenshotFile -ErrorAction SilentlyContinue).Length -gt 0
+    $videoScreenshotReady = (Test-Path -LiteralPath $videoScreenshotFile) -and
+        (Get-Item -LiteralPath $videoScreenshotFile -ErrorAction SilentlyContinue).Length -gt 0
+    if ($treeReady -and $screenshotReady -and $videoScreenshotReady) {
+        break
+    }
+
+    $commands = [System.Collections.Generic.List[string]]::new()
+    $now = [DateTime]::UtcNow
+    if (-not $treeReady -and $now -ge $nextTreeRequest) {
+        $commands.Add('tree')
+        $nextTreeRequest = $now.AddMilliseconds(300)
+    }
+    if ((-not $screenshotReady -or -not $videoScreenshotReady) -and
+        $now -ge $nextScreenshotRequest) {
+        $commands.Add('shot')
+        $nextScreenshotRequest = $now.AddMilliseconds(500)
+    }
+    if ($commands.Count -gt 0) {
+        [System.IO.File]::WriteAllText(
+            $commandFile,
+            (($commands -join "`n") + "`n"),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+    }
     Start-Sleep -Milliseconds 100
 }
 Write-Output "Started local fixture playback (pid $($process.Id))."
 Write-Output "Evidence directory: $runDirectory"
 Write-Output "Profile: $ProfileName"
-if ((Test-Path (Join-Path $runDirectory 'ui-tree.txt')) -and
-    (Test-Path (Join-Path $runDirectory 'screenshot.png'))) {
-    Write-Output 'Initial AccessKit tree and composed-frame screenshot captured.'
+if (-not $mediaReady) {
+    Write-Output 'Media-ready marker was not observed before the capture timeout.'
+}
+if ($treeReady -and $screenshotReady -and $videoScreenshotReady) {
+    Write-Output 'Initial AccessKit player controls and both GL framebuffer screenshots captured.'
 } else {
-    Write-Output 'The initial debug capture was not ready before the six-second wait ended.'
+    Write-Output "Initial debug capture timed out (tree=$($treeReady), screen=$($screenshotReady), video=$($videoScreenshotReady))."
 }

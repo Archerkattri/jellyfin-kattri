@@ -180,14 +180,13 @@ pub(crate) fn pause_running(manager: &DownloadManager) {
 }
 
 /// Maps a page intent to the worker command that carries it out.
-pub(super) fn command_for_intent(intent: &DownloadIntent, base_url: &str) -> WorkerCommand {
+pub(super) fn command_for_intent(intent: &DownloadIntent) -> WorkerCommand {
     match intent.action {
         DownloadAction::Pause => WorkerCommand::DownloadPause {
             item_id: intent.id.clone(),
         },
         DownloadAction::Resume => WorkerCommand::DownloadResume {
             item_id: intent.id.clone(),
-            base_url: base_url.to_owned(),
         },
     }
 }
@@ -245,27 +244,22 @@ mod tests {
             id: "item-1".to_owned(),
             action: DownloadAction::Pause,
         };
-        let WorkerCommand::DownloadPause { item_id } =
-            command_for_intent(&intent, "https://example.test")
-        else {
+        let WorkerCommand::DownloadPause { item_id } = command_for_intent(&intent) else {
             panic!("a pause intent must send DownloadPause");
         };
         assert_eq!(item_id, "item-1");
     }
 
     #[test]
-    fn resume_intent_maps_to_the_resume_command_with_its_base() {
+    fn resume_intent_maps_to_a_command_without_a_caller_supplied_base() {
         let intent = DownloadIntent {
             id: "item-2".to_owned(),
             action: DownloadAction::Resume,
         };
-        let WorkerCommand::DownloadResume { item_id, base_url } =
-            command_for_intent(&intent, "https://example.test/jf")
-        else {
+        let WorkerCommand::DownloadResume { item_id } = command_for_intent(&intent) else {
             panic!("a resume intent must send DownloadResume");
         };
         assert_eq!(item_id, "item-2");
-        assert_eq!(base_url, "https://example.test/jf");
     }
 
     #[test]

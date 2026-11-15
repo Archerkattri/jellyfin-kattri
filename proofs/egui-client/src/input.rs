@@ -236,19 +236,17 @@ pub fn take_action(
 }
 
 /// Translate conventional gamepad names to the same navigation vocabulary.
-/// Analog backends may report the left stick as directional transitions.
+/// Analog backends may report either stick as directional transitions.
 pub fn gamepad_button_to_action(button: &str) -> Option<NavAction> {
     match button.trim().to_ascii_uppercase().as_str() {
-        "DPAD_UP" | "D_PAD_UP" | "DPADUP" | "LEFT_STICK_UP" | "LEFTSTICKUP" => Some(NavAction::Up),
-        "DPAD_DOWN" | "D_PAD_DOWN" | "DPADDOWN" | "LEFT_STICK_DOWN" | "LEFTSTICKDOWN" => {
-            Some(NavAction::Down)
-        }
-        "DPAD_LEFT" | "D_PAD_LEFT" | "DPADLEFT" | "LEFT_STICK_LEFT" | "LEFTSTICKLEFT" => {
-            Some(NavAction::Left)
-        }
-        "DPAD_RIGHT" | "D_PAD_RIGHT" | "DPADRIGHT" | "LEFT_STICK_RIGHT" | "LEFTSTICKRIGHT" => {
-            Some(NavAction::Right)
-        }
+        "DPAD_UP" | "D_PAD_UP" | "DPADUP" | "LEFT_STICK_UP" | "LEFTSTICKUP" | "RIGHT_STICK_UP"
+        | "RIGHTSTICKUP" => Some(NavAction::Up),
+        "DPAD_DOWN" | "D_PAD_DOWN" | "DPADDOWN" | "LEFT_STICK_DOWN" | "LEFTSTICKDOWN"
+        | "RIGHT_STICK_DOWN" | "RIGHTSTICKDOWN" => Some(NavAction::Down),
+        "DPAD_LEFT" | "D_PAD_LEFT" | "DPADLEFT" | "LEFT_STICK_LEFT" | "LEFTSTICKLEFT"
+        | "RIGHT_STICK_LEFT" | "RIGHTSTICKLEFT" => Some(NavAction::Left),
+        "DPAD_RIGHT" | "D_PAD_RIGHT" | "DPADRIGHT" | "LEFT_STICK_RIGHT" | "LEFTSTICKRIGHT"
+        | "RIGHT_STICK_RIGHT" | "RIGHTSTICKRIGHT" => Some(NavAction::Right),
         "A" | "BUTTON_A" | "SOUTH" => Some(NavAction::Select),
         "B" | "BUTTON_B" | "EAST" => Some(NavAction::Back),
         "START" | "BUTTON_START" => Some(NavAction::Menu),
@@ -411,6 +409,10 @@ mod tests {
             ("LeftStickDown", NavAction::Down),
             ("LeftStickLeft", NavAction::Left),
             ("LeftStickRight", NavAction::Right),
+            ("RightStickUp", NavAction::Up),
+            ("RightStickDown", NavAction::Down),
+            ("RightStickLeft", NavAction::Left),
+            ("RightStickRight", NavAction::Right),
             ("South", NavAction::Select),
             ("East", NavAction::Back),
             ("Start", NavAction::Menu),

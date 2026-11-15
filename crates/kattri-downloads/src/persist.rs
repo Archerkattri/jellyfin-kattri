@@ -22,8 +22,10 @@ use kattri_client_core::downloads::{
 use kattri_settings::guard::is_secret_like_value;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{self, Read};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 /// The only format version this build reads or writes.
 pub const FORMAT_VERSION: u32 = 1;
@@ -145,14 +147,7 @@ pub fn save(path: &Path, record: &PersistedDownload) -> Result<(), PersistError>
     if bytes.len() as u64 > MAX_RECORD_BYTES {
         return Err(PersistError::TooLarge);
     }
-    let tmp = tmp_sibling(path);
-    {
-        let mut file = File::create(&tmp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-    }
-    fs::rename(&tmp, path)?;
-    sync_parent(path)?;
+    crate::fs::write_atomic(path, &bytes)?;
     Ok(())
 }
 
@@ -195,27 +190,11 @@ pub fn clear(path: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
 fn tmp_sibling(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".tmp");
     PathBuf::from(name)
-}
-
-#[cfg(unix)]
-fn sync_parent(path: &Path) -> io::Result<()> {
-    match path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        Some(parent) => File::open(parent)?.sync_all(),
-        None => Ok(()),
-    }
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> io::Result<()> {
-    // std cannot fsync a directory on Windows. The rename replaces the target atomically.
-    Ok(())
 }
 
 fn is_valid_temp_name(name: &str) -> bool {

@@ -1185,14 +1185,12 @@ pub(crate) enum WorkerCommand {
     DownloadsList,
     DownloadStart {
         item_id: String,
-        base_url: String,
     },
     DownloadPause {
         item_id: String,
     },
     DownloadResume {
         item_id: String,
-        base_url: String,
     },
     LoadHomeRow {
         request_id: u64,
@@ -1685,23 +1683,13 @@ impl ApiWorker {
         self.commands.send(WorkerCommand::DownloadsList)
     }
 
-    pub(crate) fn download_start(
-        &self,
-        item_id: String,
-        base_url: String,
-    ) -> Result<(), WorkerSubmitError> {
-        self.commands
-            .send(WorkerCommand::DownloadStart { item_id, base_url })
+    pub(crate) fn download_start(&self, item_id: String) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::DownloadStart { item_id })
     }
 
     /// Sends a pause or resume the user chose on the Downloads page.
-    pub(crate) fn download_intent(
-        &self,
-        intent: &DownloadIntent,
-        base_url: &str,
-    ) -> Result<(), WorkerSubmitError> {
-        self.commands
-            .send(downloads::command_for_intent(intent, base_url))
+    pub(crate) fn download_intent(&self, intent: &DownloadIntent) -> Result<(), WorkerSubmitError> {
+        self.commands.send(downloads::command_for_intent(intent))
     }
 
     /// Read-only admin dashboard reads (M4-22). The result arrives as `DashboardLoaded`.
@@ -6240,14 +6228,15 @@ async fn execute_command(
                 let event = downloads::list_event(downloads.as_ref());
                 send_event(events, ctx, event).await;
             }
-            WorkerCommand::DownloadStart { item_id, base_url } => {
+            WorkerCommand::DownloadStart { item_id } => {
                 let event = match (client.as_ref(), session.as_ref()) {
                     (Some(client), Some(session)) => {
                         let auth = client.session_authorization(session);
+                        let base_url = client.server_base_url();
                         downloads::start_event(
                             downloads.as_ref(),
                             session.server_id.as_deref(),
-                            &base_url,
+                            base_url,
                             &item_id,
                             &auth,
                         )
@@ -6260,14 +6249,15 @@ async fn execute_command(
                 let event = downloads::pause_event(downloads.as_ref(), &item_id);
                 send_event(events, ctx, event).await;
             }
-            WorkerCommand::DownloadResume { item_id, base_url } => {
+            WorkerCommand::DownloadResume { item_id } => {
                 let event = match (client.as_ref(), session.as_ref()) {
                     (Some(client), Some(session)) => {
                         let auth = client.session_authorization(session);
+                        let base_url = client.server_base_url();
                         downloads::resume_event(
                             downloads.as_ref(),
                             session.server_id.as_deref(),
-                            &base_url,
+                            base_url,
                             &item_id,
                             &auth,
                         )

@@ -786,6 +786,109 @@ mod launch_intent_tests {
     }
 }
 
+#[cfg(test)]
+mod connection_boundary_tests {
+    use super::KattriApp;
+    use jellyfin_api::{BaseItemDto, BaseItemPerson};
+
+    fn item(id: &str) -> BaseItemDto {
+        serde_json::from_value(serde_json::json!({
+            "Id": id,
+            "Name": format!("Old profile item {id}"),
+            "Type": "Movie",
+            "ImageTags": {"Primary": "old-tag"}
+        }))
+        .expect("valid old-profile item")
+    }
+
+    fn person() -> BaseItemPerson {
+        BaseItemPerson {
+            id: Some("old-person".to_owned()),
+            name: Some("Old profile person".to_owned()),
+            role: Some("Actor".to_owned()),
+            person_type: Some("Actor".to_owned()),
+            primary_image_tag: Some("old-person-tag".to_owned()),
+        }
+    }
+
+    fn seed_detail_state(app: &mut KattriApp, context: &egui::Context) {
+        let person = person();
+        let texture = context.load_texture(
+            "old-profile-detail",
+            egui::ColorImage::from_rgba_unmultiplied([1, 1], &[255, 255, 255, 255]),
+            egui::TextureOptions::LINEAR,
+        );
+        app.selected_person = Some(person.clone());
+        app.person_items = vec![item("old-person-item")];
+        app.person_items_loading = true;
+        app.person_artwork_queue.push(person);
+        app.pending_person_artwork
+            .insert(80, "old-person".to_owned());
+        app.attempted_person_artwork.insert("old-person".to_owned());
+        app.person_artwork_textures
+            .insert("old-person".to_owned(), texture.clone());
+        app.series_seasons = vec![item("old-season")];
+        app.series_episodes = vec![item("old-episode")];
+        app.series_seasons_loading = true;
+        app.series_episodes_loading = true;
+        app.episode_thumbnails
+            .insert("old-episode".to_owned(), texture);
+        app.episode_thumbnail_pending
+            .insert(81, "old-episode".to_owned());
+        app.episode_thumbnail_queue
+            .push_back(("queued-episode".to_owned(), "queued-tag".to_owned()));
+        app.similar_items = vec![item("old-similar")];
+    }
+
+    fn assert_detail_state_cleared(app: &KattriApp) {
+        assert!(app.selected_person.is_none());
+        assert!(app.person_items.is_empty());
+        assert!(!app.person_items_loading);
+        assert!(app.person_artwork_queue.is_empty());
+        assert!(app.pending_person_artwork.is_empty());
+        assert!(app.attempted_person_artwork.is_empty());
+        assert!(app.person_artwork_textures.is_empty());
+        assert!(app.series_seasons.is_empty());
+        assert!(!app.series_seasons_loading);
+        assert!(app.series_episodes.is_empty());
+        assert!(!app.series_episodes_loading);
+        assert!(app.episode_thumbnails.is_empty());
+        assert!(app.episode_thumbnail_pending.is_empty());
+        assert!(app.episode_thumbnail_queue.is_empty());
+        assert!(app.similar_items.is_empty());
+    }
+
+    #[test]
+    fn beginning_a_connection_clears_prior_profile_person_and_series_details() {
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context.clone());
+        seed_detail_state(&mut app, &context);
+        let old_person_request = app.person_items_request_id;
+        let old_series_request = app.series_episodes_request_id;
+
+        app.begin_connection("Checking server");
+
+        assert_detail_state_cleared(&app);
+        assert_ne!(app.person_items_request_id, old_person_request);
+        assert_ne!(app.series_episodes_request_id, old_series_request);
+    }
+
+    #[test]
+    fn clearing_a_connection_clears_prior_profile_person_and_series_details() {
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context.clone());
+        seed_detail_state(&mut app, &context);
+        let old_person_request = app.person_items_request_id;
+        let old_series_request = app.series_episodes_request_id;
+
+        app.clear_connection();
+
+        assert_detail_state_cleared(&app);
+        assert_ne!(app.person_items_request_id, old_person_request);
+        assert_ne!(app.series_episodes_request_id, old_series_request);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PlaybackReportKind {
     Started,
@@ -1431,8 +1534,7 @@ pub struct KattriApp {
     playlist_candidates_request_id: u64,
     pub(crate) focus_graph: FocusGraph,
     pub(crate) gamepad: Box<dyn GamepadBackend>,
-    /// True while a video fills the window: gamepad input then drives the player, not the
-    /// hidden library page.
+    /// True while the native player surface owns gamepad input instead of the hidden library.
     player_owns_input: bool,
     /// Gamepad actions collected for the player since the host last took them.
     pub(crate) player_nav_actions: Vec<kattri_client_core::focus::NavAction>,
@@ -2200,6 +2302,21 @@ impl KattriApp {
         if !owns {
             self.player_nav_actions.clear();
         }
+    }
+
+    /// Poll gamepad transitions for the native player without drawing the hidden library UI.
+    /// The host keeps these actions in its local input path so they cannot reach libmpv.
+    pub fn poll_player_gamepad_actions(
+        &mut self,
+    ) -> Result<Vec<kattri_client_core::focus::NavAction>, GamepadError> {
+        if !self.settings.settings().input.sdl_gamepad_enabled {
+            return Ok(Vec::new());
+        }
+        let actions = crate::input::poll_gamepad(self.gamepad.as_mut())?;
+        if !actions.is_empty() {
+            self.note_gamepad_activity();
+        }
+        Ok(actions)
     }
 
     pub(crate) fn player_owns_input(&self) -> bool {
@@ -4296,6 +4413,8 @@ impl KattriApp {
         self.catalog_error = None;
         self.details_loading = false;
         self.details_error = None;
+        self.reset_series_detail();
+        self.reset_people_detail();
         self.reset_playback(PlaybackReset::Session);
         self.pending_artwork_requests.clear();
         self.attempted_artwork.clear();
@@ -7357,12 +7476,11 @@ impl KattriApp {
         if !self.ensure_downloads_open() {
             return;
         }
-        let base_url = self.server_url.trim().to_owned();
         let sent = self
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
-            .and_then(|worker| worker.download_start(item_id.to_owned(), base_url));
+            .and_then(|worker| worker.download_start(item_id.to_owned()));
         if sent.is_err() {
             self.downloads
                 .fail(ui_text(ids::APP_ERROR_DOWNLOAD_QUEUE).to_owned());
@@ -7601,12 +7719,11 @@ impl KattriApp {
 
     /// Sends a pause or resume the user chose on the Downloads page.
     pub fn download_intent(&mut self, intent: &DownloadIntent) {
-        let base_url = self.server_url.trim().to_owned();
         let sent = self
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
-            .and_then(|worker| worker.download_intent(intent, &base_url));
+            .and_then(|worker| worker.download_intent(intent));
         if sent.is_err() {
             self.downloads
                 .fail(ui_text(ids::APP_ERROR_DOWNLOAD_QUEUE).to_owned());
@@ -9023,6 +9140,8 @@ impl KattriApp {
         self.detail_backdrop_attempted = false;
         self.details_loading = false;
         self.details_error = None;
+        self.reset_series_detail();
+        self.reset_people_detail();
         self.reset_playback(PlaybackReset::Session);
         self.submitted_search = None;
         self.search_results.clear();
@@ -10589,28 +10708,39 @@ impl KattriApp {
                         self.pump_episode_thumbnails();
                     } else if let Some((expected_item_id, expected_tag)) =
                         self.pending_artwork_requests.remove(&request_id)
-                        && expected_item_id == item_id
                     {
-                        // Episodes of one series can share the series poster, so every entry
-                        // showing this image gets the texture.
-                        let mut texture: Option<egui::TextureHandle> = None;
-                        for item in self.items.iter_mut().chain(self.home.media_mut()) {
-                            if item.artwork_id != item_id
-                                || item.primary_image_tag.as_deref() != Some(expected_tag.as_str())
-                            {
-                                continue;
+                        let key = (expected_item_id.clone(), expected_tag.clone());
+                        let mut attached = false;
+                        if expected_item_id == item_id {
+                            // Episodes of one series can share the series poster, so every entry
+                            // showing this image gets the texture.
+                            let mut texture: Option<egui::TextureHandle> = None;
+                            for item in self.items.iter_mut().chain(self.home.media_mut()) {
+                                if item.artwork_id != item_id
+                                    || item.primary_image_tag.as_deref()
+                                        != Some(expected_tag.as_str())
+                                {
+                                    continue;
+                                }
+                                attached = true;
+                                let texture = texture.get_or_insert_with(|| {
+                                    ctx.load_texture(
+                                        format!("jellyfin-primary:{item_id}:{expected_tag}"),
+                                        egui::ColorImage::from_rgba_unmultiplied(
+                                            [width as usize, height as usize],
+                                            &rgba,
+                                        ),
+                                        egui::TextureOptions::LINEAR,
+                                    )
+                                });
+                                item.artwork_texture = Some(texture.clone());
                             }
-                            let texture = texture.get_or_insert_with(|| {
-                                ctx.load_texture(
-                                    format!("jellyfin-primary:{item_id}:{expected_tag}"),
-                                    egui::ColorImage::from_rgba_unmultiplied(
-                                        [width as usize, height as usize],
-                                        &rgba,
-                                    ),
-                                    egui::TextureOptions::LINEAR,
-                                )
-                            });
-                            item.artwork_texture = Some(texture.clone());
+                        }
+                        if !attached {
+                            // The visible item may disappear before its response returns. Do not
+                            // leave an orphan retry marker for the same (id, tag) pair.
+                            self.attempted_artwork.remove(&key);
+                            self.artwork_access_ticks.remove(&key);
                         }
                     }
                     self.trim_artwork_cache();
@@ -11231,8 +11361,8 @@ pub(crate) fn take_pad_presses(ctx: &egui::Context) -> Vec<GamepadEvent> {
 #[cfg(test)]
 mod keymap_watch_tests {
     use super::{
-        GamepadBackend, GamepadError, GamepadEvent, ObservedGamepad, reload_keymap_if_changed,
-        take_pad_presses,
+        GamepadBackend, GamepadError, GamepadEvent, KattriApp, ObservedGamepad,
+        reload_keymap_if_changed, take_pad_presses,
     };
     use kattri_input::input_map::InputMap;
     use kattri_input::input_store::{MapName, save_map};
@@ -11291,6 +11421,24 @@ mod keymap_watch_tests {
             vec![event("South", true), event("East", true)]
         );
         assert!(take_pad_presses(&ctx).is_empty(), "a press is offered once");
+    }
+
+    #[test]
+    fn native_player_poll_uses_the_enabled_backend_and_keeps_capture_events() {
+        let ctx = egui::Context::default();
+        let mut app = KattriApp::new(ctx.clone());
+        app.settings.settings_mut().input.sdl_gamepad_enabled = true;
+        let press = event("DPadUp", true);
+        app.gamepad = Box::new(ObservedGamepad {
+            ctx: ctx.clone(),
+            inner: Box::new(Scripted(vec![press.clone()])),
+        });
+
+        assert_eq!(
+            app.poll_player_gamepad_actions().expect("controller poll"),
+            [kattri_client_core::focus::NavAction::Up]
+        );
+        assert_eq!(take_pad_presses(&ctx), [press]);
     }
 
     #[test]
@@ -14579,11 +14727,73 @@ mod playback_report_feedback_tests {
 #[cfg(test)]
 mod artwork_cache_tests {
     use super::{
-        MAX_CACHED_ARTWORK_TEXTURES, MAX_PHOTO_THUMBNAILS, evict_photo_thumbnails,
+        KattriApp, MAX_CACHED_ARTWORK_TEXTURES, MAX_PHOTO_THUMBNAILS, evict_photo_thumbnails,
         trim_artwork_textures,
     };
     use crate::catalog::{ArtworkMotif, ArtworkPalette, MediaItem, MediaKind};
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn late_primary_response_for_removed_item_allows_the_same_artwork_to_retry() {
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context.clone());
+        let (worker, sender) = crate::worker::ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+
+        let item_id = "removed-item".to_owned();
+        let tag = "primary-v1".to_owned();
+        let key = (item_id.clone(), tag.clone());
+        let request_id = 77;
+        app.pending_artwork_requests.insert(request_id, key.clone());
+        app.attempted_artwork.insert(key.clone());
+        app.artwork_access_ticks.insert(key.clone(), 1);
+        sender
+            .try_send(crate::worker::WorkerEvent::PrimaryArtworkLoaded {
+                request_id,
+                item_id: item_id.clone(),
+                width: 1,
+                height: 1,
+                rgba: vec![255; 4],
+            })
+            .expect("send the late artwork response");
+
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx());
+        });
+        output.textures_delta.clear();
+        assert!(!app.pending_artwork_requests.contains_key(&request_id));
+        assert!(!app.attempted_artwork.contains(&key));
+        assert!(!app.artwork_access_ticks.contains_key(&key));
+
+        app.items.push(MediaItem {
+            series_id: None,
+            played: false,
+            favorite: false,
+            resumable: false,
+            artwork_id: item_id.clone(),
+            backdrop_id: item_id.clone(),
+            id: item_id.clone(),
+            title: "Returned item".to_owned(),
+            remote_type: Some("Movie".to_owned()),
+            overview: None,
+            kind: MediaKind::Movie,
+            artwork: ArtworkPalette {
+                top: [10, 20, 30],
+                bottom: [30, 20, 10],
+                shape: [50, 60, 70],
+                detail: [70, 60, 50],
+                motif: ArtworkMotif::Orbit,
+            },
+            production_year: None,
+            official_rating: None,
+            run_time_ticks: None,
+            primary_image_tag: Some(tag.clone()),
+            artwork_texture: None,
+        });
+        app.request_visible_artwork(vec![(item_id, tag)]);
+        assert_eq!(app.pending_artwork_requests.len(), 1);
+        assert!(app.attempted_artwork.contains(&key));
+    }
 
     #[test]
     fn evicts_the_oldest_texture_and_allows_it_to_be_requested_again() {

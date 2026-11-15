@@ -183,6 +183,8 @@ jobs:
           $executables = foreach ($packageName in $packageNames) {
             $packagePrefix = if ($packageName -like '*.zip') {
               '{0}/' -f [System.IO.Path]::GetFileNameWithoutExtension($packageName)
+            } else {
+              'Jellyfin Kattri/'
             }
             $executable = @{
               package_file = $packageName
@@ -194,41 +196,49 @@ jobs:
             }
             $executable
           }
-          $zipPrefix = '{0}/' -f [System.IO.Path]::GetFileNameWithoutExtension($zipName)
-          $packageMembers = @(
-            @{
-              package_file = $zipName
-              path = "${zipPrefix}jellyfin-kattri.exe"
-              role = 'executable'
-              evidence_file = 'release-validation/executables/jellyfin-kattri.exe'
-            },
-            @{
-              package_file = $zipName
-              path = "${zipPrefix}libmpv-2.dll"
-              role = 'native'
-              evidence_file = 'release-validation/native/libmpv-2.dll'
-            },
-            @{
-              package_file = $zipName
-              path = "${zipPrefix}LICENSE"
-              role = 'license'
-              evidence_file = 'release-validation/licenses/project/LICENSE'
-            },
-            @{
-              package_file = $zipName
-              path = "${zipPrefix}libmpv-NOTICE.txt"
-              role = 'license'
-              evidence_file = 'release-validation/licenses/libmpv/libmpv-NOTICE.txt'
+          $packageMembers = @()
+          foreach ($packageName in $packageNames) {
+            $packagePrefix = if ($packageName -like '*.zip') {
+              '{0}/' -f [System.IO.Path]::GetFileNameWithoutExtension($packageName)
+            } else {
+              'Jellyfin Kattri/'
             }
-          )
-          $packageMembers += @($licenseFiles | ForEach-Object {
-            @{
-              package_file = $zipName
-              path = "${zipPrefix}licenses/libmpv/$($_.Name)"
-              role = 'license'
-              evidence_file = "release-validation/licenses/libmpv/$($_.Name)"
-            }
-          })
+            $projectLicenseName = if ($packageName -like '*.zip') { 'LICENSE' } else { 'LICENSE.txt' }
+            $packageMembers += @(
+              @{
+                package_file = $packageName
+                path = "${packagePrefix}jellyfin-kattri.exe"
+                role = 'executable'
+                evidence_file = 'release-validation/executables/jellyfin-kattri.exe'
+              },
+              @{
+                package_file = $packageName
+                path = "${packagePrefix}libmpv-2.dll"
+                role = 'native'
+                evidence_file = 'release-validation/native/libmpv-2.dll'
+              },
+              @{
+                package_file = $packageName
+                path = "${packagePrefix}${projectLicenseName}"
+                role = 'license'
+                evidence_file = 'release-validation/licenses/project/LICENSE'
+              },
+              @{
+                package_file = $packageName
+                path = "${packagePrefix}libmpv-NOTICE.txt"
+                role = 'license'
+                evidence_file = 'release-validation/licenses/libmpv/libmpv-NOTICE.txt'
+              }
+            )
+            $packageMembers += @($licenseFiles | ForEach-Object {
+              @{
+                package_file = $packageName
+                path = "${packagePrefix}licenses/libmpv/$($_.Name)"
+                role = 'license'
+                evidence_file = "release-validation/licenses/libmpv/$($_.Name)"
+              }
+            })
+          }
           $spec = @{
             source_commit = $env:GITHUB_SHA
             target = "windows-$platform"

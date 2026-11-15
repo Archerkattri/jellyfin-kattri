@@ -1,0 +1,11 @@
+[workspace]
+
+[package]
+name = "kattri-runtime-ci-profile"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+directories = "6"
+kattri-settings = { path = "../../../crates/kattri-settings" }

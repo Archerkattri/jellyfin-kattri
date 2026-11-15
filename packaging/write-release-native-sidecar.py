@@ -219,6 +219,8 @@ def build_sidecar(root: Path, spec: dict[str, Any], manifest: Path | None) -> di
         package_file = require_string(original.get("package_file"), "package member package_file")
         if package_file not in package_paths:
             raise ValueError("package member names an unknown package: " + package_file)
+        if Path(package_file).suffix.casefold() not in {".zip", ".msi"}:
+            raise ValueError("member inventories are supported only for ZIP and MSI packages")
         path = package_member_path(original.get("path"))
         role = require_string(original.get("role"), "package member role")
         if role not in PACKAGE_MEMBER_ROLES:
@@ -256,7 +258,7 @@ def build_sidecar(root: Path, spec: dict[str, Any], manifest: Path | None) -> di
                 ("license", license_file["path"], license_file["evidence_file"], license_file["sha256"])
             )
     for package_file, (_, normalized_package_file) in package_paths.items():
-        if Path(normalized_package_file).suffix.casefold() != ".zip":
+        if Path(normalized_package_file).suffix.casefold() not in {".zip", ".msi"}:
             continue
         actual = {
             (member["role"], member["path"], member["evidence_file"], member["sha256"])
@@ -264,7 +266,7 @@ def build_sidecar(root: Path, spec: dict[str, Any], manifest: Path | None) -> di
         }
         missing = expected_by_package.get(package_file, set()) - actual
         if missing:
-            raise ValueError("ZIP package member manifest does not cover all executable, native, and license claims: " + normalized_package_file)
+            raise ValueError("package member manifest does not cover all executable, native, and license claims: " + normalized_package_file)
         executable_claims = {
             (member["path"], member["evidence_file"], member["sha256"])
             for member in members_by_package.get(package_file, [])
@@ -276,7 +278,7 @@ def build_sidecar(root: Path, spec: dict[str, Any], manifest: Path | None) -> di
             if executable["package_file"] == package_file
         }
         if executable_claims != expected_executables:
-            raise ValueError("ZIP package executable member claims do not match the executable evidence: " + normalized_package_file)
+            raise ValueError("package executable member claims do not match the executable evidence: " + normalized_package_file)
         native_claims = {
             (member["path"], member["evidence_file"], member["sha256"])
             for member in members_by_package.get(package_file, [])
@@ -288,7 +290,7 @@ def build_sidecar(root: Path, spec: dict[str, Any], manifest: Path | None) -> di
             if component["package_file"] == package_file
         }
         if native_claims != expected_native:
-            raise ValueError("ZIP package native member claims do not match native component evidence: " + normalized_package_file)
+            raise ValueError("package native member claims do not match native component evidence: " + normalized_package_file)
 
     gaps = spec.get("inventory_gaps", [])
     if not isinstance(gaps, list) or any(not isinstance(gap, str) or not gap.strip() for gap in gaps):
