@@ -2004,8 +2004,10 @@ impl<'session> GlHost<'session> {
                 .completed(request_id, accepted, Instant::now());
         }
         let sample = self.mpv.sync_play_sample();
+        // Observe every sample, not just a restart: pause, unpause and seek changes during normal
+        // playback must reach the group even when stream-only validation keeps ordinary playback
+        // reporting disabled. The observer itself filters noise and rate-limits corrections.
         if sample.loaded
-            && sample.restarted
             && !sample.resume_pending
             && sample.cache_paused != Some(true)
             && let (Some(generation), Some(paused), Some(position)) =
