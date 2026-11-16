@@ -24,6 +24,8 @@ _dbg_audio/
 /reports/
 /rust-client/
 **/*.md
+!/packaging/*/LICENSE.md
+!/packaging/*/libmpv-licenses/LICENSE.md
 !/README.md
 !/CHANGELOG.md
 
