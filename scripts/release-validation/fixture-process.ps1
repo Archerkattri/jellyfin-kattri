@@ -6,7 +6,9 @@ param(
     [ValidateRange(8, 128)]
     [int]$MemoryMiB = 32,
 
-    [switch]$Windowed
+    [switch]$Windowed,
+
+    [switch]$CancelFirstClose
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,6 +35,16 @@ if ($Windowed) {
         $form.Close()
     }.GetNewClosure())
     $form.Add_Shown({ $timer.Start() }.GetNewClosure())
+    if ($CancelFirstClose) {
+        $closeAttemptCount = [ref]0
+        $form.Add_FormClosing({
+            param($sender, $eventArgs)
+            $closeAttemptCount.Value++
+            if ($closeAttemptCount.Value -eq 1) {
+                $eventArgs.Cancel = $true
+            }
+        }.GetNewClosure())
+    }
 
     try {
         $form.Show()

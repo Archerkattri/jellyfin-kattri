@@ -23,7 +23,7 @@ $fixtureArgumentPath = '"{0}"' -f $fixturePath
 $normalCloseHelperLoaded = $false
 
 $fixture = Start-Process -FilePath $powerShellPath `
-    -ArgumentList @('-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-File', $fixtureArgumentPath, '-DurationSeconds', '180', '-MemoryMiB', '32', '-Windowed') `
+    -ArgumentList @('-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-File', $fixtureArgumentPath, '-DurationSeconds', '180', '-MemoryMiB', '32', '-Windowed', '-CancelFirstClose') `
     -PassThru -WindowStyle Minimized
 
 try {
@@ -249,7 +249,7 @@ try {
 
     Write-Output ("PASS: {0} samples; {1:N1} MiB synthetic private-memory peak; product runtime not exercised." -f $summary.sample_count, $summary.memory.private_mb.max)
     Write-Output 'PASS: product launch requires an explicit acceptance profile and local media.'
-    Write-Output 'PASS: attach mode preserves its process; incomplete observations stay open; normal launched completion closes a synthetic windowed process.'
+    Write-Output 'PASS: attach mode preserves its process; incomplete observations stay open; normal launched completion retries one rejected close and closes a synthetic windowed process.'
     Write-Output 'PASS: mapped drives reject before probes; UNC and junction targets reject; fixed local files pass.'
     Write-Output ("Private verification output: {0}" -f $runDirectory)
 } finally {

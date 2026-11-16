@@ -8,7 +8,10 @@
 //! [`DownloadManager::open`] (see [`JOB_LIST_FILE`]). An entry holds the item ID, the server ID
 //! and the job's [`PersistedDownload`] record. It never holds the token, the `Authorization`
 //! header or the upstream URL. The URL is rebuilt from the base URL the caller passes to
-//! `start` and `resume`.
+//! `start` and `resume`. Both validate the base URL with the driver's default transport
+//! policy: a plain-HTTP base is accepted only for loopback, private-network and link-local
+//! hosts. The explicit [`crate::driver::InsecureHttpPolicy::AllowRemote`] opt-in is not
+//! wired through this manager.
 //!
 //! A transfer owns its job while it runs, so [`JobView::running`] is true and the other fields
 //! show what the transfer last returned. Live byte progress is not reported here.
@@ -92,6 +95,16 @@ pub struct JobView {
     pub notice: Option<Notice>,
     pub verification: Option<Verification>,
     pub failure: Option<FailureReason>,
+}
+
+/// A completed download available for local handoff.
+///
+/// The path currently points into the manager's temporary store and retains its `.part`
+/// suffix. The caller must treat it as a managed artifact, not choose its final filename.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedArtifact {
+    pub path: PathBuf,
+    pub verification: Verification,
 }
 
 /// One job as the manager keeps it in memory.
@@ -278,6 +291,28 @@ impl DownloadManager {
             .collect()
     }
 
+    /// Returns a completed artifact only after its job committed and its temp file is still a
+    /// regular file. Incomplete jobs, and legacy completed jobs without a saved verification
+    /// result, return `Ok(None)`.
+    pub fn committed_artifact(
+        &self,
+        item_id: &str,
+    ) -> Result<Option<CommittedArtifact>, ManagerError> {
+        let shared = lock(&self.shared);
+        let entry = shared.jobs.get(item_id).ok_or(ManagerError::UnknownItem)?;
+        if entry.job.snapshot().state != DownloadState::Committed || entry.pause.is_some() {
+            return Ok(None);
+        }
+        let Some(verification) = entry.verification else {
+            return Ok(None);
+        };
+        let Some(temp_name) = entry.temp_name.as_deref() else {
+            return Ok(None);
+        };
+        let path = TempStore::new(self.dir.join(TEMP_SUBDIR)).existing_path(temp_name)?;
+        Ok(Some(CommittedArtifact { path, verification }))
+    }
+
     /// Returns and clears the error from a transfer thread that could not be reported when it
     /// happened, such as a failed job-list save after a transfer finished.
     pub fn take_background_error(&self) -> Option<ManagerError> {
@@ -442,6 +477,8 @@ struct JobListEntry {
     item_id: String,
     server_id: String,
     record: PersistedDownload,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verification: Option<Verification>,
 }
 
 enum Loaded {
@@ -496,7 +533,7 @@ fn parse_list(bytes: &[u8]) -> Option<BTreeMap<String, Entry>> {
             job,
             temp_name,
             notice: None,
-            verification: None,
+            verification: entry.verification,
             failure: None,
             pause: None,
         };
@@ -522,6 +559,7 @@ fn save_list(shared: &Shared) -> Result<(), ManagerError> {
                     entry.job.snapshot(),
                     entry.temp_name.as_deref(),
                 ),
+                verification: entry.verification,
             })
             .collect(),
     };

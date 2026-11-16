@@ -11,6 +11,7 @@ use jellyfin_api::{ClientConfig, JellyfinClient, SessionAuthorization};
 use kattri_client_core::downloads::DownloadState;
 use kattri_downloads::driver::SYNC_CHUNK_BYTES;
 use kattri_downloads::manager::{DownloadManager, JOB_LIST_FILE, JobView, ManagerError};
+use kattri_downloads::verify::Verification;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -342,6 +343,54 @@ async fn job_list_file_holds_no_token_no_url_and_reloads_as_paused() {
     assert_eq!(reloaded[0].state, DownloadState::Paused);
     assert!(!reloaded[0].running);
     assert_eq!(reloaded[0].durable_offset, paused[0].durable_offset);
+    assert_eq!(
+        reopened.committed_artifact(ITEM).expect("artifact lookup"),
+        None
+    );
+
+    reopened
+        .resume(SERVER_ID, &server.base, ITEM, &authorization)
+        .expect("resume after reopening the manager");
+    let completed = wait_for(&reopened, "commit after manager restart", |jobs| {
+        !jobs[0].running && jobs[0].state == DownloadState::Committed
+    })
+    .await;
+    assert_eq!(completed[0].verification, Some(Verification::Unverified));
+    let requests = server.seen.lock().expect("log").clone();
+    assert_eq!(requests.len(), 2, "restart resumes with one range request");
+    assert_eq!(
+        requests[1].range.as_deref(),
+        Some(format!("bytes={}-", paused[0].durable_offset).as_str()),
+        "restart resumes from the last durable offset"
+    );
+
+    let artifact = reopened
+        .committed_artifact(ITEM)
+        .expect("artifact lookup")
+        .expect("committed artifact");
+    assert_eq!(artifact.verification, Verification::Unverified);
+    assert_eq!(fs::read(&artifact.path).expect("artifact bytes"), body());
+
+    drop(reopened);
+    let completed_reopened = DownloadManager::open(&downloads).expect("reopen completed manager");
+    let reloaded_completed = completed_reopened.list();
+    assert_eq!(reloaded_completed[0].state, DownloadState::Committed);
+    assert_eq!(
+        reloaded_completed[0].verification,
+        Some(Verification::Unverified)
+    );
+    let artifact_after_restart = completed_reopened
+        .committed_artifact(ITEM)
+        .expect("artifact lookup after restart")
+        .expect("committed artifact after restart");
+    assert_eq!(
+        artifact_after_restart.verification,
+        Verification::Unverified
+    );
+    assert_eq!(
+        fs::read(artifact_after_restart.path).expect("reloaded artifact bytes"),
+        body()
+    );
 }
 
 #[test]

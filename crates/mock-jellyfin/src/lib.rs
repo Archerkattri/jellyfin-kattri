@@ -1,7 +1,8 @@
 //! Deterministic mock of the Jellyfin HTTP API for tests and development.
 //!
 //! This is NOT a real Jellyfin server. It implements only the endpoints the
-//! Rust client uses, with fixed seed data, placeholder media bytes, and an
+//! Rust client uses, with fixed seed data, placeholder media bytes (or opt-in
+//! synthetic WAV audio), and an
 //! in-memory log of playback reports. Passing tests against it do not
 //! validate compatibility with a real Jellyfin server.
 
@@ -43,6 +44,11 @@ use seed::{Catalog, Item, Kind};
 /// Size of the placeholder media body served by the stream endpoints.
 const STREAM_LEN: usize = 32 * 1024;
 const DEFAULT_LATEST_LIMIT: usize = 16;
+const SYNTHETIC_AUDIO_SAMPLE_RATE: u32 = 44_100;
+const SYNTHETIC_AUDIO_SECONDS: u32 = 8;
+const SYNTHETIC_AUDIO_CHANNELS: u16 = 2;
+const SYNTHETIC_AUDIO_BYTES_PER_SAMPLE: u16 = 2;
+const WAV_HEADER_LEN: usize = 44;
 
 /// Options for [`spawn`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -55,6 +61,9 @@ pub struct MockConfig {
     pub item_count: Option<usize>,
     /// Seed this many deterministic audio tracks for queue restore tests.
     pub audio_item_count: Option<usize>,
+    /// Serve deterministic PCM WAV fixtures for audio stream requests.
+    /// Disabled by default so existing mock fixtures keep their placeholder bytes.
+    pub synthetic_audio_wav: bool,
     /// Seed this many deterministic photos in the standard photo folder.
     pub photo_item_count: Option<usize>,
     /// Seed four ordered items and a nested box set in the first movie collection.
@@ -148,6 +157,7 @@ pub async fn spawn(config: MockConfig) -> std::io::Result<RunningServer> {
         reject_unplayed_filter_for_audio: config.reject_unplayed_filter_for_audio,
         omit_primary_image_tags: config.omit_primary_image_tags,
         primary_images_unavailable: config.primary_images_unavailable,
+        synthetic_audio_wav: config.synthetic_audio_wav,
         seasons_endpoint_not_found: config.seasons_endpoint_not_found,
         similar_endpoint_status: config.similar_endpoint_status,
         fail_progress_posts_remaining: AtomicUsize::new(config.fail_progress_posts),
@@ -187,6 +197,7 @@ struct AppState {
     reject_unplayed_filter_for_audio: bool,
     omit_primary_image_tags: bool,
     primary_images_unavailable: bool,
+    synthetic_audio_wav: bool,
     seasons_endpoint_not_found: bool,
     similar_endpoint_status: Option<u16>,
     fail_progress_posts_remaining: AtomicUsize,
@@ -1149,7 +1160,10 @@ async fn get_item(
                 if let Some(trickplay) = subtitles::trickplay_manifest(item) {
                     object.insert("Trickplay".into(), trickplay);
                 }
-                let mut streams = media_streams(true).as_array().cloned().unwrap_or_default();
+                let mut streams = media_streams(true, false)
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
                 streams.extend(state.subtitle_store.streams(&id));
                 object.insert(
                     "MediaSources".into(),
@@ -1236,8 +1250,11 @@ async fn playback_info(
     let play_session_id = format!("mock-play-{}", seed::image_tag(&id, "PlaySession"));
     let is_video = item.kind.media_type() == Some("Video");
     let transcode_only = is_video && state.transcode_only_mkv;
+    let synthetic_audio = state.synthetic_audio_wav && item.kind.media_type() == Some("Audio");
     let container = if transcode_only {
         "mkv"
+    } else if synthetic_audio {
+        "wav"
     } else if is_video {
         "mp4"
     } else {
@@ -1253,8 +1270,8 @@ async fn playback_info(
         "IsRemote": false,
         "ETag": seed::image_tag(&id, "etag"),
         "RunTimeTicks": item.run_time_ticks,
-        "Size": STREAM_LEN,
-        "Bitrate": 2_000_000,
+        "Size": if synthetic_audio { synthetic_audio_wav_len() } else { STREAM_LEN as u64 },
+        "Bitrate": if synthetic_audio { 1_411_200 } else { 2_000_000 },
         "SupportsDirectPlay": !transcode_only,
         "SupportsDirectStream": !transcode_only,
         "SupportsTranscoding": is_video,
@@ -1264,7 +1281,7 @@ async fn playback_info(
         "RequiresLooping": false,
         "SupportsProbing": true,
         "RequiredHttpHeaders": {},
-        "MediaStreams": media_streams(is_video),
+        "MediaStreams": media_streams(is_video, synthetic_audio),
         "DefaultAudioStreamIndex": 1,
     });
     if is_video {
@@ -1277,11 +1294,18 @@ async fn playback_info(
     json_ok(json!({ "MediaSources": [source], "PlaySessionId": play_session_id }))
 }
 
-fn media_streams(is_video: bool) -> Value {
-    let audio_codec = if is_video { "aac" } else { "mp3" };
+fn media_streams(is_video: bool, synthetic_audio: bool) -> Value {
+    let audio_codec = if is_video {
+        "aac"
+    } else if synthetic_audio {
+        "pcm_s16le"
+    } else {
+        "mp3"
+    };
     let audio = json!({
         "Type": "Audio", "Codec": audio_codec, "Index": 1, "Channels": 2,
-        "SampleRate": 48000, "Language": "eng", "IsDefault": true,
+        "SampleRate": if synthetic_audio { SYNTHETIC_AUDIO_SAMPLE_RATE } else { 48000 },
+        "Language": "eng", "IsDefault": true,
     });
     if is_video {
         json!([
@@ -1444,7 +1468,24 @@ async fn stream(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path((id, stream_name)): Path<(String, String)>,
+    RawQuery(raw_query): RawQuery,
 ) -> Response {
+    let media_type = state
+        .catalog
+        .get(&id)
+        .and_then(|item| item.kind.media_type())
+        .unwrap_or("Video");
+    let route = if media_type == "Audio" {
+        "Audio"
+    } else {
+        "Videos"
+    };
+    record_request(
+        &state,
+        "GET",
+        &format!("/{route}/{id}/{stream_name}"),
+        raw_query.as_deref(),
+    );
     if !is_authorized(&headers) {
         return unauthorized();
     }
@@ -1471,7 +1512,12 @@ fn media_response(state: &AppState, headers: &HeaderMap, id: &str) -> Response {
     let Some(item) = state.catalog.get(id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let body = placeholder_media();
+    let synthetic_audio = state.synthetic_audio_wav && item.kind.media_type() == Some("Audio");
+    let body = if synthetic_audio {
+        synthetic_audio_wav(&item.id)
+    } else {
+        placeholder_media()
+    };
     let total = body.len() as u64;
     let range = headers
         .get(header::RANGE)
@@ -1479,7 +1525,9 @@ fn media_response(state: &AppState, headers: &HeaderMap, id: &str) -> Response {
         .map(|value| parse_range(value, total));
     let etag = HeaderValue::from_static("\"mock-media-v1\"");
 
-    let content_type = if item.kind.media_type() == Some("Audio") {
+    let content_type = if synthetic_audio {
+        HeaderValue::from_static("audio/wav")
+    } else if item.kind.media_type() == Some("Audio") {
         HeaderValue::from_static("audio/mpeg")
     } else {
         HeaderValue::from_static("video/mp4")
@@ -1523,6 +1571,53 @@ fn placeholder_media() -> Vec<u8> {
                 .wrapping_add((index >> 8) as u32) as u8
         })
         .collect()
+}
+
+fn synthetic_audio_wav_len() -> u64 {
+    WAV_HEADER_LEN as u64
+        + u64::from(SYNTHETIC_AUDIO_SAMPLE_RATE)
+            * u64::from(SYNTHETIC_AUDIO_SECONDS)
+            * u64::from(SYNTHETIC_AUDIO_CHANNELS)
+            * u64::from(SYNTHETIC_AUDIO_BYTES_PER_SAMPLE)
+}
+
+/// A short deterministic stereo PCM tone that libmpv can decode locally.
+/// The item ID changes the pitch so adjacent queue entries are distinguishable.
+fn synthetic_audio_wav(item_id: &str) -> Vec<u8> {
+    let frame_count = SYNTHETIC_AUDIO_SAMPLE_RATE * SYNTHETIC_AUDIO_SECONDS;
+    let data_len = (frame_count as usize)
+        * usize::from(SYNTHETIC_AUDIO_CHANNELS)
+        * usize::from(SYNTHETIC_AUDIO_BYTES_PER_SAMPLE);
+    let mut wav = Vec::with_capacity(WAV_HEADER_LEN + data_len);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&((data_len + 36) as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16_u32.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&SYNTHETIC_AUDIO_CHANNELS.to_le_bytes());
+    wav.extend_from_slice(&SYNTHETIC_AUDIO_SAMPLE_RATE.to_le_bytes());
+    let bytes_per_frame = SYNTHETIC_AUDIO_CHANNELS * SYNTHETIC_AUDIO_BYTES_PER_SAMPLE;
+    wav.extend_from_slice(
+        &(SYNTHETIC_AUDIO_SAMPLE_RATE * u32::from(bytes_per_frame)).to_le_bytes(),
+    );
+    wav.extend_from_slice(&bytes_per_frame.to_le_bytes());
+    wav.extend_from_slice(&(SYNTHETIC_AUDIO_BYTES_PER_SAMPLE * 8).to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(data_len as u32).to_le_bytes());
+
+    let hash = item_id.as_bytes().iter().fold(0_u32, |value, byte| {
+        value.wrapping_mul(33).wrapping_add(u32::from(*byte))
+    });
+    let frequency = 220.0 + f64::from(hash % 550);
+    for frame in 0..frame_count {
+        let phase = std::f64::consts::TAU * frequency * f64::from(frame)
+            / f64::from(SYNTHETIC_AUDIO_SAMPLE_RATE);
+        let sample = (phase.sin() * 0.12 * f64::from(i16::MAX)) as i16;
+        for _ in 0..SYNTHETIC_AUDIO_CHANNELS {
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+    }
+    wav
 }
 
 #[derive(Debug, PartialEq, Eq)]

@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
@@ -57,7 +58,8 @@ impl ServerChecksum {
 }
 
 /// Status of a committed file.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Verification {
     /// The server's checksum matched.
     Verified,

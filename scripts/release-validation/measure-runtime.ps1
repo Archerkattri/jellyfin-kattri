@@ -456,10 +456,25 @@ function Close-LaunchedProcessNormally {
             return $true
         }
         if ($Process.MainWindowHandle -ne [IntPtr]::Zero) {
-            $null = $Process.CloseMainWindow()
-            return $Process.WaitForExit(5000)
+            break
         }
         Start-Sleep -Milliseconds 250
+    }
+
+    for ($closeAttempt = 0; $closeAttempt -lt 2; $closeAttempt++) {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            return $true
+        }
+        if ($Process.MainWindowHandle -eq [IntPtr]::Zero) {
+            return $false
+        }
+
+        # A transient UI veto can reject one graceful close; retry once, never force-terminate.
+        $null = $Process.CloseMainWindow()
+        if ($Process.WaitForExit(5000)) {
+            return $true
+        }
     }
     return $false
 }

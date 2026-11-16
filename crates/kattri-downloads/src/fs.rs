@@ -12,6 +12,11 @@
 //! - Paths longer than [`MAX_PATH_CHARS`] are refused.
 //! - Opens that hit a lock (permission or sharing violation) are retried a bounded
 //!   number of times.
+//! - A final destination is caller-supplied, so `commit_final` enforces containment:
+//!   the relative path may not contain `..`, a root, or a drive prefix, every destination
+//!   parent is canonicalized and checked beneath the canonical downloads root, and the
+//!   final file need not exist. An escape is refused with
+//!   [`FsError::InvalidDestination`] before any rename.
 //!
 //! Resume opens do not follow a symlink or Windows reparse point at the temp-file
 //! name, and validate the opened handle as a regular file before truncating or seeking.
@@ -57,6 +62,8 @@ pub enum FsError {
     PathTooLong,
     #[error("could not find an unused temporary file name")]
     NameCollision,
+    #[error("download destination must be a regular file beneath the downloads root")]
+    InvalidDestination,
     #[error("filesystem error: {0}")]
     Io(#[from] io::Error),
 }
@@ -185,6 +192,20 @@ impl TempStore {
         })
     }
 
+    /// Returns the path for an existing regular temp file without following a leaf link.
+    /// The file is opened read-only because callers use this for completed-file handoff.
+    pub(crate) fn existing_path(&self, name: &str) -> Result<PathBuf, FsError> {
+        let path = self.path_for(name)?;
+        let file =
+            open_readonly_regular_file_nofollow(&path).map_err(|error| match error.kind() {
+                io::ErrorKind::NotFound => FsError::Missing,
+                io::ErrorKind::InvalidInput => FsError::UnsafeFile,
+                _ => FsError::Io(error),
+            })?;
+        drop(file);
+        Ok(path)
+    }
+
     /// Create a fresh temp file, trying each generated name until one is unused.
     fn create_fresh_with(
         &self,
@@ -264,6 +285,61 @@ fn open_regular_file_nofollow(path: &Path) -> io::Result<File> {
         .write(true)
         .custom_flags(O_NOFOLLOW)
         .open(path)?;
+    validate_regular_file(&file)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn open_readonly_regular_file_nofollow(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    const O_NOFOLLOW: i32 = 0x8000;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    const O_NOFOLLOW: i32 = 0x2_0000;
+    #[cfg(target_os = "macos")]
+    const O_NOFOLLOW: i32 = 0x0100;
+
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        target_os = "macos"
+    )))]
+    compile_error!("no-follow temp-file opens are defined only for Linux x64/ARM64 and macOS");
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)?;
+    validate_regular_file(&file)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_readonly_regular_file_nofollow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "temporary path is a reparse point",
+        ));
+    }
+    validate_regular_metadata(&metadata)?;
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_readonly_regular_file_nofollow(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new().read(true).open(path)?;
     validate_regular_file(&file)?;
     Ok(file)
 }
@@ -406,12 +482,20 @@ fn sync_parent(_path: &Path) -> io::Result<()> {
 }
 
 /// Moves a committed temp file to a path beneath the downloads root.
+///
+/// The final path is caller-supplied, so containment is enforced here before the rename:
+/// `relative_path` must be a plain relative path (no `..`, root, or drive prefix), the
+/// temp file must already be inside the canonical downloads root, and every destination
+/// parent is resolved and checked beneath the root. The final file does not have to
+/// exist. An escape is refused with [`FsError::InvalidDestination`] and neither file is
+/// touched.
+///
 /// The bytes were fsynced while downloading, so only the rename happens here.
 pub(crate) fn commit_final(
     temp: &Path,
     downloads_root: &Path,
     relative_path: &Path,
-) -> io::Result<()> {
+) -> Result<(), FsError> {
     let components = relative_path.components().collect::<Vec<_>>();
     if components.is_empty()
         || components.iter().any(|component| match component {
@@ -451,14 +535,14 @@ pub(crate) fn commit_final(
                 match fs::create_dir(&parent) {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(FsError::Io(error)),
                 }
                 let metadata = fs::symlink_metadata(&parent)?;
                 if !metadata.file_type().is_dir() || is_link_or_reparse_point(&metadata) {
                     return Err(invalid_destination());
                 }
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(FsError::Io(error)),
         }
         let canonical_parent = fs::canonicalize(&parent)?;
         if !canonical_parent.starts_with(&root) {
@@ -476,16 +560,13 @@ pub(crate) fn commit_final(
         }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+        Err(error) => return Err(FsError::Io(error)),
     }
-    fs::rename(temp, final_path)
+    Ok(fs::rename(temp, final_path)?)
 }
 
-fn invalid_destination() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "download destination must be a regular file beneath the downloads root",
-    )
+fn invalid_destination() -> FsError {
+    FsError::InvalidDestination
 }
 
 fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
@@ -646,7 +727,25 @@ mod tests {
 
         let result = commit_final(&temp, &root, Path::new("../outside.srt"));
 
-        assert!(result.is_err());
+        assert!(matches!(result, Err(FsError::InvalidDestination)));
+        assert_eq!(fs::read(&outside).expect("read outside"), b"keep outside");
+        assert_eq!(fs::read(&temp).expect("read temp"), b"subtitle bytes");
+    }
+
+    #[test]
+    fn final_commit_rejects_an_absolute_destination_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("downloads");
+        fs::create_dir_all(&root).expect("root");
+        let store = TempStore::new(root.join("tmp"));
+        store.ensure_dir().expect("temp directory");
+        let temp = committed_temp(&store, b"subtitle bytes");
+        let outside = dir.path().join("outside.srt");
+        fs::write(&outside, b"keep outside").expect("outside file");
+
+        let result = commit_final(&temp, &root, &outside);
+
+        assert!(matches!(result, Err(FsError::InvalidDestination)));
         assert_eq!(fs::read(&outside).expect("read outside"), b"keep outside");
         assert_eq!(fs::read(&temp).expect("read temp"), b"subtitle bytes");
     }
@@ -663,7 +762,7 @@ mod tests {
 
         let result = commit_final(&outside, &root, Path::new("item-1/subtitles/2.srt"));
 
-        assert!(result.is_err());
+        assert!(matches!(result, Err(FsError::InvalidDestination)));
         assert_eq!(fs::read(&outside).expect("read outside"), b"keep outside");
         assert!(!root.join("item-1").exists());
     }
@@ -685,7 +784,7 @@ mod tests {
 
         let result = commit_final(&temp, &root, Path::new("escape/nested/2.srt"));
 
-        assert!(result.is_err());
+        assert!(matches!(result, Err(FsError::InvalidDestination)));
         assert!(!outside.join("nested").exists());
         assert_eq!(fs::read(&temp).expect("read temp"), b"subtitle bytes");
     }
@@ -707,7 +806,7 @@ mod tests {
 
         let result = commit_final(&temp, &root, Path::new("item-1/subtitles/2.srt"));
 
-        assert!(result.is_err());
+        assert!(matches!(result, Err(FsError::InvalidDestination)));
         assert_eq!(fs::read(&outside).expect("read outside"), b"keep outside");
         assert_eq!(fs::read(&temp).expect("read temp"), b"subtitle bytes");
     }
@@ -767,8 +866,10 @@ mod tests {
         symlink(&target, &link).expect("create symlink");
 
         let result = store.open_resume("aaaaaaaaaaaaaaaa.part", 0);
+        let handoff = store.existing_path("aaaaaaaaaaaaaaaa.part");
 
         assert!(result.is_err(), "resume must refuse the symlink");
+        assert!(handoff.is_err(), "local handoff must refuse the symlink");
         assert_eq!(
             fs::read(&target).expect("read target"),
             b"preserve this target"
@@ -796,8 +897,10 @@ mod tests {
         symlink_file(&target, &link).expect("create symlink (requires symlink privilege)");
 
         let result = store.open_resume("aaaaaaaaaaaaaaaa.part", 0);
+        let handoff = store.existing_path("aaaaaaaaaaaaaaaa.part");
 
         assert!(result.is_err(), "resume must refuse the symlink");
+        assert!(handoff.is_err(), "local handoff must refuse the symlink");
         assert_eq!(
             fs::read(&target).expect("read target"),
             b"preserve this target"

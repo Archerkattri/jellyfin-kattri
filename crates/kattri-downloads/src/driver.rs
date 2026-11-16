@@ -16,10 +16,17 @@
 //! It holds the validated `/Items/{itemId}/Download` URL and no credential. The auth
 //! header travels separately as [`RequestAuth`], so a source or a record cannot carry it.
 //!
+//! Transport policy: a plain-HTTP base is accepted only for loopback, private-network,
+//! link-local, `localhost` and `*.localhost` hosts, mirroring the API client's policy. A
+//! public host over plain HTTP is refused unless the caller passes the explicit
+//! [`InsecureHttpPolicy::AllowRemote`] opt-in (the API client's
+//! `ClientConfig::with_insecure_remote_http` is not reachable here).
+//!
 //! Not in this module: playback negotiation (downloads never use PlaybackInfo, see
 //! decision 0009).
 
 use std::fmt;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,6 +107,8 @@ pub enum DriverError {
     InvalidBaseUrl,
     #[error("base URL must not contain user info, a query, a fragment or credential text")]
     BaseUrlNotPlain,
+    #[error("plain HTTP download sources are accepted only for loopback or private-network hosts")]
+    InsecureRemoteTransport,
     #[error("subtitle stream index or format is invalid")]
     InvalidSubtitleSelection,
     #[error("HTTP client could not be built")]
@@ -172,12 +181,41 @@ impl RequestAuth {
     }
 }
 
-/// Builds the original-file URL for an item.
+/// Policy for a plain-HTTP download source URL.
+///
+/// Mirrors the API client's transport policy: plain HTTP is accepted only for loopback,
+/// private-network, link-local, `localhost` and `*.localhost` hosts. A public host over
+/// plain HTTP needs the explicit [`InsecureHttpPolicy::AllowRemote`] opt-in, because every
+/// download request carries the server's `Authorization` header. The API client's
+/// `ClientConfig::with_insecure_remote_http` is not reachable from this crate, so the
+/// opt-in is a separate, typed parameter here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InsecureHttpPolicy {
+    /// Accept plain HTTP only for loopback, private-network, link-local and `localhost`
+    /// hosts. This is the default.
+    LocalNetworkOnly,
+    /// Explicit opt-in: also accept plain HTTP for a public host. Prefer HTTPS when the
+    /// server supports it.
+    AllowRemote,
+}
+
+/// Builds the original-file URL for an item under the default plain-HTTP policy.
 ///
 /// Confirmed 2026-10-20 against the official generated SDK `LibraryApi.getDownload`
 /// and Jellyfin's `LibraryController.GetDownload`. The server returns the original
 /// item file; this route has no playback-profile or transcoding parameters.
 pub fn original_file_url(base: &str, item_id: &str) -> Result<String, DriverError> {
+    original_file_url_with_policy(base, item_id, InsecureHttpPolicy::LocalNetworkOnly)
+}
+
+/// Builds the original-file URL for an item with an explicit plain-HTTP policy.
+///
+/// The item ID is validated before the base, so a refused item never reaches URL handling.
+pub fn original_file_url_with_policy(
+    base: &str,
+    item_id: &str,
+    policy: InsecureHttpPolicy,
+) -> Result<String, DriverError> {
     if item_id.is_empty()
         || item_id.len() > MAX_DOWNLOAD_ID_CHARS
         || !item_id
@@ -186,12 +224,26 @@ pub fn original_file_url(base: &str, item_id: &str) -> Result<String, DriverErro
     {
         return Err(DriverError::InvalidItemId);
     }
-    url_for_base_segments(base, &["Items", item_id, "Download"])
+    url_for_base_segments_with_policy(base, &["Items", item_id, "Download"], policy)
+}
+
+/// Validates the caller's server root under the default plain-HTTP policy and appends
+/// encoded path segments. See [`url_for_base_segments_with_policy`].
+pub(crate) fn url_for_base_segments(base: &str, segments: &[&str]) -> Result<String, DriverError> {
+    url_for_base_segments_with_policy(base, segments, InsecureHttpPolicy::LocalNetworkOnly)
 }
 
 /// Validates the caller's server root and appends encoded path segments without
 /// allowing a query, fragment, user info or malformed authority to change the route.
-pub(crate) fn url_for_base_segments(base: &str, segments: &[&str]) -> Result<String, DriverError> {
+///
+/// A plain-HTTP base for a public host is refused with
+/// [`DriverError::InsecureRemoteTransport`] unless `policy` is
+/// [`InsecureHttpPolicy::AllowRemote`].
+pub(crate) fn url_for_base_segments_with_policy(
+    base: &str,
+    segments: &[&str],
+    policy: InsecureHttpPolicy,
+) -> Result<String, DriverError> {
     let mut url = Url::parse(base).map_err(|_| DriverError::InvalidBaseUrl)?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err(DriverError::InvalidBaseUrl);
@@ -215,6 +267,8 @@ pub(crate) fn url_for_base_segments(base: &str, segments: &[&str]) -> Result<Str
     {
         return Err(DriverError::InvalidBaseUrl);
     }
+    // The plain-text checks run before the transport policy, so a request that is not
+    // plain is refused for that reason even when the caller opted into remote HTTP.
     if !url.username().is_empty()
         || url.password().is_some()
         || authority.contains('@')
@@ -223,6 +277,12 @@ pub(crate) fn url_for_base_segments(base: &str, segments: &[&str]) -> Result<Str
         || is_secret_like_value(after_scheme)
     {
         return Err(DriverError::BaseUrlNotPlain);
+    }
+    if url.scheme() == "http"
+        && policy == InsecureHttpPolicy::LocalNetworkOnly
+        && !is_local_host(url.host_str().unwrap_or_default())
+    {
+        return Err(DriverError::InsecureRemoteTransport);
     }
 
     {
@@ -233,6 +293,33 @@ pub(crate) fn url_for_base_segments(base: &str, segments: &[&str]) -> Result<Str
         path.extend(segments.iter().copied());
     }
     Ok(url.to_string())
+}
+
+/// Whether `host` names a loopback, private-network, link-local or `localhost` endpoint.
+///
+/// Mirrors the private `jellyfin_api::is_local_host` policy: `.local` is deliberately not
+/// local, because any LAN peer can answer it. IPv6 host strings keep their brackets.
+fn is_local_host(host: &str) -> bool {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    // `.localhost` is reserved by RFC 6761 and cannot be claimed by mDNS.
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => {
+            address.is_loopback() || address.is_private() || address.is_link_local()
+        }
+        Ok(IpAddr::V6(address)) => {
+            if address.is_loopback() || address.is_unicast_link_local() {
+                return true;
+            }
+            address.segments()[0] & 0xfe00 == 0xfc00
+        }
+        Err(_) => false,
+    }
 }
 
 /// The validated download source for one item.
@@ -246,10 +333,21 @@ pub struct OriginalFileSource {
 }
 
 impl OriginalFileSource {
-    /// Validates the base URL and item ID once. See [`original_file_url`].
+    /// Validates the base URL and item ID once under the default plain-HTTP policy. See
+    /// [`original_file_url`].
     pub fn new(base: &str, item_id: &str) -> Result<Self, DriverError> {
+        Self::new_with_policy(base, item_id, InsecureHttpPolicy::LocalNetworkOnly)
+    }
+
+    /// Like [`Self::new`], with an explicit plain-HTTP policy. Only pass
+    /// [`InsecureHttpPolicy::AllowRemote`] after a deliberate user opt-in.
+    pub fn new_with_policy(
+        base: &str,
+        item_id: &str,
+        policy: InsecureHttpPolicy,
+    ) -> Result<Self, DriverError> {
         Ok(Self {
-            url: original_file_url(base, item_id)?,
+            url: original_file_url_with_policy(base, item_id, policy)?,
         })
     }
 
@@ -282,7 +380,23 @@ impl OriginalFileRequest {
         item_id: &str,
         authorization: &SessionAuthorization,
     ) -> Result<Self, DriverError> {
-        let source = OriginalFileSource::new(base, item_id)?;
+        Self::new_with_policy(
+            base,
+            item_id,
+            authorization,
+            InsecureHttpPolicy::LocalNetworkOnly,
+        )
+    }
+
+    /// Like [`Self::new`], with an explicit plain-HTTP policy. Only pass
+    /// [`InsecureHttpPolicy::AllowRemote`] after a deliberate user opt-in.
+    pub fn new_with_policy(
+        base: &str,
+        item_id: &str,
+        authorization: &SessionAuthorization,
+        policy: InsecureHttpPolicy,
+    ) -> Result<Self, DriverError> {
+        let source = OriginalFileSource::new_with_policy(base, item_id, policy)?;
         let auth = RequestAuth::new("Authorization", authorization.header_value())?;
         Ok(Self { source, auth })
     }
@@ -369,6 +483,11 @@ enum Step {
 }
 
 impl Transfer {
+    /// A transfer for an already-built URL.
+    ///
+    /// This constructor does not apply the source transport policy; callers that start
+    /// from a server base should use [`Transfer::from_source`] with a validated
+    /// [`OriginalFileSource`].
     pub fn new(url: String) -> Self {
         Self {
             job: DownloadJob::new(),
@@ -971,7 +1090,8 @@ mod source_and_cleanup_tests {
 
     #[test]
     fn source_debug_output_hides_the_upstream_url() {
-        let source = OriginalFileSource::new("http://media.example", "abc-1").expect("source");
+        // HTTPS so this test exercises Debug redaction, not the plain-HTTP policy.
+        let source = OriginalFileSource::new("https://media.example", "abc-1").expect("source");
         let text = format!("{source:?}");
         assert_eq!(text, "OriginalFileSource([REDACTED])");
         assert!(!text.contains("media.example"));
@@ -1093,6 +1213,113 @@ mod source_and_cleanup_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = TempStore::new(dir.path().join("tmp"));
         assert!(remove_failed_record(&store, None, None, None).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod transport_policy_tests {
+    use super::*;
+
+    fn source_with(
+        base: &str,
+        policy: InsecureHttpPolicy,
+    ) -> Result<OriginalFileSource, DriverError> {
+        OriginalFileSource::new_with_policy(base, "abc-1", policy)
+    }
+
+    #[test]
+    fn loopback_plain_http_is_accepted() {
+        for base in [
+            "http://127.0.0.1:8096/",
+            "http://localhost:8096",
+            "http://jellyfin.localhost:8096",
+            "http://[::1]:8096",
+        ] {
+            source_with(base, InsecureHttpPolicy::LocalNetworkOnly).expect(base);
+        }
+    }
+
+    #[test]
+    fn private_and_link_local_plain_http_is_accepted() {
+        for base in [
+            "http://10.0.0.5:8096",
+            "http://172.16.4.2",
+            "http://192.168.1.10:8096",
+            "http://169.254.10.20:8096",
+            "http://[fd00::1]:8096",
+            "http://[fe80::1]:8096",
+        ] {
+            source_with(base, InsecureHttpPolicy::LocalNetworkOnly).expect(base);
+        }
+    }
+
+    #[test]
+    fn public_plain_http_is_refused_by_default() {
+        for base in [
+            "http://media.example",
+            "http://198.51.100.7:8096",
+            "http://nas.local",
+        ] {
+            assert!(
+                matches!(
+                    source_with(base, InsecureHttpPolicy::LocalNetworkOnly),
+                    Err(DriverError::InsecureRemoteTransport)
+                ),
+                "{base} must be refused"
+            );
+            assert!(
+                matches!(
+                    OriginalFileSource::new(base, "abc-1"),
+                    Err(DriverError::InsecureRemoteTransport)
+                ),
+                "{base} must be refused by the default constructor"
+            );
+        }
+    }
+
+    #[test]
+    fn public_plain_http_is_accepted_only_with_the_explicit_opt_in() {
+        let source = source_with(
+            "http://media.example/jellyfin",
+            InsecureHttpPolicy::AllowRemote,
+        )
+        .expect("explicit opt-in");
+        assert_eq!(
+            source.url(),
+            "http://media.example/jellyfin/Items/abc-1/Download"
+        );
+    }
+
+    #[test]
+    fn public_https_is_accepted_without_the_opt_in() {
+        let source = source_with(
+            "https://media.example/jellyfin",
+            InsecureHttpPolicy::LocalNetworkOnly,
+        )
+        .expect("public HTTPS");
+        assert_eq!(
+            source.url(),
+            "https://media.example/jellyfin/Items/abc-1/Download"
+        );
+    }
+
+    #[test]
+    fn the_opt_in_does_not_allow_user_info_query_or_fragment() {
+        let token_base = format!("http://{}@media.example", "token=x");
+        let api_key_base = format!("{}?{}{}abc", "http://media.example/", "api_key", "=");
+        for base in [
+            token_base.as_str(),
+            api_key_base.as_str(),
+            "http://media.example/#frag",
+        ] {
+            assert!(
+                matches!(
+                    source_with(base, InsecureHttpPolicy::AllowRemote),
+                    Err(DriverError::BaseUrlNotPlain)
+                ),
+                "{base} must stay refused under the opt-in"
+            );
+        }
     }
 }
 
