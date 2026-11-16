@@ -49,5 +49,5 @@ assets = [
     ["../../target/kattri-libmpv/LICENSE.libdisplay-info.MIT", "usr/share/doc/kattri/licenses/libdisplay-info.MIT", "644"],
     ["../../target/kattri-libmpv/LICENSE.libjpeg-turbo", "usr/share/doc/kattri/licenses/libjpeg-turbo", "644"],
     # Lintian overrides: the bundled libmpv/libjpeg are intentional; the tag below documents it.
-    ["lintian-overrides", "usr/share/lintian/overrides/kattri", "644"],
+    ["../../packaging/linux/deb/lintian-overrides", "usr/share/lintian/overrides/kattri", "644"],
 ]
