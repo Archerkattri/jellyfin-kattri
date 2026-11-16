@@ -529,21 +529,31 @@ jobs:
           mkdir -p "$EVIDENCE/native" "$EVIDENCE/licenses/libmpv" \
             "$EVIDENCE/licenses/libass" "$EVIDENCE/licenses/uchardet" \
             "$EVIDENCE/licenses/kattri" "$EVIDENCE/executables"
-          cp -L "$FILES/lib/libmpv.so.2" "$EVIDENCE/native/libmpv.so.2"
-          cp -L "$FILES/lib/libass.so.9" "$EVIDENCE/native/libass.so.9"
-          cp -L "$FILES/lib/libuchardet.so.0" "$EVIDENCE/native/libuchardet.so.0"
+          for native in libmpv.so.2 libass.so.9 libuchardet.so.0; do
+            if [ -f "$FILES/lib/$native" ]; then
+              cp -L "$FILES/lib/$native" "$EVIDENCE/native/$native"
+            else
+              echo "host-provided runtime library, not hashed: $native" >&2
+            fi
+          done
           cp "$FILES/bin/kattri" "$EVIDENCE/executables/kattri"
           cp "$FILES/share/licenses/libmpv/BUILD-INFO.txt" "$EVIDENCE/licenses/libmpv/BUILD-INFO.txt"
           for license in LICENSE.mpv.LGPL LICENSE.ffmpeg.LGPL LICENSE.libplacebo.LGPL \
             LICENSE.dav1d.BSD-2-Clause LICENSE.libdisplay-info.MIT; do
             cp "$FILES/share/licenses/libmpv/$license" "$EVIDENCE/licenses/libmpv/$license"
           done
-          cp "$FILES/share/licenses/libass/COPYING" "$EVIDENCE/licenses/libass/COPYING"
-          cp "$FILES/share/licenses/uchardet/COPYING" "$EVIDENCE/licenses/uchardet/COPYING"
+          for optional in licenses/libass/COPYING licenses/uchardet/COPYING; do
+            if [ -f "$FILES/share/$optional" ]; then
+              cp "$FILES/share/$optional" "$EVIDENCE/$optional"
+            else
+              echo "host-provided runtime license, not hashed: $optional" >&2
+            fi
+          done
           cp "$FILES/share/licenses/org.kattri.JellyfinKattri/LICENSE" "$EVIDENCE/licenses/kattri/LICENSE"
           python3 - "$RUNNER_TEMP/release-native-input.json" "$PACKAGE" "$SOURCE_COMMIT" <<'PY'
           import json
           import sys
+          from pathlib import Path
 
           spec_path, package, commit = sys.argv[1:]
           evidence = "release-validation"
@@ -586,6 +596,13 @@ jobs:
               "license_files": [{"path": "share/licenses/uchardet/COPYING",
                                  "evidence_file": f"{evidence}/licenses/uchardet/COPYING"}],
           }]
+          # A Flatpak runtime may provide libass/libuchardet itself; only components whose evidence
+          # copy exists are hashed, so the sidecar never claims a file the bundle does not carry.
+          components = [component for component in components if Path(component["evidence_file"]).exists()]
+          for component in components:
+              component["license_files"] = [
+                  entry for entry in component["license_files"] if Path(entry["evidence_file"]).exists()
+              ]
           spec = {
               "source_commit": commit,
               "target": "linux-x64",

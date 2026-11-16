@@ -51,6 +51,9 @@
       <ComponentRef Id="LibmpvComponent" />
       <ComponentRef Id="LibmpvNoticeComponent" />
       <ComponentRef Id="LibmpvLicensesComponent" />
+      <ComponentRef Id="LibmpvCopyrightComponent" />
+      <ComponentRef Id="FfmpegLicenseComponent" />
+      <ComponentRef Id="FfmpegNoticeComponent" />
       <ComponentRef Id="JellyfinUriProtocolComponent" />
       <ComponentRef Id="StartMenuShortcutComponent" />
     </Feature>
@@ -75,9 +78,17 @@
           <Directory Id="LibmpvLicensesDirectory" Name="libmpv">
             <Component Id="LibmpvLicensesComponent" Guid="*">
               <File Id="MpvLicenseLgpl" Source="$(var.LibmpvLicenseDirectory)\LICENSE.LGPL" Name="LICENSE.LGPL" KeyPath="yes" />
-              <File Id="MpvCopyright" Source="$(var.LibmpvLicenseDirectory)\Copyright" Name="Copyright" />
-              <File Id="FfmpegLicenseLgplv3" Source="$(var.LibmpvLicenseDirectory)\COPYING.LGPLv3" Name="COPYING.LGPLv3" />
-              <File Id="FfmpegLicenseNotice" Source="$(var.LibmpvLicenseDirectory)\LICENSE.md" Name="LICENSE.md" />
+            </Component>
+            <!-- One file per component: WiX cannot auto-generate a GUID for a multi-file component
+                 whose key path is not a versioned file. -->
+            <Component Id="LibmpvCopyrightComponent" Guid="*">
+              <File Id="MpvCopyright" Source="$(var.LibmpvLicenseDirectory)\Copyright" Name="Copyright" KeyPath="yes" />
+            </Component>
+            <Component Id="FfmpegLicenseComponent" Guid="*">
+              <File Id="FfmpegLicenseLgplv3" Source="$(var.LibmpvLicenseDirectory)\COPYING.LGPLv3" Name="COPYING.LGPLv3" KeyPath="yes" />
+            </Component>
+            <Component Id="FfmpegNoticeComponent" Guid="*">
+              <File Id="FfmpegLicenseNotice" Source="$(var.LibmpvLicenseDirectory)\LICENSE.md" Name="LICENSE.md" KeyPath="yes" />
             </Component>
           </Directory>
         </Directory>
