@@ -74,6 +74,73 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  macos_intel:
+    name: macOS Intel launch and URL delivery
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    steps:
+      - name: Check out the dispatched revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain and macOS targets
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
+        with:
+          target: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build the universal application bundle on Intel hardware
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = \"\(.*\)\"$/\1/p' Cargo.toml | head -n 1)"
+          test -n "$VERSION"
+          CARGO_PACKAGE=egui-gl-host-proof BINARY_NAME=jellyfin-kattri \
+            packaging/macos/build-app.sh "$VERSION"
+
+      - name: Ad-hoc sign and verify the local bundle
+        run: |
+          set -euo pipefail
+          APP='dist/macos/Jellyfin Kattri.app'
+          codesign --force --deep -s - "$APP"
+          codesign --verify --deep --strict "$APP"
+
+      - name: Record the Intel host architecture
+        run: |
+          set -euo pipefail
+          mkdir -p runtime-evidence/macos-intel
+          uname -m | tee runtime-evidence/macos-intel/host-arch.txt
+          file 'dist/macos/Jellyfin Kattri.app/Contents/MacOS/jellyfin-kattri' \
+            | tee runtime-evidence/macos-intel/binary-arch.txt
+          lipo -archs 'dist/macos/Jellyfin Kattri.app/Contents/MacOS/jellyfin-kattri' \
+            | tee runtime-evidence/macos-intel/lipo-archs.txt
+
+      - name: Initialize an isolated runner profile and check URL delivery
+        env:
+          APP_PATH: dist/macos/Jellyfin Kattri.app
+          PROFILE_NAME: acceptance-macos-intel-url
+        run: |
+          set -euo pipefail
+          unset JELLYFIN_TEST_URL JELLYFIN_TEST_USER JELLYFIN_TEST_PASSWORD \
+            KATTRI_DEBUG_URL KATTRI_DEBUG_USER KATTRI_DEBUG_PASSWORD
+          bash scripts/acceptance/setup_macos_runner_profile.sh \
+            | tee runtime-evidence/macos-intel/profile-setup.txt
+          bash scripts/acceptance/verify_macos_scheme.sh \
+            | tee runtime-evidence/macos-intel/url-delivery.txt
+          bash scripts/runtime-ci/record_macos_evidence.sh \
+            | tee runtime-evidence/macos-intel/summary.txt
+
+      - name: Upload bounded macOS Intel runtime evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: runtime-acceptance-macos-intel-${{ github.run_id }}
+          path: runtime-evidence/macos-intel/
+          if-no-files-found: warn
+          retention-days: 7
+
   linux:
     name: Linux AppImage and software-frame acceptance
     runs-on: ubuntu-22.04
