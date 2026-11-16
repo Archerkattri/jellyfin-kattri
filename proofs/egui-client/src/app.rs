@@ -3129,12 +3129,16 @@ impl KattriApp {
         update: SyncPlayPlayQueueUpdate,
     ) {
         let Some(joined_group_id) = self.joined_sync_play_group_id().map(str::to_owned) else {
+            #[cfg(debug_assertions)]
+            crate::debug_log::log("syncplay queue update: refused, not joined");
             return;
         };
         if group_id
             .as_deref()
             .is_some_and(|incoming| incoming != joined_group_id)
         {
+            #[cfg(debug_assertions)]
+            crate::debug_log::log("syncplay queue update: refused, group mismatch");
             return;
         }
         let Ok(last_update_ms) = parse_server_timestamp_ms(&update.last_update) else {
@@ -3169,6 +3173,14 @@ impl KattriApp {
             self.invalidate_sync_play_playback_handoff();
             self.sync_play_queue_generation = self.sync_play_queue_generation.wrapping_add(1);
         }
+        #[cfg(debug_assertions)]
+        crate::debug_log::log(&format!(
+            "syncplay queue update: entries={} playing_index={} changed={} playing={}",
+            update.playlist.len(),
+            update.playing_item_index,
+            active_entry_changed,
+            update.is_playing
+        ));
 
         let mut start_position_ticks = update.start_position_ticks;
         if update.is_playing
@@ -3204,6 +3216,8 @@ impl KattriApp {
             item_id: entry.item_id.clone(),
             playlist_item_id: entry.playlist_item_id.clone(),
         });
+        #[cfg(debug_assertions)]
+        crate::debug_log::log("syncplay queue update: starting the active group entry");
         self.play_item_locally(entry.item_id, true);
     }
 
@@ -7896,6 +7910,12 @@ impl KattriApp {
     /// stream from `poll_auto_play` as soon as both the item record and the options have
     /// arrived. `start_over` ignores a saved resume position.
     pub(crate) fn play_item(&mut self, item_id: String, start_over: bool) {
+        #[cfg(debug_assertions)]
+        crate::debug_log::log(&format!(
+            "syncplay play_item: can_send={} group_joined={}",
+            self.sync_play_can_send(),
+            self.joined_sync_play_group_id().is_some()
+        ));
         if self.sync_play_can_send() {
             let start_ticks = if start_over {
                 0
@@ -7914,10 +7934,14 @@ impl KattriApp {
                     })
                     .unwrap_or(0)
             };
-            if self
-                .set_sync_play_new_queue(vec![item_id], 0, start_ticks)
-                .is_err()
-            {
+            let submitted = self.set_sync_play_new_queue(vec![item_id], 0, start_ticks);
+            #[cfg(debug_assertions)]
+            crate::debug_log::log(&format!(
+                "syncplay play_item: set_new_queue ok={} start_ticks={}",
+                submitted.is_ok(),
+                start_ticks
+            ));
+            if submitted.is_err() {
                 self.sync_play_ui.action_failed();
             }
             return;
