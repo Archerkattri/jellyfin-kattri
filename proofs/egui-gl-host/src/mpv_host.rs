@@ -2898,7 +2898,9 @@ impl<'session> MpvHost<'session> {
 
     /// Debug-only stream validation must never create a reporting lifecycle on the owner's
     /// server. Configure this before loading anything; never discard an admitted lifecycle.
-    #[cfg(debug_assertions)]
+    ///
+    /// The accessor compiles in every profile: the release player UI reads it, and release
+    /// builds always report.
     pub(crate) fn reporting_enabled(&self) -> bool {
         self.reporting_enabled
     }

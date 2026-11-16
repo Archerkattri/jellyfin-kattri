@@ -3,6 +3,8 @@
 #[cfg(debug_assertions)]
 mod debug_harness;
 #[cfg(debug_assertions)]
+mod position_trace;
+#[cfg(debug_assertions)]
 mod qa_metrics;
 use std::error::Error;
 use std::ffi::CString;
@@ -515,6 +517,13 @@ impl<'session> GlHost<'session> {
             self.kattri_app.playback_loaded(generation);
         }
         let playback_end = self.mpv.take_playback_end();
+        #[cfg(debug_assertions)]
+        if playback_end
+            .as_ref()
+            .is_some_and(|end| end.reason == mpv_render_proof::EndFileReason::Error)
+        {
+            position_trace::note_player_error();
+        }
         let replacement_end = playback_end
             .as_ref()
             .map(|end| {
@@ -605,6 +614,19 @@ impl<'session> GlHost<'session> {
                     | mpv_render_proof::EndFileReason::Unknown(_) => {}
                 }
             }
+        }
+        #[cfg(debug_assertions)]
+        {
+            // One per-client sample four times a second while a file is open, for the SyncPlay
+            // drift analyzer. `is_playing` is the loaded-file flag, not the paused state.
+            let controls = self.mpv.controls_snapshot();
+            position_trace::observe(
+                self.mpv.is_playing(),
+                controls.position_seconds,
+                controls.paused,
+                self.mpv.sync_play_sample().cache_paused,
+                Instant::now(),
+            );
         }
         if let Some(profile) = self.mpv.take_device_profile() {
             self.kattri_app.set_device_profile(profile);
@@ -2898,6 +2920,13 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
                         .map_or(deadline, |current| current.min(deadline)),
                 );
             }
+            #[cfg(debug_assertions)]
+            if let Some(deadline) = position_trace::poll_deadline(Instant::now()) {
+                self.redraw_at = Some(
+                    self.redraw_at
+                        .map_or(deadline, |current| current.min(deadline)),
+                );
+            }
         }
         event_loop.set_control_flow(match self.redraw_at {
             Some(deadline) => ControlFlow::WaitUntil(deadline),
@@ -3051,6 +3080,8 @@ fn run_window_smoke() -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    #[cfg(debug_assertions)]
+    position_trace::configure(Instant::now(), debug_syncplay_status_opt_in());
     #[cfg(debug_assertions)]
     qa_metrics::start(Instant::now());
     let _log_guard = init_logging();

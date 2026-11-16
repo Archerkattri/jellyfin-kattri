@@ -42,6 +42,11 @@ Write-Host '==> [libmpv-runtime] durable development runtime selection checks'
 $results += [pscustomobject]@{ Name = 'libmpv-runtime'; Code = $LASTEXITCODE }
 
 Write-Host ''
+Write-Host '==> [acceptance-scripts] opt-in helper parse and contract checks'
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'tests/acceptance_scripts.ps1')
+$results += [pscustomobject]@{ Name = 'acceptance-scripts'; Code = $LASTEXITCODE }
+
+Write-Host ''
 Write-Host '==> [qa-harness] offline click-through assertion checks'
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test_qa_clickthrough.ps1')
 $results += [pscustomobject]@{ Name = 'qa-harness'; Code = $LASTEXITCODE }

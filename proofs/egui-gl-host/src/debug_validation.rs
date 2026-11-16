@@ -1,6 +1,7 @@
 //! Pure policy for explicitly isolated debug playback validation.
 
 /// Whether the stream-only run explicitly opted in to SyncPlay group status messages.
+#[cfg(debug_assertions)]
 pub(crate) fn stream_only_syncplay_opt_in(stream_only: bool, status_opt_in: bool) -> bool {
     stream_only && status_opt_in
 }
@@ -14,7 +15,7 @@ pub(crate) fn should_poll_syncplay_status(
     reporting_enabled || stream_only_status_opt_in
 }
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::{should_poll_syncplay_status, stream_only_syncplay_opt_in};
 

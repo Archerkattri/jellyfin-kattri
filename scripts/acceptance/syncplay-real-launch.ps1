@@ -1,3 +1,8 @@
+# Per-client SyncPlay acceptance launcher. The host writes the per-client position traces that
+# syncplay-real-analyze.ps1 reads when KATTRI_DEBUG_DIR is present in the child environment
+# together with KATTRI_DEBUG_STREAM_ONLY=1 and KATTRI_DEBUG_SYNCPLAY_STATUS=1. This script clears
+# inherited KATTRI_DEBUG_* names and then sets a per-profile KATTRI_DEBUG_DIR, so each client
+# writes its own position-trace-<pid>.csv and debug log under .verify\syncplay-real\<profile>.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -194,6 +199,12 @@ try {
         $environment['KATTRI_DEBUG_STREAM_ONLY'] = '1'
         $environment['KATTRI_DEBUG_SYNCPLAY_STATUS'] = '1'
         $environment['KATTRI_DEBUG_DEVICE_ID'] = $deviceIds[$index]
+        # Per-client debug directory: the host writes position-trace-<pid>.csv here, which
+        # syncplay-real-analyze.ps1 consumes. Keeping one directory per profile also keeps the
+        # two debug logs separate.
+        $traceDirectory = Join-Path (Join-Path $repoRoot '.verify\syncplay-real') $profileNames[$index]
+        New-Item -ItemType Directory -Force -Path $traceDirectory | Out-Null
+        $environment['KATTRI_DEBUG_DIR'] = $traceDirectory
         $environment['KATTRI_LOG'] = 'off'
         $environment['PATH'] = "$mpvDirectory;$($env:PATH)"
 
