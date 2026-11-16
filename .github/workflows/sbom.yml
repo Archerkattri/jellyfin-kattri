@@ -99,15 +99,17 @@ jobs:
           set -euo pipefail
           cargo cyclonedx --manifest-path proofs/egui-gl-host/Cargo.toml \
             --format json --override-filename rust-dependencies
-          found=0
-          while IFS= read -r -d '' file; do
-            cp "$file" dist/sbom/rust-dependencies.cdx.json
-            found=$((found + 1))
-          done < <(find . -path ./target -prune -o -name 'rust-dependencies*.json' -print0)
-          if [[ "$found" -ne 1 ]]; then
-            echo "error: expected one cargo-cyclonedx output, found $found" >&2
+          # cargo-cyclonedx writes one BOM per workspace member. Bind the host package's BOM (it
+          # resolves the full binary dependency graph) and drop the other per-member copies.
+          host_sbom=proofs/egui-gl-host/rust-dependencies.json
+          if [[ ! -f "$host_sbom" ]]; then
+            echo "error: the host package SBOM was not generated" >&2
             exit 1
           fi
+          cp "$host_sbom" dist/sbom/rust-dependencies.cdx.json
+          find . -path ./target -prune -o -name 'rust-dependencies*.json' -print \
+            | grep -v "^\./proofs/egui-gl-host/rust-dependencies.json$" \
+            | xargs -r rm -f
 
       - name: Scan exact release executable evidence
         run: |

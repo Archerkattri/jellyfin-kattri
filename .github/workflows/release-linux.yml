@@ -598,10 +598,16 @@ jobs:
           }]
           # A Flatpak runtime may provide libass/libuchardet itself; only components whose evidence
           # copy exists are hashed, so the sidecar never claims a file the bundle does not carry.
-          components = [component for component in components if Path(component["evidence_file"]).exists()]
+          # The evidence paths are relative to the package artifact root (dist/linux), not the repo.
+          artifact_root = Path("dist/linux")
+          components = [
+              component for component in components
+              if (artifact_root / component["evidence_file"]).exists()
+          ]
           for component in components:
               component["license_files"] = [
-                  entry for entry in component["license_files"] if Path(entry["evidence_file"]).exists()
+                  entry for entry in component["license_files"]
+                  if (artifact_root / entry["evidence_file"]).exists()
               ]
           spec = {
               "source_commit": commit,
