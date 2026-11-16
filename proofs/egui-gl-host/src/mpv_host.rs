@@ -22,9 +22,8 @@ use kattri_client_core::media_info_mpv::media_input_from_mpv;
 use kattri_client_core::mpv_options::{
     MpvOptionError, OptionValue, ValidatedOption, aspect_options, audio_channels_for_layout,
     audio_filter_options, default_speed_for_setting, framedrop_for_setting, hwdec_for_decode_mode,
-    placement_options, subtitle_ass_options, subtitle_font_and_border_options,
-    subtitle_size_and_color_options, validate, validate_audio_track, validate_subtitle_track,
-    video_sync_for_sync_mode, zoom_reset_options,
+    placement_options, subtitle_font_and_border_options, subtitle_size_and_color_options, validate,
+    validate_audio_track, validate_subtitle_track, video_sync_for_sync_mode, zoom_reset_options,
 };
 use kattri_client_core::playback_reporting::{
     PlaybackReportAction, PlaybackReportInput, PlaybackReportMetadata, PlaybackReportScheduler,
@@ -33,6 +32,7 @@ use kattri_client_core::playback_reporting::{
 use kattri_client_core::remote::LocalAction as RemoteAction;
 use kattri_client_core::segments::{MediaSegment, SegmentSkipper};
 use kattri_client_core::stream_url::StreamUrl;
+use kattri_client_core::subtitle_ass::{AssStyleOverride, subtitle_ass_options};
 use kattri_client_core::subtitle_style::subtitle_background_option;
 use kattri_client_core::subtitle_sync::{OffsetDirection, OffsetStep, SubtitleOffset};
 use kattri_client_core::subtitles::{
@@ -235,13 +235,18 @@ fn video_layout_options(
 fn subtitle_layout_options(
     subtitles: &SubtitleSettings,
 ) -> [(&'static str, Result<Vec<ValidatedOption>, MpvOptionError>); 5] {
+    let resolved_ass = AssStyleOverride::resolve_stored(subtitles.ass_style_override.as_deref());
+    if let Some(refusal) = resolved_ass.refusal {
+        tracing::warn!(
+            setting = "subtitles.ass_style_override",
+            %refusal,
+            "stored subtitle style override refused; using the authored ASS default"
+        );
+    }
     [
         (
             "subtitles.ass",
-            subtitle_ass_options(
-                subtitles.ass_scale_border_and_shadow,
-                subtitles.ass_style_override.as_deref(),
-            ),
+            subtitle_ass_options(subtitles.ass_scale_border_and_shadow, resolved_ass.mode),
         ),
         (
             "subtitles.font_and_border",
@@ -2966,6 +2971,15 @@ impl<'session> MpvHost<'session> {
         Some(options)
     }
 
+    pub(crate) fn has_video_track(&self) -> Option<bool> {
+        self.track_inventory.as_ref().map(|inventory| {
+            inventory
+                .tracks()
+                .iter()
+                .any(|track| track.kind == TrackKind::Video)
+        })
+    }
+
     pub(crate) fn track_feedback(&self) -> Option<&str> {
         self.track_feedback.as_deref()
     }
@@ -4809,11 +4823,12 @@ mod pre_load_tests {
     }
 
     #[test]
-    fn default_subtitle_settings_write_only_the_font_and_ass_scaling_on_local_files() {
+    fn default_subtitle_settings_write_the_font_ass_scaling_and_authored_override() {
         // The defaults (size -1, no colour, no placement, outline -1) mean "player default", so
-        // mpv keeps its own values. The font and the ASS scaling choice are always written, so
-        // a setting changed back to its default takes effect on the next file. The helper fails
-        // the test if any default builder refuses.
+        // mpv keeps its own values. The font, the ASS scaling choice, and the resolved ASS/SSA
+        // override are always written, so a setting changed back to its default takes effect on
+        // the next file and authored ASS/SSA styles are kept until the user opts in. The helper
+        // fails the test if any default builder refuses.
         let got = local_file_written(&VideoSettings::default(), &SubtitleSettings::default());
         let subtitle_writes: Vec<_> = got
             .iter()
@@ -4826,12 +4841,54 @@ mod pre_load_tests {
                     "sub-ass-style-overrides",
                     "ScaledBorderAndShadow=yes".to_owned()
                 ),
+                &("sub-ass-override", "no".to_owned()),
                 &("sub-font", "sans-serif".to_owned()),
                 &("sub-bold", "no".to_owned()),
                 &("sub-back-color", "#00000000".to_owned())
             ],
             "unexpected subtitle writes in {got:?}"
         );
+        assert_eq!(
+            AssStyleOverride::DEFAULT_FOR_ASS_AND_SSA.mpv_value(),
+            "no",
+            "the typed ASS/SSA default must be the keep-authored mode"
+        );
+    }
+
+    #[test]
+    fn an_explicit_ass_override_still_wins_over_the_authored_default() {
+        for stored in ["force", "yes", "no", "scale", "strip"] {
+            let subtitles = SubtitleSettings {
+                ass_style_override: Some(stored.to_owned()),
+                ..SubtitleSettings::default()
+            };
+            let got = local_file_written(&VideoSettings::default(), &subtitles);
+            assert!(
+                got.contains(&("sub-ass-override", stored.to_owned())),
+                "{stored:?} did not win: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_stored_ass_override_falls_back_to_the_authored_default() {
+        let subtitles = SubtitleSettings {
+            ass_style_override: Some("force;vo=null".to_owned()),
+            ..SubtitleSettings::default()
+        };
+        let got = local_file_written(&VideoSettings::default(), &subtitles);
+        assert!(
+            got.contains(&("sub-ass-override", "no".to_owned())),
+            "the authored default was not written: {got:?}"
+        );
+        assert!(
+            got.iter()
+                .all(|(_, value)| !value.contains("force;vo=null")),
+            "a refused stored value reached the writes: {got:?}"
+        );
+        for (name, _) in &got {
+            assert!(spec_for(name).is_some(), "{name} is not on the allowlist");
+        }
     }
 
     /// A command queue that records writes instead of talking to libmpv.
