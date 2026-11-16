@@ -250,6 +250,8 @@ pub const ARTWORK_DESCRIPTION_PLACEHOLDER: &str = "artwork.description.placehold
 pub const ARTWORK_LABEL_SUMMARY: &str = "artwork.label.summary";
 pub const ROW_LABEL_NO_ITEMS: &str = "row.label.no_items";
 pub const ROW_LABEL_COUNT_FOCUSED: &str = "row.label.count_focused";
+pub const ROW_CARD_ACCESSIBLE_NAME: &str = "row.card.accessible_name";
+pub const ROW_CARD_ACCESSIBLE_NAME_PROGRESS: &str = "row.card.accessible_name_progress";
 pub const TIME_HOURS_MINUTES: &str = "time.hours_minutes";
 pub const TIME_MINUTES: &str = "time.minutes";
 pub const SERIES_SEASON_NUMBERED: &str = "series.season.numbered";
@@ -259,6 +261,16 @@ pub const ADMIN_LIBRARY_UNNAMED: &str = "admin.library.unnamed";
 pub const ADMIN_VALUE_NOT_REPORTED: &str = "admin.value.not_reported";
 pub const HOME_LIBRARY_UNTITLED: &str = "home.library.untitled";
 pub const HOME_EMPTY_NO_LIBRARIES: &str = "home.empty.no_libraries";
+pub const HOME_MEDIA_KIND_MOVIE: &str = "home.media_kind.movie";
+pub const HOME_MEDIA_KIND_SERIES: &str = "home.media_kind.series";
+pub const HOME_MEDIA_KIND_EPISODE: &str = "home.media_kind.episode";
+pub const HOME_MEDIA_KIND_AUDIO: &str = "home.media_kind.audio";
+pub const HOME_MEDIA_KIND_PHOTO: &str = "home.media_kind.photo";
+pub const HOME_MEDIA_KIND_PLAYLIST: &str = "home.media_kind.playlist";
+pub const HOME_MEDIA_KIND_FOLDER: &str = "home.media_kind.folder";
+pub const HOME_MEDIA_KIND_VIDEO: &str = "home.media_kind.video";
+pub const HOME_MEDIA_KIND_BOOK: &str = "home.media_kind.book";
+pub const HOME_MEDIA_KIND_OTHER: &str = "home.media_kind.other";
 pub const HOME_ROW_CONTINUE_WATCHING: &str = "home.row.continue_watching";
 pub const HOME_ROW_NEXT_UP: &str = "home.row.next_up";
 pub const HOME_ROW_LATEST: &str = "home.row.latest";
@@ -629,6 +641,8 @@ pub const SETTINGS_MEDIA_AUDIO_OUTPUT_BASIC: &str = "settings.media.audio_output
 pub const SETTINGS_MEDIA_AUDIO_OUTPUT_SPDIF: &str = "settings.media.audio_output.spdif";
 pub const SETTINGS_MEDIA_AUDIO_OUTPUT_HDMI: &str = "settings.media.audio_output.hdmi";
 pub const SETTINGS_MEDIA_LAYOUT_AUTO: &str = "settings.media.layout.auto";
+pub const SETTINGS_MEDIA_REFRESH_SWITCH_UNAVAILABLE: &str =
+    "settings.media.refresh_switch.unavailable";
 pub const SETTINGS_MEDIA_LAYOUT_STEREO: &str = "settings.media.layout.stereo";
 pub const SETTINGS_MEDIA_LAYOUT_SURROUND51: &str = "settings.media.layout.surround51";
 pub const SETTINGS_MEDIA_LAYOUT_SURROUND71: &str = "settings.media.layout.surround71";
@@ -1930,4 +1944,17 @@ pub const ALL: &[&str] = &[
     SHELL_RAIL_WATCH_TOGETHER,
     DETAIL_BOOK_NOT_PLAYABLE,
     LIVE_TV_EMPTY_NOT_SET_UP_HINT,
+    HOME_MEDIA_KIND_AUDIO,
+    HOME_MEDIA_KIND_BOOK,
+    HOME_MEDIA_KIND_EPISODE,
+    HOME_MEDIA_KIND_FOLDER,
+    HOME_MEDIA_KIND_MOVIE,
+    HOME_MEDIA_KIND_OTHER,
+    HOME_MEDIA_KIND_PHOTO,
+    HOME_MEDIA_KIND_PLAYLIST,
+    HOME_MEDIA_KIND_SERIES,
+    HOME_MEDIA_KIND_VIDEO,
+    ROW_CARD_ACCESSIBLE_NAME,
+    ROW_CARD_ACCESSIBLE_NAME_PROGRESS,
+    SETTINGS_MEDIA_REFRESH_SWITCH_UNAVAILABLE,
 ];

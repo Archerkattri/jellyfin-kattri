@@ -375,6 +375,7 @@ fn serve_one(mut stream: TcpStream, control: Arc<HttpControl>) {
     }
 
     let is_read = path.contains("/Items")
+        || path.contains("/Shows/NextUp")
         || path.contains("/QuickConnect/Enabled")
         || path.contains("/System/Info/Public");
     // Count the read before announcing the request: a test that wakes on `entered` and then
@@ -418,7 +419,7 @@ fn serve_one(mut stream: TcpStream, control: Arc<HttpControl>) {
         )
     } else if path.contains("/QuickConnect/Enabled") {
         ("200 OK", "true")
-    } else if path.contains("/Items") {
+    } else if path.contains("/Shows/NextUp") || path.contains("/Items") {
         (
             "200 OK",
             r#"{"Items":[],"TotalRecordCount":0,"StartIndex":0}"#,
@@ -575,6 +576,124 @@ fn scheduler_caps_reads_at_three_and_keeps_control_and_queued_read_moving() {
     queue.shutdown();
     let report = worker.join().expect("worker exits");
     assert_eq!(report, WorkerShutdownReport::default());
+}
+
+#[test]
+fn hiding_a_home_row_aborts_its_active_read_and_keeps_other_rows() {
+    let server = LocalServer::start();
+    let queue = Arc::new(CommandQueue::default());
+    let (events, mut receiver) = sink();
+    let worker = run_on_thread(queue.clone(), events, Duration::from_secs(2));
+    queue
+        .send(WorkerCommand::Connect {
+            request_id: 1,
+            server_url: server.url.clone(),
+            username: "fixture".into(),
+            password: zeroize::Zeroizing::new("synthetic".into()),
+            allow_insecure_remote_http: false,
+            saved: crate::worker::SavedSignInRequest::not_remembered(),
+        })
+        .expect("connect to synthetic fixture");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if matches!(
+            receiver.try_recv(),
+            Ok(WorkerEvent::ItemsLoaded { request_id: 1, .. })
+        ) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture connection did not complete"
+        );
+        thread::yield_now();
+    }
+
+    server.control.entered.lock().expect("entered lock").clear();
+    let gate = server.pause("READ");
+    queue
+        .send(WorkerCommand::LoadHomeRow {
+            request_id: 10,
+            row: HomeRowKind::Latest,
+        })
+        .expect("queue latest row");
+    let paths = server.wait_entered(1);
+    assert!(paths.iter().any(|path| path.contains("/Items/Latest")));
+    queue
+        .send(WorkerCommand::LoadHomeRow {
+            request_id: 11,
+            row: HomeRowKind::NextUp,
+        })
+        .expect("queue next-up row");
+    queue
+        .send(WorkerCommand::GetItem {
+            request_id: 12,
+            item_id: "fixture-item".into(),
+        })
+        .expect("queue foreground item read");
+    queue
+        .send(WorkerCommand::CheckQuickConnect {
+            request_id: 13,
+            server_url: server.url.clone(),
+            allow_insecure_remote_http: false,
+        })
+        .expect("queue foreground quick-connect read");
+    queue
+        .send(fetch(14, "queued-after-hide"))
+        .expect("queue another foreground read");
+
+    let paths = server.wait_entered(3);
+    assert!(!paths.iter().any(|path| path.contains("/Items/NextUp")));
+    queue.cancel_home_rows(&[HomeRowKind::Latest]);
+
+    let paths = server.wait_entered(4);
+    assert!(
+        paths.iter().any(|path| path.contains("/Shows/NextUp")),
+        "cancelling Latest must preserve the queued NextUp row"
+    );
+    gate.release();
+    server.wait_entered(5);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut next_up_loaded = false;
+    let mut queued_search_loaded = false;
+    let mut received = Vec::new();
+    while !(next_up_loaded && queued_search_loaded) {
+        while let Ok(event) = receiver.try_recv() {
+            if matches!(
+                &event,
+                WorkerEvent::HomeRowLoaded {
+                    request_id: 11,
+                    row: HomeRowKind::NextUp,
+                    ..
+                }
+            ) {
+                next_up_loaded = true;
+            }
+            if matches!(&event, WorkerEvent::ItemsLoaded { request_id: 14, .. }) {
+                queued_search_loaded = true;
+            }
+            received.push(event);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "unhidden row or a queued foreground read did not complete"
+        );
+        thread::yield_now();
+    }
+
+    queue.shutdown();
+    let report = worker.join().expect("worker exits");
+    assert_eq!(report, WorkerShutdownReport::default());
+    received.extend(std::iter::from_fn(|| receiver.try_recv().ok()));
+    assert!(!received.iter().any(|event| matches!(
+        event,
+        WorkerEvent::HomeRowLoaded {
+            request_id: 10,
+            row: HomeRowKind::Latest,
+            ..
+        }
+    )));
 }
 
 #[test]

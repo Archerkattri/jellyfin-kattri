@@ -47,55 +47,77 @@ impl OpenUrlState {
     }
 }
 
+/// What the dialog body asked for this frame.
+#[derive(Debug, Default)]
+struct DialogAction {
+    submit: bool,
+    cancelled: bool,
+}
+
+/// Draws the dialog fields. Kept separate from the floating window so the accessible names can be
+/// asserted headlessly: a floating area's subtree is not published by `Context::run_ui`'s
+/// AccessKit pass, but the widgets themselves are unchanged.
+fn dialog_body(ui: &mut egui::Ui, open: &mut OpenUrlState) -> DialogAction {
+    let mut action = DialogAction::default();
+    ui.set_min_width(420.0);
+    ui.label(ui_text(ids::OPEN_URL_NOTE));
+    ui.add_space(8.0);
+    let field = ui.add(
+        egui::TextEdit::singleline(&mut open.input)
+            .hint_text(ui_text(ids::OPEN_URL_HINT))
+            .desired_width(f32::INFINITY),
+    );
+    field.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::Role::TextInput,
+            true,
+            ui_text(ids::OPEN_URL_TITLE).to_owned(),
+        )
+    });
+    if !field.has_focus() && open.input.is_empty() {
+        field.request_focus();
+    }
+    if field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
+        action.submit = true;
+    }
+    if let Some(error) = open.error {
+        ui.add_space(6.0);
+        ui.label(RichText::new(error.to_string()).color(crate::theme::active_palette().danger));
+    }
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        if ui.button(ui_text(ids::OPEN_URL_PLAY)).clicked() {
+            action.submit = true;
+        }
+        if ui.button(ui_text(ids::OPEN_URL_CANCEL)).clicked() {
+            action.cancelled = true;
+        }
+    });
+    action
+}
+
 /// Draws the dialog while `state` is `Some`. Returns the accepted address on the frame the viewer
 /// confirms it; the dialog closes then, and also when it is cancelled.
 pub(crate) fn show(ctx: &Context, state: &mut Option<OpenUrlState>) -> Option<StreamUrl> {
     let open = state.as_mut()?;
     let mut accepted = None;
-    let mut cancelled = false;
-    let mut submit = false;
+    let mut action = DialogAction::default();
     egui::Window::new(ui_text(ids::OPEN_URL_TITLE))
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .collapsible(false)
         .resizable(false)
         .show(ctx, |ui| {
-            ui.set_min_width(420.0);
-            ui.label(ui_text(ids::OPEN_URL_NOTE));
-            ui.add_space(8.0);
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut open.input)
-                    .hint_text(ui_text(ids::OPEN_URL_HINT))
-                    .desired_width(f32::INFINITY),
-            );
-            if !field.has_focus() && open.input.is_empty() {
-                field.request_focus();
-            }
-            if field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
-                submit = true;
-            }
-            if let Some(error) = open.error {
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(error.to_string()).color(crate::theme::active_palette().danger),
-                );
-            }
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button(ui_text(ids::OPEN_URL_PLAY)).clicked() {
-                    submit = true;
-                }
-                if ui.button(ui_text(ids::OPEN_URL_CANCEL)).clicked() {
-                    cancelled = true;
-                }
-            });
+            action = dialog_body(ui, open);
         });
     if ctx.input(|input| input.key_pressed(Key::Escape)) {
-        cancelled = true;
+        action.cancelled = true;
     }
-    if submit && let Ok(url) = open.submit() {
+    if action.submit
+        && let Ok(url) = open.submit()
+    {
         accepted = Some(url);
     }
-    if cancelled || accepted.is_some() {
+    if action.cancelled || accepted.is_some() {
         *state = None;
     }
     accepted
@@ -104,6 +126,61 @@ pub(crate) fn show(ctx: &Context, state: &mut Option<OpenUrlState>) -> Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_url_field_has_an_accessible_name() {
+        let context = Context::default();
+        context.enable_accesskit();
+        let mut open = OpenUrlState::default();
+        // The dialog body is rendered on the root layer here: egui does not publish a floating
+        // window's subtree through `run_ui`'s AccessKit pass, but the widgets are identical.
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let _ = dialog_body(ui, &mut open);
+            },
+        );
+        output.textures_delta.clear();
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("the open-address dialog produces an AccessKit tree");
+        let all = update
+            .nodes
+            .iter()
+            .map(|(_, node)| {
+                (
+                    node.role(),
+                    node.label().map(str::to_owned),
+                    node.value().map(str::to_owned),
+                )
+            })
+            .collect::<Vec<_>>();
+        let field = update
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::TextInput
+                    && (node.label() == Some(ui_text(ids::OPEN_URL_TITLE))
+                        || node.value() == Some(ui_text(ids::OPEN_URL_TITLE)))
+            })
+            .unwrap_or_else(|| {
+                panic!("the stream-address field has a meaningful accessible name; nodes={all:?}")
+            });
+        assert!(
+            field
+                .1
+                .label()
+                .or_else(|| field.1.value())
+                .is_some_and(|name| !name.trim().is_empty())
+        );
+    }
 
     #[test]
     fn a_good_address_is_accepted_and_the_text_is_dropped() {

@@ -7,6 +7,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 mod clock_sampler;
 mod custom_backdrop;
+pub(crate) mod device_identity;
 pub(crate) mod downloads;
 pub(crate) mod downloads_batch;
 mod saved_sign_in;
@@ -1557,7 +1558,7 @@ impl ApiWorker {
             #[cfg(feature = "photo-counters")]
             photo_decode_counters: photo_decode_counters.clone(),
         };
-        let device_id = crate::device_id::load_or_create();
+        let device_id = crate::device_id::load_for_process()?;
         let thread = std::thread::Builder::new()
             .name("jellyfin-api-worker".into())
             .spawn(move || run_worker(worker_commands, sink, device_id, tls))?;
@@ -2584,6 +2585,10 @@ impl ApiWorker {
 
     pub(crate) fn cancel_navigation_reads(&self) {
         self.commands.cancel_navigation_reads();
+    }
+
+    pub(crate) fn cancel_home_rows(&self, rows: &[HomeRowKind]) {
+        self.commands.cancel_home_rows(rows);
     }
 
     /// Flush accepted ordered work for at most two seconds, then report any

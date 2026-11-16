@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{self, Write},
 };
 
 use directories::ProjectDirs;
@@ -43,8 +43,34 @@ pub fn load_or_create() -> String {
     }
 }
 
+/// Load the installation ID unless a debug-only per-process test override is present.
+pub fn load_for_process() -> io::Result<String> {
+    if let Some(id) = crate::worker::device_identity::from_environment()? {
+        return Ok(id);
+    }
+    Ok(load_or_create())
+}
+
 fn read_id(path: &std::path::Path) -> Option<String> {
     let value = fs::read_to_string(path).ok()?;
+    parse_id(&value)
+}
+
+fn parse_id(value: &str) -> Option<String> {
     let id = Uuid::parse_str(value.trim()).ok()?;
     Some(id.hyphenated().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_id;
+
+    #[test]
+    fn device_id_values_must_be_uuids_and_are_normalized() {
+        assert_eq!(
+            parse_id("ABCDEFAB-1234-4234-8234-ABCDEFABCDEF"),
+            Some("abcdefab-1234-4234-8234-abcdefabcdef".into())
+        );
+        assert_eq!(parse_id("not-a-uuid"), None);
+    }
 }

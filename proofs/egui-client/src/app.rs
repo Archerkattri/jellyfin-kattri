@@ -5005,8 +5005,18 @@ impl KattriApp {
 
     /// Applies the home section settings, and loads a section the viewer just turned on.
     fn sync_home_sections(&mut self) {
-        self.home.sections =
+        let sections =
             crate::ui::home::HomeSections::from_settings(&self.settings.settings().general);
+        if self.home.sections != sections {
+            let hidden_rows = self.home.sections.rows_hidden_by(sections);
+            if let Some(worker) = self.worker.as_ref() {
+                worker.cancel_home_rows(&hidden_rows);
+            }
+            for kind in hidden_rows {
+                self.home.cancel_load(kind);
+            }
+            self.home.sections = sections;
+        }
         self.sync_home_series_suppressions();
         if self.user_name.is_none() {
             return;

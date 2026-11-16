@@ -16,6 +16,9 @@ static EPISODES_PRIMARY_LOGGED: Once = Once::new();
 static EPISODES_FALLBACK_LOGGED: Once = Once::new();
 
 impl JellyfinClient {
+    /// Maximum number of episodes returned by one paged season request.
+    pub const MAX_EPISODE_PAGE_SIZE: u32 = 48;
+
     /// List a series' seasons using `GET /Shows/{seriesId}/Seasons`.
     ///
     /// The authenticated user's `userId` and image flags are included so
@@ -110,6 +113,68 @@ impl JellyfinClient {
                         ("includeItemTypes", "Episode".to_owned()),
                         ("recursive", "false".to_owned()),
                         ("fields", "Overview,PrimaryImageAspectRatio".to_owned()),
+                    ],
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// List one bounded page of a season's episodes using
+    /// `GET /Shows/{seriesId}/Episodes?seasonId=...&startIndex=...&limit=...`.
+    ///
+    /// A zero limit is invalid; larger limits are capped at
+    /// [`JellyfinClient::MAX_EPISODE_PAGE_SIZE`]. A 404 from the dedicated endpoint falls back to
+    /// the equivalent paged `/Items` query.
+    pub async fn list_episodes_page(
+        &self,
+        session: &Session,
+        series_id: &str,
+        season_id: &str,
+        start_index: u32,
+        requested_limit: u32,
+    ) -> Result<ItemsResponse, ApiError> {
+        validate_id(series_id)?;
+        validate_id(season_id)?;
+        if requested_limit == 0 {
+            return Err(ApiError::InvalidResponse);
+        }
+        let start_index = start_index.to_string();
+        let limit = requested_limit.min(Self::MAX_EPISODE_PAGE_SIZE).to_string();
+        let primary = self
+            .get_series_items(
+                session,
+                &["Shows", series_id, "Episodes"],
+                &[
+                    ("seasonId", season_id.to_owned()),
+                    ("userId", session.user.id.clone()),
+                    ("enableUserData", "true".to_owned()),
+                    ("fields", "Overview,PrimaryImageAspectRatio".to_owned()),
+                    ("startIndex", start_index.clone()),
+                    ("limit", limit.clone()),
+                ],
+            )
+            .await;
+        match primary {
+            Ok(items) => {
+                log_path_once(&EPISODES_PRIMARY_LOGGED, "GET /Shows/{seriesId}/Episodes");
+                Ok(items)
+            }
+            Err(ApiError::HttpStatus(StatusCode::NOT_FOUND)) => {
+                log_path_once(&EPISODES_FALLBACK_LOGGED, "GET /Items episode fallback");
+                self.get_series_items(
+                    session,
+                    &["Items"],
+                    &[
+                        ("userId", session.user.id.clone()),
+                        ("parentId", season_id.to_owned()),
+                        ("includeItemTypes", "Episode".to_owned()),
+                        ("recursive", "false".to_owned()),
+                        ("fields", "Overview,PrimaryImageAspectRatio".to_owned()),
+                        ("startIndex", start_index),
+                        ("limit", limit),
+                        ("enableTotalRecordCount", "true".to_owned()),
                     ],
                 )
                 .await
@@ -386,6 +451,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_episodes_page_serializes_offsets_caps_limit_and_parses_page_metadata() {
+        let body = r#"{"Items":[{"Id":"episode-49","Name":"Forty Ninth","Type":"Episode","IndexNumber":49}],"TotalRecordCount":100,"StartIndex":48}"#;
+        let (base, task) = mock_server(vec![(200, body)]).await;
+        let response = client(&base)
+            .list_episodes_page(&session(), "series-1", "season-1", 48, 1000)
+            .await
+            .expect("episode page");
+        let requests = task.await.expect("server task");
+        let url = request_uri(&requests[0]);
+        let query = params(&url);
+        assert_eq!(url.path(), "/jellyfin/Shows/series-1/Episodes");
+        assert_eq!(query.get("seasonId").map(String::as_str), Some("season-1"));
+        assert_eq!(query.get("startIndex").map(String::as_str), Some("48"));
+        assert_eq!(query.get("limit").map(String::as_str), Some("48"));
+        assert_eq!(response.items[0].id, "episode-49");
+        assert_eq!(response.total_record_count, Some(100));
+        assert_eq!(response.start_index, 48);
+    }
+
+    #[tokio::test]
+    async fn episode_page_fallback_preserves_paging_parameters() {
+        let body = r#"{"Items":[{"Id":"episode-49","Name":"Forty Ninth","IndexNumber":49}],"TotalRecordCount":100,"StartIndex":48}"#;
+        let (base, task) = mock_server(vec![(404, "{}"), (200, body)]).await;
+        let response = client(&base)
+            .list_episodes_page(&session(), "series-1", "season-1", 48, 48)
+            .await
+            .expect("fallback episode page");
+        let requests = task.await.expect("server task");
+        assert_eq!(requests.len(), 2);
+        let url = request_uri(&requests[1]);
+        let query = params(&url);
+        assert_eq!(url.path(), "/jellyfin/Items");
+        assert_eq!(query.get("parentId").map(String::as_str), Some("season-1"));
+        assert_eq!(
+            query.get("includeItemTypes").map(String::as_str),
+            Some("Episode")
+        );
+        assert_eq!(query.get("startIndex").map(String::as_str), Some("48"));
+        assert_eq!(query.get("limit").map(String::as_str), Some("48"));
+        assert_eq!(
+            query.get("enableTotalRecordCount").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(response.items[0].id, "episode-49");
+        assert_eq!(response.total_record_count, Some(100));
+    }
+
+    #[tokio::test]
     async fn adjacent_episodes_asks_for_the_window_and_splits_it() {
         let body = r#"{"Items":[{"Id":"e1","Name":"One","Type":"Episode"},{"Id":"e2","Name":"Two","Type":"Episode"},{"Id":"e3","Name":"Three","Type":"Episode"}]}"#;
         let (base, task) = mock_server(vec![(200, body)]).await;
@@ -554,6 +667,12 @@ mod tests {
         ));
         assert!(matches!(
             client.list_episodes(&session(), "series-1", "").await,
+            Err(ApiError::InvalidResponse)
+        ));
+        assert!(matches!(
+            client
+                .list_episodes_page(&session(), "series-1", "season-1", 0, 0)
+                .await,
             Err(ApiError::InvalidResponse)
         ));
     }

@@ -50,6 +50,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::raw_window_handle::HasWindowHandle;
 use winit::window::{Window, WindowAttributes, WindowId};
 
+mod debug_validation;
 mod display_switch;
 mod gl_adapter;
 #[cfg(windows)]
@@ -115,6 +116,7 @@ struct GlHost<'session> {
     report_connection_generation: u64,
     report_connection_notice: Option<String>,
     sync_play_bridge: syncplay_bridge::SyncPlaybackBridge,
+    syncplay_status_opt_in: bool,
     osd_visibility: OsdVisibility,
     osd_clock: Instant,
     /// Fade of the player chrome, driven by the OSD timer but stepped smoothly so the row and the
@@ -264,6 +266,7 @@ impl<'session> GlHost<'session> {
             .and_then(|path| path.as_deref())
             .and_then(|path| Path::new(path).file_stem())
             .map(|stem| stem.to_string_lossy().into_owned());
+        let syncplay_status_opt_in = debug_syncplay_status_opt_in();
         let video_target = VideoTarget::new(&gl, [640, 360])?;
         let video_texture_id = painter.register_native_texture(video_target.texture());
         let provider = HostGlContextProvider::new(Rc::clone(&parts), Arc::clone(&gl));
@@ -341,6 +344,7 @@ impl<'session> GlHost<'session> {
             report_connection_generation,
             report_connection_notice: None,
             sync_play_bridge: syncplay_bridge::SyncPlaybackBridge::default(),
+            syncplay_status_opt_in,
             osd_visibility,
             osd_clock,
             chrome_opacity: 0.0,
@@ -647,10 +651,15 @@ impl<'session> GlHost<'session> {
         let media_active = self.mpv.has_media();
         let pip_active = self.pip.is_pip();
         let player_surface_active = media_active && !pip_active;
-        let theater = renderer_available
-            && player_surface_active
-            && !self.show_player_details
-            && self.kattri_app.selected_is_video();
+        let local_video_track =
+            self.local_stem.is_some() && self.mpv.has_video_track() == Some(true);
+        let theater = should_use_theater_view(
+            renderer_available,
+            player_surface_active,
+            self.show_player_details,
+            self.kattri_app.selected_is_video(),
+            local_video_track,
+        );
         if player_surface_active && !self.player_input_active {
             self.focus_before_player = self.egui.memory(|memory| memory.focused());
             if let Some(focused) = self.focus_before_player {
@@ -754,8 +763,9 @@ impl<'session> GlHost<'session> {
         self.osd_visibility
             .set_paused(controls_paused.unwrap_or(false));
         let osd_now = self.osd_clock.elapsed();
+        let local_stream_only_media = self.local_stem.is_some() && !self.mpv.reporting_enabled();
         let controls_visible = player_controls_visible(
-            self.osd_visibility.is_visible_at(osd_now),
+            self.osd_visibility.is_visible_at(osd_now) || local_stream_only_media,
             self.egui.memory(|memory| memory.focused().is_some()),
             egui::Popup::is_any_open(&self.egui),
         );
@@ -804,7 +814,8 @@ impl<'session> GlHost<'session> {
         let playing_title = playing_item_id
             .as_deref()
             .and_then(|id| self.kattri_app.item_title(id))
-            .map(str::to_owned);
+            .map(str::to_owned)
+            .or_else(|| self.local_stem.clone());
         // The app exposes only an item title publicly, so the second title line uses the chapter
         // that contains the playhead, which is the useful context a viewer has here.
         let playing_subtitle = controls_chapters
@@ -1959,8 +1970,10 @@ impl<'session> GlHost<'session> {
     }
 
     fn poll_sync_play_status(&mut self) {
-        #[cfg(debug_assertions)]
-        if stream_only_validation(std::env::var_os("KATTRI_DEBUG_STREAM_ONLY").as_deref()) {
+        if !debug_validation::should_poll_syncplay_status(
+            self.mpv.reporting_enabled(),
+            self.syncplay_status_opt_in,
+        ) {
             self.sync_play_bridge.clear();
             return;
         }
@@ -2437,6 +2450,19 @@ fn status_bar_visible(
 
 fn playback_panel_visible(media_active: bool, details_requested: bool) -> bool {
     media_active || details_requested
+}
+
+fn should_use_theater_view(
+    renderer_available: bool,
+    player_surface_active: bool,
+    details_open: bool,
+    selected_is_video: bool,
+    local_video_track: bool,
+) -> bool {
+    renderer_available
+        && player_surface_active
+        && !details_open
+        && (selected_is_video || local_video_track)
 }
 
 /// The folder for screenshots. An empty setting means the Pictures folder of the user profile.
@@ -3082,6 +3108,19 @@ fn stream_only_validation(value: Option<&OsStr>) -> bool {
     value == Some(OsStr::new("1"))
 }
 
+#[cfg(debug_assertions)]
+fn debug_syncplay_status_opt_in() -> bool {
+    debug_validation::stream_only_syncplay_opt_in(
+        stream_only_validation(std::env::var_os("KATTRI_DEBUG_STREAM_ONLY").as_deref()),
+        stream_only_validation(std::env::var_os("KATTRI_DEBUG_SYNCPLAY_STATUS").as_deref()),
+    )
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_syncplay_status_opt_in() -> bool {
+    false
+}
+
 fn should_resume_saved_sign_in(
     local_media: &Result<Option<String>, String>,
     has_launch_intent: bool,
@@ -3094,6 +3133,7 @@ mod tests {
     use super::{
         CURSOR_HIDE_AFTER, append_gamepad_navigation_events, cursor_should_hide,
         duration_from_seconds, has_user_activity, label_video_surface, should_resume_saved_sign_in,
+        should_use_theater_view,
     };
     use egui::{Event, Key, Modifiers};
     use std::time::Duration;
@@ -3197,6 +3237,15 @@ mod tests {
         assert!(!should_resume_saved_sign_in(&invalid_file, false));
         assert!(!should_resume_saved_sign_in(&no_file, true));
         assert!(should_resume_saved_sign_in(&no_file, false));
+    }
+
+    #[test]
+    fn local_video_without_a_server_item_uses_the_theater_player_surface() {
+        assert!(should_use_theater_view(true, true, false, false, true));
+        assert!(!should_use_theater_view(true, true, false, false, false));
+        assert!(should_use_theater_view(true, true, false, true, false));
+        assert!(!should_use_theater_view(false, true, false, false, true));
+        assert!(!should_use_theater_view(true, true, true, false, true));
     }
 
     #[test]

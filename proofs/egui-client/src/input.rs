@@ -249,6 +249,10 @@ pub fn gamepad_button_to_action(button: &str) -> Option<NavAction> {
         | "RIGHT_STICK_RIGHT" | "RIGHTSTICKRIGHT" => Some(NavAction::Right),
         "A" | "BUTTON_A" | "SOUTH" => Some(NavAction::Select),
         "B" | "BUTTON_B" | "EAST" => Some(NavAction::Back),
+        "LEFT_TRIGGER" | "LEFT_TRIGGER2" | "LEFTTRIGGER" | "LEFTTRIGGER2" => Some(NavAction::Up),
+        "RIGHT_TRIGGER" | "RIGHT_TRIGGER2" | "RIGHTTRIGGER" | "RIGHTTRIGGER2" => {
+            Some(NavAction::Down)
+        }
         "START" | "BUTTON_START" => Some(NavAction::Menu),
         _ => None,
     }
@@ -380,6 +384,16 @@ mod tests {
             },
             GamepadEvent {
                 device: "synthetic".into(),
+                button: "LeftTrigger2".into(),
+                pressed: true,
+            },
+            GamepadEvent {
+                device: "synthetic".into(),
+                button: "RightTrigger".into(),
+                pressed: true,
+            },
+            GamepadEvent {
+                device: "synthetic".into(),
                 button: "A".into(),
                 pressed: false,
             },
@@ -394,6 +408,8 @@ mod tests {
                 NavAction::Select,
                 NavAction::Back,
                 NavAction::Menu,
+                NavAction::Up,
+                NavAction::Down,
             ]
         );
     }
@@ -416,6 +432,12 @@ mod tests {
             ("South", NavAction::Select),
             ("East", NavAction::Back),
             ("Start", NavAction::Menu),
+            ("LeftTrigger", NavAction::Up),
+            ("LeftTrigger2", NavAction::Up),
+            ("RightTrigger", NavAction::Down),
+            ("RightTrigger2", NavAction::Down),
+            ("left_trigger", NavAction::Up),
+            ("RIGHT_TRIGGER2", NavAction::Down),
         ] {
             assert_eq!(gamepad_button_to_action(button), Some(action), "{button}");
         }

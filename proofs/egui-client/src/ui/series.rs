@@ -25,6 +25,16 @@ pub struct SeriesPresentationResponse {
     pub activated_episode_id: Option<String>,
     /// The episode whose title was pressed, to open its page.
     pub opened_episode_id: Option<String>,
+    /// The next bounded episode page requested by the viewer.
+    pub requested_page_start_index: Option<u32>,
+}
+
+/// Paging state supplied by the parent app for the selected season.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EpisodePageState {
+    pub start_index: u32,
+    pub has_next_page: bool,
+    pub loading: bool,
 }
 
 impl SeriesPresentation {
@@ -35,6 +45,24 @@ impl SeriesPresentation {
         seasons: &[BaseItemDto],
         episodes: &[BaseItemDto],
         thumbnails: &std::collections::HashMap<String, egui::TextureHandle>,
+    ) -> SeriesPresentationResponse {
+        self.show_paged(
+            ui,
+            seasons,
+            episodes,
+            thumbnails,
+            EpisodePageState::default(),
+        )
+    }
+
+    /// Draws one bounded episode page and its Previous/Next controls.
+    pub fn show_paged(
+        &mut self,
+        ui: &mut Ui,
+        seasons: &[BaseItemDto],
+        episodes: &[BaseItemDto],
+        thumbnails: &std::collections::HashMap<String, egui::TextureHandle>,
+        page: EpisodePageState,
     ) -> SeriesPresentationResponse {
         let ordered = ordered_seasons(seasons);
         if ordered.is_empty() {
@@ -72,6 +100,7 @@ impl SeriesPresentation {
             .find(|season| self.selected_season_id.as_deref() == Some(season.id.as_str()));
         let mut activated_episode_id = None;
         let mut opened_episode_id = None;
+        let mut requested_page_start_index = None;
         if let Some(season) = selected_season {
             let season_index = season.index_number;
             let matching_episodes = episodes
@@ -79,6 +108,7 @@ impl SeriesPresentation {
                 .filter(|episode| episode.parent_index_number == season_index)
                 .collect::<Vec<_>>();
             let matching_episodes = ordered_episode_refs(&matching_episodes);
+            let matching_episode_count = matching_episodes.len();
 
             ui.add_space(8.0);
             if matching_episodes.is_empty() {
@@ -106,12 +136,34 @@ impl SeriesPresentation {
                     }
                 }
             }
+
+            if page.start_index > 0 || page.has_next_page {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let previous = ui.add_enabled(
+                        !page.loading && page.start_index > 0,
+                        egui::Button::new(ui_text(ids::PHOTOS_BUTTON_PREVIOUS_PAGE)),
+                    );
+                    if previous.clicked() {
+                        requested_page_start_index = previous_page_start_index(page.start_index);
+                    }
+                    let next = ui.add_enabled(
+                        !page.loading && page.has_next_page,
+                        egui::Button::new(ui_text(ids::PHOTOS_BUTTON_NEXT_PAGE)),
+                    );
+                    if next.clicked() {
+                        requested_page_start_index =
+                            next_page_start_index(page.start_index, matching_episode_count);
+                    }
+                });
+            }
         }
 
         SeriesPresentationResponse {
             selected_season_id: self.selected_season_id.clone(),
             activated_episode_id,
             opened_episode_id,
+            requested_page_start_index,
         }
     }
 }
@@ -169,6 +221,16 @@ fn season_label(season: &BaseItemDto) -> String {
             },
         )
     }
+}
+
+fn previous_page_start_index(start_index: u32) -> Option<u32> {
+    (start_index > 0)
+        .then(|| start_index.saturating_sub(jellyfin_api::JellyfinClient::MAX_EPISODE_PAGE_SIZE))
+}
+
+fn next_page_start_index(start_index: u32, episode_count: usize) -> Option<u32> {
+    let loaded = u32::try_from(episode_count).ok()?;
+    (loaded > 0).then(|| start_index.saturating_add(loaded))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,8 +385,8 @@ fn progress_fraction(episode: &BaseItemDto) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SeriesPresentation, episode_label, format_runtime, ordered_episode_refs, ordered_seasons,
-        progress_fraction,
+        SeriesPresentation, episode_label, format_runtime, next_page_start_index,
+        ordered_episode_refs, ordered_seasons, previous_page_start_index, progress_fraction,
     };
     use egui::{Pos2, RawInput, Rect, Shape, Vec2};
     use jellyfin_api::BaseItemDto;
@@ -403,6 +465,20 @@ mod tests {
         let ordered = ordered_seasons(&seasons);
         assert_eq!(ordered[0].id, "a-season");
         assert_eq!(ordered[1].id, "z-season");
+    }
+
+    #[test]
+    fn episode_page_offsets_stay_within_the_bounded_page_size() {
+        let page_size = jellyfin_api::JellyfinClient::MAX_EPISODE_PAGE_SIZE;
+        assert_eq!(previous_page_start_index(0), None);
+        assert_eq!(previous_page_start_index(page_size), Some(0));
+        assert_eq!(previous_page_start_index(page_size * 2), Some(page_size));
+        assert_eq!(
+            next_page_start_index(0, page_size as usize),
+            Some(page_size)
+        );
+        assert_eq!(next_page_start_index(page_size, 17), Some(page_size + 17));
+        assert_eq!(next_page_start_index(page_size, 0), None);
     }
 
     #[test]

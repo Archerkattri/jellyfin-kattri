@@ -112,12 +112,14 @@ fn accessible_names_are_a_pure_function_of_the_catalog() {
 }
 
 #[test]
-fn german_stub_has_exactly_three_messages_and_all_exist_in_english() {
+fn german_stub_ids_all_exist_in_english() {
     let de = match german_stub() {
         Ok(catalog) => catalog,
         Err(err) => panic!("de-DE stub should parse: {err}"),
     };
-    assert_eq!(de.len(), 3);
+    // The German pilot set covers the connect/browse pilot plus the media-kind, accessible-name
+    // and refresh-switch strings; the rest of the catalog falls back to English.
+    assert_eq!(de.len(), 16);
     let en = en();
     for id in de.ids() {
         assert!(en.get(id).is_some(), "stub key {id} is not in en-US");

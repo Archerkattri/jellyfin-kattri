@@ -16,7 +16,7 @@ use kattri_i18n::ids;
 use super::hero::{HeroBanner, HeroItem, HeroOptions};
 use super::row::{PosterRow, RowCard, RowOptions};
 use super::{CardFocus, HomePosterGroup};
-use crate::catalog::MediaItem;
+use crate::catalog::{MediaItem, MediaKind};
 use crate::parental::item_is_shown;
 use crate::theme::Palette;
 use crate::worker::{HomeCatalogKind, HomeRowKind};
@@ -211,6 +211,13 @@ impl HomeSections {
         }
     }
 
+    pub(crate) fn rows_hidden_by(self, next: Self) -> Vec<HomeRowKind> {
+        HomeRowKind::ALL
+            .into_iter()
+            .filter(|kind| self.shows_row(*kind) && !next.shows_row(*kind))
+            .collect()
+    }
+
     pub fn shows_continue_next_up(self) -> bool {
         self.continue_watching || self.next_up
     }
@@ -381,6 +388,15 @@ impl HomeState {
         let row = self.row_mut(kind);
         row.status = RowStatus::Loading;
         row.request_id = request_id;
+    }
+
+    /// Cancels a pending row without discarding its last successful cards.
+    pub(crate) fn cancel_load(&mut self, kind: HomeRowKind) {
+        let row = self.row_mut(kind);
+        if row.status == RowStatus::Loading {
+            row.status = RowStatus::Idle;
+            row.request_id = 0;
+        }
     }
 
     /// True when `request_id` belongs to a row or catalog that is still waiting. Kept for the
@@ -830,10 +846,42 @@ pub fn card_subtitle(
     year.filter(|year| *year > 0).map(|year| year.to_string())
 }
 
+fn accessible_card_name(card: &HomeCard) -> String {
+    let kind = ui_text(match card.media.kind {
+        MediaKind::Movie => ids::HOME_MEDIA_KIND_MOVIE,
+        MediaKind::Series => ids::HOME_MEDIA_KIND_SERIES,
+        MediaKind::Episode => ids::HOME_MEDIA_KIND_EPISODE,
+        MediaKind::Audio => ids::HOME_MEDIA_KIND_AUDIO,
+        MediaKind::Photo => ids::HOME_MEDIA_KIND_PHOTO,
+        MediaKind::Playlist => ids::HOME_MEDIA_KIND_PLAYLIST,
+        MediaKind::Folder => ids::HOME_MEDIA_KIND_FOLDER,
+        MediaKind::Video => ids::HOME_MEDIA_KIND_VIDEO,
+        MediaKind::Book => ids::HOME_MEDIA_KIND_BOOK,
+        MediaKind::Other => ids::HOME_MEDIA_KIND_OTHER,
+    });
+    if let Some(progress) = card.progress.filter(|progress| progress.is_finite()) {
+        let progress = (progress.clamp(0.0, 1.0) * 100.0).round().to_string();
+        ui_text_args(
+            ids::ROW_CARD_ACCESSIBLE_NAME_PROGRESS,
+            &[
+                ("title", &card.media.title),
+                ("kind", kind),
+                ("progress", &progress),
+            ],
+        )
+    } else {
+        ui_text_args(
+            ids::ROW_CARD_ACCESSIBLE_NAME,
+            &[("title", &card.media.title), ("kind", kind)],
+        )
+    }
+}
+
 fn card_view(card: &HomeCard) -> RowCard {
     RowCard {
         id: card.media.id.clone(),
         title: card.media.title.clone(),
+        accessible_name: Some(accessible_card_name(card)),
         subtitle: card.subtitle.clone(),
         progress: card.progress,
         image: card
@@ -1446,6 +1494,29 @@ mod tests {
     }
 
     #[test]
+    fn disabling_a_home_row_invalidates_only_that_row_and_rejects_late_results() {
+        let previous = HomeSections::default();
+        let next = HomeSections {
+            latest: false,
+            ..previous
+        };
+        assert_eq!(previous.rows_hidden_by(next), [HomeRowKind::Latest]);
+        assert!(next.rows_hidden_by(next).is_empty());
+
+        let mut state = HomeState::default();
+        state.begin_load(HomeRowKind::Latest, 11);
+        assert!(state.apply_items(HomeRowKind::Latest, 11, vec![card("kept")]));
+        state.begin_load(HomeRowKind::Latest, 12);
+        state.begin_load(HomeRowKind::NextUp, 13);
+        state.cancel_load(HomeRowKind::Latest);
+
+        assert_eq!(state.row(HomeRowKind::Latest).status, RowStatus::Idle);
+        assert_eq!(state.row(HomeRowKind::Latest).cards[0].media.id, "kept");
+        assert!(!state.apply_items(HomeRowKind::Latest, 12, vec![card("late")]));
+        assert!(state.is_pending(HomeRowKind::NextUp, 13));
+    }
+
+    #[test]
     fn home_sections_follow_the_saved_order_and_fill_missing_ones() {
         let mut general = kattri_settings::GeneralSettings::default();
         assert_eq!(
@@ -1960,6 +2031,23 @@ mod tests {
         assert_eq!(mapped.subtitle, None);
         assert_eq!(mapped.progress, None);
         assert!(mapped.media.artwork_texture.is_none());
+    }
+
+    #[test]
+    fn home_card_row_accessibility_name_includes_localized_kind_and_valid_progress() {
+        let mut card = card("Movie A");
+        card.media.kind = MediaKind::Movie;
+        card.progress = Some(0.425);
+
+        let name = accessible_card_name(&card);
+        assert!(name.contains("Movie A"));
+        assert!(name.contains("Movie"));
+        assert!(name.contains("43%"));
+
+        card.progress = Some(f32::NAN);
+        let name = accessible_card_name(&card);
+        assert!(name.contains("Movie"));
+        assert!(!name.contains('%'));
     }
 
     #[test]

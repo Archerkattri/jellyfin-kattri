@@ -38,6 +38,8 @@ pub struct RowCard {
     /// Stable identifier, used for animation state and placeholder colours.
     pub id: String,
     pub title: String,
+    /// Localized title, media kind, and progress details when the caller has them.
+    pub accessible_name: Option<String>,
     pub subtitle: Option<String>,
     /// Watched fraction in `0..=1`; `None` hides the progress bar.
     pub progress: Option<f32>,
@@ -246,7 +248,11 @@ impl PosterRow {
         if animating {
             ctx.request_repaint();
         }
-        let focused_title = &cards[self.focus].title;
+        let focused_card = &cards[self.focus];
+        let focused_title = focused_card
+            .accessible_name
+            .as_deref()
+            .unwrap_or(&focused_card.title);
         let label = ui_text_args(
             ids::ROW_LABEL_COUNT_FOCUSED,
             &[
@@ -481,5 +487,88 @@ mod tests {
             degenerate,
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
         );
+    }
+
+    #[test]
+    fn accessible_row_label_tracks_focused_card_kind_and_optional_progress() {
+        fn accessible_label(
+            context: &egui::Context,
+            row: &mut PosterRow,
+            cards: &[RowCard],
+        ) -> String {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(960.0, 600.0))),
+                    ..Default::default()
+                },
+                |ui| {
+                    row.show(ui, "Continue Watching", cards, &RowOptions::default());
+                },
+            );
+            output.textures_delta.clear();
+            let update = output
+                .platform_output
+                .accesskit_update
+                .expect("row emits an AccessKit update");
+            let item_count = format!("{} items", cards.len());
+            let all = update
+                .nodes
+                .iter()
+                .map(|(_, node)| {
+                    (
+                        node.role(),
+                        node.label().map(str::to_owned),
+                        node.value().map(str::to_owned),
+                    )
+                })
+                .collect::<Vec<_>>();
+            // egui exposes a labelled Role::Label widget's text as the node value, so accept
+            // either field: a screen reader reads the value of a label node.
+            let labels = all
+                .iter()
+                .filter_map(|(_, label, value)| value.clone().or_else(|| label.clone()))
+                .collect::<Vec<_>>();
+            labels
+                .iter()
+                .find(|label| label.contains(&item_count))
+                .cloned()
+                .unwrap_or_else(|| panic!("row summary accessible text missing; nodes={all:?}"))
+        }
+
+        let card = |id: &str, title: &str, accessible_name: Option<&str>, progress| RowCard {
+            id: id.into(),
+            title: title.into(),
+            accessible_name: accessible_name.map(str::to_owned),
+            subtitle: None,
+            progress,
+            image: None,
+        };
+        let cards = [
+            card(
+                "movie-a",
+                "Movie A",
+                Some("Movie A, Movie, 42% watched"),
+                Some(0.42),
+            ),
+            card("episode-b", "Episode B", Some("Episode B, Episode"), None),
+        ];
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut row = PosterRow::default();
+
+        let first = accessible_label(&context, &mut row, &cards);
+        assert!(first.contains("Movie A"));
+        assert!(first.contains("Movie"));
+        assert!(first.contains("42%"));
+
+        row.queue_focus(1);
+        let second = accessible_label(&context, &mut row, &cards);
+        assert!(second.contains("Episode B"));
+        assert!(second.contains("Episode"));
+        assert!(!second.contains("42%"));
+
+        let no_detail = [card("plain", "Plain item", None, None)];
+        let fallback = accessible_label(&context, &mut row, &no_detail);
+        assert!(fallback.contains("Plain item"));
     }
 }

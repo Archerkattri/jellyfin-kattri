@@ -5,7 +5,9 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::{AbortHandle, Id, JoinSet};
 
-use super::{WorkerCommand, WorkerEvent, WorkerSink, WorkerState, execute_command, send_event};
+use super::{
+    HomeRowKind, WorkerCommand, WorkerEvent, WorkerSink, WorkerState, execute_command, send_event,
+};
 
 pub(super) const CONTROL_CAPACITY: usize = 32;
 const DISCONNECT_CAPACITY: usize = 32;
@@ -189,7 +191,7 @@ impl WorkerCommand {
     }
 
     fn read_key(&self) -> Option<usize> {
-        use super::{HomeCatalogKind, HomeRowKind};
+        use super::HomeCatalogKind;
         match self {
             Self::CheckServer { .. } => Some(0),
             Self::FetchItems { .. } => Some(1),
@@ -197,11 +199,7 @@ impl WorkerCommand {
             // a queued request and Back/disconnect cancels both.
             Self::ListLibrarySuggestions { .. } | Self::ListUpcomingEpisodes { .. } => Some(1),
             Self::GetItem { .. } => Some(2),
-            Self::LoadHomeRow { row, .. } => Some(match row {
-                HomeRowKind::ContinueWatching => 3,
-                HomeRowKind::NextUp => 4,
-                HomeRowKind::Latest => 5,
-            }),
+            Self::LoadHomeRow { row, .. } => Some(home_row_read_key(*row)),
             Self::LoadHomeCatalog { kind, .. } => Some(match kind {
                 HomeCatalogKind::Libraries => 6,
                 HomeCatalogKind::Collections => 7,
@@ -367,6 +365,22 @@ impl CommandQueue {
         self.wake.notify_one();
     }
 
+    pub(super) fn cancel_home_rows(&self, rows: &[HomeRowKind]) {
+        let keys: HashSet<_> = rows.iter().copied().map(home_row_read_key).collect();
+        if keys.is_empty() {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            for key in &keys {
+                state.versions[*key] = state.versions[*key].wrapping_add(1);
+            }
+            state
+                .reads
+                .retain(|entry| entry.ticket.key.is_none_or(|key| !keys.contains(&key)));
+        }
+        self.wake.notify_one();
+    }
+
     /// Remove queued photo jobs and signal active matching jobs for abort. Only
     /// active IDs are retained, so cancellation bookkeeping is bounded by the
     /// artwork concurrency limit; unrelated work is never selected by this path.
@@ -500,6 +514,14 @@ impl CommandQueue {
             .or_else(|| self.pop(Lane::Artwork))
             .map(|entry| entry.command)
             .ok_or(())
+    }
+}
+
+fn home_row_read_key(row: HomeRowKind) -> usize {
+    match row {
+        HomeRowKind::ContinueWatching => 3,
+        HomeRowKind::NextUp => 4,
+        HomeRowKind::Latest => 5,
     }
 }
 

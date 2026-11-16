@@ -1454,8 +1454,8 @@ fn video_preferences_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             "Unavailable: HDR output control is not connected to playback yet.",
             12.0,
         );
-        // Display switching has a backend on Windows only (M6-04).
-        let switching_available = cfg!(windows);
+        // M6-04 supports the native display-switch backends available on Windows and macOS.
+        let switching_available = cfg!(windows) || cfg!(target_os = "macos");
         ui.add_enabled(
             switching_available,
             egui::Checkbox::new(
@@ -1470,16 +1470,17 @@ fn video_preferences_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
                 "Avoid 25/30 Hz refresh rates",
             ),
         );
-        muted(
-            ui,
-            colors,
-            if switching_available {
-                "Matches the display to the video's frame rate while it plays and puts the original mode back afterwards. Takes effect for the next video."
-            } else {
-                "Unavailable: display refresh-rate switching is only available on Windows."
-            },
-            12.0,
-        );
+        if switching_available {
+            muted(
+                ui,
+                colors,
+                "Matches the display to the video's frame rate while it plays and puts the original mode back afterwards. Takes effect for the next video.",
+                12.0,
+            );
+        } else {
+            let unavailable = ui_text(ids::SETTINGS_MEDIA_REFRESH_SWITCH_UNAVAILABLE);
+            muted(ui, colors, unavailable, 12.0);
+        }
         ui.add_enabled_ui(false, |ui| {
             ui.checkbox(&mut video.transcode.prefer_h265, "Prefer H.265 transcoding");
             ui.checkbox(&mut video.transcode.allow_hevc, "Allow HEVC transcoding");
