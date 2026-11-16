@@ -166,6 +166,10 @@ Validated so far:
 - A Windows x64 native-window DirectPlay check on November 2: decoded video was visible,
   pause and seek changed the real player, and stop returned to browsing.
 - A Windows RTX 4060 run using NVDEC with an HDR10 source tone-mapped to SDR.
+- A Windows x64 local-file run on November 15, 2026: the H.264/AAC fixture opened in the theater
+  player surface, the captured video framebuffer was 1887x1062 with 185,630 distinct colours (not
+  black, not white), pause and seek changed the player, and the app closed normally. Audible output
+  was not asserted.
 - Release packages cover Windows x64/ARM64, macOS universal, and Linux x64. Clean-runner
   install, launch and normal close pass for the macOS DMG and all four Linux formats.
 
@@ -181,7 +185,10 @@ signing and notarization, Microsoft Store and Flathub distribution, native macOS
 menus and Wayland refresh-rate switching. Synchronized lyrics and the new Linux deb/rpm
 runtime packaging have unit or static checks, with live visual and clean-install validation
 pending. Theme media plays on request from the item page rather than automatically as
-ambient audio.
+ambient audio. A two-client SyncPlay drift measurement still needs a per-client position-trace
+emitter in the client; the test-only server authorization for that run is recorded, but no measured
+drift result exists yet. A 1.0 release is held until the owner runs the remaining platform,
+hardware and accessibility acceptance checks.
 
 ## Troubleshooting
 

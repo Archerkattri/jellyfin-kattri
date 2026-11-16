@@ -4,6 +4,32 @@ All notable changes to Jellyfin Kattri are recorded here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are release dates on GitHub.
 Everything before 0.7.0 was published as a prerelease.
 
+## Unreleased
+
+### Added
+
+- Row cards expose their title, media kind and optional progress to accessibility tools, and the
+  open-stream-address field has an accessible name.
+- Bounded episode pages (48 per page) with Previous/Next and a paginated API fallback.
+- Local video files open in the theater player surface, with startup and mid-stream source recovery
+  that keeps the current playback generation.
+- Acceptance helpers for a two-client SyncPlay run, a Live TV lineup preflight, and a music-queue
+  smoke run against the loopback mock; release-validation runtime measurement is more robust.
+- Upgrade-path regression tests: a 0.7.0 settings file keeps every value and unknown key, and a
+  newer-schema file is refused read-only with its bytes preserved.
+- Typed Dolby Vision handling policy, typed ASS/SSA subtitle override policy (authored styles are
+  the default, an explicit user style still wins), and a gated disc-input detector that stays
+  closed until a rights decision is recorded.
+- More German pilot strings for the connect, browse, media-kind and accessibility labels.
+
+### Changed
+
+- Download transport enforces its own plain-HTTP policy (loopback and private networks by default,
+  explicit opt-in for public HTTP) and returns typed containment errors before any rename.
+- A disabled Home shelf cancels its in-flight read and rejects a late result instead of applying it.
+- Debug builds can give each acceptance process its own device identity and opt into SyncPlay
+  status reporting while ordinary playback reporting stays disabled.
+
 ## 0.7.0 - 2026-11-05
 
 ### Added
