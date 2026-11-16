@@ -2,3 +2,6 @@
 *.sh text eol=lf
 *.bat text eol=crlf
 packaging/linux/deb/changelog text eol=lf
+
+# Pinned license payloads are hashed byte-for-byte by packaging scripts; never convert line endings.
+packaging/windows/libmpv-licenses/** -text

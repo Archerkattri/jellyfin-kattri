@@ -31,8 +31,8 @@ bundled pinned libmpv runtime and the native libraries listed as package depende
 depends = "$auto, libass9, libva2, libva-drm2, libuchardet0, libxfixes3, libx11-6, libasound2, libpulse0, libdrm2, libgbm1, libegl1, zlib1g, libstdc++6, libxkbcommon-x11-0"
 assets = [
     ["target/release/jellyfin-kattri", "usr/bin/kattri", "755"],
-    ["../../target/kattri-libmpv/libmpv.so.2", "usr/lib/kattri/libmpv.so.2", "755"],
-    ["../../target/kattri-libmpv/libjpeg.so.8", "usr/lib/kattri/libjpeg.so.8", "755"],
+    ["../../target/kattri-libmpv/libmpv.so.2", "usr/lib/kattri/libmpv.so.2", "644"],
+    ["../../target/kattri-libmpv/libjpeg.so.8", "usr/lib/kattri/libjpeg.so.8", "644"],
     ["../../packaging/linux/share/kattri.desktop", "usr/share/applications/kattri.desktop", "644"],
     ["../../packaging/linux/icons/kattri.svg", "usr/share/icons/hicolor/scalable/apps/kattri.svg", "644"],
     # Compressed by the release workflow (gzip -9n) before cargo deb runs.
@@ -48,4 +48,6 @@ assets = [
     ["../../target/kattri-libmpv/LICENSE.dav1d.BSD-2-Clause", "usr/share/doc/kattri/licenses/dav1d.BSD-2-Clause", "644"],
     ["../../target/kattri-libmpv/LICENSE.libdisplay-info.MIT", "usr/share/doc/kattri/licenses/libdisplay-info.MIT", "644"],
     ["../../target/kattri-libmpv/LICENSE.libjpeg-turbo", "usr/share/doc/kattri/licenses/libjpeg-turbo", "644"],
+    # Lintian overrides: the bundled libmpv/libjpeg are intentional; the tag below documents it.
+    ["lintian-overrides", "usr/share/lintian/overrides/kattri", "644"],
 ]

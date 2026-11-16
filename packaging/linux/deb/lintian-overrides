@@ -1,0 +1,8 @@
+# The pinned libmpv build embeds FFmpeg and libjpeg on purpose, and both the app and the bundled
+# library link libstdc++ through the system. These tags are expected for the packaged runtime.
+kattri: embedded-library libavdevice usr/lib/kattri/libmpv.so.2
+kattri: embedded-library libavfilter usr/lib/kattri/libmpv.so.2
+kattri: embedded-library libavutil usr/lib/kattri/libmpv.so.2
+kattri: embedded-library libswscale usr/lib/kattri/libmpv.so.2
+kattri: embedded-library libjpeg usr/lib/kattri/libjpeg.so.8
+kattri: package-depends-on-multiple-libstdc-versions libstdc++6

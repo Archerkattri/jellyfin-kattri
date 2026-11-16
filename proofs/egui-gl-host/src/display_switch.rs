@@ -180,7 +180,7 @@ impl DisplaySwitch {
         Some(text)
     }
 
-    #[cfg(all(test, not(windows)))]
+    #[cfg(all(test, not(any(windows, target_os = "macos"))))]
     fn is_switched(&self) -> bool {
         self.matcher.is_switched()
     }
