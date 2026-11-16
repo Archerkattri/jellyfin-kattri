@@ -4,7 +4,7 @@ All notable changes to Jellyfin Kattri are recorded here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are release dates on GitHub.
 Everything before 0.7.0 was published as a prerelease.
 
-## Unreleased
+## 0.8.0 - 2026-11-16
 
 ### Added
 
@@ -15,6 +15,9 @@ Everything before 0.7.0 was published as a prerelease.
   that keeps the current playback generation.
 - Acceptance helpers for a two-client SyncPlay run, a Live TV lineup preflight, and a music-queue
   smoke run against the loopback mock; release-validation runtime measurement is more robust.
+- A debug-only per-client position-trace emitter writes the CSV schema the SyncPlay analyzer reads,
+  so a two-client drift measurement can now be collected; the gate also parses every acceptance
+  helper and checks it carries no private address.
 - Upgrade-path regression tests: a 0.7.0 settings file keeps every value and unknown key, and a
   newer-schema file is refused read-only with its bytes preserved.
 - Typed Dolby Vision handling policy, typed ASS/SSA subtitle override policy (authored styles are
@@ -29,6 +32,14 @@ Everything before 0.7.0 was published as a prerelease.
 - A disabled Home shelf cancels its in-flight read and rejects a late result instead of applying it.
 - Debug builds can give each acceptance process its own device identity and opt into SyncPlay
   status reporting while ordinary playback reporting stays disabled.
+
+### Fixed
+
+- The release profile of the native host now compiles again: the playback-reporting accessor is no
+  longer debug-gated even though the release player UI reads it, and the debug-only device-identity
+  and SyncPlay-status helpers compile out without unused-item warnings.
+- The German pilot catalog registers its expanded message set in `ids::ALL`, so the localization
+  consistency tests pass.
 
 ## 0.7.0 - 2026-11-05
 
