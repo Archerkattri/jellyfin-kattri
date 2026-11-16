@@ -194,7 +194,30 @@ def write_audit_index(asset_root: Path, output_dir: Path) -> tuple[dict[str, Any
     vulnerable = False
 
     for binary_sha, subject in sorted(subjects.items()):
-        exit_code, report = run_audit(subject["path"])
+        scan_unavailable = None
+        try:
+            exit_code, report = run_audit(subject["path"])
+        except RuntimeError as exc:
+            # Release packages built without cargo-auditable (Windows, macOS, the stripped deb/rpm
+            # payloads) carry no embedded dependency metadata, so cargo-audit cannot produce a JSON
+            # report for them. Record the exact bytes as an explicitly incomplete scan instead of
+            # failing the whole binding; the sidecar already states the missing metadata.
+            if "cargo-auditable" not in subject["scope"]:
+                raise
+            scan_unavailable = str(exc)
+            exit_code = 0
+            report = {
+                "vulnerabilities": {"count": 0, "found": False, "list": []},
+                "warnings": {},
+                "scan_unavailable": "cargo-audit could not read embedded dependency metadata for this release executable",
+                "scan_error": scan_unavailable,
+            }
+        scope = subject["scope"]
+        if scan_unavailable is not None:
+            scope = "%s (not a complete scan: %s; only the exact executable hash is bound)" % (
+                scope,
+                scan_unavailable,
+            )
         vulnerability_report = report.get("vulnerabilities")
         vulnerability_count = vulnerability_report.get("count", 0) if isinstance(vulnerability_report, dict) else 0
         found = isinstance(vulnerability_report, dict) and (
@@ -210,7 +233,7 @@ def write_audit_index(asset_root: Path, output_dir: Path) -> tuple[dict[str, Any
             "binary_sha256": binary_sha,
             "binary_size_bytes": subject["bytes"],
             "completeness": "partial_panic_recovery",
-            "scope": subject["scope"],
+            "scope": scope,
             "audit_exit_code": exit_code,
             "packages": subject["packages"],
             "audit_report": report,

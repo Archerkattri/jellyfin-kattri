@@ -107,7 +107,7 @@ jobs:
             exit 1
           fi
           cp "$host_sbom" dist/sbom/rust-dependencies.cdx.json
-          find . -path ./target -prune -o -name 'rust-dependencies*.json' -print \
+          find . -path ./target -prune -o -path ./dist -prune -o -name 'rust-dependencies*.json' -print \
             | grep -v "^\./proofs/egui-gl-host/rust-dependencies.json$" \
             | xargs -r rm -f
 
