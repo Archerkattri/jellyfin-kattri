@@ -16,6 +16,7 @@ mod remote;
 mod seed;
 mod subtitles;
 mod syncplay;
+mod syncplay_live;
 mod system;
 
 use std::{
@@ -51,7 +52,7 @@ const SYNTHETIC_AUDIO_BYTES_PER_SAMPLE: u16 = 2;
 const WAV_HEADER_LEN: usize = 44;
 
 /// Options for [`spawn`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MockConfig {
     /// Port to bind on 127.0.0.1. `0` selects an ephemeral port.
     pub port: u16,
@@ -96,6 +97,13 @@ pub struct MockConfig {
     pub transcode_only_mkv: bool,
     /// Add collections, books, home videos, music videos and Live TV libraries to the seed.
     pub extra_libraries: bool,
+    /// Enable the stateful SyncPlay group simulator (session WebSocket, group state, command
+    /// anchors, `/GetUtcTime`). Disabled by default so the stateless SyncPlay fixtures are unchanged.
+    pub syncplay_live: bool,
+    /// Serve this real local media file (with HTTP range support) for video/audio stream requests
+    /// instead of placeholder bytes, so a player can actually decode and advance position. Used by
+    /// the isolated SyncPlay drift run. `None` keeps the deterministic placeholder fixtures.
+    pub media_file: Option<std::path::PathBuf>,
 }
 
 /// Handle to a running mock server. Dropping it requests shutdown; call
@@ -137,6 +145,10 @@ impl Drop for RunningServer {
 pub async fn spawn(config: MockConfig) -> std::io::Result<RunningServer> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port)).await?;
     let addr = listener.local_addr()?;
+    let media_file = match &config.media_file {
+        Some(path) => Some(Arc::new(std::fs::read(path)?)),
+        None => None,
+    };
     let state = Arc::new(AppState {
         catalog: if let Some(count) = config.audio_item_count {
             seed::catalog_with_audio_track_count(count)
@@ -174,6 +186,12 @@ pub async fn spawn(config: MockConfig) -> std::io::Result<RunningServer> {
         playlist_store: Arc::new(playlists::PlaylistStore::default()),
         metadata: metadata::MetadataStore::default(),
         subtitle_store: subtitles::SubtitleStore::default(),
+        syncplay_live: if config.syncplay_live {
+            Some(Arc::new(syncplay_live::LiveState::new()))
+        } else {
+            None
+        },
+        media_file,
     });
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let app = router(state);
@@ -226,10 +244,19 @@ struct AppState {
     capabilities: Mutex<Vec<Value>>,
     /// Sanitized request method/path entries; authorization headers are never recorded.
     requests: Mutex<Vec<Value>>,
+    /// Stateful SyncPlay group simulator, present only when `MockConfig::syncplay_live` is set.
+    syncplay_live: Option<Arc<syncplay_live::LiveState>>,
+    /// Real media bytes served for stream requests when `MockConfig::media_file` is set.
+    media_file: Option<Arc<Vec<u8>>>,
 }
 
 fn router(state: Arc<AppState>) -> Router {
     let playlist_store = state.playlist_store.clone();
+    let syncplay_router = if state.syncplay_live.is_some() {
+        syncplay_live::router()
+    } else {
+        syncplay::router()
+    };
     Router::new()
         .route("/System/Info/Public", get(public_info))
         .route("/Users/AuthenticateByName", post(authenticate))
@@ -277,7 +304,7 @@ fn router(state: Arc<AppState>) -> Router {
         .merge(admin::router())
         .merge(metadata::router())
         .merge(system::router())
-        .merge(syncplay::router())
+        .merge(syncplay_router)
         .merge(remote::router())
         .merge(subtitles::router())
         .fallback(not_found)
@@ -1270,7 +1297,16 @@ async fn playback_info(
         "IsRemote": false,
         "ETag": seed::image_tag(&id, "etag"),
         "RunTimeTicks": item.run_time_ticks,
-        "Size": if synthetic_audio { synthetic_audio_wav_len() } else { STREAM_LEN as u64 },
+        "Size": match &state.media_file {
+            Some(bytes) => bytes.len() as u64,
+            None => {
+                if synthetic_audio {
+                    synthetic_audio_wav_len()
+                } else {
+                    STREAM_LEN as u64
+                }
+            }
+        },
         "Bitrate": if synthetic_audio { 1_411_200 } else { 2_000_000 },
         "SupportsDirectPlay": !transcode_only,
         "SupportsDirectStream": !transcode_only,
@@ -1306,11 +1342,19 @@ fn media_streams(is_video: bool, synthetic_audio: bool) -> Value {
         "Type": "Audio", "Codec": audio_codec, "Index": 1, "Channels": 2,
         "SampleRate": if synthetic_audio { SYNTHETIC_AUDIO_SAMPLE_RATE } else { 48000 },
         "Language": "eng", "IsDefault": true,
+        "Profile": if is_video { "LC" } else { "" },
+        "BitRate": if is_video { 64_000 } else { 128_000 },
     });
     if is_video {
+        // A real server reports the depth and range a client profile gates DirectPlay on.
+        // Omitting them makes the client treat the source as unvalidated and transcode.
         json!([
             {"Type": "Video", "Codec": "h264", "Index": 0, "Width": 1920, "Height": 1080,
-             "AspectRatio": "16:9", "IsDefault": true},
+             "AspectRatio": "16:9", "IsDefault": true,
+             "BitDepth": 8, "VideoRange": "SDR", "VideoRangeType": "SDR",
+             "PixelFormat": "yuv420p", "Level": 41, "Profile": "High",
+             "IsInterlaced": false, "BitRate": 1_800_000,
+             "ColorSpace": "bt709", "ColorTransfer": "bt709", "ColorPrimaries": "bt709"},
             audio,
         ])
     } else {
@@ -1508,7 +1552,51 @@ async fn download(
     media_response(&state, &headers, &id)
 }
 
+/// Serve the real media file with HTTP range support so a player can decode and seek. The body is
+/// the whole file for a plain GET and the requested slice for a range request.
+fn serve_real_media(bytes: &Arc<Vec<u8>>, headers: &HeaderMap) -> Response {
+    let total = bytes.len() as u64;
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| parse_range(value, total));
+    let content_type = HeaderValue::from_static("video/mp4");
+    let etag = HeaderValue::from_static("\"mock-real-media-v1\"");
+    match range {
+        None | Some(RangeOutcome::Ignored) => {
+            let mut response = (StatusCode::OK, Body::from(bytes.as_ref().clone())).into_response();
+            let response_headers = response.headers_mut();
+            response_headers.insert(header::CONTENT_TYPE, content_type);
+            response_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            response_headers.insert(header::ETAG, etag);
+            response
+        }
+        Some(RangeOutcome::Unsatisfiable) => {
+            let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            if let Ok(value) = HeaderValue::from_str(&format!("bytes */{total}")) {
+                response.headers_mut().insert(header::CONTENT_RANGE, value);
+            }
+            response
+        }
+        Some(RangeOutcome::Satisfiable(start, end)) => {
+            let slice = bytes[start as usize..=end as usize].to_vec();
+            let mut response = (StatusCode::PARTIAL_CONTENT, Body::from(slice)).into_response();
+            let response_headers = response.headers_mut();
+            response_headers.insert(header::CONTENT_TYPE, content_type);
+            response_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            response_headers.insert(header::ETAG, etag);
+            if let Ok(value) = HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")) {
+                response.headers_mut().insert(header::CONTENT_RANGE, value);
+            }
+            response
+        }
+    }
+}
+
 fn media_response(state: &AppState, headers: &HeaderMap, id: &str) -> Response {
+    if let Some(bytes) = &state.media_file {
+        return serve_real_media(bytes, headers);
+    }
     let Some(item) = state.catalog.get(id) else {
         return StatusCode::NOT_FOUND.into_response();
     };

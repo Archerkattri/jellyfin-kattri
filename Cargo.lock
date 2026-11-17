@@ -488,6 +488,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
+ "base64 0.22.1",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -506,8 +507,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1 0.10.7",
  "sync_wrapper",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -530,6 +533,12 @@ dependencies = [
  "tower-layer",
  "tower-service",
 ]
+
+[[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "base64"
@@ -790,7 +799,7 @@ checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
- "rand_core",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -1483,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "egui-gl-host-proof"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "directories",
  "egui",
@@ -1988,7 +1997,7 @@ dependencies = [
  "js-sys",
  "libc",
  "r-efi 6.0.0",
- "rand_core",
+ "rand_core 0.10.1",
  "wasm-bindgen",
 ]
 
@@ -2333,7 +2342,7 @@ version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddc03d96684f9226b8a787cdb71488417b53ab5ea8fdb1dac946cb9431cc8bff"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -2560,7 +2569,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jellyfin-api"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "mock-jellyfin",
  "reqwest",
@@ -2569,7 +2578,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tungstenite",
+ "tungstenite 0.30.0",
  "url",
  "zeroize",
 ]
@@ -2578,7 +2587,7 @@ dependencies = [
 name = "jellyfin-egui-client"
 version = "0.1.0"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "directories",
  "ed25519-dalek",
  "eframe",
@@ -2703,7 +2712,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-bench"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "jellyfin-api",
@@ -2713,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-client-core"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "jellyfin-api",
  "kattri-guard",
@@ -2724,7 +2733,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-downloads"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "jellyfin-api",
  "kattri-client-core",
@@ -2742,15 +2751,15 @@ dependencies = [
 
 [[package]]
 name = "kattri-guard"
-version = "0.8.0"
+version = "1.0.0"
 
 [[package]]
 name = "kattri-i18n"
-version = "0.8.0"
+version = "1.0.0"
 
 [[package]]
 name = "kattri-input"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "gilrs",
  "serde_json",
@@ -2759,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-logging"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "directories",
  "jellyfin-api",
@@ -2773,7 +2782,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-parental"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "argon2",
  "getrandom 0.3.4",
@@ -2785,7 +2794,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-platform"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "apple-native-keyring-store",
  "async-channel",
@@ -2802,7 +2811,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-player"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2811,7 +2820,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-plugin-host"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "kattri-guard",
  "kattri-plugins",
@@ -2821,7 +2830,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-plugins"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "kattri-client-core",
  "kattri-guard",
@@ -2835,7 +2844,7 @@ dependencies = [
 
 [[package]]
 name = "kattri-settings"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "kattri-guard",
  "serde",
@@ -2846,9 +2855,9 @@ dependencies = [
 
 [[package]]
 name = "kattri-updater"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "ed25519-dalek",
  "reqwest",
  "semver",
@@ -3086,16 +3095,17 @@ dependencies = [
 
 [[package]]
 name = "mock-jellyfin"
-version = "0.8.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "form_urlencoded",
+ "futures-util",
  "jellyfin-api",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
- "tungstenite",
+ "tungstenite 0.30.0",
  "zeroize",
 ]
 
@@ -3930,6 +3940,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ppv-lite86"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
+dependencies = [
+ "zerocopy",
+]
+
+[[package]]
 name = "proc-macro-crate"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4027,7 +4046,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "lru-slab",
- "rand",
+ "rand 0.10.3",
  "rand_pcg",
  "ring",
  "rustc-hash 2.1.3",
@@ -4077,13 +4096,42 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
+dependencies = [
+ "rand_chacha",
+ "rand_core 0.9.5",
+]
+
+[[package]]
+name = "rand"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
- "rand_core",
+ "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rand_chacha"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.9.5",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
+dependencies = [
+ "getrandom 0.3.4",
 ]
 
 [[package]]
@@ -4098,7 +4146,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
- "rand_core",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -4211,7 +4259,7 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "bytes",
  "futures-core",
  "futures-util",
@@ -5014,6 +5062,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.29.0",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5184,6 +5244,22 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.5",
+ "sha1 0.10.7",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "tungstenite"
 version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
@@ -5193,7 +5269,7 @@ dependencies = [
  "http",
  "httparse",
  "log",
- "rand",
+ "rand 0.10.3",
  "rustls",
  "rustls-native-certs",
  "rustls-pki-types",
