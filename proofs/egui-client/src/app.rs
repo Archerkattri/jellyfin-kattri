@@ -2005,7 +2005,7 @@ impl KattriApp {
             password_input: Zeroizing::new(String::new()),
             pending_launch_intent: None,
             allow_insecure_remote_http: false,
-            remember_sign_in: false,
+            remember_sign_in: true,
             saved_sign_in_available: None,
             server: None,
             user_name: None,
