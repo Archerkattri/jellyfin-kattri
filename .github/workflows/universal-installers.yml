@@ -75,7 +75,7 @@ jobs:
   windows-msi:
     name: Windows universal MSI
     needs: [windows-x64, windows-arm64]
-    runs-on: ubuntu-22.04
+    runs-on: windows-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -89,11 +89,12 @@ jobs:
         with:
           name: universal-payload-windows-arm64
           path: payloads/arm64
+      # Pinned: current WiX releases require accepting a fee EULA (WIX7015) that CI cannot accept.
       - name: Install the WiX v4 CLI
+        shell: pwsh
         run: |
-          set -euo pipefail
-          dotnet tool install --global wix
-          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          dotnet tool install --global wix --version 4.0.5
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - name: Build the universal MSI
         shell: pwsh
         run: |
@@ -122,7 +123,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            desktop-file-utils file libfuse2 libass9 libuchardet0
+            desktop-file-utils file libfuse2 libass9 libuchardet0 libudev-dev pkg-config
       - name: Fetch the pinned libmpv
         run: bash packaging/libmpv/fetch.sh linux-x64
       - name: Build the release executable
