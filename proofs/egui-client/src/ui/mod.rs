@@ -1098,44 +1098,20 @@ fn sign_in_form(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: 
                 .starts_with("http://");
             if is_http {
                 ui.add_space(16.0);
-                let warning = colors.warning;
-                egui::Frame::new()
-                    .fill(warning.gamma_multiply(0.09))
-                    .stroke(Stroke::new(1.0, warning))
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(egui::Margin::same(12))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(ui_text(ids::CONNECT_WARNING_HTTP_TITLE))
-                                .strong()
-                                .color(warning),
-                        );
-                        ui.label(
-                            RichText::new(ui_text(ids::CONNECT_WARNING_HTTP_BODY))
-                                .size(12.0)
-                                .color(colors.text),
-                        );
-                        ui.add_space(6.0);
-                        let opt_in_response = with_access_name(
-                            ui.checkbox(
-                                &mut app.allow_insecure_remote_http,
-                                ui_text(ids::CONNECT_OPTION_ALLOW_PUBLIC_HTTP),
-                            ),
-                            egui::Role::CheckBox,
-                            ids::ACCESS_CONNECT_ALLOW_PUBLIC_HTTP,
-                        );
-                        if opt_in_response.changed() {
-                            app.server_address_changed(duration_from_egui_time(
-                                ui.input(|input| input.time),
-                            ));
-                            quick_connect_probe_requested = true;
-                        }
-                        ui.label(
-                            RichText::new(ui_text(ids::CONNECT_NOTE_LAN_HTTP))
-                                .size(11.0)
-                                .color(colors.muted),
-                        );
-                    });
+                let opt_in_response = with_access_name(
+                    ui.checkbox(
+                        &mut app.allow_insecure_remote_http,
+                        ui_text(ids::CONNECT_OPTION_ALLOW_PUBLIC_HTTP),
+                    ),
+                    egui::Role::CheckBox,
+                    ids::ACCESS_CONNECT_ALLOW_PUBLIC_HTTP,
+                );
+                if opt_in_response.changed() {
+                    app.server_address_changed(duration_from_egui_time(
+                        ui.input(|input| input.time),
+                    ));
+                    quick_connect_probe_requested = true;
+                }
             }
 
             if let Some(server) = app.visible_server_preview() {
