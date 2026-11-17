@@ -720,7 +720,13 @@ impl<'session> GlHost<'session> {
         let typing = self.egui.egui_wants_keyboard_input();
         if !typing {
             for action in mpv_host::playback_key_actions(&input.events) {
-                self.mpv.dispatch_playback_key(action);
+                // The aspect cycle needs the settings store to persist the new mode, which lives
+                // on the app side; every other playback key is handled by the player alone.
+                if matches!(action, mpv_host::PlaybackKeyAction::CycleAspect) {
+                    self.cycle_aspect();
+                } else {
+                    self.mpv.dispatch_playback_key(action);
+                }
             }
         }
         let screenshot_requested = !typing && screenshot_key_pressed(&input.events);
@@ -1217,12 +1223,7 @@ impl<'session> GlHost<'session> {
                         );
                         ui.add_space(6.0);
                         for (marker, label) in SYNC_MARKER_BUTTONS {
-                            if ui
-                                .add_sized(
-                                    [ui.available_width(), 38.0],
-                                    egui::Button::new(label),
-                                )
-                                .clicked()
+                            if player_controls::sync_marker_button_for(ui, marker, label, true, 1.0)
                             {
                                 mpv.capture_sync_marker(marker);
                             }
@@ -1622,15 +1623,52 @@ impl<'session> GlHost<'session> {
         }
     }
 
-    /// Perform the player actions reached from a Ctrl shortcut (Ctrl+1 and Ctrl+2). These are
-    /// keyboard-only, so no button is added to the control bar.
+    /// Perform the player actions reached from a Ctrl shortcut (Ctrl+1, Ctrl+2, Ctrl+Up/Down,
+    /// Ctrl+0 and Ctrl+A). These are keyboard-only, so no button is added to the control bar.
     fn apply_player_shortcut(&mut self, action: PlayerControlAction) {
         match action {
             PlayerControlAction::FitWindowToVideo => self.fit_window_to_video(),
             PlayerControlAction::ToggleDoubleSpeed => self.toggle_double_speed(),
+            PlayerControlAction::StepSpeed { up } => self.step_playback_speed(up),
+            PlayerControlAction::ResetSpeed => self.reset_playback_speed(),
+            PlayerControlAction::CycleAspect => self.cycle_aspect(),
             // Other actions arrive through the on-screen controls or the gamepad, not here.
             _ => {}
         }
+    }
+
+    /// Ctrl+Up / Ctrl+Down: move the playback rate one ladder notch from mpv's reported speed.
+    /// The setter enforces the Watch Together speed lock, so a synchronized session stays normal.
+    fn step_playback_speed(&mut self, up: bool) {
+        if !self.mpv.has_media() {
+            self.set_shell_notice("Playback speed needs a loaded video.".to_owned());
+            return;
+        }
+        let current = self.mpv.controls_snapshot().speed_multiplier;
+        let direction = if up { 1 } else { -1 };
+        let target = kattri_client_core::controls::step_speed(current, direction);
+        self.mpv.set_playback_speed(target);
+    }
+
+    /// Ctrl+0: return the playback rate to normal.
+    fn reset_playback_speed(&mut self) {
+        if !self.mpv.has_media() {
+            self.set_shell_notice("Playback speed needs a loaded video.".to_owned());
+            return;
+        }
+        self.mpv
+            .set_playback_speed(kattri_client_core::controls::PlaybackSpeed::Normal);
+    }
+
+    /// Cycle the video aspect ratio: persist the new mode through the app, then apply it to the
+    /// live player so the picture changes immediately and the next file starts the same way.
+    fn cycle_aspect(&mut self) {
+        if !self.mpv.has_media() {
+            self.set_shell_notice("Aspect ratio needs a loaded video.".to_owned());
+            return;
+        }
+        let mode = self.kattri_app.cycle_video_aspect();
+        self.mpv.apply_video_aspect(mode);
     }
 
     /// Ctrl+2: switch between normal and double speed. The current speed comes from mpv's own
@@ -2213,6 +2251,7 @@ fn osd_controls(
             paused: osd.paused,
             speed_multiplier: osd.speed_multiplier,
             speed_enabled: !kattri_app.sync_play_speed_locked(),
+            aspect_label: kattri_app.video_settings().aspect.label(),
             seek_enabled: true,
             stop_enabled: osd.media_active,
             previous_track_enabled: osd.previous_track_enabled,
@@ -2248,12 +2287,19 @@ fn osd_controls(
                 ui.small(feedback);
             }
             ui.label("Sync subtitles to speech");
-            ui.add_enabled_ui(subtitle_selected, |ui| {
-                for (marker, label) in SYNC_MARKER_BUTTONS {
-                    if ui.button(label).clicked() {
-                        sync_marker = Some(marker);
-                    }
+            for (marker, label) in SYNC_MARKER_BUTTONS {
+                if player_controls::sync_marker_button_for(
+                    ui,
+                    marker,
+                    label,
+                    subtitle_selected,
+                    osd.opacity,
+                ) {
+                    sync_marker = Some(marker);
                 }
+                ui.add_space(4.0);
+            }
+            ui.add_enabled_ui(subtitle_selected, |ui| {
                 if ui.button("Reset subtitle delay").clicked() {
                     reset_subtitle_delay = true;
                 }
@@ -2346,8 +2392,16 @@ fn osd_controls(
             PlayerControlAction::ToggleMute => mpv.toggle_mute(),
             PlayerControlAction::StepChapter { forward } => mpv.step_chapter_control(forward),
             PlayerControlAction::ToggleFullscreen => *fullscreen_toggle_requested = true,
-            // Ctrl+1 and Ctrl+2 are global shortcuts handled before the OSD is drawn.
-            PlayerControlAction::FitWindowToVideo | PlayerControlAction::ToggleDoubleSpeed => {}
+            PlayerControlAction::CycleAspect => {
+                let mode = kattri_app.cycle_video_aspect();
+                mpv.apply_video_aspect(mode);
+            }
+            // Ctrl shortcuts are handled before the OSD is drawn; the speed steps and reset reach
+            // the player through apply_player_shortcut, not through the on-screen action loop.
+            PlayerControlAction::FitWindowToVideo
+            | PlayerControlAction::ToggleDoubleSpeed
+            | PlayerControlAction::StepSpeed { .. }
+            | PlayerControlAction::ResetSpeed => {}
         }
     }
     if let Some(feedback) = osd.feedback {

@@ -46,7 +46,7 @@ use kattri_player::{
     cache_runtime_capabilities, cached_runtime_capabilities,
 };
 use kattri_settings::{
-    AudioSettings, DecodeMode, PlaybackSettings, SubtitleSettings, VideoSettings,
+    AspectMode, AudioSettings, DecodeMode, PlaybackSettings, SubtitleSettings, VideoSettings,
 };
 use mpv_render_proof::playback_policy::OptionWriteLedger;
 use mpv_render_proof::{
@@ -2322,6 +2322,18 @@ impl<'session> MpvHost<'session> {
         );
     }
 
+    /// Apply a video aspect mode to the live player through the same validated writes the load
+    /// path queues before loadfile, so a cycle during playback matches what the next file starts
+    /// with. Persistence is owned by the caller that holds the settings store.
+    pub(crate) fn apply_video_aspect(&mut self, mode: AspectMode) {
+        let Some(session) = self.session else {
+            self.controls_feedback = Some("libmpv is unavailable.".into());
+            return;
+        };
+        queue_validated(session, "video.aspect", aspect_options(mode));
+        self.controls_feedback = Some(format!("Aspect ratio: {}", mode.label()));
+    }
+
     pub(crate) fn stop_playback(&mut self) {
         let Some(session) = self.session else {
             self.controls_feedback = Some("libmpv is unavailable.".into());
@@ -3304,6 +3316,10 @@ impl<'session> MpvHost<'session> {
                 self.cycle_ab_loop();
             }
             PlaybackKeyAction::MediaInfo => self.media_info.toggle(),
+            // The host intercepts this before dispatch so the settings store can persist the new
+            // mode; reaching here means no settings owner was available, so there is nothing to
+            // cycle against and the picture is left unchanged.
+            PlaybackKeyAction::CycleAspect => {}
         }
     }
 
@@ -3746,6 +3762,10 @@ pub(crate) enum PlaybackKeyAction {
     AbLoopCycle,
     /// Show or hide the media info panel (M6-14).
     MediaInfo,
+    /// Cycle the video aspect ratio. The caller that owns the settings store persists the new
+    /// mode and applies it live; `dispatch_playback_key` only reaches this when no such caller
+    /// intercepted it, so it applies the picture change without a save.
+    CycleAspect,
 }
 
 /// Map one key to its playback control. `shift` selects the coarse subtitle step.
@@ -3776,6 +3796,7 @@ pub(crate) fn playback_key_action(key: Key, shift: bool) -> Option<PlaybackKeyAc
         Key::PageDown => Some(PlaybackKeyAction::Chapter(ChapterStep::Previous)),
         Key::L => Some(PlaybackKeyAction::AbLoopCycle),
         Key::I => Some(PlaybackKeyAction::MediaInfo),
+        Key::A => Some(PlaybackKeyAction::CycleAspect),
         _ => None,
     }
 }
@@ -4409,6 +4430,10 @@ mod tests {
         assert_eq!(
             playback_key_action(Key::I, false),
             Some(PlaybackKeyAction::MediaInfo)
+        );
+        assert_eq!(
+            playback_key_action(Key::A, false),
+            Some(PlaybackKeyAction::CycleAspect)
         );
         assert_eq!(playback_key_action(Key::Space, false), None);
     }

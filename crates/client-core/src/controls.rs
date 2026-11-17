@@ -77,6 +77,30 @@ impl PlaybackSpeed {
         let next = (index + direction.signum()).clamp(0, last) as usize;
         Self::ALL[next]
     }
+
+    /// The ladder entry closest to a reported multiplier. A non-finite value falls back to
+    /// normal speed, so a missing or broken mpv observation never selects an extreme rate.
+    pub fn nearest(multiplier: f64) -> Self {
+        if !multiplier.is_finite() {
+            return Self::Normal;
+        }
+        Self::ALL
+            .into_iter()
+            .min_by(|a, b| {
+                let da = (a.multiplier() - multiplier).abs();
+                let db = (b.multiplier() - multiplier).abs();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(Self::Normal)
+    }
+}
+
+/// Step the playback rate one ladder notch from the currently reported multiplier. `direction`
+/// is positive for faster and negative for slower; both ends clamp. `None` (no observation yet)
+/// starts from normal speed.
+pub fn step_speed(current: Option<f64>, direction: i32) -> PlaybackSpeed {
+    let base = current.map_or(PlaybackSpeed::Normal, PlaybackSpeed::nearest);
+    base.step(direction)
 }
 
 /// Inactivity duration before playback controls hide.
@@ -212,6 +236,25 @@ mod tests {
         assert_eq!(PlaybackSpeed::Half.step(-1), PlaybackSpeed::Half);
         assert_eq!(PlaybackSpeed::Double.step(1), PlaybackSpeed::Double);
         assert_eq!(PlaybackSpeed::Normal.step(0), PlaybackSpeed::Normal);
+    }
+
+    #[test]
+    fn nearest_speed_snaps_to_the_ladder_and_defaults_on_bad_input() {
+        use super::step_speed;
+        assert_eq!(PlaybackSpeed::nearest(1.0), PlaybackSpeed::Normal);
+        assert_eq!(PlaybackSpeed::nearest(1.24), PlaybackSpeed::FiveQuarters);
+        assert_eq!(PlaybackSpeed::nearest(1.26), PlaybackSpeed::FiveQuarters);
+        assert_eq!(PlaybackSpeed::nearest(1.4), PlaybackSpeed::ThreeHalves);
+        assert_eq!(PlaybackSpeed::nearest(0.1), PlaybackSpeed::Half);
+        assert_eq!(PlaybackSpeed::nearest(9.0), PlaybackSpeed::Double);
+        assert_eq!(PlaybackSpeed::nearest(f64::NAN), PlaybackSpeed::Normal);
+        assert_eq!(PlaybackSpeed::nearest(f64::INFINITY), PlaybackSpeed::Normal);
+
+        assert_eq!(step_speed(Some(1.0), 1), PlaybackSpeed::FiveQuarters);
+        assert_eq!(step_speed(Some(1.0), -1), PlaybackSpeed::ThreeQuarters);
+        assert_eq!(step_speed(None, 1), PlaybackSpeed::FiveQuarters);
+        assert_eq!(step_speed(Some(2.0), 1), PlaybackSpeed::Double);
+        assert_eq!(step_speed(Some(0.5), -1), PlaybackSpeed::Half);
     }
 
     #[test]

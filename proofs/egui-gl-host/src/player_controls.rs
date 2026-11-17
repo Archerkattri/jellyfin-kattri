@@ -32,7 +32,7 @@ use kattri_client_core::segments::{
     SegmentError, SegmentKind, SegmentSkipper, SkipDecision, SkipSettings,
 };
 use kattri_settings::PlaybackSettings;
-use mpv_render_proof::TrackSelection;
+use mpv_render_proof::{CalibrationMarker, TrackSelection};
 
 use crate::player_icons::{self, OsdIcon};
 use jellyfin_egui_client::SeekThumbnail;
@@ -91,6 +91,8 @@ pub struct PlayerControlsView<'a> {
     pub speed_multiplier: Option<f64>,
     /// Whether local playback speed can be changed in the current session.
     pub speed_enabled: bool,
+    /// Short label of the current video aspect mode, for the settings cycle row.
+    pub aspect_label: &'a str,
     /// Whether the current source permits seeking.
     pub seek_enabled: bool,
     /// Whether there is a loaded item the Stop control can stop.
@@ -239,6 +241,15 @@ pub enum PlayerControlAction {
     FitWindowToVideo,
     /// Switch between normal and double playback speed.
     ToggleDoubleSpeed,
+    /// Step the playback rate one ladder notch (Ctrl+Up / Ctrl+Down).
+    StepSpeed {
+        /// True steps faster, false slower.
+        up: bool,
+    },
+    /// Return the playback rate to normal (Ctrl+0).
+    ResetSpeed,
+    /// Cycle the video aspect ratio one step (Ctrl+A, the A key, or the settings row).
+    CycleAspect,
 }
 
 /// Segment skip for the current item. The caller keeps `skipper` loaded with the item's
@@ -479,6 +490,7 @@ struct SettingsSections {
     subtitles: bool,
     secondary: bool,
     speed: bool,
+    aspect: bool,
     chapters: bool,
     playback: bool,
     media_info: bool,
@@ -495,6 +507,7 @@ fn settings_sections(view: &PlayerControlsView<'_>, layout: ChromeLayout) -> Set
                 .is_some_and(|tracks| !tracks.is_empty()),
         secondary: !view.secondary_subtitles.is_empty(),
         speed: true,
+        aspect: true,
         chapters: !view.chapters.is_empty(),
         // Below the roomy tier the row hides secondary playback controls; the popover is where
         // they remain reachable.
@@ -1405,6 +1418,20 @@ fn settings_popover(
                             first_row = false;
                         }
                     }
+                    if sections.aspect {
+                        settings_heading(ui, "Video", opacity);
+                        if settings_row(
+                            ui,
+                            &format!("Aspect ratio · {}", view.aspect_label),
+                            false,
+                            true,
+                            opacity,
+                            opening && first_row,
+                        ) {
+                            chosen = Some(PlayerControlAction::CycleAspect);
+                        }
+                        first_row = false;
+                    }
                     if sections.chapters {
                         settings_heading(ui, "Chapters", opacity);
                         let current = current_chapter_index(view.chapters, view.position);
@@ -1899,10 +1926,12 @@ pub fn screenshot_key_pressed(events: &[egui::Event]) -> bool {
 
 /// The player action for a Ctrl shortcut in one frame of input, if one was pressed.
 ///
-/// Ctrl+1 asks for a 1:1 window and Ctrl+2 toggles normal and double speed. Repeats are ignored so
-/// a held key fires once. Like [`screenshot_key_pressed`], the caller must skip this while a text
-/// field has focus. The host does not depend on kattri-input yet, so these defaults are repeated
-/// here; keep them equal to that crate's player map.
+/// Ctrl+1 asks for a 1:1 window, Ctrl+2 toggles normal and double speed, Ctrl+Up / Ctrl+Down step
+/// the playback rate, Ctrl+0 returns it to normal, and Ctrl+A cycles the aspect ratio. Repeats are
+/// ignored so a held key fires once. Like [`screenshot_key_pressed`], the caller must skip this
+/// while a text field has focus. The host does not depend on kattri-input yet, so these defaults
+/// are repeated here; keep them equal to that crate's player map (SpeedUp/SpeedDown are Ctrl+Up /
+/// Ctrl+Down there).
 pub fn player_shortcut_action(events: &[egui::Event]) -> Option<PlayerControlAction> {
     events.iter().find_map(|event| {
         let egui::Event::Key {
@@ -1921,6 +1950,10 @@ pub fn player_shortcut_action(events: &[egui::Event]) -> Option<PlayerControlAct
         match key {
             egui::Key::Num1 => Some(PlayerControlAction::FitWindowToVideo),
             egui::Key::Num2 => Some(PlayerControlAction::ToggleDoubleSpeed),
+            egui::Key::Num0 => Some(PlayerControlAction::ResetSpeed),
+            egui::Key::ArrowUp => Some(PlayerControlAction::StepSpeed { up: true }),
+            egui::Key::ArrowDown => Some(PlayerControlAction::StepSpeed { up: false }),
+            egui::Key::A => Some(PlayerControlAction::CycleAspect),
             _ => None,
         }
     })
@@ -2077,6 +2110,80 @@ fn primary_icon_button(
     observe(rect);
     response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, accessible_name));
     response.on_hover_text(accessible_name)
+}
+
+/// A full-width subtitle-sync marker button: an icon (ear and sound waves for the spoken line, a
+/// caption box for the text) beside its label. The icon symbolizes which moment the viewer is
+/// marking; the label is also the accessible name and tooltip, so a screen reader reads the full
+/// instruction. Either marker may be tapped first; the host applies the signed correction once
+/// both times are captured.
+pub fn sync_marker_button(
+    ui: &mut egui::Ui,
+    icon: OsdIcon,
+    label: &str,
+    enabled: bool,
+    opacity: f32,
+) -> bool {
+    let rounding = egui::CornerRadius::same(8);
+    let width = ui.available_width().max(140.0);
+    let (rect, response) = ui
+        .add_enabled_ui(enabled, |ui| {
+            ui.allocate_exact_size(egui::vec2(width, 38.0), Sense::click())
+        })
+        .inner;
+    let hover = response.hovered() && enabled;
+    let fill = if hover {
+        Color32::from_white_alpha(42)
+    } else {
+        Color32::from_white_alpha(18)
+    };
+    ui.painter()
+        .rect_filled(rect, rounding, faded(fill, opacity));
+    ui.painter().rect_stroke(
+        rect,
+        rounding,
+        egui::Stroke::new(1.0, faded(Color32::from_white_alpha(44), opacity)),
+        egui::StrokeKind::Inside,
+    );
+    let color = if !enabled {
+        OSD_MUTED
+    } else if hover {
+        Color32::WHITE
+    } else {
+        OSD_TEXT
+    };
+    let icon_rect =
+        egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 7.0), egui::vec2(24.0, 24.0));
+    player_icons::paint(ui.painter(), icon_rect, icon, faded(color, opacity));
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(13.0),
+        faded(color, opacity),
+    );
+    ui.painter().galley(
+        egui::pos2(rect.min.x + 44.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        faded(color, opacity),
+    );
+    focus_ring(ui, &response, rounding, opacity);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, label));
+    response.on_hover_text(label).clicked()
+}
+
+/// The sync marker button for one calibration marker, choosing the icon that symbolizes it:
+/// an ear and sound waves for the spoken line, a caption box for the text seen.
+pub fn sync_marker_button_for(
+    ui: &mut egui::Ui,
+    marker: CalibrationMarker,
+    label: &str,
+    enabled: bool,
+    opacity: f32,
+) -> bool {
+    let icon = match marker {
+        CalibrationMarker::VoiceHeard => OsdIcon::SyncVoice,
+        CalibrationMarker::TextSeen => OsdIcon::SyncText,
+    };
+    sync_marker_button(ui, icon, label, enabled, opacity)
 }
 
 /// A borderless text action such as "Player details".
@@ -2308,6 +2415,7 @@ mod tests {
             paused: Some(true),
             speed_multiplier: Some(1.0),
             speed_enabled: true,
+            aspect_label: "Normal",
             seek_enabled: true,
             stop_enabled: true,
             previous_track_enabled: true,
@@ -3034,6 +3142,44 @@ mod tests {
             )]),
             None,
             "other chords do not toggle speed"
+        );
+    }
+
+    #[test]
+    fn ctrl_speed_and_aspect_shortcuts_select_the_player_actions() {
+        let key = |key, pressed, repeat, modifiers| egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat,
+            modifiers,
+        };
+        let ctrl = egui::Modifiers::CTRL;
+        assert_eq!(
+            player_shortcut_action(&[key(egui::Key::ArrowUp, true, false, ctrl)]),
+            Some(PlayerControlAction::StepSpeed { up: true })
+        );
+        assert_eq!(
+            player_shortcut_action(&[key(egui::Key::ArrowDown, true, false, ctrl)]),
+            Some(PlayerControlAction::StepSpeed { up: false })
+        );
+        assert_eq!(
+            player_shortcut_action(&[key(egui::Key::Num0, true, false, ctrl)]),
+            Some(PlayerControlAction::ResetSpeed)
+        );
+        assert_eq!(
+            player_shortcut_action(&[key(egui::Key::A, true, false, ctrl)]),
+            Some(PlayerControlAction::CycleAspect)
+        );
+        assert_eq!(
+            player_shortcut_action(&[key(egui::Key::ArrowUp, true, false, egui::Modifiers::NONE)]),
+            None,
+            "bare arrows belong to seeking, not speed"
+        );
+        assert_eq!(
+            player_shortcut_action(&[key(egui::Key::A, true, true, ctrl)]),
+            None,
+            "repeat"
         );
     }
 

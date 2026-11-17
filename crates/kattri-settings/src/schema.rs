@@ -955,6 +955,36 @@ pub enum AspectMode {
     NoScaling,
 }
 
+impl AspectMode {
+    /// The next mode in the quick playback cycle: Normal, 16:9, 4:3, Zoom, Stretch, then back to
+    /// Normal. Modes outside that ring (Custom, the conditional 16:9, NoScaling) enter it at 16:9
+    /// so a cycle always lands on a distinct, predictable picture shape.
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Normal => Self::Force16x9,
+            Self::Force16x9 => Self::Force4x3,
+            Self::Force4x3 => Self::Zoom,
+            Self::Zoom => Self::Stretch,
+            Self::Stretch => Self::Normal,
+            Self::Custom | Self::Force16x9IfFourByThree | Self::NoScaling => Self::Force16x9,
+        }
+    }
+
+    /// Short English label for the player chrome, which is not localized.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Custom => "Custom",
+            Self::Normal => "Normal",
+            Self::Zoom => "Zoom",
+            Self::Force4x3 => "4:3",
+            Self::Force16x9 => "16:9",
+            Self::Force16x9IfFourByThree => "16:9 if 4:3",
+            Self::Stretch => "Stretch",
+            Self::NoScaling => "No scaling",
+        }
+    }
+}
+
 /// Transcode preferences: which client-side conditions make the device profile
 /// ask the server to transcode. Defaults follow the legacy defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1306,5 +1336,52 @@ impl std::fmt::Debug for ParentalSettings {
             )
             .field("max_rating", &self.max_rating)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod aspect_tests {
+    use super::AspectMode;
+
+    #[test]
+    fn the_quick_cycle_visits_each_shape_and_wraps() {
+        let ring = [
+            AspectMode::Normal,
+            AspectMode::Force16x9,
+            AspectMode::Force4x3,
+            AspectMode::Zoom,
+            AspectMode::Stretch,
+        ];
+        for (index, mode) in ring.iter().enumerate() {
+            let next = ring[(index + 1) % ring.len()];
+            assert_eq!(mode.cycle(), next, "{mode:?} should cycle to {next:?}");
+        }
+    }
+
+    #[test]
+    fn modes_outside_the_ring_enter_it_predictably() {
+        for mode in [
+            AspectMode::Custom,
+            AspectMode::Force16x9IfFourByThree,
+            AspectMode::NoScaling,
+        ] {
+            assert_eq!(mode.cycle(), AspectMode::Force16x9);
+        }
+    }
+
+    #[test]
+    fn every_mode_has_a_non_empty_label() {
+        for mode in [
+            AspectMode::Custom,
+            AspectMode::Normal,
+            AspectMode::Zoom,
+            AspectMode::Force4x3,
+            AspectMode::Force16x9,
+            AspectMode::Force16x9IfFourByThree,
+            AspectMode::Stretch,
+            AspectMode::NoScaling,
+        ] {
+            assert!(!mode.label().is_empty(), "{mode:?} has no label");
+        }
     }
 }

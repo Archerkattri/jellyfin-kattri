@@ -2912,6 +2912,17 @@ impl KattriApp {
         &self.settings.settings().video
     }
 
+    /// Cycle the video aspect ratio one step and persist it through the same queued save the
+    /// settings page uses. Returns the new mode so the host can apply it to the live player.
+    pub fn cycle_video_aspect(&mut self) -> kattri_settings::AspectMode {
+        let before = self.settings.settings().clone();
+        let video = &mut self.settings.settings_mut().video;
+        video.aspect = video.aspect.cycle();
+        let mode = video.aspect;
+        self.settings.save_if_changed(&before);
+        mode
+    }
+
     /// Window settings of the running profile: the remembered placement and fullscreen state (M2-14).
     pub fn window_settings(&self) -> &kattri_settings::WindowSettings {
         &self.settings.settings().window

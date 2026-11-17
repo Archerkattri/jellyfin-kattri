@@ -53,6 +53,10 @@ pub(crate) enum OsdIcon {
     Settings,
     /// The selected row in a menu: a check mark.
     Check,
+    /// Subtitle sync, spoken line: an ear beside sound waves, marking when the line is heard.
+    SyncVoice,
+    /// Subtitle sync, text seen: a caption box with two lines, marking when the subtitle is read.
+    SyncText,
 }
 
 impl OsdIcon {
@@ -200,6 +204,40 @@ pub(crate) fn shapes(rect: Rect, icon: OsdIcon, color: Color32) -> Vec<Shape> {
             Shape::circle_filled(point(7.5, 18.0), 2.1 * scale, color),
         ],
         OsdIcon::Check => vec![polyline(&[(4.5, 12.5), (9.5, 17.5), (19.5, 6.5)], stroke)],
+        // An ear outline with a small inner fold, then two sound waves: "I hear the spoken line".
+        OsdIcon::SyncVoice => vec![
+            polyline(
+                &[
+                    (13.5, 3.5),
+                    (8.0, 3.5),
+                    (5.0, 7.0),
+                    (5.0, 13.0),
+                    (7.5, 16.0),
+                    (7.5, 19.0),
+                    (10.0, 20.5),
+                    (12.0, 19.0),
+                    (11.0, 16.5),
+                    (13.0, 14.0),
+                    (14.5, 11.0),
+                    (14.5, 7.0),
+                ],
+                stroke,
+            ),
+            polyline(&[(11.0, 7.0), (9.0, 8.5), (9.0, 11.0), (11.0, 12.0)], thin),
+            polyline(&[(16.5, 9.0), (18.5, 12.0), (16.5, 15.0)], thin),
+            polyline(&[(19.0, 6.5), (21.5, 12.0), (19.0, 17.5)], thin),
+        ],
+        // A caption box with two text lines: "I see the subtitle".
+        OsdIcon::SyncText => vec![
+            Shape::rect_stroke(
+                Rect::from_min_max(point(3.0, 5.0), point(21.0, 19.0)),
+                2.0 * scale,
+                stroke,
+                egui::StrokeKind::Inside,
+            ),
+            bar(6.0, 9.0, 14.0, 10.6),
+            bar(6.0, 13.0, 18.0, 14.6),
+        ],
     }
 }
 
@@ -213,7 +251,7 @@ mod tests {
     use super::{OsdIcon, shapes};
     use egui::Color32;
 
-    const ALL: [OsdIcon; 19] = [
+    const ALL: [OsdIcon; 21] = [
         OsdIcon::Play,
         OsdIcon::Pause,
         OsdIcon::Stop,
@@ -233,6 +271,8 @@ mod tests {
         OsdIcon::Back,
         OsdIcon::Settings,
         OsdIcon::Check,
+        OsdIcon::SyncVoice,
+        OsdIcon::SyncText,
     ];
 
     #[test]
