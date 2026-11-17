@@ -34,16 +34,20 @@ real desktop window, with a keyboard, a gamepad or a mouse.
 
 ## Screenshots
 
-| Movies library | Item details |
+| Movies and series | Item details |
 | --- | --- |
-| ![Movies library](assets/screenshots/library.jpg) | ![Item details](assets/screenshots/detail.jpg) |
+| ![Movies and series](assets/screenshots/library.jpg) | ![Item details](assets/screenshots/detail.jpg) |
 
 | Player | Settings |
 | --- | --- |
 | ![Player controls](assets/screenshots/player.jpg) | ![Settings](assets/screenshots/settings.jpg) |
 
+| Series | All items |
+| --- | --- |
+| ![Series](assets/screenshots/series.jpg) | ![All items](assets/screenshots/items.jpg) |
+
 These are framebuffer captures from the running application against a real Jellyfin 12.4.0
-server on 2026-11-06, with the debug-only stream-only banner cropped out. No mock data is
+server on 2026-11-17, with the debug-only stream-only banner cropped out. No mock data is
 used.
 
 ## Features
