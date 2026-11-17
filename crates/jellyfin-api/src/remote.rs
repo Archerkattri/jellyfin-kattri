@@ -68,4 +68,3 @@ pub fn parse_session_message(message: &str) -> Result<RemoteCommand, RemoteComma
         _ => Err(RemoteCommandError::UnsupportedCommand),
     }
 }
-

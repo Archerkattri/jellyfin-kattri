@@ -298,4 +298,3 @@ impl AdjacentEpisodes {
 fn log_path_once(once: &Once, path: &'static str) {
     once.call_once(|| tracing::info!(endpoint = path, "series list endpoint selected"));
 }
-

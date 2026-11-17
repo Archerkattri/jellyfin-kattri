@@ -1434,4 +1434,3 @@ fn failure_line(ui: &mut egui::Ui, title: &str, message: &str, colors: Palette) 
         });
     ui.add_space(6.0);
 }
-
