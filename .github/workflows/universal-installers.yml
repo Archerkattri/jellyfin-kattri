@@ -1,0 +1,208 @@
+# Builds one auto-architecture installer per operating system:
+#   Windows  JellyfinKattri-<version>-universal.msi  (x64 + ARM64 payloads, one MSI)
+#   macOS    JellyfinKattri-<version>.pkg            (universal app, installs into /Applications)
+#   Linux    JellyfinKattri-<version>-linux.run      (self-extracting, detects uname -m)
+#
+# These are the release-download files; the per-architecture MSI/DMG/AppImage/deb/rpm outputs of the
+# release-*.yml workflows stay available for package-manager users. This workflow only builds and
+# uploads artifacts: it publishes nothing and creates no release.
+name: Universal installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    name: Windows x64 payload
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
+      - name: Fetch the pinned libmpv
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File packaging/libmpv/fetch.ps1 -Platform windows-x64
+      - name: Build the release executable
+        run: cargo build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri
+      - name: Stage the payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item target/release/jellyfin-kattri.exe payload/ -Force
+          Copy-Item target/libmpv/windows-x64/* payload/ -Force -Recurse
+          Get-ChildItem payload | Select-Object Name, Length
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: universal-payload-windows-x64
+          path: payload/
+          retention-days: 7
+
+  windows-arm64:
+    name: Windows ARM64 payload
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
+      - name: Fetch the pinned libmpv
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File packaging/libmpv/fetch.ps1 -Platform windows-arm64
+      - name: Build the release executable
+        run: cargo build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri
+      - name: Stage the payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item target/release/jellyfin-kattri.exe payload/ -Force
+          Copy-Item target/libmpv/windows-arm64/* payload/ -Force -Recurse
+          Get-ChildItem payload | Select-Object Name, Length
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: universal-payload-windows-arm64
+          path: payload/
+          retention-days: 7
+
+  windows-msi:
+    name: Windows universal MSI
+    needs: [windows-x64, windows-arm64]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: universal-payload-windows-x64
+          path: payloads/x64
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: universal-payload-windows-arm64
+          path: payloads/arm64
+      - name: Install the WiX v4 CLI
+        run: |
+          set -euo pipefail
+          dotnet tool install --global wix
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+      - name: Build the universal MSI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$' | Select-Object -First 1).Matches[0].Groups[1].Value
+          ./packaging/windows/build-universal-msi.ps1 -Version $version -X64PayloadDir payloads/x64 -Arm64PayloadDir payloads/arm64 -OutputDir dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: universal-windows-msi
+          path: |
+            dist/JellyfinKattri-*-universal.msi
+            dist/JellyfinKattri-*-universal.msi.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  linux-appimage-x64:
+    name: Linux x64 AppImage payload
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
+      - name: Install AppImage prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            desktop-file-utils file libfuse2 libass9 libuchardet0
+      - name: Fetch the pinned libmpv
+        run: bash packaging/libmpv/fetch.sh linux-x64
+      - name: Build the release executable
+        run: cargo build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri
+      - name: Build the AppImage
+        run: |
+          set -euo pipefail
+          chmod 755 target/release/jellyfin-kattri
+          VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          packaging/linux/appimage/build-appimage.sh "$VERSION" target/release/jellyfin-kattri dist/linux
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: universal-payload-linux-x64
+          path: dist/linux/*.AppImage
+          retention-days: 7
+
+  linux-run:
+    name: Linux self-extracting installer
+    needs: [linux-appimage-x64]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: universal-payload-linux-x64
+          path: appimage-x64
+      - name: Build the .run installer
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          X64="$(find appimage-x64 -maxdepth 1 -name '*.AppImage' -print -quit)"
+          # No aarch64 libmpv pin exists yet, so the arm64 payload is absent and the installer
+          # reports that clearly on an aarch64 machine instead of installing a foreign binary.
+          bash packaging/linux/build-run-installer.sh "$VERSION" "$X64" - dist
+      - name: Smoke the installer header
+        run: |
+          set -euo pipefail
+          RUN_FILE="$(find dist -maxdepth 1 -name '*.run' -print -quit)"
+          test -n "$RUN_FILE"
+          sh -n "$RUN_FILE"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: universal-linux-run
+          path: dist/*.run
+          if-no-files-found: error
+          retention-days: 7
+
+  macos-pkg:
+    name: macOS universal package
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
+        with:
+          target: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Fetch the pinned libmpv
+        run: bash packaging/libmpv/fetch.sh macos-universal
+      - name: Build the universal application bundle
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          CARGO_PACKAGE=egui-gl-host-proof BINARY_NAME=jellyfin-kattri packaging/macos/build-app.sh "$VERSION"
+          codesign --force --deep -s - "dist/macos/Jellyfin Kattri.app"
+          codesign --verify --deep --strict "dist/macos/Jellyfin Kattri.app"
+      - name: Build the installer package
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          bash packaging/macos/build-pkg.sh "$VERSION" "dist/macos/Jellyfin Kattri.app" dist-macos
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: universal-macos-pkg
+          path: dist-macos/*.pkg
+          if-no-files-found: error
+          retention-days: 7

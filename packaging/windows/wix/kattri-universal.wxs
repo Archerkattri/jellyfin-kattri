@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  One MSI that carries the x64 and the Windows on ARM payload and installs only the payload
+  that matches the machine (WiX v4 schema).
+
+  Built only by packaging/windows/build-universal-msi.ps1; it is not compiled by hand. The
+  build supplies these definitions:
+    Version                  numeric MSI version, for example 1.2.3
+    ExeName                  file name of the release executable, jellyfin-kattri.exe
+    X64ExePath               x64 executable copied from the x64 payload folder
+    X64LibmpvPath            x64 libmpv-2.dll copied from the x64 payload folder
+    Arm64ExePath             arm64 executable copied from the arm64 payload folder
+    Arm64LibmpvPath          arm64 libmpv-2.dll copied from the arm64 payload folder
+    LicensePath              project license installed next to the executable
+    LibmpvNoticePath         notice describing the bundled libmpv builds
+    LibmpvLicenseDirectory   verified upstream libmpv and FFmpeg license texts
+    IconPath                 ICO for the Add/Remove Programs entry and the shortcut
+    X64ExtraPayload          "1" when the x64 payload folder held more than the two known files
+    Arm64ExtraPayload        "1" when the arm64 payload folder held more than the two known files
+
+  The two extra-payload definitions always exist, because the preprocessor cannot test for a
+  missing variable. When one is "1" the build also passes the generated fragment that declares
+  the X64ExtraPayloadComponents or Arm64ExtraPayloadComponents group; those groups carry native
+  files whose names are only known at build time, for example libmpv plugins.
+
+  Auto-architecture behaviour:
+    The package is compiled once with the WiX x64 package platform. An x64 package installs on
+    x64 and on Windows on ARM, while an arm64 package is refused on x64 hardware. At install
+    time KATTRI_ARM64 receives PROCESSOR_ARCHITECTURE from the environment key under
+    HKLM\SYSTEM\CurrentControlSet\Control\Session Manager, which holds "AMD64" on x64 and
+    "ARM64" on Windows on ARM. Every component of the x64 payload group is conditioned on
+    KATTRI_ARM64<>"ARM64" and every component of the arm64 payload group on KATTRI_ARM64="ARM64",
+    so exactly one executable, one libmpv DLL and one set of extra files reaches the install
+    folder. A machine whose registry value cannot be read installs the x64 payload, which is the
+    only useful default: the x64 build runs under emulation on Windows on ARM, the reverse does
+    not. The Session Manager environment key is not registry redirected, so the search reads the
+    same value from an x64 or an arm64 installer process.
+
+  Install scope: the plain install is per user under %LOCALAPPDATA%\Programs\Jellyfin Kattri with
+  no elevation; A per-machine install for all users needs ALLUSERS=1, matching
+  packaging/windows/wix/kattri.wxs. Registry keys use HKMU so they follow the chosen scope.
+
+  Upgrade code: 35630542-A9E3-4ADD-AA5E-51534AC570F5, the same family as the per-architecture
+  MSIs, so the universal package upgrades an installed per-architecture build instead of
+  installing beside it.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Jellyfin Kattri"
+    Manufacturer="Kattri"
+    Version="$(var.Version)"
+    UpgradeCode="35630542-A9E3-4ADD-AA5E-51534AC570F5"
+    Language="1033"
+    Scope="perUserOrMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Jellyfin Kattri is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- One icon serves the Add/Remove Programs entry and the Start menu shortcut. -->
+    <Icon Id="KattriIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="KattriIcon" />
+
+    <!-- PROCESSOR_ARCHITECTURE is REG_SZ; the raw search keeps the text, "AMD64" or "ARM64". -->
+    <Property Id="KATTRI_ARM64">
+      <RegistrySearch
+        Id="KattriProcessorArchitecture"
+        Root="HKLM"
+        Key="SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+        Name="PROCESSOR_ARCHITECTURE"
+        Type="raw" />
+    </Property>
+
+    <Feature Id="MainFeature" Title="Jellyfin Kattri" Level="1">
+      <ComponentGroupRef Id="X64PayloadComponents" />
+      <ComponentGroupRef Id="Arm64PayloadComponents" />
+<?if $(var.X64ExtraPayload) = "1" ?>
+      <ComponentGroupRef Id="X64ExtraPayloadComponents" />
+<?endif?>
+<?if $(var.Arm64ExtraPayload) = "1" ?>
+      <ComponentGroupRef Id="Arm64ExtraPayloadComponents" />
+<?endif?>
+      <ComponentRef Id="LicenseComponent" />
+      <ComponentRef Id="LibmpvNoticeComponent" />
+      <ComponentRef Id="LibmpvLicensesComponent" />
+      <ComponentRef Id="LibmpvCopyrightComponent" />
+      <ComponentRef Id="FfmpegLicenseComponent" />
+      <ComponentRef Id="FfmpegNoticeComponent" />
+      <ComponentRef Id="JellyfinUriProtocolComponent" />
+      <ComponentRef Id="StartMenuShortcutComponent" />
+    </Feature>
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="Jellyfin Kattri">
+
+        <!-- The license text and the folder cleanup are not architecture specific, so they live
+             in one component that is always installed; the payload components are conditioned
+             and must not own the RemoveFolder row. -->
+        <Component Id="LicenseComponent" Guid="*">
+          <File Id="LicenseFile" Source="$(var.LicensePath)" Name="LICENSE.txt" KeyPath="yes" />
+          <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        </Component>
+
+        <Component Id="LibmpvNoticeComponent" Guid="*">
+          <File Id="LibmpvNotice" Source="$(var.LibmpvNoticePath)" Name="libmpv-NOTICE.txt" KeyPath="yes" />
+        </Component>
+
+        <Directory Id="LicensesDirectory" Name="licenses">
+          <Directory Id="LibmpvLicensesDirectory" Name="libmpv">
+            <Component Id="LibmpvLicensesComponent" Guid="*">
+              <File Id="MpvLicenseLgpl" Source="$(var.LibmpvLicenseDirectory)\LICENSE.LGPL" Name="LICENSE.LGPL" KeyPath="yes" />
+            </Component>
+            <!-- One file per component: WiX cannot auto-generate a GUID for a multi-file component
+                 whose key path is not a versioned file. -->
+            <Component Id="LibmpvCopyrightComponent" Guid="*">
+              <File Id="MpvCopyright" Source="$(var.LibmpvLicenseDirectory)\Copyright" Name="Copyright" KeyPath="yes" />
+            </Component>
+            <Component Id="FfmpegLicenseComponent" Guid="*">
+              <File Id="FfmpegLicenseLgplv3" Source="$(var.LibmpvLicenseDirectory)\COPYING.LGPLv3" Name="COPYING.LGPLv3" KeyPath="yes" />
+            </Component>
+            <Component Id="FfmpegNoticeComponent" Guid="*">
+              <File Id="FfmpegLicenseNotice" Source="$(var.LibmpvLicenseDirectory)\LICENSE.md" Name="LICENSE.md" KeyPath="yes" />
+            </Component>
+          </Directory>
+        </Directory>
+
+        <!-- The quoted %1 expands as one URI argument; the host parser validates it before use. -->
+        <Component Id="JellyfinUriProtocolComponent" Guid="*">
+          <RegistryValue
+            Root="HKMU"
+            Key="Software\Classes\jellyfin"
+            Name="URL Protocol"
+            Type="string"
+            Value=""
+            KeyPath="yes" />
+          <RegistryValue
+            Root="HKMU"
+            Key="Software\Classes\jellyfin\shell\open\command"
+            Type="string"
+            Value="&quot;[INSTALLFOLDER]$(var.ExeName)&quot; &quot;%1&quot;" />
+        </Component>
+
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramMenuFolder" Name="Jellyfin Kattri">
+        <!-- A shortcut needs a key path; HKMU records it in HKCU per user and in HKLM per machine. -->
+        <Component Id="StartMenuShortcutComponent" Guid="*">
+          <Shortcut
+            Id="StartMenuShortcut"
+            Name="Jellyfin Kattri"
+            Description="Jellyfin Kattri"
+            Target="[INSTALLFOLDER]$(var.ExeName)"
+            WorkingDirectory="INSTALLFOLDER"
+            Icon="KattriIcon" />
+          <RegistryValue
+            Root="HKMU"
+            Key="Software\Jellyfin Kattri"
+            Name="StartMenuShortcutInstalled"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+          <RemoveFolder Id="RemoveApplicationProgramMenuFolder" Directory="ApplicationProgramMenuFolder" On="uninstall" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+  </Package>
+
+  <Fragment>
+    <!--
+      Payload components are one file per component, because Windows Installer tracks versioned
+      files and removal per component. The executable and libmpv DLL names are fixed, so they are
+      declared here; anything else in a payload folder is declared by the generated extra fragment.
+    -->
+    <ComponentGroup Id="X64PayloadComponents" Directory="INSTALLFOLDER">
+      <Component Id="X64ExecutableComponent" Guid="*" Directory="INSTALLFOLDER" Condition="KATTRI_ARM64&lt;&gt;&quot;ARM64&quot;">
+        <File Id="X64MainExecutable" Source="$(var.X64ExePath)" Name="$(var.ExeName)" KeyPath="yes" />
+      </Component>
+      <Component Id="X64LibmpvComponent" Guid="*" Directory="INSTALLFOLDER" Condition="KATTRI_ARM64&lt;&gt;&quot;ARM64&quot;">
+        <File Id="X64LibmpvDll" Source="$(var.X64LibmpvPath)" Name="libmpv-2.dll" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="Arm64PayloadComponents" Directory="INSTALLFOLDER">
+      <Component Id="Arm64ExecutableComponent" Guid="*" Directory="INSTALLFOLDER" Condition="KATTRI_ARM64=&quot;ARM64&quot;">
+        <File Id="Arm64MainExecutable" Source="$(var.Arm64ExePath)" Name="$(var.ExeName)" KeyPath="yes" />
+      </Component>
+      <Component Id="Arm64LibmpvComponent" Guid="*" Directory="INSTALLFOLDER" Condition="KATTRI_ARM64=&quot;ARM64&quot;">
+        <File Id="Arm64LibmpvDll" Source="$(var.Arm64LibmpvPath)" Name="libmpv-2.dll" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

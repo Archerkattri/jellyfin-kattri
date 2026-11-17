@@ -47,6 +47,14 @@ impl SyncPlayScreenState {
             .iter_mut()
             .find(|existing| existing.group_id == group.group_id)
         {
+            // A list response can be answered before a membership or state update that the
+            // socket already delivered, so an older snapshot must not undo the newer change.
+            if snapshot_is_older(&existing.last_updated_at, &group.last_updated_at) {
+                #[cfg(debug_assertions)]
+                crate::debug_log::log("syncplay ui: ignored a stale group snapshot");
+                self.load_state = LoadState::Loaded;
+                return;
+            }
             *existing = group;
         } else {
             self.groups.push(group);
@@ -68,6 +76,8 @@ impl SyncPlayScreenState {
             .iter_mut()
             .find(|group| group.group_id == group_id)
         else {
+            #[cfg(debug_assertions)]
+            crate::debug_log::log("syncplay ui: participant update for unknown group");
             return;
         };
         if joined {
@@ -77,6 +87,12 @@ impl SyncPlayScreenState {
         } else {
             group.participants.retain(|name| name != user_name);
         }
+        #[cfg(debug_assertions)]
+        crate::debug_log::log(&format!(
+            "syncplay ui: participants={} joined={}",
+            group.participants.len(),
+            joined
+        ));
     }
 
     pub(crate) fn update_group_state(&mut self, group_id: Option<&str>, state: GroupState) {
@@ -89,6 +105,11 @@ impl SyncPlayScreenState {
             .find(|group| group.group_id == group_id)
         {
             group.state = state;
+            #[cfg(debug_assertions)]
+            crate::debug_log::log(&format!("syncplay ui: state={state:?}"));
+        } else {
+            #[cfg(debug_assertions)]
+            crate::debug_log::log("syncplay ui: state update for unknown group");
         }
     }
 
@@ -405,6 +426,12 @@ pub(crate) fn show(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     }
 }
 
+/// Whether `incoming` is an older server snapshot than `current`. Both are the server's UTC
+/// timestamp strings in a fixed format, so a lexicographic comparison is chronological. An empty
+/// timestamp on either side is treated as unknown and lets the snapshot replace the current state.
+fn snapshot_is_older(current: &str, incoming: &str) -> bool {
+    !current.is_empty() && !incoming.is_empty() && incoming < current
+}
 fn participant_count(count: usize) -> String {
     if count == 1 {
         "1 participant".to_owned()
@@ -447,6 +474,39 @@ mod tests {
             participants: Vec::new(),
             last_updated_at: String::new(),
         }
+    }
+
+    #[test]
+    fn a_stale_list_snapshot_does_not_undo_a_newer_participant_update() {
+        let mut state = SyncPlayScreenState::default();
+        let mut current = group("group-1", "Movie night");
+        current.last_updated_at = "2026-11-16T20:00:02.0000000Z".into();
+        state.upsert_group(current);
+        state.update_participant(Some("group-1"), "Sam", true);
+
+        let mut stale = group("group-1", "Movie night");
+        stale.last_updated_at = "2026-11-16T20:00:01.0000000Z".into();
+        state.upsert_group(stale);
+
+        assert_eq!(state.groups()[0].participants, vec!["Sam".to_owned()]);
+    }
+
+    #[test]
+    fn a_newer_snapshot_replaces_the_current_group() {
+        let mut state = SyncPlayScreenState::default();
+        let mut current = group("group-1", "Movie night");
+        current.last_updated_at = "2026-11-16T20:00:01.0000000Z".into();
+        state.upsert_group(current);
+
+        let mut fresher = group("group-1", "Renamed group");
+        fresher.last_updated_at = "2026-11-16T20:00:02.0000000Z".into();
+        fresher.state = GroupState::Playing;
+        fresher.participants = vec!["Alex".into(), "Sam".into()];
+        state.upsert_group(fresher);
+
+        assert_eq!(state.groups()[0].group_name, "Renamed group");
+        assert_eq!(state.groups()[0].state, GroupState::Playing);
+        assert_eq!(state.groups()[0].participants.len(), 2);
     }
 
     #[test]

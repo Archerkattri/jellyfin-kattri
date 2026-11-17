@@ -11208,6 +11208,9 @@ impl KattriApp {
                 }
                 WorkerEvent::SyncPlayGroupUpdate { update } => {
                     self.apply_sync_play_group_update(update);
+                    // The panel shows participants and group state from this update. Without a
+                    // repaint request the label can stay stale until an unrelated input event.
+                    ctx.request_repaint();
                 }
                 WorkerEvent::SyncPlayActionAccepted { request_id, action } => {
                     if matches!(action, SyncPlayAction::Ready | SyncPlayAction::Buffering) {
