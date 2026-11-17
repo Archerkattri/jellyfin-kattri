@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/jellyfin-api",
-    "crates/mock-jellyfin",
     "crates/client-core",
     "crates/playback-relay",
     "crates/kattri-settings",

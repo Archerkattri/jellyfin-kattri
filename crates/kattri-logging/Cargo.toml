@@ -16,5 +16,4 @@ tracing-subscriber = { version = "=0.3.23", default-features = false, features =
 
 [dev-dependencies]
 jellyfin-api = { path = "../jellyfin-api" }
-mock-jellyfin = { path = "../mock-jellyfin" }
 tokio = { version = "1", features = ["macros", "rt"] }

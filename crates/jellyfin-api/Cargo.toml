@@ -17,4 +17,3 @@ zeroize = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync"] }
-mock-jellyfin = { path = "../mock-jellyfin" }

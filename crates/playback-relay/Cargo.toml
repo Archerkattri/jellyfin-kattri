@@ -18,5 +18,4 @@ url = "2"
 zeroize = "1"
 
 [dev-dependencies]
-mock-jellyfin = { path = "../mock-jellyfin" }
 tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
