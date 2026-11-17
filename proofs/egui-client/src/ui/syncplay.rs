@@ -50,8 +50,6 @@ impl SyncPlayScreenState {
             // A list response can be answered before a membership or state update that the
             // socket already delivered, so an older snapshot must not undo the newer change.
             if snapshot_is_older(&existing.last_updated_at, &group.last_updated_at) {
-                #[cfg(debug_assertions)]
-                crate::debug_log::log("syncplay ui: ignored a stale group snapshot");
                 self.load_state = LoadState::Loaded;
                 return;
             }
@@ -76,8 +74,6 @@ impl SyncPlayScreenState {
             .iter_mut()
             .find(|group| group.group_id == group_id)
         else {
-            #[cfg(debug_assertions)]
-            crate::debug_log::log("syncplay ui: participant update for unknown group");
             return;
         };
         if joined {
@@ -87,12 +83,6 @@ impl SyncPlayScreenState {
         } else {
             group.participants.retain(|name| name != user_name);
         }
-        #[cfg(debug_assertions)]
-        crate::debug_log::log(&format!(
-            "syncplay ui: participants={} joined={}",
-            group.participants.len(),
-            joined
-        ));
     }
 
     pub(crate) fn update_group_state(&mut self, group_id: Option<&str>, state: GroupState) {
@@ -105,11 +95,7 @@ impl SyncPlayScreenState {
             .find(|group| group.group_id == group_id)
         {
             group.state = state;
-            #[cfg(debug_assertions)]
-            crate::debug_log::log(&format!("syncplay ui: state={state:?}"));
         } else {
-            #[cfg(debug_assertions)]
-            crate::debug_log::log("syncplay ui: state update for unknown group");
         }
     }
 

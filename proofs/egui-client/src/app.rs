@@ -3026,16 +3026,6 @@ impl KattriApp {
             return;
         }
 
-        #[cfg(debug_assertions)]
-        crate::debug_log::log(&format!(
-            "syncplay received: action={:?} entry={}",
-            command.action,
-            command
-                .playlist_item_id
-                .as_deref()
-                .map(str::len)
-                .unwrap_or(0)
-        ));
         if command.action == SyncPlayPlaybackAction::Stop {
             self.invalidate_sync_play_playback_handoff();
             self.sync_play_auto_target = None;
@@ -3139,16 +3129,12 @@ impl KattriApp {
         update: SyncPlayPlayQueueUpdate,
     ) {
         let Some(joined_group_id) = self.joined_sync_play_group_id().map(str::to_owned) else {
-            #[cfg(debug_assertions)]
-            crate::debug_log::log("syncplay queue update: refused, not joined");
             return;
         };
         if group_id
             .as_deref()
             .is_some_and(|incoming| incoming != joined_group_id)
         {
-            #[cfg(debug_assertions)]
-            crate::debug_log::log("syncplay queue update: refused, group mismatch");
             return;
         }
         let Ok(last_update_ms) = parse_server_timestamp_ms(&update.last_update) else {
@@ -3183,15 +3169,6 @@ impl KattriApp {
             self.invalidate_sync_play_playback_handoff();
             self.sync_play_queue_generation = self.sync_play_queue_generation.wrapping_add(1);
         }
-        #[cfg(debug_assertions)]
-        crate::debug_log::log(&format!(
-            "syncplay queue update: entries={} playing_index={} changed={} playing={}",
-            update.playlist.len(),
-            update.playing_item_index,
-            active_entry_changed,
-            update.is_playing
-        ));
-
         let mut start_position_ticks = update.start_position_ticks;
         if update.is_playing
             && let Some(clock) = self.sync_play_clock.estimate()
@@ -3226,8 +3203,6 @@ impl KattriApp {
             item_id: entry.item_id.clone(),
             playlist_item_id: entry.playlist_item_id.clone(),
         });
-        #[cfg(debug_assertions)]
-        crate::debug_log::log("syncplay queue update: starting the active group entry");
         self.play_item_locally(entry.item_id, true);
     }
 
@@ -3408,13 +3383,6 @@ impl KattriApp {
                 .sync_play_playback_target(playback_generation)
                 .is_none()
         {
-            #[cfg(debug_assertions)]
-            crate::debug_log::log(&format!(
-                "syncplay observe: skipped can_send={} target={}",
-                self.sync_play_can_send(),
-                self.sync_play_playback_target(playback_generation)
-                    .is_some()
-            ));
             return;
         }
         let Ok(position_ms) = i64::try_from(position_ticks / TICKS_PER_MS as u64) else {
@@ -3422,8 +3390,6 @@ impl KattriApp {
         };
         let now = self.player_view.now_ms();
         if let Some(command) = self.observe_local_player(paused, position_ms, now) {
-            #[cfg(debug_assertions)]
-            crate::debug_log::log(&format!("syncplay observe: local change {command:?}"));
             self.send_sync_play_command(command);
             // Let the authoritative server command establish the new anchor before correcting.
             return;
@@ -3759,8 +3725,6 @@ impl KattriApp {
     /// line, where a refused progress report is shown.
     fn send_sync_play_command(&mut self, command: SyncPlayCommand) {
         let request_id = self.allocate_request_id();
-        #[cfg(debug_assertions)]
-        crate::debug_log::log(&format!("syncplay send: {command:?}"));
         let Some(worker) = self.worker.as_ref() else {
             self.playback_report_feedback = Some(ui_text(ids::CONNECT_WORKER_UNAVAILABLE).into());
             return;
@@ -7931,12 +7895,6 @@ impl KattriApp {
     /// stream from `poll_auto_play` as soon as both the item record and the options have
     /// arrived. `start_over` ignores a saved resume position.
     pub(crate) fn play_item(&mut self, item_id: String, start_over: bool) {
-        #[cfg(debug_assertions)]
-        crate::debug_log::log(&format!(
-            "syncplay play_item: can_send={} group_joined={}",
-            self.sync_play_can_send(),
-            self.joined_sync_play_group_id().is_some()
-        ));
         if self.sync_play_can_send() {
             let start_ticks = if start_over {
                 0
@@ -7956,12 +7914,6 @@ impl KattriApp {
                     .unwrap_or(0)
             };
             let submitted = self.set_sync_play_new_queue(vec![item_id], 0, start_ticks);
-            #[cfg(debug_assertions)]
-            crate::debug_log::log(&format!(
-                "syncplay play_item: set_new_queue ok={} start_ticks={}",
-                submitted.is_ok(),
-                start_ticks
-            ));
             if submitted.is_err() {
                 self.sync_play_ui.action_failed();
             } else {
@@ -10836,10 +10788,6 @@ impl KattriApp {
                         color_image,
                         egui::TextureOptions::LINEAR,
                     );
-                    #[cfg(debug_assertions)]
-                    crate::debug_log::log(&format!(
-                        "home hero backdrop loaded {width}x{height} for {item_id}"
-                    ));
                     self.home_hero_backdrop = Some((item_id, texture));
                 }
                 WorkerEvent::BackdropArtworkLoaded {
@@ -10880,8 +10828,6 @@ impl KattriApp {
                 {
                     // No backdrop for this item: the hero falls back to its primary artwork.
                     // The request stays recorded so the same item is not asked for again.
-                    #[cfg(debug_assertions)]
-                    crate::debug_log::log(&format!("home hero backdrop unavailable for {item_id}"));
                 }
                 WorkerEvent::BackdropArtworkLoaded {
                     request_id,
