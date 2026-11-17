@@ -70,14 +70,14 @@ used.
 
 Download the installer for your platform from the
 [releases page](https://github.com/Archerkattri/jellyfin-kattri/releases). The current
-prerelease is **v0.7.0**.
+release is **v1.0.0**.
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows x64 | `JellyfinKattri-0.7.0-x64.msi` or `-x64-portable.zip` | libmpv is bundled; the portable zip runs `jellyfin-kattri.exe` |
-| Windows ARM64 | `JellyfinKattri-0.7.0-arm64.msi` or `-arm64-portable.zip` | libmpv is bundled |
-| macOS (universal) | `kattri-0.7.0-macos-universal.dmg` | libmpv is bundled; ad-hoc signed |
-| Linux x64 | `kattri_0.7.0-1_amd64.deb`, `kattri-0.7.0-1.x86_64.rpm`, `kattri-0.7.0-linux-x64.AppImage`, `kattri-0.7.0-linux-x64.flatpak` | The published 0.7.0 deb/rpm use distro libmpv. The AppImage and Flatpak bundle it. The current packaging workflow stages pinned libmpv for the next Linux deb/rpm release. |
+| Windows x64 | `JellyfinKattri-1.0.0-x64.msi` or `-x64-portable.zip` | libmpv is bundled; the portable zip runs `jellyfin-kattri.exe` |
+| Windows ARM64 | `JellyfinKattri-1.0.0-arm64.msi` or `-arm64-portable.zip` | libmpv is bundled |
+| macOS (universal) | `kattri-1.0.0-macos-universal.dmg` | libmpv is bundled; ad-hoc signed |
+| Linux x64 | `kattri_1.0.0-1_amd64.deb`, `kattri-1.0.0-1.x86_64.rpm`, `kattri-1.0.0-linux-x64.AppImage`, `kattri-1.0.0-linux-x64.flatpak` | The deb/rpm use distro libmpv. The AppImage and Flatpak bundle it. |
 
 Linux ARM64 has CI build/test coverage but no published release package.
 
@@ -86,7 +86,7 @@ Every download has a matching `.sha256` file. The release also publishes
 
 ```sh
 # Debian / Ubuntu (needs libmpv2 or libmpv1 installed)
-sudo apt install ./kattri_0.7.0-1_amd64.deb
+sudo apt install ./kattri_1.0.0-1_amd64.deb
 
 # Fedora (needs libmpv)
 sudo dnf install ./kattri-0.7.0-1.x86_64.rpm
