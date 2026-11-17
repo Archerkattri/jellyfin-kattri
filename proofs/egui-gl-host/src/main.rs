@@ -1,5 +1,10 @@
 //! Custom native host that embeds KattriApp and presents libmpv into egui.
 
+// Release builds are GUI apps: without this, Windows treats the exe as a console program and
+// opens a terminal window beside the player when it is launched from the Start Menu. Debug builds
+// keep the console so development output stays visible.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 #[cfg(debug_assertions)]
 mod debug_harness;
 #[cfg(debug_assertions)]
