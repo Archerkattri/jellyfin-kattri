@@ -388,7 +388,11 @@ chmod 755 "$OUT"
 # Check the payload through the offset that the header will use at install time.
 ENTRIES="$WORK/payload-entries.txt"
 tail -n +"$PAYLOAD_LINE" "$OUT" | tar -tzf - > "$ENTRIES"
-for name in "$PAYLOAD_X64" "$PAYLOAD_ARM64"; do
+CHECK_MEMBERS=("$PAYLOAD_X64")
+if [[ "$ARM64_PRESENT" -eq 1 ]]; then
+  CHECK_MEMBERS+=("$PAYLOAD_ARM64")
+fi
+for name in "${CHECK_MEMBERS[@]}"; do
   if ! grep -Fxq "$name" "$ENTRIES"; then
     echo "error: payload offset is wrong; the archive does not list $name" >&2
     exit 1
