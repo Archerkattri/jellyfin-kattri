@@ -163,12 +163,15 @@ jobs:
           # No aarch64 libmpv pin exists yet, so the arm64 payload is absent and the installer
           # reports that clearly on an aarch64 machine instead of installing a foreign binary.
           bash packaging/linux/build-run-installer.sh "$VERSION" "$X64" - dist
+      # The file carries a compressed payload after the header, so parse only the header: --help
+      # is handled before the payload is ever read.
       - name: Smoke the installer header
         run: |
           set -euo pipefail
           RUN_FILE="$(find dist -maxdepth 1 -name '*.run' -print -quit)"
           test -n "$RUN_FILE"
-          sh -n "$RUN_FILE"
+          test -x "$RUN_FILE"
+          sh "$RUN_FILE" --help > /dev/null
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: universal-linux-run
