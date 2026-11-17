@@ -1562,8 +1562,9 @@ fn photos_page(ui: &mut egui::Ui, app: &mut KattriApp) {
     }
 }
 
-/// Home view: the selected item's details (if any) sit above the hero and rows, so an
-/// activation from a row or the hero shows its playback options without leaving Home.
+/// Home view: an open item or person page replaces the hero and rows, so selecting from a row
+/// shows a full details page with a Back action instead of stacking details above the shelves
+/// (which let the home rows reappear when the viewer scrolled down).
 fn home_view(
     ui: &mut egui::Ui,
     app: &mut KattriApp,
@@ -1571,8 +1572,9 @@ fn home_view(
     entries: &mut Vec<CardFocus>,
     visible_artwork: &mut Vec<(String, String)>,
 ) {
-    if app.selected_item_id.is_some() {
+    if app.selected_item_id.is_some() || app.selected_person.is_some() {
         details_panel(ui, app, colors);
+        return;
     }
     let hero_id = app.home.hero_item_id();
     let hero_backdrop = app
@@ -1882,6 +1884,11 @@ fn render_connected(
         catalog_pagination(ui, app, colors);
     }
     details_panel(ui, app, colors);
+    // An open item or person page replaces the browse grid: without this return the grid drew
+    // below the details and reappeared when the viewer scrolled down past the details.
+    if app.selected_item_id.is_some() || app.selected_person.is_some() {
+        return;
+    }
 
     if let Some(context) = app.browse_context.as_ref() {
         ui.horizontal(|ui| {
