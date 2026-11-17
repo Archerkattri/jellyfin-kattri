@@ -751,16 +751,6 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs
                         ui.close();
                     }
                 });
-            } else {
-                let high_contrast = ui.checkbox(
-                    &mut app.high_contrast,
-                    ui_text(ids::ACCESS_NAV_HIGH_CONTRAST),
-                );
-                if high_contrast.changed() {
-                    let before = app.settings.settings().clone();
-                    app.settings.settings_mut().general.high_contrast = app.high_contrast;
-                    app.commit_settings(&before);
-                }
             }
             if connected {
                 let search_width = search_width.min((ui.available_width() - 12.0).max(80.0));
