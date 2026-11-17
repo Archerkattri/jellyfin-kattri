@@ -21,9 +21,6 @@ pub const CONNECT_SAVED_SIGN_IN_EXPIRED: &str = "connect.error.saved_sign_in_exp
 pub const CONNECT_BUTTON_SUBMIT: &str = "connect.button.submit";
 pub const CONNECT_BUTTON_QUIT: &str = "connect.button.quit";
 pub const CONNECT_OPTION_ALLOW_PUBLIC_HTTP: &str = "connect.option.allow_public_http";
-pub const CONNECT_WARNING_HTTP_TITLE: &str = "connect.warning.http_title";
-pub const CONNECT_WARNING_HTTP_BODY: &str = "connect.warning.http_body";
-pub const CONNECT_NOTE_LAN_HTTP: &str = "connect.note.lan_http";
 pub const CONNECT_NOTE_BACKGROUND: &str = "connect.note.background";
 pub const BROWSE_HEADING: &str = "browse.heading";
 pub const BROWSE_SORT_DATE_ADDED: &str = "browse.sort.date_added";
@@ -1006,9 +1003,6 @@ pub const ALL: &[&str] = &[
     CONNECT_BUTTON_SUBMIT,
     CONNECT_BUTTON_QUIT,
     CONNECT_OPTION_ALLOW_PUBLIC_HTTP,
-    CONNECT_WARNING_HTTP_TITLE,
-    CONNECT_WARNING_HTTP_BODY,
-    CONNECT_NOTE_LAN_HTTP,
     CONNECT_NOTE_BACKGROUND,
     BROWSE_HEADING,
     BROWSE_SORT_DATE_ADDED,
