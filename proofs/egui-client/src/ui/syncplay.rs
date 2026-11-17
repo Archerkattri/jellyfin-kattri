@@ -95,7 +95,6 @@ impl SyncPlayScreenState {
             .find(|group| group.group_id == group_id)
         {
             group.state = state;
-        } else {
         }
     }
 
