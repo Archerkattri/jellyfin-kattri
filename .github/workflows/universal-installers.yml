@@ -123,7 +123,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            desktop-file-utils file libfuse2 libass9 libuchardet0 libudev-dev pkg-config
+            desktop-file-utils file libfuse2 libass9 libuchardet0 libudev-dev pkg-config \
+            libxkbcommon-x11-0 libxcb1 libxcb-cursor0 libegl1 libgbm1 libdrm2
       - name: Fetch the pinned libmpv
         run: bash packaging/libmpv/fetch.sh linux-x64
       - name: Build the release executable
