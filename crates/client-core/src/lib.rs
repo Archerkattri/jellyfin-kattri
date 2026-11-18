@@ -48,6 +48,7 @@ pub mod subtitle_style;
 pub mod subtitle_sync;
 pub mod subtitles;
 pub mod syncplay;
+pub mod syncplay_membership;
 pub mod volume;
 pub mod window_state;
 

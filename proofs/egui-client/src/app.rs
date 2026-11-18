@@ -62,6 +62,9 @@ use kattri_client_core::syncplay::{
     PlayAnchor, SyncPlayError, SyncPlayState, clock_sample_from_exchange, map_command,
     parse_server_timestamp_ms, target_position_ms,
 };
+use kattri_client_core::syncplay_membership::{
+    MembershipEffect, MembershipEvent, SyncPlayMembershipMachine,
+};
 use kattri_i18n::ids;
 use kattri_input::input_store::{MapName, map_file_changed, map_file_mtime};
 use kattri_input::{GamepadBackend, GamepadError, GamepadEvent, NullGamepad};
@@ -1840,9 +1843,10 @@ pub struct KattriApp {
     /// User-facing group list and request state for the SyncPlay screen.
     pub(crate) sync_play_ui: crate::ui::syncplay::SyncPlayScreenState,
     /// Join request awaiting the worker's answer: (request id, group id).
-    sync_play_pending_join: Option<(u64, String)>,
+    /// SyncPlay join/leave lifecycle; owns the pending request ids so a stale result changes nothing.
+    sync_play_membership: SyncPlayMembershipMachine,
     /// Leave request awaiting the worker's answer.
-    sync_play_pending_leave: Option<u64>,
+
     /// Most recently submitted SyncPlay REST operation; older responses must not clear a newer
     /// operation's error state.
     sync_play_latest_action_request_id: Option<(u64, SyncPlayAction)>,
@@ -2480,8 +2484,7 @@ impl KattriApp {
             pending_player_intents: Vec::new(),
             sync_play_state: SyncPlayState::NotJoined,
             sync_play_ui: crate::ui::syncplay::SyncPlayScreenState::default(),
-            sync_play_pending_join: None,
-            sync_play_pending_leave: None,
+            sync_play_membership: SyncPlayMembershipMachine::new(),
             sync_play_latest_action_request_id: None,
             sync_play_status_results: VecDeque::new(),
             sync_play_queue: None,
@@ -3456,13 +3459,33 @@ impl KattriApp {
 
     /// Ask the worker to join a SyncPlay group (M4-11). The group counts as joined only after
     /// the worker reports success for this request.
+    /// Tell the membership machine about a group the app already knows it is in, so a later leave
+    /// can be requested. Other paths (a group playback command, the group screen) set the group
+    /// playback state directly; this keeps the two in agreement without changing that state.
+    fn adopt_known_sync_play_group(&mut self) {
+        if self.sync_play_membership.state().is_member() {
+            return;
+        }
+        if let Some(group_id) = self.joined_sync_play_group_id().map(str::to_owned) {
+            let _ = self
+                .sync_play_membership
+                .reduce(MembershipEvent::AdoptCurrentGroup { group_id });
+        }
+    }
+
     pub fn join_sync_play_group(&mut self, group_id: String) -> Result<(), WorkerSubmitError> {
+        self.adopt_known_sync_play_group();
         let request_id = self.allocate_request_id();
         self.worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)?
             .sync_play_join(request_id, group_id.clone())?;
-        self.sync_play_pending_join = Some((request_id, group_id));
+        let _ = self
+            .sync_play_membership
+            .reduce(MembershipEvent::JoinRequested {
+                request_id,
+                group_id,
+            });
         self.sync_play_ui.action_succeeded();
         Ok(())
     }
@@ -3514,26 +3537,51 @@ impl KattriApp {
     }
 
     pub(crate) fn sync_play_join_pending(&self) -> bool {
-        self.sync_play_pending_join.is_some()
+        self.sync_play_membership.is_join_pending()
     }
 
     pub(crate) fn sync_play_leave_pending(&self) -> bool {
-        self.sync_play_pending_leave.is_some()
+        self.sync_play_membership.is_leave_pending()
     }
 
     /// Ask the worker to leave the SyncPlay group. The state clears when the worker confirms.
     pub fn leave_sync_play_group(&mut self) -> Result<(), WorkerSubmitError> {
+        self.adopt_known_sync_play_group();
         let request_id = self.allocate_request_id();
         self.worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)?
             .sync_play_leave(request_id)?;
-        self.sync_play_pending_leave = Some(request_id);
+        let _ = self
+            .sync_play_membership
+            .reduce(MembershipEvent::LeaveRequested { request_id });
         Ok(())
     }
 
     fn sync_play_can_send(&self) -> bool {
-        self.joined_sync_play_group_id().is_some() && self.sync_play_pending_leave.is_none()
+        // Membership is also learned from group playback commands and the group screen, which set
+        // the playback state directly; the machine owns the pending request ids, not the group id.
+        self.joined_sync_play_group_id().is_some() && !self.sync_play_membership.is_leave_pending()
+    }
+
+    /// Run the effects a membership transition declared. The machine decides, the app acts.
+    fn apply_membership_effects(&mut self, effects: Vec<MembershipEffect>) {
+        for effect in effects {
+            match effect {
+                MembershipEffect::EnterGroup { group_id } => {
+                    self.sync_play_state = SyncPlayState::Joined { group_id };
+                }
+                MembershipEffect::LeaveGroup => {
+                    self.sync_play_state = SyncPlayState::NotJoined;
+                }
+                MembershipEffect::InvalidateQueue => self.invalidate_sync_play_queue(),
+                MembershipEffect::ClearLatestAction => {
+                    self.sync_play_latest_action_request_id = None;
+                }
+                MembershipEffect::ActionSucceeded => self.sync_play_ui.action_succeeded(),
+                MembershipEffect::ActionFailed => self.sync_play_ui.action_failed(),
+            }
+        }
     }
 
     fn sync_play_queue_matches(&self, generation: u64, playlist_item_id: &str) -> bool {
@@ -3762,27 +3810,22 @@ impl KattriApp {
             SyncPlayGroupUpdate::Joined(group) => {
                 let group_id = group.group_id.clone();
                 self.sync_play_ui.upsert_group(group);
-                if self.joined_sync_play_group_id() != Some(group_id.as_str()) {
-                    self.invalidate_sync_play_queue();
-                    self.sync_play_state = SyncPlayState::Joined { group_id };
-                }
-                self.sync_play_pending_join = None;
-                self.sync_play_pending_leave = None;
-                self.sync_play_ui.action_succeeded();
+                let transition = self
+                    .sync_play_membership
+                    .reduce(MembershipEvent::GroupEnteredFromServer { group_id });
+                self.apply_membership_effects(transition.effects);
             }
             SyncPlayGroupUpdate::Left { group_id }
             | SyncPlayGroupUpdate::NotInGroup { group_id } => {
-                let matches_current = self.joined_sync_play_group_id().is_some_and(|current| {
-                    group_id
-                        .as_deref()
-                        .is_none_or(|group_id| current == group_id)
-                });
-                if matches_current {
-                    self.invalidate_sync_play_queue();
-                    self.sync_play_state = SyncPlayState::NotJoined;
-                    self.sync_play_pending_join = None;
-                    self.sync_play_pending_leave = None;
-                    self.sync_play_latest_action_request_id = None;
+                let transition = self
+                    .sync_play_membership
+                    .reduce(MembershipEvent::GroupLeftFromServer { group_id });
+                let left = matches!(
+                    transition.state,
+                    kattri_client_core::syncplay_membership::MembershipState::Out
+                ) && !transition.effects.is_empty();
+                self.apply_membership_effects(transition.effects);
+                if left {
                     self.request_sync_play_groups();
                 }
             }
@@ -4775,8 +4818,7 @@ impl KattriApp {
         self.focus_graph = FocusGraph::default();
         self.invalidate_sync_play_queue();
         self.sync_play_state = SyncPlayState::NotJoined;
-        self.sync_play_pending_join = None;
-        self.sync_play_pending_leave = None;
+        let _ = self.sync_play_membership.reduce(MembershipEvent::Reset);
         self.sync_play_latest_action_request_id = None;
         self.sync_play_ui = crate::ui::syncplay::SyncPlayScreenState::default();
         self.connection = ConnectionStatus::Connecting {
@@ -9525,8 +9567,7 @@ impl KattriApp {
         self.focus_graph = FocusGraph::default();
         self.invalidate_sync_play_queue();
         self.sync_play_state = SyncPlayState::NotJoined;
-        self.sync_play_pending_join = None;
-        self.sync_play_pending_leave = None;
+        let _ = self.sync_play_membership.reduce(MembershipEvent::Reset);
         self.sync_play_latest_action_request_id = None;
         self.sync_play_status_results.clear();
         self.pending_launch_intent = None;
@@ -11534,42 +11575,32 @@ impl KattriApp {
                 WorkerEvent::SyncPlayJoined {
                     request_id,
                     group_id,
-                } if self
-                    .sync_play_pending_join
-                    .as_ref()
-                    .is_some_and(|(pending, _)| *pending == request_id) =>
-                {
-                    self.sync_play_pending_join = None;
-                    self.sync_play_latest_action_request_id = None;
-                    if self.joined_sync_play_group_id() != Some(group_id.as_str()) {
-                        self.invalidate_sync_play_queue();
-                    }
-                    self.sync_play_state = SyncPlayState::Joined { group_id };
-                    self.sync_play_ui.action_succeeded();
+                } => {
+                    let transition =
+                        self.sync_play_membership
+                            .reduce(MembershipEvent::JoinConfirmed {
+                                request_id,
+                                group_id,
+                            });
+                    self.apply_membership_effects(transition.effects);
                 }
-                WorkerEvent::SyncPlayJoinFailed { request_id }
-                    if self
-                        .sync_play_pending_join
-                        .as_ref()
-                        .is_some_and(|(pending, _)| *pending == request_id) =>
-                {
-                    self.sync_play_pending_join = None;
-                    self.sync_play_ui.action_failed();
+                WorkerEvent::SyncPlayJoinFailed { request_id } => {
+                    let transition = self
+                        .sync_play_membership
+                        .reduce(MembershipEvent::JoinFailed { request_id });
+                    self.apply_membership_effects(transition.effects);
                 }
-                WorkerEvent::SyncPlayLeft { request_id }
-                    if self.sync_play_pending_leave == Some(request_id) =>
-                {
-                    self.sync_play_pending_leave = None;
-                    self.invalidate_sync_play_queue();
-                    self.sync_play_latest_action_request_id = None;
-                    self.sync_play_state = SyncPlayState::NotJoined;
-                    self.sync_play_ui.action_succeeded();
+                WorkerEvent::SyncPlayLeft { request_id } => {
+                    let transition = self
+                        .sync_play_membership
+                        .reduce(MembershipEvent::LeaveConfirmed { request_id });
+                    self.apply_membership_effects(transition.effects);
                 }
-                WorkerEvent::SyncPlayLeaveFailed { request_id }
-                    if self.sync_play_pending_leave == Some(request_id) =>
-                {
-                    self.sync_play_pending_leave = None;
-                    self.sync_play_ui.action_failed();
+                WorkerEvent::SyncPlayLeaveFailed { request_id } => {
+                    let transition = self
+                        .sync_play_membership
+                        .reduce(MembershipEvent::LeaveFailed { request_id });
+                    self.apply_membership_effects(transition.effects);
                 }
                 _ => {}
             }
@@ -15599,7 +15630,10 @@ mod remote_and_sync_play_tests {
         app.worker = Some(worker);
         app.join_sync_play_group("group-1".into())
             .expect("join queued");
-        let (request_id, _) = app.sync_play_pending_join.clone().expect("join is pending");
+        let request_id = app
+            .sync_play_membership
+            .pending_request_id()
+            .expect("join is pending");
         assert_eq!(app.sync_play_state, SyncPlayState::NotJoined);
 
         events
@@ -15608,7 +15642,7 @@ mod remote_and_sync_play_tests {
             })
             .expect("stale event queued");
         app.receive_worker_events(&ctx);
-        assert!(app.sync_play_pending_join.is_some());
+        assert!(app.sync_play_join_pending());
 
         events
             .try_send(WorkerEvent::SyncPlayJoined {
@@ -15623,7 +15657,7 @@ mod remote_and_sync_play_tests {
                 group_id: "group-1".into()
             }
         );
-        assert!(app.sync_play_pending_join.is_none());
+        assert!(!app.sync_play_join_pending());
     }
 
     #[test]
@@ -15636,17 +15670,23 @@ mod remote_and_sync_play_tests {
             group_id: "group-1".into(),
         };
         app.leave_sync_play_group().expect("leave queued");
-        let request_id = app.sync_play_pending_leave.expect("leave is pending");
+        let request_id = app
+            .sync_play_membership
+            .pending_request_id()
+            .expect("leave is pending");
 
         events
             .try_send(WorkerEvent::SyncPlayLeaveFailed { request_id })
             .expect("failure queued");
         app.receive_worker_events(&ctx);
         assert!(matches!(app.sync_play_state, SyncPlayState::Joined { .. }));
-        assert!(app.sync_play_pending_leave.is_none());
+        assert!(!app.sync_play_leave_pending());
 
         app.leave_sync_play_group().expect("second leave queued");
-        let request_id = app.sync_play_pending_leave.expect("leave is pending");
+        let request_id = app
+            .sync_play_membership
+            .pending_request_id()
+            .expect("leave is pending");
         events
             .try_send(WorkerEvent::SyncPlayLeft { request_id })
             .expect("leave confirmed");
