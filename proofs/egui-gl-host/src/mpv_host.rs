@@ -2362,6 +2362,9 @@ impl<'session> MpvHost<'session> {
             }
             RemoteAction::SetVolume { percent } => self.set_remote_volume(percent),
             RemoteAction::Stop => self.stop_playback(),
+            // Loading a new item needs the API worker, so the app handles this action and starts
+            // the item through its own playback path; the player never sees it.
+            RemoteAction::PlayItems { .. } => {}
         }
     }
 

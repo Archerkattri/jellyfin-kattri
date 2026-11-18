@@ -339,10 +339,51 @@ fn classify_text(text: &str) -> Inbound {
     match parse_session_message(text) {
         Ok(command) => Inbound::Command(command),
         Err(error) => {
+            // Diagnostic builds log the rejected frame's shape (message type and field kinds,
+            // never values), so a protocol mismatch is visible without logging payload text.
+            #[cfg(debug_assertions)]
+            tracing::debug!(%error, shape = %frame_shape(text), "ignored inbound session message");
+            #[cfg(not(debug_assertions))]
             tracing::debug!(%error, "ignored inbound session message");
             Inbound::Ignored
         }
     }
+}
+
+/// A value-free description of one session frame: its message type and, for `Data`, each field
+/// name with its JSON kind and array length. Never includes a field value.
+#[cfg(debug_assertions)]
+fn frame_shape(text: &str) -> String {
+    use serde_json::Value;
+
+    fn kind(value: &Value) -> String {
+        match value {
+            Value::Array(items) => format!("array[{}]", items.len()),
+            Value::String(_) => "string".to_owned(),
+            Value::Number(_) => "number".to_owned(),
+            Value::Bool(_) => "bool".to_owned(),
+            Value::Null => "null".to_owned(),
+            Value::Object(map) => format!("object({})", map.len()),
+        }
+    }
+
+    let Ok(envelope) = serde_json::from_str::<Value>(text) else {
+        return "unparseable".to_owned();
+    };
+    let message_type = envelope
+        .get("MessageType")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing>");
+    let fields: Vec<String> = envelope
+        .get("Data")
+        .and_then(Value::as_object)
+        .map(|data| {
+            data.iter()
+                .map(|(name, value)| format!("{name}={}", kind(value)))
+                .collect()
+        })
+        .unwrap_or_default();
+    format!("{message_type} {}", fields.join(","))
 }
 
 /// A session message envelope, read only far enough to pick the parser.

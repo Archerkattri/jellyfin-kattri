@@ -53,10 +53,10 @@ struct SessionMessage {
 
 /// Parse one inbound session message into a [`RemoteCommand`].
 ///
-/// `GeneralCommand` and `Playstate` are the only message types read. Any other type, and
-/// any command the client does not implement, returns
-/// [`RemoteCommandError::UnsupportedCommand`]. A command is never guessed from a
-/// different one.
+/// `GeneralCommand`, `Playstate` and `Play` are the only message types read. `Play` is how the
+/// server delivers a "Play on" request (`SendPlayCommand`). Any other type, and any command the
+/// client does not implement, returns [`RemoteCommandError::UnsupportedCommand`]. A command is
+/// never guessed from a different one.
 pub fn parse_session_message(message: &str) -> Result<RemoteCommand, RemoteCommandError> {
     let envelope: SessionMessage =
         serde_json::from_str(message).map_err(|_| RemoteCommandError::InvalidPayload)?;
@@ -65,6 +65,7 @@ pub fn parse_session_message(message: &str) -> Result<RemoteCommand, RemoteComma
     match envelope.message_type.as_str() {
         "GeneralCommand" => RemoteCommand::from_general_command_json(&data),
         "Playstate" => RemoteCommand::from_playstate_json(&data),
+        "Play" => RemoteCommand::from_play_json(&data),
         _ => Err(RemoteCommandError::UnsupportedCommand),
     }
 }

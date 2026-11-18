@@ -41,6 +41,9 @@ pub struct AutoPlayInput {
     pub details: DetailsState,
     /// Play was pressed as "start over": ignore the saved position.
     pub start_over: bool,
+    /// Start exactly here when set, from a remote "play now" request. It wins over the saved
+    /// position and over `start_over`, because the requesting client chose this position.
+    pub requested_ticks: Option<i64>,
 }
 
 /// What the UI does with the pending request.
@@ -83,10 +86,15 @@ pub fn decide(input: &AutoPlayInput) -> AutoPlayDecision {
     let Some(pick) = pick else {
         return AutoPlayDecision::DropNoCompatibleSource;
     };
+    let resume_ticks = match input.requested_ticks {
+        Some(ticks) => Some(ticks.max(0)),
+        None if input.start_over => None,
+        None => resume_ticks,
+    };
     AutoPlayDecision::Start {
         source_index: pick.source_index,
         method: pick.method,
-        resume_ticks: if input.start_over { None } else { resume_ticks },
+        resume_ticks,
     }
 }
 
@@ -110,6 +118,7 @@ mod tests {
                 resume_ticks: Some(600_000_000),
             },
             start_over: false,
+            requested_ticks: None,
         }
     }
 
@@ -211,6 +220,45 @@ mod tests {
             ..ready()
         };
         assert_eq!(decide(&input), AutoPlayDecision::Wait);
+    }
+
+    #[test]
+    fn a_requested_position_wins_over_the_saved_position_and_start_over() {
+        let remote = AutoPlayInput {
+            requested_ticks: Some(120_000_000),
+            ..ready()
+        };
+        assert_eq!(
+            decide(&remote),
+            AutoPlayDecision::Start {
+                source_index: 1,
+                method: PlaybackMethod::DirectPlay,
+                resume_ticks: Some(120_000_000),
+            }
+        );
+        let remote_with_start_over = AutoPlayInput {
+            requested_ticks: Some(0),
+            start_over: true,
+            ..ready()
+        };
+        assert!(matches!(
+            decide(&remote_with_start_over),
+            AutoPlayDecision::Start {
+                resume_ticks: Some(0),
+                ..
+            }
+        ));
+        let negative = AutoPlayInput {
+            requested_ticks: Some(-10),
+            ..ready()
+        };
+        assert!(matches!(
+            decide(&negative),
+            AutoPlayDecision::Start {
+                resume_ticks: Some(0),
+                ..
+            }
+        ));
     }
 
     #[test]

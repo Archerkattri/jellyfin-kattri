@@ -23,6 +23,23 @@ use crate::capabilities::GeneralCommandType;
 /// Highest volume a `SetVolume` command may request.
 pub const MAX_VOLUME: u8 = 100;
 
+/// Most item ids accepted in one `Play` request. A server-side "play all" of a large playlist is
+/// refused rather than silently truncated.
+pub const MAX_REMOTE_PLAY_ITEMS: usize = 100;
+
+/// Longest accepted item id. Jellyfin ids are 32-character hex strings.
+const MAX_ITEM_ID_LEN: usize = 64;
+
+/// Whether one item id from a remote payload is usable: bounded, non-empty, and made of the
+/// characters a server id can contain. A payload cannot smuggle a path or a wildcard.
+fn usable_item_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ITEM_ID_LEN
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// A playstate command as the `PlaystateCommand` enum names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlaystateCommand {
@@ -63,13 +80,20 @@ pub struct GeneralCommand {
 }
 
 /// A remote command this client understands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteCommand {
     Play,
     Pause,
     Stop,
     Next,
     Previous,
+    /// Play these items now, starting at `start_position_ticks` when the server supplied one.
+    /// The server sends this as a `Play` message with a `PlayRequest` payload ("Play on").
+    /// Only the first item is started; see [`Self::from_play_json`].
+    PlayItems {
+        item_ids: Vec<String>,
+        start_position_ticks: Option<i64>,
+    },
     /// Seek to an absolute position in Jellyfin ticks (100-nanosecond units).
     Seek {
         position_ticks: i64,
@@ -120,6 +144,17 @@ struct InboundPlaystateRequest {
     command: String,
     #[serde(default)]
     seek_position_ticks: Option<i64>,
+}
+
+/// Inbound `PlayRequest` payload, read from the `Data` of a `Play` message.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct InboundPlayRequest {
+    play_command: String,
+    #[serde(default)]
+    item_ids: Option<Vec<String>>,
+    #[serde(default)]
+    start_position_ticks: Option<i64>,
 }
 
 impl RemoteCommand {
@@ -173,22 +208,51 @@ impl RemoteCommand {
         }
     }
 
+    /// Parse the `Data` of a `Play` message (the server's "Play on" / `SendPlayCommand`).
+    ///
+    /// Only `PlayNow` is accepted: `PlayNext` and `PlayLast` insert into a queue this client does
+    /// not expose to remote control, so they are refused rather than turned into a plain play.
+    /// Item ids are bounded and character-checked. When the request names several items only the
+    /// first is started; the caller starts one item and this module never guesses a queue.
+    pub fn from_play_json(json: &str) -> Result<Self, RemoteCommandError> {
+        let inbound: InboundPlayRequest =
+            serde_json::from_str(json).map_err(|_| RemoteCommandError::InvalidPayload)?;
+        if inbound.play_command != "PlayNow" {
+            return Err(RemoteCommandError::UnsupportedCommand);
+        }
+        let item_ids = inbound
+            .item_ids
+            .filter(|ids| !ids.is_empty() && ids.len() <= MAX_REMOTE_PLAY_ITEMS)
+            .ok_or(RemoteCommandError::InvalidArgument)?;
+        if !item_ids.iter().all(|id| usable_item_id(id)) {
+            return Err(RemoteCommandError::InvalidArgument);
+        }
+        let start_position_ticks = inbound.start_position_ticks.filter(|ticks| *ticks >= 0);
+        Ok(Self::PlayItems {
+            item_ids,
+            start_position_ticks,
+        })
+    }
+
     /// The request form the server expects for this command.
-    pub fn route(&self) -> RemoteRoute {
-        match *self {
+    ///
+    /// `None` means the command only travels server to client, so there is no request form.
+    pub fn route(&self) -> Option<RemoteRoute> {
+        Some(match self {
             Self::Play => playstate(PlaystateCommand::Unpause, None),
             Self::Pause => playstate(PlaystateCommand::Pause, None),
             Self::Stop => playstate(PlaystateCommand::Stop, None),
             Self::Next => playstate(PlaystateCommand::NextTrack, None),
             Self::Previous => playstate(PlaystateCommand::PreviousTrack, None),
             Self::Seek { position_ticks } => {
-                playstate(PlaystateCommand::Seek, Some(position_ticks))
+                playstate(PlaystateCommand::Seek, Some(*position_ticks))
             }
             Self::SetVolume { volume } => RemoteRoute::General(GeneralCommand {
                 name: GeneralCommandType::SetVolume,
                 arguments: BTreeMap::from([("Volume".to_owned(), volume.to_string())]),
             }),
-        }
+            Self::PlayItems { .. } => return None,
+        })
     }
 }
 
@@ -201,7 +265,10 @@ fn playstate(command: PlaystateCommand, seek_position_ticks: Option<i64>) -> Rem
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_VOLUME, PlaystateCommand, RemoteCommand, RemoteCommandError, RemoteRoute};
+    use super::{
+        MAX_ITEM_ID_LEN, MAX_REMOTE_PLAY_ITEMS, MAX_VOLUME, PlaystateCommand, RemoteCommand,
+        RemoteCommandError, RemoteRoute,
+    };
 
     /// Shape of a `GeneralCommandMessage` `Data` payload as the OpenAPI describes it.
     const SET_VOLUME_RECORDED: &str = r#"{
@@ -325,17 +392,17 @@ mod tests {
     fn transport_commands_map_to_playstate_routes() {
         assert_eq!(
             RemoteCommand::Play.route(),
-            RemoteRoute::Playstate {
+            Some(RemoteRoute::Playstate {
                 command: PlaystateCommand::Unpause,
                 seek_position_ticks: None
-            }
+            })
         );
         assert_eq!(
             RemoteCommand::Seek { position_ticks: 42 }.route(),
-            RemoteRoute::Playstate {
+            Some(RemoteRoute::Playstate {
                 command: PlaystateCommand::Seek,
                 seek_position_ticks: Some(42)
-            }
+            })
         );
         for (command, expected) in [
             (RemoteCommand::Pause, PlaystateCommand::Pause),
@@ -345,23 +412,101 @@ mod tests {
         ] {
             assert_eq!(
                 command.route(),
-                RemoteRoute::Playstate {
+                Some(RemoteRoute::Playstate {
                     command: expected,
                     seek_position_ticks: None
-                }
+                })
             );
         }
     }
 
     #[test]
     fn volume_maps_to_a_general_command_body() {
-        let RemoteRoute::General(body) = (RemoteCommand::SetVolume { volume: 40 }).route() else {
+        let Some(RemoteRoute::General(body)) = (RemoteCommand::SetVolume { volume: 40 }).route()
+        else {
             panic!("volume must use the general command route");
         };
         let encoded = serde_json::to_value(&body).expect("serialize");
         assert_eq!(
             encoded,
             serde_json::json!({"Name": "SetVolume", "Arguments": {"Volume": "40"}})
+        );
+    }
+
+    #[test]
+    fn parses_a_play_now_request_with_its_item_and_position() {
+        let json = r#"{
+            "PlayCommand": "PlayNow",
+            "ItemIds": ["dc1a5c2bb708012441ef2aa742336f21"],
+            "StartPositionTicks": 600000000
+        }"#;
+        assert_eq!(
+            RemoteCommand::from_play_json(json),
+            Ok(RemoteCommand::PlayItems {
+                item_ids: vec!["dc1a5c2bb708012441ef2aa742336f21".to_owned()],
+                start_position_ticks: Some(600_000_000),
+            })
+        );
+        // No position is a start from the beginning, not a rejection.
+        let no_position = r#"{"PlayCommand":"PlayNow","ItemIds":["abc"]}"#;
+        assert_eq!(
+            RemoteCommand::from_play_json(no_position),
+            Ok(RemoteCommand::PlayItems {
+                item_ids: vec!["abc".to_owned()],
+                start_position_ticks: None,
+            })
+        );
+    }
+
+    #[test]
+    fn play_items_has_no_server_request_form() {
+        let command = RemoteCommand::PlayItems {
+            item_ids: vec!["abc".to_owned()],
+            start_position_ticks: None,
+        };
+        assert_eq!(command.route(), None);
+    }
+
+    #[test]
+    fn non_play_now_play_commands_are_refused() {
+        for command in ["PlayNext", "PlayLast", "Bogus", ""] {
+            let json = format!(r#"{{"PlayCommand":"{command}","ItemIds":["abc"]}}"#);
+            assert_eq!(
+                RemoteCommand::from_play_json(&json),
+                Err(RemoteCommandError::UnsupportedCommand),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn play_items_refuses_missing_empty_or_unsafe_ids() {
+        for json in [
+            r#"{"PlayCommand":"PlayNow"}"#,
+            r#"{"PlayCommand":"PlayNow","ItemIds":[]}"#,
+            r#"{"PlayCommand":"PlayNow","ItemIds":[""]}"#,
+            r#"{"PlayCommand":"PlayNow","ItemIds":["../escape"]}"#,
+            r#"{"PlayCommand":"PlayNow","ItemIds":["has space"]}"#,
+        ] {
+            assert_eq!(
+                RemoteCommand::from_play_json(json),
+                Err(RemoteCommandError::InvalidArgument),
+                "{json}"
+            );
+        }
+        let too_many: Vec<String> = (0..=MAX_REMOTE_PLAY_ITEMS)
+            .map(|i| format!("id{i}"))
+            .collect();
+        let json = serde_json::json!({"PlayCommand": "PlayNow", "ItemIds": too_many}).to_string();
+        assert_eq!(
+            RemoteCommand::from_play_json(&json),
+            Err(RemoteCommandError::InvalidArgument)
+        );
+        let too_long = "a".repeat(MAX_ITEM_ID_LEN + 1);
+        let json = serde_json::json!({"PlayCommand": "PlayNow", "ItemIds": [too_long]}).to_string();
+        assert_eq!(
+            RemoteCommand::from_play_json(&json),
+            Err(RemoteCommandError::InvalidArgument)
         );
     }
 

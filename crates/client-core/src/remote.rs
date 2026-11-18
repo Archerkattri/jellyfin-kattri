@@ -14,11 +14,18 @@ use crate::volume::clamp_volume;
 pub const TICKS_PER_MS: u64 = 10_000;
 
 /// The local player action for one remote command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalAction {
     Play,
     Pause,
     Stop,
+    /// Load and play this item, starting at `start_position_ticks` when the server named one.
+    /// The caller starts the item through its normal playback path; only the first id is used,
+    /// because a remote request is one action and this client owns its own queue.
+    PlayItems {
+        item_id: String,
+        start_position_ticks: Option<i64>,
+    },
     /// Jump to an absolute position. The caller clamps to the item duration, which this
     /// module does not know.
     Seek {
@@ -40,6 +47,18 @@ pub fn local_action(
         RemoteCommand::Play => Ok(LocalAction::Play),
         RemoteCommand::Pause => Ok(LocalAction::Pause),
         RemoteCommand::Stop => Ok(LocalAction::Stop),
+        RemoteCommand::PlayItems {
+            item_ids,
+            start_position_ticks,
+        } => {
+            let Some(item_id) = item_ids.into_iter().next() else {
+                return Err(RemoteCommandError::InvalidArgument);
+            };
+            Ok(LocalAction::PlayItems {
+                item_id,
+                start_position_ticks: start_position_ticks.filter(|ticks| *ticks >= 0),
+            })
+        }
         RemoteCommand::Seek { position_ticks } => {
             // Check the sign before dividing: integer division would turn -1 tick into 0.
             let ticks =
@@ -92,6 +111,61 @@ mod tests {
         assert_eq!(
             local_action(RemoteCommand::SetVolume { volume: 40 }, max),
             Ok(LocalAction::SetVolume { percent: 40 })
+        );
+    }
+
+    #[test]
+    fn play_now_starts_the_first_named_item_at_the_requested_position() {
+        assert_eq!(
+            local_action(
+                RemoteCommand::PlayItems {
+                    item_ids: vec!["abc".to_owned(), "def".to_owned()],
+                    start_position_ticks: Some(600_000_000),
+                },
+                100
+            ),
+            Ok(LocalAction::PlayItems {
+                item_id: "abc".to_owned(),
+                start_position_ticks: Some(600_000_000),
+            })
+        );
+        assert_eq!(
+            local_action(
+                RemoteCommand::PlayItems {
+                    item_ids: vec!["abc".to_owned()],
+                    start_position_ticks: None,
+                },
+                100
+            ),
+            Ok(LocalAction::PlayItems {
+                item_id: "abc".to_owned(),
+                start_position_ticks: None,
+            })
+        );
+        // A negative position cannot be honoured; start from the beginning instead of seeking
+        // backwards from the load point.
+        assert_eq!(
+            local_action(
+                RemoteCommand::PlayItems {
+                    item_ids: vec!["abc".to_owned()],
+                    start_position_ticks: Some(-5),
+                },
+                100
+            ),
+            Ok(LocalAction::PlayItems {
+                item_id: "abc".to_owned(),
+                start_position_ticks: None,
+            })
+        );
+        assert_eq!(
+            local_action(
+                RemoteCommand::PlayItems {
+                    item_ids: Vec::new(),
+                    start_position_ticks: None,
+                },
+                100
+            ),
+            Err(RemoteCommandError::InvalidArgument)
         );
     }
 

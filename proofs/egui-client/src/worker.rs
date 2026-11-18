@@ -833,6 +833,9 @@ pub enum WorkerEvent {
     RemoteCommandReceived {
         command: RemoteCommand,
     },
+    /// The session socket connected. Remote control needs capabilities advertised for the session
+    /// record carrying that socket, so the app asks for a fresh advertisement on this event.
+    SessionSocketConnected,
     /// A SyncPlay playback command from the joined group, read from the session socket. The app
     /// maps it with its group clock and echo guard (M4-11).
     SyncPlayCommandReceived {
@@ -1229,6 +1232,10 @@ pub(crate) enum WorkerCommand {
         message: String,
         max_volume_percent: u32,
     },
+    /// Advertise this client's remote-control capabilities again for the current session. The
+    /// server ties capabilities to a session record and a reconnected socket can be a new record,
+    /// so the app asks for this after the socket connects, not only at sign-in.
+    AdvertiseCapabilities,
     SyncPlayJoin {
         request_id: u64,
         group_id: String,
@@ -1807,6 +1814,13 @@ impl ApiWorker {
             request_id,
             item_id,
         })
+    }
+
+    /// Ask the worker to advertise remote-control capabilities again for the current session.
+    /// The session socket calls this after it connects, because a reconnect can carry a new
+    /// session record on the server that starts without capabilities.
+    pub fn advertise_capabilities(&self) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::AdvertiseCapabilities)
     }
 
     /// Queue one inbound remote session message for parsing on the worker (M4-13).
@@ -3108,7 +3122,8 @@ async fn execute_command(
                 );
                 client = Some(new_client);
                 session = Some(new_session);
-                session_socket = session_socket::start(client.as_ref(), session.as_ref(), events);
+                session_socket =
+                    start_remote_session(client.as_ref(), session.as_ref(), events).await;
                 clock_sampler = clock_sampler::start(client.as_ref(), session.as_ref(), events);
                 server = Some(identity.clone());
                 send_event(
@@ -3274,7 +3289,8 @@ async fn execute_command(
                 saved_sign_in = key.map(|key| SavedEntry::new(events.saved_sign_in.clone(), key));
                 client = Some(new_client);
                 session = Some(new_session);
-                session_socket = session_socket::start(client.as_ref(), session.as_ref(), events);
+                session_socket =
+                    start_remote_session(client.as_ref(), session.as_ref(), events).await;
                 clock_sampler = clock_sampler::start(client.as_ref(), session.as_ref(), events);
                 server = Some(identity.clone());
                 send_event(
@@ -3860,6 +3876,20 @@ async fn execute_command(
             } => {
                 if let Some(event) = remote_action_event(&message, max_volume_percent) {
                     send_event(events, ctx, event).await;
+                }
+            }
+            WorkerCommand::AdvertiseCapabilities => {
+                if let (Some(client), Some(session)) = (client.as_ref(), session.as_ref()) {
+                    let capabilities = jellyfin_api::remote::remote_control_capabilities();
+                    match client.advertise_capabilities(session, &capabilities).await {
+                        Ok(()) => tracing::debug!("remote control capabilities re-advertised"),
+                        Err(error) => {
+                            tracing::warn!(
+                                ?error,
+                                "remote control capabilities were not advertised"
+                            )
+                        }
+                    }
                 }
             }
             WorkerCommand::SyncPlayJoin {
@@ -6008,7 +6038,8 @@ async fn execute_command(
                 );
                 client = Some(flow.client);
                 session = Some(new_session);
-                session_socket = session_socket::start(client.as_ref(), session.as_ref(), events);
+                session_socket =
+                    start_remote_session(client.as_ref(), session.as_ref(), events).await;
                 clock_sampler = clock_sampler::start(client.as_ref(), session.as_ref(), events);
                 server = Some(identity.clone());
                 send_event(
@@ -7870,6 +7901,30 @@ fn server_identity(info: &PublicSystemInfo) -> ServerIdentity {
 /// Largest remote session message the worker parses. Real command envelopes are far smaller;
 /// the bound keeps a broken or hostile peer from queueing unbounded text.
 const MAX_REMOTE_MESSAGE_BYTES: usize = 16 * 1024;
+
+/// Advertise this client's remote-control capabilities for the signed-in session, then start the
+/// session socket.
+///
+/// A session that never advertised `SupportsRemoteControl` is never sent remote commands, so the
+/// advertisement has to complete before the socket can receive anything. A failed advertisement is
+/// logged and does not stop browsing or playback; the client simply stays non-controllable until
+/// the next sign-in.
+async fn start_remote_session(
+    client: Option<&JellyfinClient>,
+    session: Option<&Session>,
+    events: &WorkerSink,
+) -> Option<session_socket::SessionSocketHandle> {
+    if let (Some(client), Some(session)) = (client, session) {
+        let capabilities = jellyfin_api::remote::remote_control_capabilities();
+        match client.advertise_capabilities(session, &capabilities).await {
+            Ok(()) => tracing::debug!("remote control capabilities advertised"),
+            Err(error) => {
+                tracing::warn!(?error, "remote control capabilities were not advertised")
+            }
+        }
+    }
+    session_socket::start(client, session, events)
+}
 
 /// Parse one inbound session message into the player action it asks for. `None` means the
 /// message was refused or is not a command this client runs. Nothing is guessed, and the

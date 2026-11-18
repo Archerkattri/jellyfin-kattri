@@ -1028,6 +1028,8 @@ pub enum ConnectionStatus {
 pub(crate) struct AutoPlay {
     item_id: String,
     start_over: bool,
+    /// Explicit start position in ticks, from a remote "play now" request.
+    requested_ticks: Option<i64>,
 }
 
 /// The item whose per-title subtitle style is in effect while it plays. A series record covers
@@ -2993,9 +2995,25 @@ impl KattriApp {
     fn queue_socket_command(&mut self, command: RemoteCommand) {
         let max_volume_percent = self.playback_audio_settings().max_volume_percent;
         match local_action(command, max_volume_percent) {
+            Ok(LocalAction::PlayItems {
+                item_id,
+                start_position_ticks,
+            }) => self.start_remote_play(item_id, start_position_ticks),
             Ok(action) => self.queue_player_intent(action, false),
             Err(error) => tracing::warn!(?error, "remote session command not executed"),
         }
+    }
+
+    /// Start an item because another client asked this one to ("Play on"). The item is loaded
+    /// through the same path a local Play uses, so source selection, reporting and SyncPlay all
+    /// behave normally; only the start position comes from the request.
+    fn start_remote_play(&mut self, item_id: String, start_position_ticks: Option<i64>) {
+        let start_over = start_position_ticks.is_none_or(|ticks| ticks <= 0);
+        self.play_item_at(
+            item_id,
+            start_over,
+            start_position_ticks.filter(|ticks| *ticks > 0),
+        );
     }
 
     /// Feed one server clock reading from the worker into the SyncPlay estimator (M4-11). The
@@ -3214,7 +3232,7 @@ impl KattriApp {
             item_id: entry.item_id.clone(),
             playlist_item_id: entry.playlist_item_id.clone(),
         });
-        self.play_item_locally(entry.item_id, true);
+        self.play_item_locally(entry.item_id, true, None);
     }
 
     /// Ask the worker to join a SyncPlay group (M4-11). The group counts as joined only after
@@ -7906,24 +7924,39 @@ impl KattriApp {
     /// stream from `poll_auto_play` as soon as both the item record and the options have
     /// arrived. `start_over` ignores a saved resume position.
     pub(crate) fn play_item(&mut self, item_id: String, start_over: bool) {
+        self.play_item_at(item_id, start_over, None);
+    }
+
+    /// Play an item, optionally at an explicit position. A remote "play now" request names the
+    /// position it wants, so it takes priority over the saved resume point.
+    pub(crate) fn play_item_at(
+        &mut self,
+        item_id: String,
+        start_over: bool,
+        requested_ticks: Option<i64>,
+    ) {
         if self.sync_play_can_send() {
-            let start_ticks = if start_over {
-                0
-            } else {
-                self.selected_details
-                    .as_ref()
-                    .filter(|details| details.id == item_id)
-                    .and_then(|details| {
-                        details.user_data.as_ref().and_then(|user_data| {
-                            crate::ui::resumable_position_ticks(
-                                user_data.playback_position_ticks,
-                                user_data.played,
-                                details.run_time_ticks,
-                            )
-                        })
-                    })
-                    .unwrap_or(0)
-            };
+            let start_ticks = requested_ticks
+                .map(|ticks| ticks.max(0))
+                .unwrap_or_else(|| {
+                    if start_over {
+                        0
+                    } else {
+                        self.selected_details
+                            .as_ref()
+                            .filter(|details| details.id == item_id)
+                            .and_then(|details| {
+                                details.user_data.as_ref().and_then(|user_data| {
+                                    crate::ui::resumable_position_ticks(
+                                        user_data.playback_position_ticks,
+                                        user_data.played,
+                                        details.run_time_ticks,
+                                    )
+                                })
+                            })
+                            .unwrap_or(0)
+                    }
+                });
             let submitted = self.set_sync_play_new_queue(vec![item_id], 0, start_ticks);
             if submitted.is_err() {
                 self.sync_play_ui.action_failed();
@@ -7935,14 +7968,20 @@ impl KattriApp {
             }
             return;
         }
-        self.play_item_locally(item_id, start_over);
+        self.play_item_locally(item_id, start_over, requested_ticks);
     }
 
-    fn play_item_locally(&mut self, item_id: String, start_over: bool) {
+    fn play_item_locally(
+        &mut self,
+        item_id: String,
+        start_over: bool,
+        requested_ticks: Option<i64>,
+    ) {
         self.select_item(item_id.clone());
         self.auto_play = Some(AutoPlay {
             item_id,
             start_over,
+            requested_ticks,
         });
         if self.playback_info.is_none() && !self.playback_loading {
             self.request_playback_options();
@@ -8004,6 +8043,7 @@ impl KattriApp {
             options,
             details,
             start_over: auto.start_over,
+            requested_ticks: auto.requested_ticks,
         });
         match decision {
             AutoPlayDecision::Wait => {}
@@ -11156,9 +11196,24 @@ impl KattriApp {
                 {
                     self.media_segments_request = None;
                 }
-                WorkerEvent::RemoteAction { action } => self.queue_player_intent(action, false),
+                WorkerEvent::RemoteAction { action } => match action {
+                    LocalAction::PlayItems {
+                        item_id,
+                        start_position_ticks,
+                    } => self.start_remote_play(item_id, start_position_ticks),
+                    action => self.queue_player_intent(action, false),
+                },
                 WorkerEvent::RemoteCommandReceived { command } => {
                     self.queue_socket_command(command);
+                }
+                WorkerEvent::SessionSocketConnected => {
+                    // The socket's session record can differ from the sign-in one, so capabilities
+                    // are advertised again here; without them the server never sends a "Play on".
+                    if let Some(worker) = self.worker.as_ref()
+                        && let Err(error) = worker.advertise_capabilities()
+                    {
+                        tracing::warn!(?error, "capability advertisement was not queued");
+                    }
                 }
                 WorkerEvent::SyncPlayCommandReceived { command } => {
                     self.queue_sync_play_command(command);
@@ -17131,6 +17186,7 @@ mod playback_state_tests {
         app.auto_play = Some(AutoPlay {
             item_id: "movie-1".into(),
             start_over: false,
+            requested_ticks: None,
         });
         app.playback_start_loading = true;
         app.consecutive_progress_report_failures = 3;

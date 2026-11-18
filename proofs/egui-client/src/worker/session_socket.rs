@@ -83,6 +83,16 @@ pub(super) fn start(
                 || SessionSocket::connect_with_cancel(&client, &session, Arc::clone(&thread_stop)),
                 &thread_stop,
                 RETRY_DELAY,
+                || {
+                    // A reconnect can be a new session record on the server, which starts without
+                    // capabilities. Ask for a fresh advertisement before reading commands.
+                    if sender
+                        .blocking_send(WorkerEvent::SessionSocketConnected)
+                        .is_ok()
+                    {
+                        ctx.request_repaint();
+                    }
+                },
                 |inbound| {
                     if thread_stop.load(Ordering::Acquire) {
                         return false;
@@ -115,12 +125,19 @@ enum End {
 }
 
 /// Read the session socket until it is stopped, retrying a failed connection once after
-/// [`RETRY_DELAY`]. `connect` opens one socket. `deliver` takes one command or SyncPlay
-/// message and returns `false` when the loop must end.
-fn run_loop<S, C, D>(mut connect: C, stop: &AtomicBool, retry_delay: Duration, mut deliver: D)
-where
+/// [`RETRY_DELAY`]. `connect` opens one socket. `on_connected` runs after every successful
+/// connect. `deliver` takes one command or SyncPlay message and returns `false` when the loop must
+/// end.
+fn run_loop<S, C, K, D>(
+    mut connect: C,
+    stop: &AtomicBool,
+    retry_delay: Duration,
+    mut on_connected: K,
+    mut deliver: D,
+) where
     S: InboundSocket,
     C: FnMut() -> Result<S, WebSocketError>,
+    K: FnMut(),
     D: FnMut(Inbound) -> bool,
 {
     let mut failures = 0_u32;
@@ -131,6 +148,7 @@ where
         let ended = match connect() {
             Ok(mut socket) => {
                 failures = 0;
+                on_connected();
                 let ended = receive_until_end(&mut socket, stop, &mut deliver);
                 socket.close();
                 ended
@@ -284,6 +302,7 @@ mod tests {
             },
             &stop,
             Duration::ZERO,
+            || {},
             |command| {
                 delivered.push(command);
                 true
@@ -418,6 +437,7 @@ mod tests {
             },
             &stop,
             Duration::ZERO,
+            || {},
             |command| {
                 // The sign-out arrives while the first command is handled.
                 delivered.push(command);
