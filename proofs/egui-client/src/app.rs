@@ -35,8 +35,10 @@ use jellyfin_api::{
     SyncPlayPlaybackStatus, baseline_device_profile, collection_runtime,
     connectivity::OfflineTracker,
 };
+use kattri_client_core::connection::{SessionEffect, SessionEvent, SessionId, SessionMachine};
 use kattri_client_core::downloads::DownloadState;
 use kattri_client_core::epg::{EpgProgram, EpgWindow};
+use kattri_client_core::epoch::Epoch;
 use kattri_client_core::focus::FocusGraph;
 use kattri_client_core::language_memory::{RecordOutcome, SeriesLanguageMemory, TrackLanguage};
 use kattri_client_core::paging::PagingState;
@@ -887,6 +889,99 @@ mod connection_boundary_tests {
         assert_ne!(app.person_items_request_id, old_person_request);
         assert_ne!(app.series_episodes_request_id, old_series_request);
     }
+
+    #[test]
+    fn beginning_a_connection_starts_a_new_session_generation() {
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context);
+        assert_eq!(
+            app.session_machine.state(),
+            kattri_client_core::connection::SessionState::SignedOut
+        );
+
+        app.begin_connection("Checking server");
+
+        assert!(matches!(
+            app.session_machine.state(),
+            kattri_client_core::connection::SessionState::Connecting { .. }
+        ));
+        assert!(app.session_machine.epoch() > kattri_client_core::epoch::Epoch::NONE);
+    }
+
+    #[test]
+    fn a_second_connection_attempt_bumps_the_session_generation() {
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context);
+        app.begin_connection("first");
+        let first = app.session_machine.epoch();
+        app.begin_connection("second");
+        let second = app.session_machine.epoch();
+        assert!(second > first, "each attempt is a new generation");
+    }
+
+    #[test]
+    fn clearing_a_connection_ends_the_session_generation() {
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context);
+        app.begin_connection("Checking server");
+        assert!(app.session_machine.epoch() > kattri_client_core::epoch::Epoch::NONE);
+
+        app.clear_connection();
+
+        assert_eq!(
+            app.session_machine.state(),
+            kattri_client_core::connection::SessionState::SignedOut
+        );
+        assert_eq!(
+            app.session_machine.epoch(),
+            kattri_client_core::epoch::Epoch::NONE
+        );
+    }
+
+    #[test]
+    fn session_generations_never_reset_across_sign_out() {
+        // C1: a result from an earlier session must not match a later one. If the epoch reset to 1
+        // on every sign-in, a stale result tagged epoch 1 could be applied to a new session.
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context);
+        app.begin_connection("first session");
+        let first = app.session_epoch;
+        app.clear_connection();
+        app.begin_connection("second session");
+        let second = app.session_epoch;
+        assert!(
+            second > first,
+            "the generation counter is monotonic across sign-out"
+        );
+    }
+
+    #[test]
+    fn a_socket_reconnect_in_a_live_session_declares_capability_advertisement() {
+        use kattri_client_core::connection::{
+            SessionEffect, SessionEvent, SessionId, SessionState,
+        };
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context);
+        app.begin_connection("Checking server");
+        let epoch = app.session_machine.epoch();
+        let session = SessionId::from_raw(1);
+        let _ = app.reduce_session(SessionEvent::SignedIn { epoch, session });
+        assert!(matches!(
+            app.session_machine.state(),
+            SessionState::Live { .. }
+        ));
+
+        // Every reconnect of the live socket must re-advertise for the record it carries.
+        for _ in 0..3 {
+            let effects = app.reduce_session(SessionEvent::SocketConnected { epoch });
+            assert!(
+                effects
+                    .iter()
+                    .any(|effect| effect == SessionEffect::AdvertiseCapabilities { session }),
+                "reconnect must declare capability advertisement"
+            );
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1602,6 +1697,15 @@ pub struct KattriApp {
     next_request_id: u64,
     search_debouncer: SearchDebouncer,
     connection_request_id: u64,
+    /// Session identity and socket lifecycle as an explicit machine (epoch seam). It owns the
+    /// session epoch and makes capability re-advertisement on reconnect a structural consequence;
+    /// `connection` below remains the UI/catalog display state.
+    session_machine: SessionMachine,
+    session_id_counter: u64,
+    /// Monotonic source of session generations. It never resets on sign-out, so a result from an
+    /// earlier session can never match a later one (C1). The machine tracks the active generation;
+    /// this counter is what new generations are issued from.
+    session_epoch: Epoch,
     catalog_request_id: u64,
     /// Latest admin dashboard read (M4-22). A reply for any other request is stale.
     pub(crate) admin_load: AdminLoad,
@@ -2246,6 +2350,9 @@ impl KattriApp {
             next_request_id: 0,
             search_debouncer: SearchDebouncer::default(),
             connection_request_id: 0,
+            session_machine: SessionMachine::new(),
+            session_id_counter: 0,
+            session_epoch: Epoch::NONE,
             catalog_request_id: 0,
             admin_load: AdminLoad::Pending,
             admin_request_id: None,
@@ -4402,7 +4509,38 @@ impl KattriApp {
 
     /// Clears the library, playback and sign-in state for a new attempt and returns its
     /// request id. Results tagged with an older id are ignored from now on.
+    /// Advance the session machine and return the effects the transition declares.
+    fn reduce_session(
+        &mut self,
+        event: SessionEvent,
+    ) -> kattri_client_core::connection::SessionEffects {
+        self.session_machine.reduce(event).effects
+    }
+
+    /// Execute the capability-advertisement effects a transition declared. Socket start, catalog
+    /// load and the initial sign-in advertisement are still owned by the worker/existing paths in
+    /// this incremental step; the machine drives the reconnect re-advertisement (the shipped bug).
+    fn advertise_session_effects(
+        &mut self,
+        effects: kattri_client_core::connection::SessionEffects,
+    ) {
+        for effect in effects.iter() {
+            if let SessionEffect::AdvertiseCapabilities { .. } = effect
+                && let Some(worker) = self.worker.as_ref()
+                && let Err(error) = worker.advertise_capabilities()
+            {
+                tracing::warn!(?error, "capability advertisement was not queued");
+            }
+        }
+    }
+
     fn begin_connection(&mut self, message: &str) -> u64 {
+        // A new connection attempt starts a new session generation; results from any earlier
+        // generation are stale from this point on. The counter is monotonic across sign-outs.
+        self.session_epoch = self.session_epoch.next();
+        let _ = self.reduce_session(SessionEvent::SignInStarted {
+            epoch: self.session_epoch,
+        });
         if let Some(worker) = self.worker.as_ref() {
             worker.cancel_reads();
         }
@@ -9160,6 +9298,8 @@ impl KattriApp {
     }
 
     fn clear_connection(&mut self) {
+        // End the session generation: any in-flight result from it is now stale.
+        let _ = self.reduce_session(SessionEvent::SignOut);
         // An admin dialog must not survive a sign-out: its next Save would otherwise go to
         // whatever session the worker holds.
         self.metadata_editor = None;
@@ -9441,6 +9581,13 @@ impl KattriApp {
                 } if catalog_response_is_current(request_id, self.catalog_request_id) => {
                     let signed_in = request_id == self.connection_request_id;
                     if signed_in {
+                        // The session record is now live. Record its identity in the machine so a
+                        // later socket reconnect re-advertises capabilities for it (C3).
+                        self.session_id_counter = self.session_id_counter.wrapping_add(1);
+                        let _ = self.reduce_session(SessionEvent::SignedIn {
+                            epoch: self.session_epoch,
+                            session: SessionId::from_raw(self.session_id_counter),
+                        });
                         self.admin_users_open = false;
                         self.admin_users.reset(self.connection_request_id);
                         self.sync_play_status_results.clear();
@@ -11207,13 +11354,14 @@ impl KattriApp {
                     self.queue_socket_command(command);
                 }
                 WorkerEvent::SessionSocketConnected => {
-                    // The socket's session record can differ from the sign-in one, so capabilities
-                    // are advertised again here; without them the server never sends a "Play on".
-                    if let Some(worker) = self.worker.as_ref()
-                        && let Err(error) = worker.advertise_capabilities()
-                    {
-                        tracing::warn!(?error, "capability advertisement was not queued");
-                    }
+                    // C3: the socket's session record can differ from the sign-in one. The machine
+                    // declares the re-advertisement for the record the socket carries; execute it.
+                    // Without this the server reports SupportsRemoteControl=false and sends no
+                    // usable "Play on" command.
+                    let effects = self.reduce_session(SessionEvent::SocketConnected {
+                        epoch: self.session_epoch,
+                    });
+                    self.advertise_session_effects(effects);
                 }
                 WorkerEvent::SyncPlayCommandReceived { command } => {
                     self.queue_sync_play_command(command);
