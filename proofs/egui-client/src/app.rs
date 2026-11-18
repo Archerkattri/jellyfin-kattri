@@ -9581,13 +9581,15 @@ impl KattriApp {
                 } if catalog_response_is_current(request_id, self.catalog_request_id) => {
                     let signed_in = request_id == self.connection_request_id;
                     if signed_in {
-                        // The session record is now live. Record its identity in the machine so a
-                        // later socket reconnect re-advertises capabilities for it (C3).
+                        // The session record is now live. Record its identity in the machine and
+                        // execute the effects it declares; the initial capability advertisement is
+                        // one of them, so the machine owns that side effect (C2).
                         self.session_id_counter = self.session_id_counter.wrapping_add(1);
-                        let _ = self.reduce_session(SessionEvent::SignedIn {
+                        let effects = self.reduce_session(SessionEvent::SignedIn {
                             epoch: self.session_epoch,
                             session: SessionId::from_raw(self.session_id_counter),
                         });
+                        self.advertise_session_effects(effects);
                         self.admin_users_open = false;
                         self.admin_users.reset(self.connection_request_id);
                         self.sync_play_status_results.clear();

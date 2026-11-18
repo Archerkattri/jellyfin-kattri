@@ -3123,7 +3123,7 @@ async fn execute_command(
                 client = Some(new_client);
                 session = Some(new_session);
                 session_socket =
-                    start_remote_session(client.as_ref(), session.as_ref(), events).await;
+                    start_session_socket(client.as_ref(), session.as_ref(), events).await;
                 clock_sampler = clock_sampler::start(client.as_ref(), session.as_ref(), events);
                 server = Some(identity.clone());
                 send_event(
@@ -3290,7 +3290,7 @@ async fn execute_command(
                 client = Some(new_client);
                 session = Some(new_session);
                 session_socket =
-                    start_remote_session(client.as_ref(), session.as_ref(), events).await;
+                    start_session_socket(client.as_ref(), session.as_ref(), events).await;
                 clock_sampler = clock_sampler::start(client.as_ref(), session.as_ref(), events);
                 server = Some(identity.clone());
                 send_event(
@@ -6039,7 +6039,7 @@ async fn execute_command(
                 client = Some(flow.client);
                 session = Some(new_session);
                 session_socket =
-                    start_remote_session(client.as_ref(), session.as_ref(), events).await;
+                    start_session_socket(client.as_ref(), session.as_ref(), events).await;
                 clock_sampler = clock_sampler::start(client.as_ref(), session.as_ref(), events);
                 server = Some(identity.clone());
                 send_event(
@@ -7902,27 +7902,17 @@ fn server_identity(info: &PublicSystemInfo) -> ServerIdentity {
 /// the bound keeps a broken or hostile peer from queueing unbounded text.
 const MAX_REMOTE_MESSAGE_BYTES: usize = 16 * 1024;
 
-/// Advertise this client's remote-control capabilities for the signed-in session, then start the
-/// session socket.
+/// Start the session socket for the signed-in session.
 ///
-/// A session that never advertised `SupportsRemoteControl` is never sent remote commands, so the
-/// advertisement has to complete before the socket can receive anything. A failed advertisement is
-/// logged and does not stop browsing or playback; the client simply stays non-controllable until
-/// the next sign-in.
-async fn start_remote_session(
+/// Capability advertisement is deliberately NOT done here: it is a consequence the app's
+/// `SessionMachine` declares (`SessionEffect::AdvertiseCapabilities`) and executes through
+/// `WorkerCommand::AdvertiseCapabilities`, so there is one owner of that side effect (C2) and a
+/// reconnect re-advertises for the record its socket carries (C3).
+async fn start_session_socket(
     client: Option<&JellyfinClient>,
     session: Option<&Session>,
     events: &WorkerSink,
 ) -> Option<session_socket::SessionSocketHandle> {
-    if let (Some(client), Some(session)) = (client, session) {
-        let capabilities = jellyfin_api::remote::remote_control_capabilities();
-        match client.advertise_capabilities(session, &capabilities).await {
-            Ok(()) => tracing::debug!("remote control capabilities advertised"),
-            Err(error) => {
-                tracing::warn!(?error, "remote control capabilities were not advertised")
-            }
-        }
-    }
     session_socket::start(client, session, events)
 }
 
