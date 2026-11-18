@@ -478,4 +478,90 @@ mod tests {
         assert_eq!(machine.state().session(), None);
         assert!(!machine.state().has_session());
     }
+
+    /// A model-based interleaving check: drive the machine with a long, deliberately mixed
+    /// sequence of intents and results (including results from abandoned epochs) and assert the
+    /// invariants that encode C2/C3 after every single step.
+    #[test]
+    fn interleaved_intents_and_stale_results_never_break_the_session_invariants() {
+        let mut machine = SessionMachine::new();
+        let epochs = [E, E.next(), E.next().next()];
+        let mut live_with_advertisement = false;
+
+        // (event, expected-to-apply) pairs. "apply" is false when the event carries an epoch that
+        // is not the machine's live one, which is exactly the stale case the boundary must drop.
+        let mut script: Vec<(SessionEvent, bool)> = Vec::new();
+        for (index, epoch) in epochs.iter().enumerate() {
+            script.push((SessionEvent::SignInStarted { epoch: *epoch }, true));
+            script.push((
+                SessionEvent::SignedIn {
+                    epoch: *epoch,
+                    session: SessionId::from_raw(index as u64 + 1),
+                },
+                true,
+            ));
+            script.push((SessionEvent::SocketConnected { epoch: *epoch }, true));
+            // A result from an older generation, delivered late.
+            if index > 0 {
+                script.push((
+                    SessionEvent::SocketConnected {
+                        epoch: epochs[index - 1],
+                    },
+                    false,
+                ));
+                script.push((
+                    SessionEvent::SocketLost {
+                        epoch: epochs[index - 1],
+                    },
+                    false,
+                ));
+            }
+            script.push((SessionEvent::SocketLost { epoch: *epoch }, true));
+            script.push((SessionEvent::RetryDue { epoch: *epoch }, true));
+            script.push((SessionEvent::SignOut, true));
+        }
+
+        for (event, should_apply) in script {
+            let before = machine.state();
+            let transition = machine.reduce(event);
+            let after = machine.state();
+            // "Applied" means the boundary let the event through: it changed the state or asked for
+            // effects. A dropped event does neither.
+            let applied = before != after || !transition.effects.is_empty();
+
+            assert_eq!(
+                applied, should_apply,
+                "{event:?} from {before:?}: applied={applied}, expected {should_apply}"
+            );
+
+            // I2: a dropped event never emits effects and never changes the epoch.
+            if !should_apply {
+                assert!(transition.effects.is_empty());
+                assert_eq!(before.epoch(), after.epoch());
+            }
+
+            // I3: entering or staying Live with a connected socket advertises for that record.
+            if let SessionState::Live { session, .. } = after
+                && applied
+                && matches!(
+                    event,
+                    SessionEvent::SignedIn { .. } | SessionEvent::SocketConnected { .. }
+                )
+            {
+                let advertised = transition
+                    .effects
+                    .iter()
+                    .any(|effect| effect == SessionEffect::AdvertiseCapabilities { session });
+                assert!(
+                    advertised,
+                    "{event:?} left the machine Live without advertising for {session:?}"
+                );
+                live_with_advertisement = true;
+            }
+        }
+        assert!(
+            live_with_advertisement,
+            "the script must reach a live session"
+        );
+    }
 }
