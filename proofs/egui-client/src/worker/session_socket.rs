@@ -311,6 +311,65 @@ mod tests {
         (delivered, connects)
     }
 
+    /// Run the loop over the scripted attempts. Returns the delivered commands, the number
+    /// of connect attempts, and how many successful connects asked for a fresh capability
+    /// advertisement.
+    fn run_counting_connects(attempts: Vec<Attempt>) -> (Vec<Inbound>, usize, usize) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut attempts = attempts.into_iter();
+        let mut connects = 0;
+        let mut connected = 0;
+        let mut delivered = Vec::new();
+        run_loop(
+            || {
+                connects += 1;
+                match attempts.next() {
+                    Some(Attempt::Open(frames)) => Ok(ScriptedSocket {
+                        frames: frames.into(),
+                        stop: Arc::clone(&stop),
+                    }),
+                    Some(Attempt::Fail(error)) => Err(error),
+                    None => Err(WebSocketError::Handshake),
+                }
+            },
+            &stop,
+            Duration::ZERO,
+            || connected += 1,
+            |command| {
+                delivered.push(command);
+                true
+            },
+        );
+        (delivered, connects, connected)
+    }
+
+    #[test]
+    fn every_successful_connect_asks_for_capabilities_again() {
+        // C3: a reconnect can be a new session record on the server, which starts without
+        // capabilities. The loop must ask for a fresh advertisement on every connect, not once.
+        let (delivered, connects, connected) = run_counting_connects(vec![
+            Attempt::Open(vec![Err(WebSocketError::Handshake)]),
+            Attempt::Open(vec![Ok(Inbound::Command(RemoteCommand::Pause))]),
+        ]);
+        assert_eq!(connects, 2, "one dropped socket and one retry");
+        assert_eq!(
+            connected, 2,
+            "each successful connect re-advertises for the session record it carries"
+        );
+        assert_eq!(delivered, vec![Inbound::Command(RemoteCommand::Pause)]);
+    }
+
+    #[test]
+    fn a_failed_connect_attempt_does_not_ask_for_capabilities() {
+        // There is no session record to advertise for until a socket is actually up.
+        let (_delivered, connects, connected) = run_counting_connects(vec![
+            Attempt::Fail(WebSocketError::Handshake),
+            Attempt::Open(vec![Ok(Inbound::Command(RemoteCommand::Pause))]),
+        ]);
+        assert_eq!(connects, 2);
+        assert_eq!(connected, 1, "only the connect that opened counts");
+    }
+
     #[test]
     fn a_pause_from_the_socket_is_delivered_once() {
         let (delivered, connects) = run(vec![Attempt::Open(vec![Ok(Inbound::Command(
