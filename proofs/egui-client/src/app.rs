@@ -984,6 +984,120 @@ mod connection_boundary_tests {
     }
 }
 
+/// Characterization tests for the one-click playback request lifecycle (`poll_auto_play`).
+/// These pin the current observable behavior so the pending-request state can be migrated to an
+/// explicit machine without changing what the viewer sees. The pure decision itself is already
+/// covered by `client-core::auto_play` tests; these cover the app-level gather-and-act wrapper.
+#[cfg(test)]
+mod auto_play_lifecycle_tests {
+    use super::{ApiWorker, AutoPlay, KattriApp};
+
+    fn ready_app() -> KattriApp {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.worker = Some(ApiWorker::queued_for_test());
+        app.selected_item_id = Some("movie".into());
+        app.selected_details = Some(
+            serde_json::from_value(serde_json::json!({
+                "Id": "movie", "Name": "Fixture", "Type": "Movie"
+            }))
+            .expect("item fixture"),
+        );
+        app.playback_info = Some(
+            serde_json::from_value(serde_json::json!({
+                "MediaSources":[{
+                    "Container":"mkv", "SupportsDirectPlay":true, "SupportsTranscoding":true,
+                    "TranscodingUrl":"/fixture",
+                    "MediaStreams":[
+                        {"Type":"Video","Codec":"h264","BitDepth":8,"VideoRangeType":"SDR"},
+                        {"Type":"Audio","Codec":"aac","IsDefault":true,"Index":1}
+                    ]
+                }]
+            }))
+            .expect("options fixture"),
+        );
+        app.auto_play = Some(AutoPlay {
+            item_id: "movie".into(),
+            start_over: false,
+            requested_ticks: None,
+        });
+        app
+    }
+
+    #[test]
+    fn no_pending_request_is_a_no_op() {
+        let mut app = ready_app();
+        app.auto_play = None;
+        app.poll_auto_play();
+        assert!(app.auto_play.is_none());
+        assert!(app.playback_start_error.is_none());
+    }
+
+    #[test]
+    fn a_changed_item_drops_the_request() {
+        let mut app = ready_app();
+        app.selected_item_id = Some("another-item".into());
+        app.poll_auto_play();
+        assert!(app.auto_play.is_none(), "the viewer moved on");
+    }
+
+    #[test]
+    fn a_negotiation_error_drops_the_request() {
+        let mut app = ready_app();
+        app.playback_error = Some("negotiation failed".into());
+        app.poll_auto_play();
+        assert!(app.auto_play.is_none());
+    }
+
+    #[test]
+    fn a_details_error_drops_the_request() {
+        let mut app = ready_app();
+        app.details_error = Some("details failed".into());
+        app.poll_auto_play();
+        assert!(app.auto_play.is_none());
+    }
+
+    #[test]
+    fn options_not_loaded_keeps_the_request_waiting() {
+        let mut app = ready_app();
+        app.playback_info = None;
+        app.poll_auto_play();
+        assert!(app.auto_play.is_some(), "still waiting for options");
+    }
+
+    #[test]
+    fn a_start_already_in_flight_keeps_the_request_waiting() {
+        let mut app = ready_app();
+        app.playback_start_loading = true;
+        app.poll_auto_play();
+        assert!(app.auto_play.is_some(), "do not start twice");
+    }
+
+    #[test]
+    fn unusable_options_drop_the_request() {
+        let mut app = ready_app();
+        app.playback_info = Some(
+            serde_json::from_value(serde_json::json!({ "MediaSources": [] }))
+                .expect("empty options fixture"),
+        );
+        app.poll_auto_play();
+        assert!(app.auto_play.is_none());
+    }
+
+    #[test]
+    fn a_ready_request_starts_once_and_clears_itself() {
+        let mut app = ready_app();
+        app.poll_auto_play();
+        assert!(
+            app.auto_play.is_none(),
+            "the request is consumed by the start"
+        );
+        assert!(app.playback_start_error.is_none());
+        // A second poll must not start again: the request is gone.
+        app.poll_auto_play();
+        assert!(app.auto_play.is_none());
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PlaybackReportKind {
     Started,
