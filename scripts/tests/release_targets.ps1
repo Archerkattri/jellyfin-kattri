@@ -525,11 +525,11 @@ try {
     if ($prefillTest -notmatch 'ConnectionStatus::Disconnected' -or
         $prefillTest -notmatch 'app\.username\.is_empty\(\)' -or
         $prefillTest -notmatch 'app\.password_input\.is_empty\(\)' -or
-        $prefillTest -notmatch 'app\.auto_play\.is_none\(\)' -or
+        $prefillTest -notmatch '!app\.auto_play\.is_pending\(\)' -or
         $prefillTest -notmatch 'app\.pending_playback\.is_none\(\)' -or
         $manualSignInTest -notmatch 'app\.start_connection\(\)' -or
         $manualSignInTest -notmatch 'WorkerEvent::ItemsLoaded' -or
-        $manualSignInTest -notmatch 'app\.auto_play\.is_none\(\)' -or
+        $manualSignInTest -notmatch '!app\.auto_play\.is_pending\(\)' -or
         $manualSignInTest -notmatch '!app\.playback_start_loading') {
         throw 'Launch intent must wait for manual authentication, select the item, and never auto-play it.'
     }

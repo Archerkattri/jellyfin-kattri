@@ -35,6 +35,9 @@ use jellyfin_api::{
     SyncPlayPlaybackStatus, baseline_device_profile, collection_runtime,
     connectivity::OfflineTracker,
 };
+use kattri_client_core::auto_play::{
+    AutoPlayEffect, AutoPlayMachine, AutoPlayObservations, PlayRequest,
+};
 use kattri_client_core::connection::{SessionEffect, SessionEvent, SessionId, SessionMachine};
 use kattri_client_core::downloads::DownloadState;
 use kattri_client_core::epg::{EpgProgram, EpgWindow};
@@ -672,7 +675,7 @@ mod launch_intent_tests {
         ));
         assert_eq!(app.selected_item_id, None);
         assert!(app.pending_launch_intent.is_some());
-        assert!(app.auto_play.is_none());
+        assert!(!app.auto_play.is_pending());
         assert!(app.pending_playback.is_none());
         assert!(!app.playback_start_loading);
     }
@@ -724,7 +727,7 @@ mod launch_intent_tests {
         app.receive_worker_events(&ctx);
         assert_eq!(app.selected_item_id.as_deref(), Some(ITEM_ID));
         assert!(app.pending_launch_intent.is_none());
-        assert!(app.auto_play.is_none());
+        assert!(!app.auto_play.is_pending());
         assert!(!app.playback_start_loading);
         let details_request_id = app.details_request_id;
 
@@ -734,7 +737,7 @@ mod launch_intent_tests {
         app.receive_worker_events(&ctx);
         assert_eq!(app.selected_item_id.as_deref(), Some(ITEM_ID));
         assert_eq!(app.details_request_id, details_request_id);
-        assert!(app.auto_play.is_none());
+        assert!(!app.auto_play.is_pending());
     }
 
     #[test]
@@ -767,7 +770,7 @@ mod launch_intent_tests {
         app.receive_worker_events(&ctx);
 
         assert!(app.selected_item_id.is_none());
-        assert!(app.auto_play.is_none());
+        assert!(!app.auto_play.is_pending());
         assert!(app.pending_launch_intent.as_ref().is_some_and(|pending| {
             pending.server_url == SERVER_URL && pending.connection_generation.is_none()
         }));
@@ -990,7 +993,7 @@ mod connection_boundary_tests {
 /// covered by `client-core::auto_play` tests; these cover the app-level gather-and-act wrapper.
 #[cfg(test)]
 mod auto_play_lifecycle_tests {
-    use super::{ApiWorker, AutoPlay, KattriApp};
+    use super::{ApiWorker, KattriApp, PlayRequest};
 
     fn ready_app() -> KattriApp {
         let mut app = KattriApp::new(egui::Context::default());
@@ -1015,7 +1018,7 @@ mod auto_play_lifecycle_tests {
             }))
             .expect("options fixture"),
         );
-        app.auto_play = Some(AutoPlay {
+        app.auto_play.request(PlayRequest {
             item_id: "movie".into(),
             start_over: false,
             requested_ticks: None,
@@ -1026,9 +1029,9 @@ mod auto_play_lifecycle_tests {
     #[test]
     fn no_pending_request_is_a_no_op() {
         let mut app = ready_app();
-        app.auto_play = None;
+        app.auto_play.cancel();
         app.poll_auto_play();
-        assert!(app.auto_play.is_none());
+        assert!(!app.auto_play.is_pending());
         assert!(app.playback_start_error.is_none());
     }
 
@@ -1037,7 +1040,7 @@ mod auto_play_lifecycle_tests {
         let mut app = ready_app();
         app.selected_item_id = Some("another-item".into());
         app.poll_auto_play();
-        assert!(app.auto_play.is_none(), "the viewer moved on");
+        assert!(!app.auto_play.is_pending(), "the viewer moved on");
     }
 
     #[test]
@@ -1045,7 +1048,7 @@ mod auto_play_lifecycle_tests {
         let mut app = ready_app();
         app.playback_error = Some("negotiation failed".into());
         app.poll_auto_play();
-        assert!(app.auto_play.is_none());
+        assert!(!app.auto_play.is_pending());
     }
 
     #[test]
@@ -1053,7 +1056,7 @@ mod auto_play_lifecycle_tests {
         let mut app = ready_app();
         app.details_error = Some("details failed".into());
         app.poll_auto_play();
-        assert!(app.auto_play.is_none());
+        assert!(!app.auto_play.is_pending());
     }
 
     #[test]
@@ -1061,7 +1064,7 @@ mod auto_play_lifecycle_tests {
         let mut app = ready_app();
         app.playback_info = None;
         app.poll_auto_play();
-        assert!(app.auto_play.is_some(), "still waiting for options");
+        assert!(app.auto_play.is_pending(), "still waiting for options");
     }
 
     #[test]
@@ -1069,7 +1072,7 @@ mod auto_play_lifecycle_tests {
         let mut app = ready_app();
         app.playback_start_loading = true;
         app.poll_auto_play();
-        assert!(app.auto_play.is_some(), "do not start twice");
+        assert!(app.auto_play.is_pending(), "do not start twice");
     }
 
     #[test]
@@ -1080,7 +1083,7 @@ mod auto_play_lifecycle_tests {
                 .expect("empty options fixture"),
         );
         app.poll_auto_play();
-        assert!(app.auto_play.is_none());
+        assert!(!app.auto_play.is_pending());
     }
 
     #[test]
@@ -1088,13 +1091,13 @@ mod auto_play_lifecycle_tests {
         let mut app = ready_app();
         app.poll_auto_play();
         assert!(
-            app.auto_play.is_none(),
+            !app.auto_play.is_pending(),
             "the request is consumed by the start"
         );
         assert!(app.playback_start_error.is_none());
         // A second poll must not start again: the request is gone.
         app.poll_auto_play();
-        assert!(app.auto_play.is_none());
+        assert!(!app.auto_play.is_pending());
     }
 }
 
@@ -1231,15 +1234,10 @@ pub enum ConnectionStatus {
     LibraryError(String),
 }
 
-/// A one-click playback request: the item is selected, its playback options are negotiated,
-/// and the stream starts as soon as both the item record and the options are ready.
-#[derive(Clone, Debug)]
-pub(crate) struct AutoPlay {
-    item_id: String,
-    start_over: bool,
-    /// Explicit start position in ticks, from a remote "play now" request.
-    requested_ticks: Option<i64>,
-}
+// A one-click playback request: the item is selected, its playback options are negotiated, and the
+// stream starts as soon as both the item record and the options are ready. The request itself is
+// owned by `AutoPlayMachine` (`client-core::auto_play`); this app only gathers the observations and
+// runs the effect the machine declares.
 
 /// The item whose per-title subtitle style is in effect while it plays. A series record covers
 /// its episodes when the episode itself has no override.
@@ -1581,7 +1579,7 @@ pub struct KattriApp {
     pub(crate) custom_backdrop_texture: Option<egui::TextureHandle>,
     custom_backdrop_request: Option<(u64, std::path::PathBuf)>,
     /// Set by `play_item`; consumed by `poll_auto_play` once the stream can start.
-    pub(crate) auto_play: Option<AutoPlay>,
+    pub(crate) auto_play: AutoPlayMachine,
     pub(crate) details_loading: bool,
     pub(crate) details_error: Option<String>,
     pub(crate) series_seasons: Vec<BaseItemDto>,
@@ -1940,7 +1938,7 @@ impl KattriApp {
     /// True while the user is waiting on a playback request. One-click playback is included
     /// because it is still negotiating even before the options request goes out.
     pub(crate) fn playback_busy(&self) -> bool {
-        self.playback_ui_phase().is_busy() || self.auto_play.is_some()
+        self.playback_ui_phase().is_busy() || self.auto_play.is_pending()
     }
 
     /// Discard playback fields through one transition point.
@@ -1980,7 +1978,7 @@ impl KattriApp {
         }
         if what == PlaybackReset::Session {
             self.active_playback = None;
-            self.auto_play = None;
+            self.auto_play.cancel();
             self.mid_stream_recoveries = 0;
             self.playback_report_feedback = None;
             self.pending_playback_report_requests.clear();
@@ -2106,7 +2104,7 @@ impl KattriApp {
             self.user_name.is_some(),
             self.selected_item_id,
             self.details_loading,
-            self.auto_play,
+            self.auto_play.pending(),
             self.playback_loading,
             self.playback_info.is_some(),
             self.playback_error,
@@ -2275,7 +2273,7 @@ impl KattriApp {
             ambient_backdrop: crate::ui::ambient::AmbientBackdrop::default(),
             custom_backdrop_texture: None,
             custom_backdrop_request: None,
-            auto_play: None,
+            auto_play: AutoPlayMachine::new(),
             details_loading: false,
             details_error: None,
             series_seasons: Vec::new(),
@@ -3279,7 +3277,7 @@ impl KattriApp {
         if command.action == SyncPlayPlaybackAction::Stop {
             self.invalidate_sync_play_playback_handoff();
             self.sync_play_auto_target = None;
-            self.auto_play = None;
+            self.auto_play.cancel();
             self.player_view.player = None;
             self.player_view.echo = None;
             self.queue_player_intent(LocalAction::Stop, true);
@@ -3351,7 +3349,7 @@ impl KattriApp {
     fn invalidate_sync_play_queue(&mut self) {
         self.invalidate_sync_play_playback_handoff();
         if self.sync_play_auto_target.take().is_some() {
-            self.auto_play = None;
+            self.auto_play.cancel();
         }
         self.sync_play_queue_generation = self.sync_play_queue_generation.wrapping_add(1);
         self.sync_play_queue = None;
@@ -3443,7 +3441,7 @@ impl KattriApp {
         }
         let Some(entry) = next_entry else {
             if self.sync_play_auto_target.take().is_some() {
-                self.auto_play = None;
+                self.auto_play.cancel();
             }
             self.sync_play_auto_target = None;
             return;
@@ -4339,7 +4337,7 @@ impl KattriApp {
         self.quick_connect_probe_after = None;
         self.quick_connect_probe_pending = None;
         self.quick_connect_enabled_for = None;
-        self.auto_play = None;
+        self.auto_play.cancel();
         self.pending_playback = None;
         self.pending_launch_intent = Some(PendingLaunchIntent {
             server_url,
@@ -4367,7 +4365,7 @@ impl KattriApp {
             .map(|intent| intent.item_id.clone());
         if let Some(item_id) = item_id {
             self.pending_launch_intent = None;
-            self.auto_play = None;
+            self.auto_play.cancel();
             self.select_item(item_id);
         }
     }
@@ -8230,7 +8228,7 @@ impl KattriApp {
         requested_ticks: Option<i64>,
     ) {
         self.select_item(item_id.clone());
-        self.auto_play = Some(AutoPlay {
+        self.auto_play.request(PlayRequest {
             item_id,
             start_over,
             requested_ticks,
@@ -8243,18 +8241,16 @@ impl KattriApp {
     /// Starts a pending `play_item` once everything it needs is loaded. Drops the request when
     /// the viewer moved to another item or negotiation failed; the details panel shows the error.
     fn poll_auto_play(&mut self) {
-        use kattri_client_core::auto_play::{
-            AutoPlayDecision, AutoPlayInput, DetailsState, OptionsState, decide,
-        };
+        use kattri_client_core::auto_play::{DetailsState, OptionsState};
 
-        let Some(auto) = self.auto_play.clone() else {
+        if !self.auto_play.is_pending() {
             return;
-        };
+        }
         if self.sync_play_auto_target.as_ref().is_some_and(|target| {
             self.selected_item_id.as_deref() != Some(target.item_id.as_str())
                 || !self.sync_play_queue_matches(target.generation, &target.playlist_item_id)
         }) {
-            self.auto_play = None;
+            self.auto_play.cancel();
             self.sync_play_auto_target = None;
             return;
         }
@@ -8287,32 +8283,34 @@ impl KattriApp {
                 }),
             },
         };
-        let decision = decide(&AutoPlayInput {
-            item_unchanged: self.selected_item_id.as_deref() == Some(auto.item_id.as_str()),
+        let observations = AutoPlayObservations {
+            item_unchanged: self.auto_play.pending().is_some_and(|request| {
+                self.selected_item_id.as_deref() == Some(request.item_id.as_str())
+            }),
             options_failed: self.playback_error.is_some(),
             details_failed: self.details_error.is_some(),
             start_in_flight: self.playback_start_loading,
             options,
             details,
-            start_over: auto.start_over,
-            requested_ticks: auto.requested_ticks,
-        });
-        match decision {
-            AutoPlayDecision::Wait => {}
-            AutoPlayDecision::Drop => {
-                self.auto_play = None;
-                self.sync_play_auto_target = None;
-            }
-            AutoPlayDecision::DropNoCompatibleSource => {
-                self.auto_play = None;
-                self.sync_play_auto_target = None;
+        };
+        let outcome = self.auto_play.reduce(&observations);
+        match outcome {
+            kattri_client_core::auto_play::AutoPlayOutcome::Idle
+            | kattri_client_core::auto_play::AutoPlayOutcome::Waiting => {}
+            kattri_client_core::auto_play::AutoPlayOutcome::Finished { effect: None } => {}
+            kattri_client_core::auto_play::AutoPlayOutcome::Finished {
+                effect: Some(AutoPlayEffect::NoCompatibleSource),
+            } => {
                 self.playback_start_error =
                     Some(ui_text(ids::PLAYBACK_ERROR_NO_COMPATIBLE_SOURCE).into());
             }
-            AutoPlayDecision::Start {
-                source_index,
-                method,
-                resume_ticks,
+            kattri_client_core::auto_play::AutoPlayOutcome::Finished {
+                effect:
+                    Some(AutoPlayEffect::Start {
+                        source_index,
+                        method,
+                        resume_ticks,
+                    }),
             } => {
                 let play_method = match method {
                     PlaybackMethod::DirectPlay => jellyfin_api::PlayMethod::DirectPlay,
@@ -8339,7 +8337,6 @@ impl KattriApp {
                         "playback plan: chosen source {source_index} via {method:?}; sources: {sources:?}"
                     ));
                 }
-                self.auto_play = None;
                 let sync_play_start_ticks =
                     self.sync_play_auto_target.as_ref().and_then(|target| {
                         self.sync_play_queue
@@ -16046,7 +16043,7 @@ mod photo_decode_event_tests {
         assert!(app.on_episode_next("e2"));
         assert_eq!(app.selected_item_id.as_deref(), Some("e3"));
         assert_eq!(
-            app.auto_play.as_ref().map(|auto| auto.item_id.as_str()),
+            app.auto_play.pending().map(|auto| auto.item_id.as_str()),
             Some("e3")
         );
     }
@@ -17371,7 +17368,7 @@ mod theme_media_tests {
             WorkerCommand::PlaybackInfo { item_id, .. } if item_id == "theme-video"
         )));
         assert_eq!(
-            app.auto_play.as_ref().map(|auto| auto.item_id.as_str()),
+            app.auto_play.pending().map(|auto| auto.item_id.as_str()),
             Some("theme-video")
         );
         // The catalog multi-selection and the music queue are untouched.
@@ -17447,7 +17444,7 @@ mod playback_state_tests {
             selection: direct_play(),
             burn_in_subtitle_stream_index: None,
         });
-        app.auto_play = Some(AutoPlay {
+        app.auto_play.request(PlayRequest {
             item_id: "movie-1".into(),
             start_over: false,
             requested_ticks: None,
@@ -17459,7 +17456,7 @@ mod playback_state_tests {
         app.reset_playback(PlaybackReset::Session);
 
         assert!(app.active_playback.is_none());
-        assert!(app.auto_play.is_none());
+        assert!(!app.auto_play.is_pending());
         assert!(!app.playback_start_loading);
         assert_eq!(app.consecutive_progress_report_failures, 0);
         assert_eq!(
