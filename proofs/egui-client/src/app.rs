@@ -7560,7 +7560,9 @@ impl KattriApp {
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
-            .and_then(|worker| worker.list_playlist_items(request_id, playlist_id));
+            .and_then(|worker| {
+                worker.list_playlist_items(request_id, self.session_epoch, playlist_id)
+            });
         if result.is_err() {
             self.playlist_items_loading = false;
             self.playlist_items_error = Some(ErrorClass::Unexpected);
@@ -7870,11 +7872,11 @@ impl KattriApp {
         self.similar_loading = true;
         let request_id = self.allocate_request_id();
         self.similar_request_id = request_id;
-        if self
-            .worker
-            .as_ref()
-            .is_none_or(|worker| worker.list_similar(request_id, item_id, 12).is_err())
-        {
+        if self.worker.as_ref().is_none_or(|worker| {
+            worker
+                .list_similar(request_id, self.session_epoch, item_id, 12)
+                .is_err()
+        }) {
             self.similar_loading = false;
         }
     }
@@ -7937,11 +7939,11 @@ impl KattriApp {
         self.person_items_loading = true;
         let request_id = self.allocate_request_id();
         self.person_items_request_id = request_id;
-        if self
-            .worker
-            .as_ref()
-            .is_none_or(|worker| worker.list_person_items(request_id, person_id, 50).is_err())
-        {
+        if self.worker.as_ref().is_none_or(|worker| {
+            worker
+                .list_person_items(request_id, self.session_epoch, person_id, 50)
+                .is_err()
+        }) {
             self.person_items_loading = false;
             self.person_items_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into());
         }
@@ -11005,6 +11007,7 @@ impl KattriApp {
                     request_id,
                     playlist_id,
                     entries,
+                    ..
                 } if request_id == self.playlist_items_request_id
                     && self.opened_playlist_id.as_deref() == Some(playlist_id.as_str()) =>
                 {
@@ -11021,6 +11024,7 @@ impl KattriApp {
                     request_id,
                     playlist_id,
                     error_class,
+                    ..
                 } if request_id == self.playlist_items_request_id
                     && self.opened_playlist_id.as_deref() == Some(playlist_id.as_str()) =>
                 {
@@ -11236,6 +11240,7 @@ impl KattriApp {
                     request_id,
                     item_id,
                     items,
+                    ..
                 } if request_id == self.similar_request_id
                     && self.browse.details.selected_item_id.as_deref()
                         == Some(item_id.as_str()) =>
@@ -11250,6 +11255,7 @@ impl KattriApp {
                 WorkerEvent::SimilarItemsFailed {
                     request_id,
                     item_id,
+                    ..
                 } if request_id == self.similar_request_id
                     && self.browse.details.selected_item_id.as_deref()
                         == Some(item_id.as_str()) =>
@@ -11280,6 +11286,7 @@ impl KattriApp {
                     request_id,
                     person_id,
                     items,
+                    ..
                 } if request_id == self.person_items_request_id
                     && self
                         .selected_person
@@ -11299,6 +11306,7 @@ impl KattriApp {
                     request_id,
                     person_id,
                     message,
+                    ..
                 } if request_id == self.person_items_request_id
                     && self
                         .selected_person
@@ -14605,6 +14613,7 @@ mod music_queue_app_tests {
         sender
             .try_send(WorkerEvent::PlaylistItemsLoaded {
                 request_id: 81,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 playlist_id: "playlist-1".into(),
                 entries: vec![playlist_entry("track-1", "entry-1")],
             })
@@ -14616,6 +14625,7 @@ mod music_queue_app_tests {
         sender
             .try_send(WorkerEvent::PlaylistItemsLoaded {
                 request_id: 82,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 playlist_id: "playlist-1".into(),
                 entries: vec![
                     playlist_entry("track-1", "entry-1"),

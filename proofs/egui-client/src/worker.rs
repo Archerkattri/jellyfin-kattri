@@ -644,11 +644,13 @@ pub enum WorkerEvent {
     },
     PlaylistItemsLoaded {
         request_id: u64,
+        epoch: Epoch,
         playlist_id: String,
         entries: Vec<PlaylistEntry>,
     },
     PlaylistItemsFailed {
         request_id: u64,
+        epoch: Epoch,
         playlist_id: String,
         error_class: ErrorClass,
     },
@@ -692,11 +694,13 @@ pub enum WorkerEvent {
     },
     SimilarItemsLoaded {
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
         items: Vec<BaseItemDto>,
     },
     SimilarItemsFailed {
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
     },
     /// Theme media for one detail page. An empty pair means the item has no theme.
@@ -713,11 +717,13 @@ pub enum WorkerEvent {
     },
     PersonItemsLoaded {
         request_id: u64,
+        epoch: Epoch,
         person_id: String,
         items: Vec<BaseItemDto>,
     },
     PersonItemsFailed {
         request_id: u64,
+        epoch: Epoch,
         person_id: String,
         message: String,
     },
@@ -991,7 +997,13 @@ impl WorkerEvent {
             | Self::SeriesSeasonsFailed { epoch, .. }
             | Self::SeriesEpisodesLoaded { epoch, .. }
             | Self::SeriesEpisodesFailed { epoch, .. }
-            | Self::GenresLoaded { epoch, .. } => (*epoch != Epoch::NONE).then_some(*epoch),
+            | Self::GenresLoaded { epoch, .. }
+            | Self::PersonItemsLoaded { epoch, .. }
+            | Self::PersonItemsFailed { epoch, .. }
+            | Self::SimilarItemsLoaded { epoch, .. }
+            | Self::SimilarItemsFailed { epoch, .. }
+            | Self::PlaylistItemsLoaded { epoch, .. }
+            | Self::PlaylistItemsFailed { epoch, .. } => (*epoch != Epoch::NONE).then_some(*epoch),
             _ => None,
         }
     }
@@ -1423,6 +1435,7 @@ pub(crate) enum WorkerCommand {
     },
     ListPlaylistItems {
         request_id: u64,
+        epoch: Epoch,
         playlist_id: String,
     },
     LoadPlaylistCandidates {
@@ -1450,6 +1463,7 @@ pub(crate) enum WorkerCommand {
     },
     ListSimilar {
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
         limit: u32,
     },
@@ -1459,6 +1473,7 @@ pub(crate) enum WorkerCommand {
     },
     ListPersonItems {
         request_id: u64,
+        epoch: Epoch,
         person_id: String,
         limit: u32,
     },
@@ -2271,10 +2286,12 @@ impl ApiWorker {
     pub(crate) fn list_playlist_items(
         &self,
         request_id: u64,
+        epoch: Epoch,
         playlist_id: String,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::ListPlaylistItems {
             request_id,
+            epoch,
             playlist_id,
         })
     }
@@ -2340,11 +2357,13 @@ impl ApiWorker {
     pub(crate) fn list_similar(
         &self,
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
         limit: u32,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::ListSimilar {
             request_id,
+            epoch,
             item_id,
             limit,
         })
@@ -2365,11 +2384,13 @@ impl ApiWorker {
     pub(crate) fn list_person_items(
         &self,
         request_id: u64,
+        epoch: Epoch,
         person_id: String,
         limit: u32,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::ListPersonItems {
             request_id,
+            epoch,
             person_id,
             limit,
         })
@@ -5059,6 +5080,7 @@ async fn execute_command(
             }
             WorkerCommand::ListPlaylistItems {
                 request_id,
+                epoch,
                 playlist_id,
             } => {
                 let result = match (client.as_ref(), session.as_ref()) {
@@ -5074,6 +5096,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::PlaylistItemsLoaded {
                                 request_id,
+                                epoch,
                                 playlist_id,
                                 entries,
                             },
@@ -5101,6 +5124,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::PlaylistItemsFailed {
                                 request_id,
+                                epoch,
                                 playlist_id,
                                 error_class: error.classify(),
                             },
@@ -5390,6 +5414,7 @@ async fn execute_command(
             }
             WorkerCommand::ListSimilar {
                 request_id,
+                epoch,
                 item_id,
                 limit,
             } => {
@@ -5406,6 +5431,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::SimilarItemsLoaded {
                                 request_id,
+                                epoch,
                                 item_id,
                                 items: response.items,
                             },
@@ -5434,6 +5460,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::SimilarItemsFailed {
                                 request_id,
+                                epoch,
                                 item_id,
                             },
                         )
@@ -5495,6 +5522,7 @@ async fn execute_command(
             }
             WorkerCommand::ListPersonItems {
                 request_id,
+                epoch,
                 person_id,
                 limit,
             } => {
@@ -5511,6 +5539,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::PersonItemsLoaded {
                                 request_id,
+                                epoch,
                                 person_id,
                                 items: response.items,
                             },
@@ -5538,6 +5567,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::PersonItemsFailed {
                                 request_id,
+                                epoch,
                                 person_id,
                                 message: error.to_string(),
                             },
@@ -8502,13 +8532,22 @@ mod people_command_tests {
     fn list_similar_enqueues_item_and_limit() {
         let (worker, commands) = worker_with_command_receiver();
 
-        assert_eq!(worker.list_similar(51, "item-9".into(), 12), Ok(()));
+        assert_eq!(
+            worker.list_similar(
+                51,
+                kattri_client_core::epoch::Epoch::NONE,
+                "item-9".into(),
+                12
+            ),
+            Ok(())
+        );
         assert!(matches!(
             commands.recv(),
             Ok(WorkerCommand::ListSimilar {
                 request_id: 51,
                 item_id,
                 limit: 12,
+                ..
             }) if item_id == "item-9"
         ));
     }
@@ -8531,13 +8570,22 @@ mod people_command_tests {
     fn list_person_items_enqueues_person_and_limit() {
         let (worker, commands) = worker_with_command_receiver();
 
-        assert_eq!(worker.list_person_items(52, "person-4".into(), 30), Ok(()));
+        assert_eq!(
+            worker.list_person_items(
+                52,
+                kattri_client_core::epoch::Epoch::NONE,
+                "person-4".into(),
+                30
+            ),
+            Ok(())
+        );
         assert!(matches!(
             commands.recv(),
             Ok(WorkerCommand::ListPersonItems {
                 request_id: 52,
                 person_id,
                 limit: 30,
+                ..
             }) if person_id == "person-4"
         ));
     }
