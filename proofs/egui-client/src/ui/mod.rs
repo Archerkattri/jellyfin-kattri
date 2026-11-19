@@ -2235,7 +2235,7 @@ fn render_connected(
 }
 
 fn music_queue_panel(ui: &mut egui::Ui, app: &mut KattriApp, navigation: &[NavAction]) {
-    if app.music_queue_restore_loading {
+    if app.music_queue_restore.is_loading() {
         ui.horizontal(|ui| {
             ui.spinner();
             ui.label(ui_text(ids::MUSIC_QUEUE_REFRESHING));

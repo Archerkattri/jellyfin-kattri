@@ -44,6 +44,7 @@ use kattri_client_core::epg::{EpgProgram, EpgWindow};
 use kattri_client_core::epoch::Epoch;
 use kattri_client_core::focus::FocusGraph;
 use kattri_client_core::language_memory::{RecordOutcome, SeriesLanguageMemory, TrackLanguage};
+use kattri_client_core::music_queue_restore::MusicQueueRestoreMachine;
 use kattri_client_core::paging::PagingState;
 use kattri_client_core::playback_plan::{
     PlaybackMethod, PlaybackSelection, playback_info_candidates_for_profile,
@@ -51,7 +52,7 @@ use kattri_client_core::playback_plan::{
 };
 use kattri_client_core::playback_reporting::PlaybackReportAction;
 use kattri_client_core::queue::{Queue, Step};
-use kattri_client_core::queue_store::{StoredLoadOutcome, StoredQueue};
+use kattri_client_core::queue_store::StoredLoadOutcome;
 use kattri_client_core::remote::{LocalAction, local_action};
 use kattri_client_core::retry::{RetryDecision, RetryPolicy, RetrySchedule};
 use kattri_client_core::search::{SearchDebouncer, SearchInputAction};
@@ -1719,9 +1720,8 @@ pub struct KattriApp {
     music_album_tracks_purpose: AlbumTracksPurpose,
     music_queue_auto_play_item_id: Option<String>,
     pub(crate) music_queue_notice: Option<String>,
-    pending_stored_music_queue: Option<StoredQueue>,
-    music_queue_restore_request_id: u64,
-    pub(crate) music_queue_restore_loading: bool,
+    /// Saved-queue restore lifecycle; owns the pending queue and request id so a stale result is refused.
+    pub(crate) music_queue_restore: MusicQueueRestoreMachine,
     pub(crate) music_queue_resume_position_ms: Option<u64>,
     music_queue_resume_position_ticks: Option<i64>,
     music_queue_last_saved_json: Option<String>,
@@ -2389,9 +2389,11 @@ impl KattriApp {
             music_album_tracks_purpose: AlbumTracksPurpose::Display,
             music_queue_auto_play_item_id: None,
             music_queue_notice,
-            pending_stored_music_queue,
-            music_queue_restore_request_id: 0,
-            music_queue_restore_loading: false,
+            music_queue_restore: {
+                let mut restore = MusicQueueRestoreMachine::new();
+                restore.loaded(pending_stored_music_queue);
+                restore
+            },
             music_queue_resume_position_ms: None,
             music_queue_resume_position_ticks: None,
             music_queue_last_saved_json: None,
@@ -4786,17 +4788,17 @@ impl KattriApp {
         self.music_track_names.clear();
         self.music_queue_auto_play_item_id = None;
         self.music_queue_notice = None;
-        self.pending_stored_music_queue = match self.settings.load_queue() {
+        let stored_queue = match self.settings.load_queue() {
             Some(Ok(StoredLoadOutcome::Loaded(stored))) if !stored.queue.is_empty() => Some(stored),
             _ => None,
         };
-        self.music_queue_restore_request_id = self.allocate_request_id();
-        self.music_queue_restore_loading = false;
+        self.music_queue_restore.reset();
+        self.music_queue_restore.loaded(stored_queue);
         self.music_queue_resume_position_ms = None;
         self.music_queue_resume_position_ticks = None;
         self.music_queue_last_saved_json = None;
         self.music_queue_saved_fingerprint = u64::MAX;
-        self.music_queue_persistence_suspended = self.pending_stored_music_queue.is_some();
+        self.music_queue_persistence_suspended = self.music_queue_restore.has_pending();
         self.playlist_entries.clear();
         self.playlist_items_loading = false;
         self.playlist_items_error = None;
@@ -5972,36 +5974,27 @@ impl KattriApp {
     }
 
     fn request_saved_music_queue(&mut self) {
-        let Some(stored) = self.pending_stored_music_queue.as_ref() else {
+        let Some(item_ids) = self.music_queue_restore.item_ids_to_restore() else {
             return;
         };
-        if self.music_queue_restore_loading {
-            return;
-        }
-        let item_ids = stored
-            .queue
-            .items()
-            .iter()
-            .map(|item| item.id.clone())
-            .collect();
         let request_id = self.allocate_request_id();
-        self.music_queue_restore_request_id = request_id;
-        self.music_queue_restore_loading = true;
+        self.music_queue_restore.request_issued(request_id);
         let result = self
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
             .and_then(|worker| worker.restore_queue_items(request_id, item_ids));
         if result.is_err() {
-            self.music_queue_restore_loading = false;
+            self.music_queue_restore.request_failed();
             self.music_queue_notice = Some(ui_text(ids::MUSIC_QUEUE_REFRESH_FAILED).into());
         }
     }
 
-    fn reconcile_restored_music_queue(&mut self, items: Vec<BaseItemDto>) {
-        let Some(mut stored) = self.pending_stored_music_queue.take() else {
-            return;
-        };
+    fn reconcile_restored_music_queue(
+        &mut self,
+        mut stored: kattri_client_core::music_queue_restore::PendingRestore,
+        items: Vec<BaseItemDto>,
+    ) {
         let audio_items = items
             .into_iter()
             .filter(|item| item.item_type.as_deref() == Some("Audio"))
@@ -6025,7 +6018,6 @@ impl KattriApp {
         }
         self.music_queue = stored.queue;
         self.music_queue_resume_position_ms = Some(stored.position_ms);
-        self.music_queue_restore_loading = false;
         self.music_queue_persistence_suspended = false;
         self.music_queue_last_saved_json = None;
         self.music_queue_saved_fingerprint = u64::MAX;
@@ -6153,8 +6145,8 @@ impl KattriApp {
 
     fn persist_music_queue_if_needed(&mut self) {
         if self.music_queue_persistence_suspended
-            || self.pending_stored_music_queue.is_some()
-            || self.music_queue_restore_loading
+            || self.music_queue_restore.has_pending()
+            || self.music_queue_restore.is_loading()
         {
             return;
         }
@@ -9534,17 +9526,17 @@ impl KattriApp {
         self.music_track_names.clear();
         self.music_queue_auto_play_item_id = None;
         self.music_queue_notice = None;
-        self.pending_stored_music_queue = match self.settings.load_queue() {
+        let stored_queue = match self.settings.load_queue() {
             Some(Ok(StoredLoadOutcome::Loaded(stored))) if !stored.queue.is_empty() => Some(stored),
             _ => None,
         };
-        self.music_queue_restore_request_id = self.allocate_request_id();
-        self.music_queue_restore_loading = false;
+        self.music_queue_restore.reset();
+        self.music_queue_restore.loaded(stored_queue);
         self.music_queue_resume_position_ms = None;
         self.music_queue_resume_position_ticks = None;
         self.music_queue_last_saved_json = None;
         self.music_queue_saved_fingerprint = u64::MAX;
-        self.music_queue_persistence_suspended = self.pending_stored_music_queue.is_some();
+        self.music_queue_persistence_suspended = self.music_queue_restore.has_pending();
         self.playlist_entries.clear();
         self.playlist_items_loading = false;
         self.playlist_items_error = None;
@@ -10563,21 +10555,23 @@ impl KattriApp {
                     self.music_album_tracks_loading = false;
                     self.music_album_tracks_error = Some(error_class);
                 }
-                WorkerEvent::QueueItemsRestored { request_id, items }
-                    if request_id == self.music_queue_restore_request_id
-                        && self.pending_stored_music_queue.is_some() =>
-                {
-                    self.record_network_success();
-                    self.reconcile_restored_music_queue(items);
+                WorkerEvent::QueueItemsRestored { request_id, items } => {
+                    // The machine refuses a result that is not for the request in flight, so a
+                    // stale restore cannot overwrite a newer queue.
+                    if let Some(stored) = self.music_queue_restore.restored(request_id) {
+                        self.record_network_success();
+                        self.reconcile_restored_music_queue(stored, items);
+                    }
                 }
                 WorkerEvent::QueueItemsRestoreFailed {
                     request_id,
                     error_class,
-                } if request_id == self.music_queue_restore_request_id => {
-                    self.record_network_error(error_class, None);
-                    self.music_queue_restore_loading = false;
-                    self.music_queue_notice =
-                        Some(ui_text(ids::MUSIC_QUEUE_REFRESH_RECONNECT).into());
+                } => {
+                    if self.music_queue_restore.restore_failed(request_id) {
+                        self.record_network_error(error_class, None);
+                        self.music_queue_notice =
+                            Some(ui_text(ids::MUSIC_QUEUE_REFRESH_RECONNECT).into());
+                    }
                 }
                 WorkerEvent::PlaylistItemsLoaded {
                     request_id,
@@ -12319,7 +12313,7 @@ impl KattriApp {
         self.persist_music_queue_if_needed();
         if !self.music_queue.is_empty()
             && !self.music_queue_persistence_suspended
-            && self.pending_stored_music_queue.is_none()
+            && !self.music_queue_restore.has_pending()
         {
             let elapsed = now.saturating_sub(self.music_queue_last_saved_at);
             ctx.request_repaint_after(Duration::from_secs(10).saturating_sub(elapsed));
@@ -13910,12 +13904,13 @@ mod live_tv_event_tests {
 #[cfg(test)]
 mod music_queue_app_tests {
     use super::{
-        AlbumTracksPurpose, KattriApp, MusicAction, PlaylistEntry, Queue, StoredQueue,
+        AlbumTracksPurpose, KattriApp, MusicAction, PlaylistEntry, Queue,
         music_queue_report_context,
     };
     use crate::worker::{ApiWorker, WorkerEvent};
     use jellyfin_api::BaseItemDto;
     use jellyfin_api::session_reporting::RepeatMode;
+    use kattri_client_core::queue_store::StoredQueue;
     use std::time::Duration;
 
     fn audio(id: &str) -> BaseItemDto {
@@ -14206,12 +14201,11 @@ mod music_queue_app_tests {
 
         let mut app = KattriApp::new(egui::Context::default());
         app.settings = crate::settings_state::SettingsState::open(None, None);
-        app.pending_stored_music_queue = Some(StoredQueue {
+        app.music_queue_restore.loaded(Some(StoredQueue {
             queue,
             position_ms: 12_345,
-        });
-        app.music_queue_restore_request_id = 91;
-        app.music_queue_restore_loading = true;
+        }));
+        app.music_queue_restore.request_issued(91);
         let (worker, sender) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
         sender
