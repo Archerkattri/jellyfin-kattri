@@ -5081,7 +5081,7 @@ mod accessible_name_tests {
             let context = egui::Context::default();
             context.enable_accesskit();
             let mut app = KattriApp::new(context.clone());
-            app.connection = ConnectionStatus::Connected;
+            app.apply_connection_status(ConnectionStatus::Connected);
             app.view = AppView::Home;
             let mut output = context.run_ui(
                 egui::RawInput {
@@ -5128,7 +5128,7 @@ mod accessible_name_tests {
         let context = egui::Context::default();
         context.enable_accesskit();
         let mut app = KattriApp::new(context.clone());
-        app.connection = ConnectionStatus::Connected;
+        app.apply_connection_status(ConnectionStatus::Connected);
         match page {
             Some(page) => {
                 app.view = AppView::Library;

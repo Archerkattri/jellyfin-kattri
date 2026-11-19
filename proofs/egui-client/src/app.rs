@@ -901,6 +901,79 @@ mod connection_boundary_tests {
     }
 
     #[test]
+    fn connection_text_is_taken_from_every_status() {
+        use super::{ConnectionStatus, ConnectionText};
+        assert_eq!(
+            ConnectionText::from_status(&ConnectionStatus::Disconnected {
+                error: Some("reason".into())
+            }),
+            ConnectionText::Error(Some("reason".into()))
+        );
+        assert_eq!(
+            ConnectionText::from_status(&ConnectionStatus::Disconnected { error: None }),
+            ConnectionText::Error(None)
+        );
+        assert_eq!(
+            ConnectionText::from_status(&ConnectionStatus::Connecting {
+                message: "wait".into()
+            }),
+            ConnectionText::Message("wait".into())
+        );
+        assert_eq!(
+            ConnectionText::from_status(&ConnectionStatus::LibraryError("bad".into())),
+            ConnectionText::LibraryError("bad".into())
+        );
+        assert_eq!(
+            ConnectionText::from_status(&ConnectionStatus::LoadingItems),
+            ConnectionText::None
+        );
+        assert_eq!(
+            ConnectionText::from_status(&ConnectionStatus::Connected),
+            ConnectionText::None
+        );
+    }
+
+    #[test]
+    fn connection_text_reads_back_as_the_viewer_would_see_it() {
+        use super::ConnectionText;
+        assert_eq!(ConnectionText::None.text(), "");
+        assert_eq!(ConnectionText::Message("wait".into()).text(), "wait");
+        assert_eq!(ConnectionText::Error(None).text(), "");
+        assert_eq!(
+            ConnectionText::Error(Some("reason".into())).text(),
+            "reason"
+        );
+        assert_eq!(ConnectionText::LibraryError("bad".into()).text(), "bad");
+    }
+
+    #[test]
+    fn applying_a_status_stores_its_text_and_the_status() {
+        use super::{ConnectionStatus, ConnectionText};
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context);
+        app.apply_connection_status(ConnectionStatus::Connecting {
+            message: "wait".into(),
+        });
+        assert!(matches!(
+            app.connection,
+            ConnectionStatus::Connecting { .. }
+        ));
+        assert_eq!(app.connection_text.text(), "wait");
+
+        app.apply_connection_status(ConnectionStatus::Disconnected {
+            error: Some("reason".into()),
+        });
+        assert!(matches!(
+            app.connection_text,
+            ConnectionText::Error(Some(ref reason)) if reason == "reason"
+        ));
+        assert_eq!(
+            app.connection_text.text(),
+            "reason",
+            "the disconnect reason replaces the connecting message"
+        );
+    }
+    #[test]
     fn beginning_a_connection_starts_a_new_session_generation() {
         let context = egui::Context::default();
         let mut app = KattriApp::new(context);
@@ -1241,6 +1314,45 @@ pub enum ConnectionStatus {
     LibraryError(String),
 }
 
+/// The display text carried by a [`ConnectionStatus`], held separately from the phase.
+///
+/// The phase belongs to owned state (the session machine's connecting phase and the catalog flags);
+/// the text is what a site wants the viewer to read. Keeping the text here means the phase can be
+/// derived while the message is preserved, and it gives the connection display state one owner.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ConnectionText {
+    /// Nothing to show.
+    #[default]
+    None,
+    /// A connecting message, for `Connecting { message }`.
+    Message(String),
+    /// A disconnect reason, for `Disconnected { error }`.
+    Error(Option<String>),
+    /// A library failure message, for `LibraryError`.
+    LibraryError(String),
+}
+
+impl ConnectionText {
+    /// The text as the viewer would read it, for diagnostics.
+    fn text(&self) -> &str {
+        match self {
+            Self::None | Self::Error(None) => "",
+            Self::Message(message) | Self::LibraryError(message) => message,
+            Self::Error(Some(error)) => error,
+        }
+    }
+
+    /// Take the text out of a status.
+    fn from_status(status: &ConnectionStatus) -> Self {
+        match status {
+            ConnectionStatus::Disconnected { error } => Self::Error(error.clone()),
+            ConnectionStatus::Connecting { message } => Self::Message(message.clone()),
+            ConnectionStatus::LibraryError(message) => Self::LibraryError(message.clone()),
+            ConnectionStatus::LoadingItems | ConnectionStatus::Connected => Self::None,
+        }
+    }
+}
+
 // A one-click playback request: the item is selected, its playback options are negotiated, and the
 // stream starts as soon as both the item record and the options are ready. The request itself is
 // owned by `AutoPlayMachine` (`client-core::auto_play`); this app only gathers the observations and
@@ -1489,6 +1601,8 @@ pub struct KattriApp {
     /// Last update result for the update panel. Only the UI thread writes it.
     pub(crate) update: UpdateState,
     pub(crate) connection: ConnectionStatus,
+    /// The display text of `connection`, held so the phase can be derived from owned state.
+    connection_text: ConnectionText,
     pub(crate) offline_tracker: OfflineTracker,
     pub(crate) network_notice: Option<ErrorClass>,
     network_retry_schedule: RetrySchedule,
@@ -2088,8 +2202,9 @@ impl KattriApp {
             ConnectionStatus::LibraryError(_) => "LibraryError",
         };
         let snapshot = format!(
-            "connection={} server_check_error={:?} catalog_error={:?} catalog_loading={} items={} signed_in={} selected={:?} details_loading={} auto_play={:?} info_loading={} info_ready={} playback_error={:?} start_loading={} start_status={:?} start_error={:?}",
+            "connection={} connection_text={} server_check_error={:?} catalog_error={:?} catalog_loading={} items={} signed_in={} selected={:?} details_loading={} auto_play={:?} info_loading={} info_ready={} playback_error={:?} start_loading={} start_status={:?} start_error={:?}",
             connection,
+            self.connection_text.text(),
             self.server_check_error,
             self.catalog_error,
             self.catalog_loading,
@@ -2201,6 +2316,7 @@ impl KattriApp {
         let launch_notice = settings.launch_notice().map(str::to_owned);
         Self {
             worker,
+            connection_text: ConnectionText::from_status(&connection),
             connection,
             offline_tracker: OfflineTracker::new(),
             network_notice: None,
@@ -4237,9 +4353,9 @@ impl KattriApp {
         self.remember_sign_in = true;
         let saved = self.saved_sign_in_request(true);
         let request_id = self.begin_connection(ui_text(ids::CONNECT_CHECKING_SERVER));
-        self.connection = ConnectionStatus::Connecting {
+        self.apply_connection_status(ConnectionStatus::Connecting {
             message: ui_text(ids::CONNECT_CHECKING_SERVER).into(),
-        };
+        });
         let submitted = self
             .worker
             .as_ref()
@@ -4248,7 +4364,7 @@ impl KattriApp {
             });
         if submitted.is_err() {
             self.catalog_loading = false;
-            self.connection = ConnectionStatus::Disconnected { error: None };
+            self.apply_connection_status(ConnectionStatus::Disconnected { error: None });
         }
     }
 
@@ -4258,9 +4374,9 @@ impl KattriApp {
             self.cancel_quick_connect();
         }
         if self.server_url.trim().is_empty() {
-            self.connection = ConnectionStatus::Disconnected {
+            self.apply_connection_status(ConnectionStatus::Disconnected {
                 error: Some(ui_text(ids::CONNECT_ERROR_SERVER_REQUIRED).into()),
-            };
+            });
             return;
         }
         if self.server_preview().is_none() {
@@ -4268,15 +4384,15 @@ impl KattriApp {
             return;
         }
         if self.username.trim().is_empty() {
-            self.connection = ConnectionStatus::Disconnected {
+            self.apply_connection_status(ConnectionStatus::Disconnected {
                 error: Some(ui_text(ids::CONNECT_ERROR_USERNAME_REQUIRED).into()),
-            };
+            });
             return;
         }
         if self.worker.is_none() {
-            self.connection = ConnectionStatus::Disconnected {
+            self.apply_connection_status(ConnectionStatus::Disconnected {
                 error: Some(ui_text(ids::CONNECT_WORKER_UNAVAILABLE).into()),
-            };
+            });
             return;
         }
 
@@ -4307,9 +4423,9 @@ impl KattriApp {
                 });
         if connect_result.is_err() {
             self.catalog_loading = false;
-            self.connection = ConnectionStatus::Disconnected {
+            self.apply_connection_status(ConnectionStatus::Disconnected {
                 error: Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into()),
-            };
+            });
         }
     }
 
@@ -4556,27 +4672,27 @@ impl KattriApp {
 
     pub(crate) fn start_quick_connect(&mut self) {
         if self.server_url.trim().is_empty() {
-            self.connection = ConnectionStatus::Disconnected {
+            self.apply_connection_status(ConnectionStatus::Disconnected {
                 error: Some(ui_text(ids::CONNECT_ERROR_SERVER_REQUIRED).into()),
-            };
+            });
             return;
         }
         if self.server_preview().is_none() {
-            self.connection = ConnectionStatus::Disconnected {
+            self.apply_connection_status(ConnectionStatus::Disconnected {
                 error: Some(ui_text(ids::CONNECT_ERROR_CHECK_ADDRESS).into()),
-            };
+            });
             return;
         }
         if !self.quick_connect_available() {
-            self.connection = ConnectionStatus::Disconnected {
+            self.apply_connection_status(ConnectionStatus::Disconnected {
                 error: Some(ui_text(ids::CONNECT_ERROR_QUICK_CONNECT_DISABLED).into()),
-            };
+            });
             return;
         }
         if self.worker.is_none() {
-            self.connection = ConnectionStatus::Disconnected {
+            self.apply_connection_status(ConnectionStatus::Disconnected {
                 error: Some(ui_text(ids::CONNECT_WORKER_UNAVAILABLE).into()),
-            };
+            });
             return;
         }
 
@@ -4596,9 +4712,9 @@ impl KattriApp {
             if let Some(flow) = self.quick_connect.as_mut() {
                 let _ = flow.initiate_failed();
             }
-            self.connection = ConnectionStatus::Disconnected {
+            self.apply_connection_status(ConnectionStatus::Disconnected {
                 error: Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into()),
-            };
+            });
         }
     }
 
@@ -4619,7 +4735,7 @@ impl KattriApp {
             }
         }
         self.quick_connect = None;
-        self.connection = ConnectionStatus::Disconnected { error };
+        self.apply_connection_status(ConnectionStatus::Disconnected { error });
     }
 
     fn handle_quick_connect_action(&mut self, request_id: u64, action: crate::sign_in::Action) {
@@ -4634,9 +4750,9 @@ impl KattriApp {
             Action::Authenticate => worker.quick_connect_authenticate(request_id, saved),
         };
         if result.is_err() {
-            self.connection = ConnectionStatus::Disconnected {
+            self.apply_connection_status(ConnectionStatus::Disconnected {
                 error: Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into()),
-            };
+            });
             self.quick_connect = None;
         }
     }
@@ -4666,6 +4782,29 @@ impl KattriApp {
                 tracing::warn!(?error, "capability advertisement was not queued");
             }
         }
+    }
+
+    /// The single write path for the connection display state.
+    ///
+    /// Every site goes through here so the display text and the status cannot disagree, and so a
+    /// later step can derive the status from owned state without hunting for writers. The session
+    /// machine already owns the session phase; this mirrors the one phase it can know for certain
+    /// (the first catalog page loading) and never forces a session transition, because a validation
+    /// error or a server probe must not start or end a session.
+    pub(crate) fn apply_connection_status(&mut self, status: ConnectionStatus) {
+        if matches!(status, ConnectionStatus::LoadingItems)
+            && let kattri_client_core::connection::SessionState::Connecting { epoch, .. } =
+                self.session_machine.state()
+        {
+            let _ = self
+                .session_machine
+                .reduce(SessionEvent::ConnectingPhaseChanged {
+                    epoch,
+                    phase: kattri_client_core::connection::ConnectingPhase::LoadingItems,
+                });
+        }
+        self.connection_text = ConnectionText::from_status(&status);
+        self.connection = status;
     }
 
     fn begin_connection(&mut self, message: &str) -> u64 {
@@ -4799,9 +4938,9 @@ impl KattriApp {
         let _ = self.sync_play_membership.reduce(MembershipEvent::Reset);
         self.sync_play_latest_action_request_id = None;
         self.sync_play_ui = crate::ui::syncplay::SyncPlayScreenState::default();
-        self.connection = ConnectionStatus::Connecting {
+        self.apply_connection_status(ConnectionStatus::Connecting {
             message: message.into(),
-        };
+        });
         request_id
     }
 
@@ -6483,7 +6622,7 @@ impl KattriApp {
         self.catalog_loaded = true;
         self.catalog_loading = false;
         self.catalog_error = None;
-        self.connection = ConnectionStatus::Connected;
+        self.apply_connection_status(ConnectionStatus::Connected);
         true
     }
 
@@ -6920,7 +7059,7 @@ impl KattriApp {
         self.catalog_loaded = true;
         self.catalog_loading = false;
         self.catalog_error = None;
-        self.connection = ConnectionStatus::Connected;
+        self.apply_connection_status(ConnectionStatus::Connected);
     }
 
     fn request_catalog(&mut self, start_index: u32, search_term: Option<String>) {
@@ -6985,7 +7124,7 @@ impl KattriApp {
             self.playback_start_request_id = self.allocate_request_id();
         }
         if !self.catalog_loaded {
-            self.connection = ConnectionStatus::LoadingItems;
+            self.apply_connection_status(ConnectionStatus::LoadingItems);
         }
 
         if self.worker.is_none() {
@@ -7112,7 +7251,7 @@ impl KattriApp {
             let message = ui_text(ids::APP_ERROR_QUEUE_NETWORK).to_owned();
             self.catalog_error = Some(message.clone());
             if !self.catalog_loaded {
-                self.connection = ConnectionStatus::LibraryError(message);
+                self.apply_connection_status(ConnectionStatus::LibraryError(message));
             }
         } else if start_index == 0 && self.page == Page::Playlists && !is_search {
             self.request_playlist_candidates();
@@ -9533,7 +9672,7 @@ impl KattriApp {
         self.sync_play_status_results.clear();
         self.pending_launch_intent = None;
         self.sync_play_ui = crate::ui::syncplay::SyncPlayScreenState::default();
-        self.connection = ConnectionStatus::Disconnected { error: None };
+        self.apply_connection_status(ConnectionStatus::Disconnected { error: None });
     }
 
     fn receive_worker_events(&mut self, ctx: &egui::Context) {
@@ -9625,9 +9764,9 @@ impl KattriApp {
                     if let Some(flow) = self.quick_connect.as_mut() {
                         let _ = flow.initiate_failed();
                     }
-                    self.connection = ConnectionStatus::Disconnected {
+                    self.apply_connection_status(ConnectionStatus::Disconnected {
                         error: Some(message),
-                    };
+                    });
                     self.quick_connect = None;
                     ctx.request_repaint();
                 }
@@ -9653,9 +9792,9 @@ impl KattriApp {
                 WorkerEvent::CheckingServer { request_id }
                     if request_id == self.connection_request_id =>
                 {
-                    self.connection = ConnectionStatus::Connecting {
+                    self.apply_connection_status(ConnectionStatus::Connecting {
                         message: ui_text(ids::CONNECT_CHECKING_SERVER).into(),
-                    };
+                    });
                 }
                 WorkerEvent::SavedSignInAvailability { available } => {
                     self.saved_sign_in_available = Some(available);
@@ -9671,20 +9810,20 @@ impl KattriApp {
                     // keeps the server address; only an expired token says anything.
                     self.clear_connection();
                     self.remember_sign_in = false;
-                    self.connection = ConnectionStatus::Disconnected {
+                    self.apply_connection_status(ConnectionStatus::Disconnected {
                         error: expired.then(|| ui_text(ids::CONNECT_SAVED_SIGN_IN_EXPIRED).into()),
-                    };
+                    });
                     self.server_address_changed(Duration::ZERO);
                 }
                 WorkerEvent::Authenticating { request_id, server }
                     if request_id == self.connection_request_id =>
                 {
-                    self.connection = ConnectionStatus::Connecting {
+                    self.apply_connection_status(ConnectionStatus::Connecting {
                         message: ui_text_args(
                             ids::APP_STATUS_SIGNING_IN,
                             &[("server", server.name.as_str())],
                         ),
-                    };
+                    });
                     self.server = Some(server);
                 }
                 WorkerEvent::CatalogLoading {
@@ -9724,7 +9863,7 @@ impl KattriApp {
                     }
                     self.catalog_loading = true;
                     if !self.catalog_loaded {
-                        self.connection = ConnectionStatus::LoadingItems;
+                        self.apply_connection_status(ConnectionStatus::LoadingItems);
                     }
                     if signed_in {
                         // Home loads once per successful sign-in; Refresh reloads it later.
@@ -10065,11 +10204,11 @@ impl KattriApp {
                             "catalog load failed: {error_class:?}"
                         ));
                         self.catalog_error = Some(safe_message.clone());
-                        self.connection = if self.catalog_loaded {
+                        self.apply_connection_status(if self.catalog_loaded {
                             ConnectionStatus::Connected
                         } else {
                             ConnectionStatus::LibraryError(safe_message)
-                        };
+                        });
                     }
                 }
                 WorkerEvent::ItemDetailsLoaded { request_id, item }
@@ -11423,9 +11562,9 @@ impl KattriApp {
                         });
                     self.clear_connection();
                     self.pending_launch_intent = retry_launch_intent;
-                    self.connection = ConnectionStatus::Disconnected {
+                    self.apply_connection_status(ConnectionStatus::Disconnected {
                         error: Some(message),
-                    };
+                    });
                 }
                 // The worker clears its session when any request sees an expired token, so this
                 // is connection-wide: playlists, Live TV, photos, subtitles and the rest must
@@ -11440,9 +11579,9 @@ impl KattriApp {
                         let _ = worker.disconnect();
                     }
                     self.clear_connection();
-                    self.connection = ConnectionStatus::Disconnected {
+                    self.apply_connection_status(ConnectionStatus::Disconnected {
                         error: Some(message),
-                    };
+                    });
                 }
                 WorkerEvent::MediaSegmentsLoaded {
                     request_id,
