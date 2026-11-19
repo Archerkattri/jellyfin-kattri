@@ -28,6 +28,7 @@ pub mod media_info_mpv;
 pub mod mpv_options;
 pub mod music_queue_persistence;
 pub mod music_queue_restore;
+pub mod music_queue_resume;
 pub mod paging;
 pub mod photo_grid;
 pub mod pip;

@@ -46,6 +46,7 @@ use kattri_client_core::focus::FocusGraph;
 use kattri_client_core::language_memory::{RecordOutcome, SeriesLanguageMemory, TrackLanguage};
 use kattri_client_core::music_queue_persistence::MusicQueuePersistence;
 use kattri_client_core::music_queue_restore::MusicQueueRestoreMachine;
+use kattri_client_core::music_queue_resume::ResumePosition;
 use kattri_client_core::paging::PagingState;
 use kattri_client_core::playback_plan::{
     PlaybackMethod, PlaybackSelection, playback_info_candidates_for_profile,
@@ -1713,8 +1714,8 @@ pub struct KattriApp {
     pub(crate) music_queue_notice: Option<String>,
     /// Saved-queue restore lifecycle; owns the pending queue and request id so a stale result is refused.
     pub(crate) music_queue_restore: MusicQueueRestoreMachine,
-    pub(crate) music_queue_resume_position_ms: Option<u64>,
-    music_queue_resume_position_ticks: Option<i64>,
+    /// The saved-queue resume position: available (button shown) or parked (waiting for start).
+    pub(crate) music_queue_resume: ResumePosition,
     /// Save debounce and checkpoint bookkeeping for the music queue.
     music_queue_persistence: MusicQueuePersistence,
     music_queue_position_ms: u64,
@@ -2381,8 +2382,7 @@ impl KattriApp {
                 restore.loaded(pending_stored_music_queue);
                 restore
             },
-            music_queue_resume_position_ms: None,
-            music_queue_resume_position_ticks: None,
+            music_queue_resume: ResumePosition::None,
             music_queue_persistence: MusicQueuePersistence::new(),
             music_queue_position_ms: 0,
             playlist_entries: Vec::new(),
@@ -4771,8 +4771,7 @@ impl KattriApp {
         };
         self.music_queue_restore.reset();
         self.music_queue_restore.loaded(stored_queue);
-        self.music_queue_resume_position_ms = None;
-        self.music_queue_resume_position_ticks = None;
+        self.music_queue_resume.clear();
         self.music_queue_persistence.reset();
         self.music_queue_persistence
             .set_suspended(self.music_queue_restore.has_pending());
@@ -5767,8 +5766,7 @@ impl KattriApp {
             self.music_track_names.extend(names);
             self.music_album_tracks_error = None;
             self.music_queue_position_ms = 0;
-            self.music_queue_resume_position_ms = None;
-            self.music_queue_resume_position_ticks = None;
+            self.music_queue_resume.clear();
             self.select_item(first_id);
         }
     }
@@ -5811,8 +5809,7 @@ impl KattriApp {
                     && self.music_queue.select(index).is_ok()
                 {
                     self.music_queue_position_ms = 0;
-                    self.music_queue_resume_position_ms = None;
-                    self.music_queue_resume_position_ticks = None;
+                    self.music_queue_resume.clear();
                     self.select_item(item_id);
                 }
             }
@@ -5940,8 +5937,7 @@ impl KattriApp {
         };
         self.music_queue_auto_play_item_id = Some(item_id.clone());
         self.music_queue_position_ms = 0;
-        self.music_queue_resume_position_ms = None;
-        self.music_queue_resume_position_ticks = None;
+        self.music_queue_resume.clear();
         self.music_queue_notice = Some(notice.to_owned());
         if self.selected_item_id.as_deref() == Some(item_id.as_str()) {
             self.request_playback_options();
@@ -5994,7 +5990,7 @@ impl KattriApp {
             let _ = stored.queue.select(last);
         }
         self.music_queue = stored.queue;
-        self.music_queue_resume_position_ms = Some(stored.position_ms);
+        self.music_queue_resume = ResumePosition::available(stored.position_ms);
         self.music_queue_persistence.set_suspended(false);
         self.music_queue_persistence.reset();
         self.music_queue_position_ms = stored.position_ms;
@@ -6031,10 +6027,7 @@ impl KattriApp {
             self.music_queue_notice = Some(ui_text(ids::MUSIC_QUEUE_NOTHING_TO_RESUME).into());
             return;
         };
-        self.music_queue_resume_position_ticks = self
-            .music_queue_resume_position_ms
-            .take()
-            .and_then(|position| i64::try_from(position.saturating_mul(10_000)).ok());
+        self.music_queue_resume.park();
         self.music_queue_auto_play_item_id = Some(item_id.clone());
         self.select_item(item_id);
     }
@@ -8419,7 +8412,7 @@ impl KattriApp {
             PlaybackMethod::DirectStream => jellyfin_api::PlayMethod::DirectStream,
             PlaybackMethod::Transcode => jellyfin_api::PlayMethod::Transcode,
         };
-        let resume_ticks = self.music_queue_resume_position_ticks.take();
+        let resume_ticks = self.music_queue_resume.take_ticks();
         self.start_server_playback(source_index, play_method, resume_ticks);
     }
 
@@ -9509,8 +9502,7 @@ impl KattriApp {
         };
         self.music_queue_restore.reset();
         self.music_queue_restore.loaded(stored_queue);
-        self.music_queue_resume_position_ms = None;
-        self.music_queue_resume_position_ticks = None;
+        self.music_queue_resume.clear();
         self.music_queue_persistence.reset();
         self.music_queue_persistence
             .set_suspended(self.music_queue_restore.has_pending());
@@ -14202,7 +14194,7 @@ mod music_queue_app_tests {
             ["track-1", "track-1"]
         );
         assert_eq!(app.music_queue.current_index(), Some(1));
-        assert_eq!(app.music_queue_resume_position_ms, Some(12_345));
+        assert_eq!(app.music_queue_resume.ms(), Some(12_345));
         assert_eq!(app.selected_item_id, None, "restore must not auto-play");
         assert!(
             app.music_queue_notice

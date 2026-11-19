@@ -2241,7 +2241,7 @@ fn music_queue_panel(ui: &mut egui::Ui, app: &mut KattriApp, navigation: &[NavAc
             ui.label(ui_text(ids::MUSIC_QUEUE_REFRESHING));
         });
     }
-    if app.music_queue_resume_position_ms.is_some() && !app.music_queue.is_empty() {
+    if app.music_queue_resume.is_available() && !app.music_queue.is_empty() {
         let resume = ui.button(ui_text(ids::MUSIC_QUEUE_RESUME));
         resume.widget_info(|| {
             egui::WidgetInfo::labeled(
