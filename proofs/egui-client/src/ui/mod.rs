@@ -609,7 +609,7 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs
         // the profile menu; the tabs get what is left.
         let search_width = (ui.available_width() * 0.28).clamp(140.0, 300.0);
         let searching =
-            !app.search_query.is_empty() || app.submitted_search.is_some() || app.search_active;
+            !app.search.query.is_empty() || app.submitted_search.is_some() || app.search.active;
         let clear_width = if searching {
             ui.painter()
                 .layout_no_wrap(
@@ -764,7 +764,7 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs
                 let search_width = search_width.min((ui.available_width() - 12.0).max(80.0));
                 let search = ui.add_sized(
                     [search_width, 36.0],
-                    egui::TextEdit::singleline(&mut app.search_query)
+                    egui::TextEdit::singleline(&mut app.search.query)
                         .hint_text(ui_text(ids::BROWSE_SEARCH_HINT))
                         .margin(egui::Margin {
                             left: 36,
@@ -807,9 +807,9 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs
         } else if !shows_search_results(app.navigation.page) {
             // Pages that are not item grids have no place for results, so the search opens the
             // full catalog. Keep the typed text, which leaving the page clears.
-            let query = std::mem::take(&mut app.search_query);
+            let query = std::mem::take(&mut app.search.query);
             app.navigate_to(Page::Home);
-            app.search_query = query;
+            app.search.query = query;
         }
         app.submit_search(search_now);
         ui.ctx()
@@ -1698,8 +1698,8 @@ fn render_connected(
     }
     if matches!(app.navigation.page, Page::Movies | Page::Series)
         && app.navigation.view == AppView::Library
-        && app.search_browse_group.is_none()
-        && !app.search_active
+        && app.search.browse_group.is_none()
+        && !app.search.active
         && app.submitted_search.is_none()
     {
         library_tab_strip(ui, app, gamepad_actions);
@@ -1714,7 +1714,7 @@ fn render_connected(
     if app.browse.catalog_loading {
         ui.horizontal(|ui| {
             ui.spinner();
-            let message = if app.search_active || app.submitted_search.is_some() {
+            let message = if app.search.active || app.submitted_search.is_some() {
                 ui_text(ids::BROWSE_STATUS_SEARCHING)
             } else {
                 ui_text(ids::BROWSE_STATUS_LOADING_PAGE)
@@ -1729,7 +1729,7 @@ fn render_connected(
         return;
     }
 
-    if let Some(group) = app.search_browse_group {
+    if let Some(group) = app.search.browse_group {
         if ui
             .button(ui_text(ids::SEARCH_BUTTON_BACK_TO_RESULTS))
             .clicked()
@@ -1808,18 +1808,18 @@ fn render_connected(
         return;
     }
 
-    if app.search_active || app.submitted_search.is_some() {
+    if app.search.active || app.submitted_search.is_some() {
         details_panel(ui, app, colors);
-        if app.search_stale {
+        if app.search.stale {
             ui.label(RichText::new(ui_text(ids::SEARCH_NOTICE_STALE)).color(colors.muted));
         }
         let query = app.submitted_search.clone();
         // Borrowed in the usual case; copied only when channel results must be appended.
         let grouped_results: std::borrow::Cow<'_, [jellyfin_api::BaseItemDto]> =
             if app.live_tv_search_results.is_empty() {
-                std::borrow::Cow::Borrowed(&app.search_results)
+                std::borrow::Cow::Borrowed(&app.search.results)
             } else {
-                let mut merged = app.search_results.clone();
+                let mut merged = app.search.results.clone();
                 merged.extend(app.live_tv_search_results.iter().cloned());
                 std::borrow::Cow::Owned(merged)
             };
@@ -1838,7 +1838,7 @@ fn render_connected(
                         app,
                     );
                 }
-            } else if app.search_query.trim().chars().count() < 2 {
+            } else if app.search.query.trim().chars().count() < 2 {
                 state_panel(
                     ui,
                     colors,
