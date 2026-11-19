@@ -984,6 +984,77 @@ mod connection_boundary_tests {
             "the disconnect reason replaces the connecting message"
         );
     }
+
+    #[test]
+    fn the_single_write_path_keeps_text_and_status_in_step_across_the_lifecycle() {
+        use super::{ConnectionStatus, ConnectionText};
+        use kattri_client_core::connection::{ConnectingPhase, SessionState};
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context);
+        app.begin_connection("Checking server");
+
+        // Every display phase the viewer can see, in lifecycle order. After each write the stored
+        // text must equal the text taken from the stored status: that invariant is what the single
+        // write path guarantees, and it is the property a pure derivation would have to reproduce.
+        let lifecycle = [
+            ConnectionStatus::Connecting {
+                message: "Checking server".into(),
+            },
+            ConnectionStatus::Connecting {
+                message: "Signing in".into(),
+            },
+            ConnectionStatus::LoadingItems,
+            ConnectionStatus::Connected,
+            ConnectionStatus::LibraryError("library failed".into()),
+            ConnectionStatus::Disconnected {
+                error: Some("sign-in failed".into()),
+            },
+            ConnectionStatus::Disconnected { error: None },
+        ];
+        for status in lifecycle {
+            app.apply_connection_status(status);
+            assert_eq!(
+                app.connection_text,
+                ConnectionText::from_status(&app.connection),
+                "the stored text must always match the stored status"
+            );
+        }
+
+        // LoadingItems is the one display phase mirrored into the session machine.
+        app.apply_connection_status(ConnectionStatus::LoadingItems);
+        assert!(matches!(
+            app.session_machine.state(),
+            SessionState::Connecting {
+                phase: ConnectingPhase::LoadingItems,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_disconnect_reason_outlives_the_session_it_failed_in() {
+        use super::{ConnectionStatus, ConnectionText};
+        use kattri_client_core::connection::SessionState;
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context);
+        app.begin_connection("Checking server");
+        // A failed attempt ends the session generation...
+        app.clear_connection();
+        assert_eq!(app.session_machine.state(), SessionState::SignedOut);
+        // ...but the viewer must still read why it failed. The reason lives only in the display
+        // state, not in the machine (SignedOut carries no payload): this is why the status cannot be
+        // derived from owned state, and why the single write path is the accepted end state.
+        app.apply_connection_status(ConnectionStatus::Disconnected {
+            error: Some("sign-in failed".into()),
+        });
+        assert_eq!(app.session_machine.state(), SessionState::SignedOut);
+        assert_eq!(
+            app.connection_text,
+            ConnectionText::Error(Some("sign-in failed".into()))
+        );
+        assert_eq!(app.connection_text.text(), "sign-in failed");
+    }
+
     #[test]
     fn stale_detail_and_series_results_are_dropped_across_a_session_bump() {
         use super::{BaseItemDto, WorkerEvent};
@@ -1808,9 +1879,11 @@ impl std::fmt::Debug for PhotoState {
 
 /// The display text carried by a [`ConnectionStatus`], held separately from the phase.
 ///
-/// The phase belongs to owned state (the session machine's connecting phase and the catalog flags);
-/// the text is what a site wants the viewer to read. Keeping the text here means the phase can be
-/// derived while the message is preserved, and it gives the connection display state one owner.
+/// The text is what a site wants the viewer to read: a connecting message, a disconnect reason, a
+/// library failure. It is kept here — written only by [`KattriApp::apply_connection_status`] — because
+/// it cannot be derived from owned state: the session machine carries no message payload and the
+/// catalog flags do not encode it. This is the accepted end state, not a stepping stone to derivation;
+/// see `docs/architecture/WORK-REVIEW.md` ("ConnectionStatus end-state").
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ConnectionText {
     /// Nothing to show.
@@ -2093,7 +2166,8 @@ pub struct KattriApp {
     /// Last update result for the update panel. Only the UI thread writes it.
     pub(crate) update: UpdateState,
     pub(crate) connection: ConnectionStatus,
-    /// The display text of `connection`, held so the phase can be derived from owned state.
+    /// The display text of `connection`. Kept, not derived: the messages are site-specific and
+    /// outlive the session machine's state. Written only by `apply_connection_status`.
     connection_text: ConnectionText,
     pub(crate) offline_tracker: OfflineTracker,
     pub(crate) network_notice: Option<ErrorClass>,
@@ -5162,13 +5236,27 @@ impl KattriApp {
         }
     }
 
-    /// The single write path for the connection display state.
+    /// The single write path for the connection display state — the accepted end state.
     ///
-    /// Every site goes through here so the display text and the status cannot disagree, and so a
-    /// later step can derive the status from owned state without hunting for writers. The session
-    /// machine already owns the session phase; this mirrors the one phase it can know for certain
-    /// (the first catalog page loading) and never forces a session transition, because a validation
-    /// error or a server probe must not start or end a session.
+    /// Every site goes through here so the display text and the status cannot disagree. Deriving the
+    /// status purely from owned state (the session machine's phase plus the catalog flags) was
+    /// considered and rejected, not deferred:
+    ///
+    /// * The display carries free-form messages the machine does not hold. A disconnect reason
+    ///   outlives the session it failed in (`clear_connection` ends the generation, yet the error
+    ///   banner must stay), and the connecting message is chosen per site (checking-server vs
+    ///   quick-connect vs signing-in-with-server-name). The machine's phase has no message payload,
+    ///   and the app never drives it into `SigningIn`, `Lost` or `Failed`.
+    /// * The catalog-flag timing trap on refresh: the flags are written at different points than the
+    ///   status across handlers, so a flag-keyed derivation flickers between `Connected` and
+    ///   `LibraryError` (a failed refresh keeps `Connected`; a queue failure can set `catalog_error`
+    ///   without a status write).
+    ///
+    /// One writer is what guarantees the pair stays in step; see `docs/architecture/WORK-REVIEW.md`
+    /// ("ConnectionStatus end-state"). The session machine owns the session lifecycle; this mirrors
+    /// the one display phase it can know for certain (the first catalog page loading) and never
+    /// forces a session transition, because a validation error or a server probe must not start or
+    /// end a session.
     pub(crate) fn apply_connection_status(&mut self, status: ConnectionStatus) {
         if matches!(status, ConnectionStatus::LoadingItems)
             && let kattri_client_core::connection::SessionState::Connecting { epoch, .. } =
