@@ -248,7 +248,7 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
     let content_scroll_id = egui::Id::unique((
         "library_content_scroll",
         format!("{:?}:{:?}", app.view, app.page),
-        app.selected_item_id.as_deref(),
+        app.browse.details.selected_item_id.as_deref(),
         app.library_tab,
     ));
 
@@ -1572,7 +1572,7 @@ fn home_view(
     entries: &mut Vec<CardFocus>,
     visible_artwork: &mut Vec<(String, String)>,
 ) {
-    if app.selected_item_id.is_some() || app.selected_person.is_some() {
+    if app.browse.details.selected_item_id.is_some() || app.selected_person.is_some() {
         details_panel(ui, app, colors);
         return;
     }
@@ -1875,7 +1875,7 @@ fn render_connected(
         music_queue_panel(ui, app, gamepad_actions);
     }
     // Sorting and paging belong to the list; an open item or person page replaces them.
-    if app.selected_item_id.is_none() && app.selected_person.is_none() {
+    if app.browse.details.selected_item_id.is_none() && app.selected_person.is_none() {
         // Sort and filter controls only describe the library's own catalog. Suggestions and
         // Upcoming are one fixed page, and Episodes has its own newest-first ordering.
         if app.library_tab == LibraryTab::Library {
@@ -1886,7 +1886,7 @@ fn render_connected(
     details_panel(ui, app, colors);
     // An open item or person page replaces the browse grid: without this return the grid drew
     // below the details and reappeared when the viewer scrolled down past the details.
-    if app.selected_item_id.is_some() || app.selected_person.is_some() {
+    if app.browse.details.selected_item_id.is_some() || app.selected_person.is_some() {
         return;
     }
 
@@ -2054,7 +2054,7 @@ fn render_connected(
             for plan in grouped {
                 ui.add_space(26.0);
                 let item_count = plan.items.len();
-                let selected_item_id = app.selected_item_id.clone();
+                let selected_item_id = app.browse.details.selected_item_id.clone();
                 let mut context = ShelfContext {
                     entries,
                     selected_item_id: selected_item_id.as_deref(),
@@ -2199,7 +2199,7 @@ fn render_connected(
         return;
     }
     let items: Vec<&MediaItem> = items.collect();
-    let selected_item_id = app.selected_item_id.clone();
+    let selected_item_id = app.browse.details.selected_item_id.clone();
     let general = &app.settings.settings().general;
     let list_layout = matches!(general.library_layout, kattri_settings::LibraryLayout::List);
     let artwork_scale = match general.library_artwork_size {
@@ -2317,7 +2317,9 @@ fn playlists_page(ui: &mut egui::Ui, app: &mut KattriApp) {
             .find(|item| item.id == playlist_id)
             .map(|item| item.title.clone())
             .or_else(|| {
-                app.selected_details
+                app.browse
+                    .details
+                    .selected_details
                     .as_ref()
                     .filter(|item| item.id == playlist_id)
                     .map(|item| item.name.clone())
@@ -2947,7 +2949,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
         person_page_panel(ui, app, colors);
         return;
     }
-    if app.selected_item_id.is_none() {
+    if app.browse.details.selected_item_id.is_none() {
         return;
     }
 
@@ -2978,7 +2980,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
         .corner_radius(CornerRadius::same(16))
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
-            if app.details_loading {
+            if app.browse.details.details_loading {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(
@@ -2987,7 +2989,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                 });
             }
 
-            if let Some(item) = app.selected_details.as_ref() {
+            if let Some(item) = app.browse.details.selected_details.as_ref() {
                 let detail_panel_id = egui::Id::unique(("item_detail_panel", &item.id));
                 DETAIL_PANEL_STATE.with_borrow_mut(|state| {
                     if state.as_ref().is_none_or(|(id, _)| *id != detail_panel_id) {
@@ -3404,9 +3406,9 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                         .color(colors.danger),
                     );
                 }
-            } else if let Some(message) = app.details_error.clone() {
+            } else if let Some(message) = app.browse.details.details_error.clone() {
                 detail_error_action = detail_error_panel(ui, &message, colors);
-            } else if !app.details_loading {
+            } else if !app.browse.details.details_loading {
                 ui.add_space(6.0);
                 ui.label(RichText::new(ui_text(ids::DETAIL_EMPTY_DETAILS)).color(colors.muted));
             }
@@ -3482,7 +3484,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     }
     if let Some(start_over) = play_requests.start_over
         && detail_error_action.is_none()
-        && let Some(item_id) = app.selected_item_id.clone()
+        && let Some(item_id) = app.browse.details.selected_item_id.clone()
     {
         app.play_item(item_id, start_over);
         ui.ctx().request_repaint();

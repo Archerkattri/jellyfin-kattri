@@ -681,7 +681,7 @@ mod launch_intent_tests {
             app.connection,
             ConnectionStatus::Disconnected { .. }
         ));
-        assert_eq!(app.selected_item_id, None);
+        assert_eq!(app.browse.details.selected_item_id, None);
         assert!(app.pending_launch_intent.is_some());
         assert!(!app.auto_play.is_pending());
         assert!(app.pending_playback.is_none());
@@ -735,18 +735,24 @@ mod launch_intent_tests {
         };
         events.try_send(signed_in()).expect("sign-in result queued");
         app.receive_worker_events(&ctx);
-        assert_eq!(app.selected_item_id.as_deref(), Some(ITEM_ID));
+        assert_eq!(
+            app.browse.details.selected_item_id.as_deref(),
+            Some(ITEM_ID)
+        );
         assert!(app.pending_launch_intent.is_none());
         assert!(!app.auto_play.is_pending());
         assert!(!app.playback_start_loading);
-        let details_request_id = app.details_request_id;
+        let details_request_id = app.browse.details.details_request_id;
 
         events
             .try_send(signed_in())
             .expect("duplicate result queued");
         app.receive_worker_events(&ctx);
-        assert_eq!(app.selected_item_id.as_deref(), Some(ITEM_ID));
-        assert_eq!(app.details_request_id, details_request_id);
+        assert_eq!(
+            app.browse.details.selected_item_id.as_deref(),
+            Some(ITEM_ID)
+        );
+        assert_eq!(app.browse.details.details_request_id, details_request_id);
         assert!(!app.auto_play.is_pending());
     }
 
@@ -779,7 +785,7 @@ mod launch_intent_tests {
             .expect("failure event queued");
         app.receive_worker_events(&ctx);
 
-        assert!(app.selected_item_id.is_none());
+        assert!(app.browse.details.selected_item_id.is_none());
         assert!(!app.auto_play.is_pending());
         assert!(app.pending_launch_intent.as_ref().is_some_and(|pending| {
             pending.server_url == SERVER_URL && pending.connection_generation.is_none()
@@ -1143,8 +1149,8 @@ mod auto_play_lifecycle_tests {
     fn ready_app() -> KattriApp {
         let mut app = KattriApp::new(egui::Context::default());
         app.worker = Some(ApiWorker::queued_for_test());
-        app.selected_item_id = Some("movie".into());
-        app.selected_details = Some(
+        app.browse.details.selected_item_id = Some("movie".into());
+        app.browse.details.selected_details = Some(
             serde_json::from_value(serde_json::json!({
                 "Id": "movie", "Name": "Fixture", "Type": "Movie"
             }))
@@ -1183,7 +1189,7 @@ mod auto_play_lifecycle_tests {
     #[test]
     fn a_changed_item_drops_the_request() {
         let mut app = ready_app();
-        app.selected_item_id = Some("another-item".into());
+        app.browse.details.selected_item_id = Some("another-item".into());
         app.poll_auto_play();
         assert!(!app.auto_play.is_pending(), "the viewer moved on");
     }
@@ -1199,7 +1205,7 @@ mod auto_play_lifecycle_tests {
     #[test]
     fn a_details_error_drops_the_request() {
         let mut app = ready_app();
-        app.details_error = Some("details failed".into());
+        app.browse.details.details_error = Some("details failed".into());
         app.poll_auto_play();
         assert!(!app.auto_play.is_pending());
     }
@@ -1735,8 +1741,6 @@ pub struct KattriApp {
     library_tab_request_id: u64,
     loaded_search: Option<String>,
     unsupported_catalog_filters: Vec<(Page, ItemFilter)>,
-    pub(crate) selected_item_id: Option<String>,
-    pub(crate) selected_details: Option<BaseItemDto>,
     pub(crate) selected_artwork_texture: Option<egui::TextureHandle>,
     detail_artwork_request_id: u64,
     detail_backdrop_attempted: bool,
@@ -1751,8 +1755,6 @@ pub struct KattriApp {
     custom_backdrop_request: Option<(u64, std::path::PathBuf)>,
     /// Set by `play_item`; consumed by `poll_auto_play` once the stream can start.
     pub(crate) auto_play: AutoPlayMachine,
-    pub(crate) details_loading: bool,
-    pub(crate) details_error: Option<String>,
     pub(crate) series_seasons: Vec<BaseItemDto>,
     pub(crate) series_seasons_loading: bool,
     pub(crate) series_seasons_error: Option<String>,
@@ -1990,7 +1992,6 @@ pub struct KattriApp {
     admin_request_id: Option<u64>,
     pub(crate) admin_users_open: bool,
     pub(crate) admin_users: AdminUsersData,
-    details_request_id: u64,
     watched: Option<WatchedItemState>,
     favorite: Option<FavoriteItemState>,
     series_seasons_request_id: u64,
@@ -2270,8 +2271,8 @@ impl KattriApp {
             self.browse.catalog_loading,
             self.items.len(),
             self.user_name.is_some(),
-            self.selected_item_id,
-            self.details_loading,
+            self.browse.details.selected_item_id,
+            self.browse.details.details_loading,
             self.auto_play.pending(),
             self.playback_loading,
             self.playback_info.is_some(),
@@ -2425,8 +2426,6 @@ impl KattriApp {
             batch_started: HashMap::new(),
             update: UpdateState::default(),
             unsupported_catalog_filters: Vec::new(),
-            selected_item_id: None,
-            selected_details: None,
             selected_artwork_texture: None,
             detail_artwork_request_id: 0,
             detail_backdrop_attempted: false,
@@ -2438,8 +2437,6 @@ impl KattriApp {
             custom_backdrop_texture: None,
             custom_backdrop_request: None,
             auto_play: AutoPlayMachine::new(),
-            details_loading: false,
-            details_error: None,
             series_seasons: Vec::new(),
             series_seasons_loading: false,
             series_seasons_error: None,
@@ -2630,7 +2627,6 @@ impl KattriApp {
             admin_request_id: None,
             admin_users_open: false,
             admin_users: AdminUsersData::default(),
-            details_request_id: 0,
             watched: None,
             favorite: None,
             series_seasons_request_id: 0,
@@ -2783,6 +2779,8 @@ impl KattriApp {
     /// full-window video view. Items whose record has not loaded count as video.
     pub fn selected_is_video(&self) -> bool {
         !self
+            .browse
+            .details
             .selected_details
             .as_ref()
             .is_some_and(|details| details.item_type.as_deref() == Some("Audio"))
@@ -2841,7 +2839,7 @@ impl KattriApp {
         if !self.media_playing
             || self.pending_playback.is_some()
             || self.burn_in_subtitle_replacement_load.is_some()
-            || self.selected_item_id.as_deref() != Some(active.item_id.as_str())
+            || self.browse.details.selected_item_id.as_deref() != Some(active.item_id.as_str())
             || active.start_request_id != self.playback_start_request_id
             || active.selection.method != PlaybackMethod::Transcode
             || !self.settings.settings().subtitles.burn_in
@@ -3015,7 +3013,7 @@ impl KattriApp {
         self.burn_in_replace
             .pending_matches(request_id, playback_generation, item_id)
             && self.playback_start_request_id == playback_generation
-            && self.selected_item_id.as_deref() == Some(item_id)
+            && self.browse.details.selected_item_id.as_deref() == Some(item_id)
             && self.active_playback.as_ref().is_some_and(|active| {
                 active.item_id == item_id
                     && active.start_request_id == playback_generation
@@ -3272,7 +3270,9 @@ impl KattriApp {
             .find(|item| item.id == item_id)
             .map(|item| item.title.as_str())
             .or_else(|| {
-                self.selected_details
+                self.browse
+                    .details
+                    .selected_details
                     .as_ref()
                     .filter(|item| item.id == item_id)
                     .map(|item| item.name.as_str())
@@ -4877,7 +4877,7 @@ impl KattriApp {
         let request_id = self.allocate_request_id();
         self.connection_request_id = request_id;
         self.browse.catalog_request_id = request_id;
-        self.details_request_id = self.allocate_request_id();
+        self.browse.details.details_request_id = self.allocate_request_id();
         self.playback_request_id = self.allocate_request_id();
         self.playback_start_request_id = self.allocate_request_id();
         self.server = None;
@@ -4890,8 +4890,8 @@ impl KattriApp {
         self.catalog_selection.clear();
         self.library_tab = LibraryTab::Library;
         self.library_tab_request_id = self.allocate_request_id();
-        self.selected_item_id = None;
-        self.selected_details = None;
+        self.browse.details.selected_item_id = None;
+        self.browse.details.selected_details = None;
         self.selected_artwork_texture = None;
         self.detail_artwork_request_id = self.allocate_request_id();
         self.detail_backdrop_attempted = false;
@@ -4904,8 +4904,8 @@ impl KattriApp {
         self.loaded_search = None;
         self.browse.catalog_loading = true;
         self.browse.catalog_error = None;
-        self.details_loading = false;
-        self.details_error = None;
+        self.browse.details.details_loading = false;
+        self.browse.details.details_error = None;
         self.reset_series_detail();
         self.reset_people_detail();
         self.reset_playback(PlaybackReset::Session);
@@ -5016,7 +5016,9 @@ impl KattriApp {
     fn dispatch_network_retry(&mut self) {
         if self.playback_error.is_some() {
             self.request_playback_options();
-        } else if self.details_error.is_some() || self.selected_item_id.is_some() {
+        } else if self.browse.details.details_error.is_some()
+            || self.browse.details.selected_item_id.is_some()
+        {
             self.retry_item_details();
         } else if self.view == AppView::Home {
             self.refresh_home();
@@ -5029,7 +5031,11 @@ impl KattriApp {
         let Some(deadline) = self.network_retry_deadline else {
             return;
         };
-        let current_context = (self.view, self.page, self.selected_item_id.clone());
+        let current_context = (
+            self.view,
+            self.page,
+            self.browse.details.selected_item_id.clone(),
+        );
         if self.network_retry_context.as_ref() != Some(&current_context) {
             self.network_retry_deadline = None;
             self.network_retry_context = None;
@@ -5072,9 +5078,13 @@ impl KattriApp {
             RetryDecision::Retry { delay } => Some(self.ui_time.saturating_add(delay)),
             RetryDecision::Stop(_) => None,
         };
-        self.network_retry_context = self
-            .network_retry_deadline
-            .map(|_| (self.view, self.page, self.selected_item_id.clone()));
+        self.network_retry_context = self.network_retry_deadline.map(|_| {
+            (
+                self.view,
+                self.page,
+                self.browse.details.selected_item_id.clone(),
+            )
+        });
     }
 
     fn record_network_success(&mut self) {
@@ -5090,13 +5100,13 @@ impl KattriApp {
             worker.cancel_navigation_reads();
         }
         self.browse.catalog_request_id = self.allocate_request_id();
-        self.details_request_id = self.allocate_request_id();
+        self.browse.details.details_request_id = self.allocate_request_id();
         self.series_seasons_request_id = self.allocate_request_id();
         self.series_episodes_request_id = self.allocate_request_id();
         self.similar_request_id = self.allocate_request_id();
         self.person_items_request_id = self.allocate_request_id();
         self.browse.catalog_loading = false;
-        self.details_loading = false;
+        self.browse.details.details_loading = false;
         self.series_seasons_loading = false;
         self.series_episodes_loading = false;
         self.similar_loading = false;
@@ -5451,19 +5461,19 @@ impl KattriApp {
             self.person_items_error = None;
             return;
         }
-        if self.selected_item_id.is_some()
+        if self.browse.details.selected_item_id.is_some()
             && let Some(parent) = self.detail_parent.take()
         {
             self.select_item(parent);
             return;
         }
-        if self.selected_item_id.take().is_some() {
-            self.details_request_id = self.allocate_request_id();
+        if self.browse.details.selected_item_id.take().is_some() {
+            self.browse.details.details_request_id = self.allocate_request_id();
             self.playback_request_id = self.allocate_request_id();
             self.playback_start_request_id = self.allocate_request_id();
-            self.selected_details = None;
-            self.details_loading = false;
-            self.details_error = None;
+            self.browse.details.selected_details = None;
+            self.browse.details.details_loading = false;
+            self.browse.details.details_error = None;
             self.reset_series_detail();
             self.reset_people_detail();
             self.reset_playback(PlaybackReset::Selection);
@@ -5562,7 +5572,7 @@ impl KattriApp {
         self.items.retain(|item| item.id != item_id);
         self.home.remove_item(item_id);
         self.series_episodes.retain(|episode| episode.id != item_id);
-        if self.selected_item_id.as_deref() == Some(item_id) {
+        if self.browse.details.selected_item_id.as_deref() == Some(item_id) {
             self.navigate_back();
         }
     }
@@ -5741,7 +5751,7 @@ impl KattriApp {
         }
         let request_id = self.allocate_request_id();
         self.live_tv_selected_channel_id = Some(channel_id.clone());
-        self.selected_item_id = Some(channel_id.clone());
+        self.browse.details.selected_item_id = Some(channel_id.clone());
         self.live_tv_tune_request_id = Some(request_id);
         self.live_tv_retry_available = false;
         self.playback_start_request_id = request_id;
@@ -5881,10 +5891,16 @@ impl KattriApp {
     }
 
     pub(crate) fn queue_selected_audio(&mut self, play_next: bool) {
-        let Some(item) = self.selected_details.as_ref().filter(|item| {
-            item.item_type.as_deref() == Some("Audio")
-                && self.selected_item_id.as_deref() == Some(item.id.as_str())
-        }) else {
+        let Some(item) = self
+            .browse
+            .details
+            .selected_details
+            .as_ref()
+            .filter(|item| {
+                item.item_type.as_deref() == Some("Audio")
+                    && self.browse.details.selected_item_id.as_deref() == Some(item.id.as_str())
+            })
+        else {
             return;
         };
         let queue_item = QueueItem::new(item.id.clone());
@@ -5910,11 +5926,15 @@ impl KattriApp {
     }
 
     fn selected_album_id(&self) -> Option<String> {
-        self.selected_details.as_ref().and_then(|item| {
-            (item.item_type.as_deref() == Some("MusicAlbum")
-                && self.selected_item_id.as_deref() == Some(item.id.as_str()))
-            .then(|| item.id.clone())
-        })
+        self.browse
+            .details
+            .selected_details
+            .as_ref()
+            .and_then(|item| {
+                (item.item_type.as_deref() == Some("MusicAlbum")
+                    && self.browse.details.selected_item_id.as_deref() == Some(item.id.as_str()))
+                .then(|| item.id.clone())
+            })
     }
 
     fn request_album_tracks(&mut self, purpose: AlbumTracksPurpose) {
@@ -6135,7 +6155,7 @@ impl KattriApp {
         self.music_queue_position_ms = 0;
         self.music_queue_resume.clear();
         self.music_queue_notice = Some(notice.to_owned());
-        if self.selected_item_id.as_deref() == Some(item_id.as_str()) {
+        if self.browse.details.selected_item_id.as_deref() == Some(item_id.as_str()) {
             self.request_playback_options();
         } else {
             self.select_item(item_id);
@@ -6436,13 +6456,13 @@ impl KattriApp {
         self.search_browse_group = None;
         self.search_active = true;
         self.invalidate_track_lyrics();
-        self.selected_item_id = None;
-        self.selected_details = None;
-        self.details_request_id = self.allocate_request_id();
+        self.browse.details.selected_item_id = None;
+        self.browse.details.selected_details = None;
+        self.browse.details.details_request_id = self.allocate_request_id();
         self.reset_series_detail();
         self.reset_people_detail();
-        self.details_loading = false;
-        self.details_error = None;
+        self.browse.details.details_loading = false;
+        self.browse.details.details_error = None;
         let action = self.search_debouncer.input(input, now);
         self.browse.catalog_request_id = self.allocate_request_id();
         self.invalidate_live_tv_search();
@@ -7063,10 +7083,10 @@ impl KattriApp {
         self.search_stale = false;
         self.loaded_search = None;
         self.invalidate_track_lyrics();
-        self.selected_item_id = None;
-        self.selected_details = None;
-        self.details_loading = false;
-        self.details_error = None;
+        self.browse.details.selected_item_id = None;
+        self.browse.details.selected_details = None;
+        self.browse.details.details_loading = false;
+        self.browse.details.details_error = None;
         request_id
     }
 
@@ -7173,12 +7193,12 @@ impl KattriApp {
         // Appending a page must not close an open detail page or invalidate an in-flight
         // playback start: auto-prefetch while scrolling would otherwise cancel playback.
         if start_index == 0 {
-            self.selected_item_id = None;
-            self.selected_details = None;
-            self.details_loading = false;
-            self.details_error = None;
+            self.browse.details.selected_item_id = None;
+            self.browse.details.selected_details = None;
+            self.browse.details.details_loading = false;
+            self.browse.details.details_error = None;
             self.reset_playback(PlaybackReset::Selection);
-            self.details_request_id = self.allocate_request_id();
+            self.browse.details.details_request_id = self.allocate_request_id();
             self.playback_request_id = self.allocate_request_id();
             self.playback_start_request_id = self.allocate_request_id();
         }
@@ -7339,14 +7359,15 @@ impl KattriApp {
 
     /// Opens `item_id` (an episode) from the page on screen; Back returns to that page.
     pub(crate) fn open_child_item(&mut self, item_id: String) {
-        let parent = self.selected_item_id.clone();
+        let parent = self.browse.details.selected_item_id.clone();
         self.select_item(item_id);
         self.detail_parent = parent;
     }
 
     pub(crate) fn select_item(&mut self, item_id: String) {
-        if self.selected_item_id.as_deref() == Some(item_id.as_str())
-            && (self.selected_details.is_some() || self.details_loading)
+        if self.browse.details.selected_item_id.as_deref() == Some(item_id.as_str())
+            && (self.browse.details.selected_details.is_some()
+                || self.browse.details.details_loading)
         {
             return;
         }
@@ -7358,14 +7379,14 @@ impl KattriApp {
         self.music_album_tracks.clear();
         self.music_album_tracks_album_id = None;
         self.music_album_tracks_purpose = AlbumTracksPurpose::Display;
-        self.selected_item_id = Some(item_id.clone());
-        self.selected_details = None;
+        self.browse.details.selected_item_id = Some(item_id.clone());
+        self.browse.details.selected_details = None;
         self.reset_series_detail();
         self.reset_people_detail();
         self.selected_artwork_texture = None;
         self.detail_backdrop_attempted = false;
         self.detail_artwork_request_id = self.allocate_request_id();
-        self.details_error = None;
+        self.browse.details.details_error = None;
         self.reset_playback(PlaybackReset::Selection);
         self.playback_request_id = self.allocate_request_id();
         self.playback_start_request_id = self.allocate_request_id();
@@ -7593,24 +7614,24 @@ impl KattriApp {
     }
 
     pub(crate) fn retry_item_details(&mut self) {
-        if let Some(item_id) = self.selected_item_id.clone() {
+        if let Some(item_id) = self.browse.details.selected_item_id.clone() {
             self.load_selected_details(item_id);
         }
     }
 
     fn load_selected_details(&mut self, item_id: String) {
         let request_id = self.allocate_request_id();
-        self.details_request_id = request_id;
-        self.details_loading = true;
-        self.details_error = None;
+        self.browse.details.details_request_id = request_id;
+        self.browse.details.details_loading = true;
+        self.browse.details.details_error = None;
         let result = self
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
             .and_then(|worker| worker.get_item(request_id, self.session_epoch, item_id));
         if result.is_err() {
-            self.details_loading = false;
-            self.details_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into());
+            self.browse.details.details_loading = false;
+            self.browse.details.details_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into());
         }
     }
 
@@ -7689,7 +7710,7 @@ impl KattriApp {
     }
 
     fn request_similar_items(&mut self) {
-        let Some(item_id) = self.selected_item_id.clone() else {
+        let Some(item_id) = self.browse.details.selected_item_id.clone() else {
             return;
         };
         self.similar_items.clear();
@@ -7738,7 +7759,9 @@ impl KattriApp {
     pub(crate) fn theme_media_item(&self) -> Option<&BaseItemDto> {
         self.theme_media
             .as_ref()
-            .filter(|state| self.selected_item_id.as_deref() == Some(state.item_id.as_str()))
+            .filter(|state| {
+                self.browse.details.selected_item_id.as_deref() == Some(state.item_id.as_str())
+            })
             .map(|state| &state.item)
     }
 
@@ -7773,6 +7796,8 @@ impl KattriApp {
 
     pub(crate) fn open_person_page_by_id(&mut self, person_id: &str) {
         let person = self
+            .browse
+            .details
             .selected_details
             .as_ref()
             .and_then(|item| item.people.as_deref())
@@ -7787,6 +7812,8 @@ impl KattriApp {
 
     fn queue_person_artwork(&mut self) {
         self.person_artwork_queue = self
+            .browse
+            .details
             .selected_details
             .as_ref()
             .and_then(|item| item.people.as_ref())
@@ -7882,6 +7909,8 @@ impl KattriApp {
 
     pub(crate) fn select_series_season(&mut self, season_id: String) {
         let Some(series_id) = self
+            .browse
+            .details
             .selected_details
             .as_ref()
             .filter(|item| item.item_type.as_deref() == Some("Series"))
@@ -7912,11 +7941,14 @@ impl KattriApp {
 
     /// Watched state for the selected item's toggle button.
     pub(crate) fn watched_view(&self) -> WatchedView {
-        let Some(item) = self.selected_details.as_ref() else {
+        let Some(item) = self.browse.details.selected_details.as_ref() else {
             return WatchedView::default();
         };
         match self.watched.as_ref() {
-            Some(state) if self.selected_item_id.as_deref() == Some(state.item_id.as_str()) => {
+            Some(state)
+                if self.browse.details.selected_item_id.as_deref()
+                    == Some(state.item_id.as_str()) =>
+            {
                 WatchedView {
                     played: state.toggle.played(),
                     pending: state.toggle.is_pending(),
@@ -8261,10 +8293,10 @@ impl KattriApp {
 
     /// Does nothing while a previous toggle for this item is in flight.
     pub(crate) fn request_watched_toggle(&mut self) {
-        let Some(item_id) = self.selected_item_id.clone() else {
+        let Some(item_id) = self.browse.details.selected_item_id.clone() else {
             return;
         };
-        let Some(details) = self.selected_details.as_ref() else {
+        let Some(details) = self.browse.details.selected_details.as_ref() else {
             return;
         };
         let mut toggle = match self.watched.as_ref() {
@@ -8300,11 +8332,14 @@ impl KattriApp {
     }
 
     pub(crate) fn favorite_view(&self) -> FavoriteView {
-        let Some(item) = self.selected_details.as_ref() else {
+        let Some(item) = self.browse.details.selected_details.as_ref() else {
             return FavoriteView::default();
         };
         match self.favorite.as_ref() {
-            Some(state) if self.selected_item_id.as_deref() == Some(state.item_id.as_str()) => {
+            Some(state)
+                if self.browse.details.selected_item_id.as_deref()
+                    == Some(state.item_id.as_str()) =>
+            {
                 FavoriteView {
                     favorite: state.toggle.displayed(),
                     pending: state.toggle.in_flight(),
@@ -8324,10 +8359,10 @@ impl KattriApp {
     }
 
     pub(crate) fn request_favorite_toggle(&mut self) {
-        let Some(item_id) = self.selected_item_id.clone() else {
+        let Some(item_id) = self.browse.details.selected_item_id.clone() else {
             return;
         };
-        let Some(details) = self.selected_details.as_ref() else {
+        let Some(details) = self.browse.details.selected_details.as_ref() else {
             return;
         };
         let mut toggle = match self.favorite.as_ref() {
@@ -8395,7 +8430,9 @@ impl KattriApp {
                     if start_over {
                         0
                     } else {
-                        self.selected_details
+                        self.browse
+                            .details
+                            .selected_details
                             .as_ref()
                             .filter(|details| details.id == item_id)
                             .and_then(|details| {
@@ -8450,7 +8487,7 @@ impl KattriApp {
             return;
         }
         if self.sync_play_auto_target.as_ref().is_some_and(|target| {
-            self.selected_item_id.as_deref() != Some(target.item_id.as_str())
+            self.browse.details.selected_item_id.as_deref() != Some(target.item_id.as_str())
                 || !self.sync_play_queue_matches(target.generation, &target.playlist_item_id)
         }) {
             self.auto_play.cancel();
@@ -8466,9 +8503,9 @@ impl KattriApp {
                 pick: self.chosen_playback_selection(info),
             },
         };
-        let details = match self.selected_details.as_ref() {
+        let details = match self.browse.details.selected_details.as_ref() {
             None => DetailsState::Missing {
-                loading: self.details_loading,
+                loading: self.browse.details.details_loading,
             },
             Some(details) => DetailsState::Loaded {
                 resume_ticks: details.user_data.as_ref().and_then(|user_data| {
@@ -8488,10 +8525,10 @@ impl KattriApp {
         };
         let observations = AutoPlayObservations {
             item_unchanged: self.auto_play.pending().is_some_and(|request| {
-                self.selected_item_id.as_deref() == Some(request.item_id.as_str())
+                self.browse.details.selected_item_id.as_deref() == Some(request.item_id.as_str())
             }),
             options_failed: self.playback_error.is_some(),
-            details_failed: self.details_error.is_some(),
+            details_failed: self.browse.details.details_error.is_some(),
             start_in_flight: self.playback_start_loading,
             options,
             details,
@@ -8557,7 +8594,7 @@ impl KattriApp {
     }
 
     pub(crate) fn request_playback_options(&mut self) {
-        let Some(item_id) = self.selected_item_id.clone() else {
+        let Some(item_id) = self.browse.details.selected_item_id.clone() else {
             return;
         };
         let request_id = self.allocate_request_id();
@@ -8566,6 +8603,8 @@ impl KattriApp {
         self.playback_loading = true;
         self.playback_start_request_id = self.allocate_request_id();
         let is_audio = self
+            .browse
+            .details
             .selected_details
             .as_ref()
             .is_some_and(|details| details.item_type.as_deref() == Some("Audio"));
@@ -8623,11 +8662,11 @@ impl KattriApp {
         start_time_ticks: Option<i64>,
     ) {
         let group_queue_load = self.sync_play_auto_target.as_ref().is_some_and(|target| {
-            self.selected_item_id.as_deref() == Some(target.item_id.as_str())
+            self.browse.details.selected_item_id.as_deref() == Some(target.item_id.as_str())
                 && self.sync_play_queue_matches(target.generation, &target.playlist_item_id)
         });
         if self.sync_play_can_send() && !group_queue_load {
-            let item_id = self.selected_item_id.clone();
+            let item_id = self.browse.details.selected_item_id.clone();
             if let Some(item_id) = item_id
                 && self
                     .set_sync_play_new_queue(vec![item_id], 0, start_time_ticks.unwrap_or(0).max(0))
@@ -8644,7 +8683,7 @@ impl KattriApp {
         self.mid_stream_recoveries = 0;
         // Only ordinary movie/episode startup is retried. Music and Live TV
         // retain their existing queue/reconnect policies.
-        if let Some(item_id) = self.selected_item_id.clone()
+        if let Some(item_id) = self.browse.details.selected_item_id.clone()
             && self.selected_is_movie_or_episode(&item_id)
             && let Some(info) = self.playback_info.as_ref()
         {
@@ -8669,15 +8708,21 @@ impl KattriApp {
 
     /// Asks for the neighbours of the episode about to play, once per episode.
     fn request_episode_neighbors(&mut self) {
-        let Some((episode_id, series_id)) = self.selected_details.as_ref().and_then(|item| {
-            (item.item_type.as_deref() == Some("Episode"))
-                .then(|| {
-                    item.series_id
-                        .clone()
-                        .map(|series| (item.id.clone(), series))
+        let Some((episode_id, series_id)) =
+            self.browse
+                .details
+                .selected_details
+                .as_ref()
+                .and_then(|item| {
+                    (item.item_type.as_deref() == Some("Episode"))
+                        .then(|| {
+                            item.series_id
+                                .clone()
+                                .map(|series| (item.id.clone(), series))
+                        })
+                        .flatten()
                 })
-                .flatten()
-        }) else {
+        else {
             return;
         };
         if self
@@ -8793,12 +8838,14 @@ impl KattriApp {
     pub(crate) fn preferred_source_index(&self) -> Option<usize> {
         self.preferred_source
             .as_ref()
-            .filter(|(item_id, _)| self.selected_item_id.as_deref() == Some(item_id.as_str()))
+            .filter(|(item_id, _)| {
+                self.browse.details.selected_item_id.as_deref() == Some(item_id.as_str())
+            })
             .map(|(_, index)| *index)
     }
 
     pub(crate) fn set_preferred_source(&mut self, index: usize) {
-        if let Some(item_id) = self.selected_item_id.clone() {
+        if let Some(item_id) = self.browse.details.selected_item_id.clone() {
             self.preferred_source = Some((item_id, index));
         }
     }
@@ -8807,6 +8854,8 @@ impl KattriApp {
     fn request_track_lyrics(&mut self) {
         self.invalidate_track_lyrics();
         let Some(item_id) = self
+            .browse
+            .details
             .selected_details
             .as_ref()
             .and_then(|item| (item.item_type.as_deref() == Some("Audio")).then(|| item.id.clone()))
@@ -8829,9 +8878,16 @@ impl KattriApp {
     fn request_item_extras(&mut self) {
         self.item_extras.clear();
         self.item_extras_request_id = self.allocate_request_id();
-        let Some(item_id) = self.selected_details.as_ref().and_then(|item| {
-            matches!(item.item_type.as_deref(), Some("Movie" | "Series")).then(|| item.id.clone())
-        }) else {
+        let Some(item_id) = self
+            .browse
+            .details
+            .selected_details
+            .as_ref()
+            .and_then(|item| {
+                matches!(item.item_type.as_deref(), Some("Movie" | "Series"))
+                    .then(|| item.id.clone())
+            })
+        else {
             return;
         };
         let request_id = self.item_extras_request_id;
@@ -8844,11 +8900,17 @@ impl KattriApp {
     fn request_season_siblings(&mut self) {
         self.season_siblings.clear();
         self.season_siblings_request_id = self.allocate_request_id();
-        let Some((series_id, season)) = self.selected_details.as_ref().and_then(|item| {
-            (item.item_type.as_deref() == Some("Episode"))
-                .then(|| item.series_id.clone().zip(item.parent_index_number))
-                .flatten()
-        }) else {
+        let Some((series_id, season)) =
+            self.browse
+                .details
+                .selected_details
+                .as_ref()
+                .and_then(|item| {
+                    (item.item_type.as_deref() == Some("Episode"))
+                        .then(|| item.series_id.clone().zip(item.parent_index_number))
+                        .flatten()
+                })
+        else {
             return;
         };
         let request_id = self.season_siblings_request_id;
@@ -8859,7 +8921,7 @@ impl KattriApp {
 
     /// Plays an extra of the page on screen; Back from it returns to that page.
     pub(crate) fn play_child_item(&mut self, item_id: String) {
-        let parent = self.selected_item_id.clone();
+        let parent = self.browse.details.selected_item_id.clone();
         self.play_item(item_id, true);
         self.detail_parent = parent;
     }
@@ -8951,7 +9013,7 @@ impl KattriApp {
         let Some(recovery) = self.playback_recovery.as_mut() else {
             return false;
         };
-        if self.selected_item_id.as_deref() != Some(recovery.item_id.as_str())
+        if self.browse.details.selected_item_id.as_deref() != Some(recovery.item_id.as_str())
             || self.playback_request_id != recovery.options_request_id
         {
             self.playback_recovery = None;
@@ -8971,9 +9033,13 @@ impl KattriApp {
     }
 
     fn selected_is_movie_or_episode(&self, item_id: &str) -> bool {
-        self.selected_details.as_ref().is_some_and(|item| {
-            item.id == item_id && matches!(item.item_type.as_deref(), Some("Movie" | "Episode"))
-        })
+        self.browse
+            .details
+            .selected_details
+            .as_ref()
+            .is_some_and(|item| {
+                item.id == item_id && matches!(item.item_type.as_deref(), Some("Movie" | "Episode"))
+            })
     }
 
     /// Reopen a movie or episode that failed after it began playing. The same
@@ -8986,7 +9052,7 @@ impl KattriApp {
         let Some(active) = self.active_playback.clone() else {
             return false;
         };
-        if self.selected_item_id.as_deref() != Some(active.item_id.as_str())
+        if self.browse.details.selected_item_id.as_deref() != Some(active.item_id.as_str())
             || self.playback_request_id != active.options_request_id
             || self.playback_start_request_id != active.start_request_id
             || self.mid_stream_recoveries >= MAX_MID_STREAM_RECOVERIES
@@ -9022,7 +9088,7 @@ impl KattriApp {
         play_method: jellyfin_api::PlayMethod,
         start_time_ticks: Option<i64>,
     ) {
-        let Some(item_id) = self.selected_item_id.clone() else {
+        let Some(item_id) = self.browse.details.selected_item_id.clone() else {
             return;
         };
         let request_id = self.allocate_request_id();
@@ -9270,7 +9336,7 @@ impl KattriApp {
     }
 
     fn request_detail_backdrop(&mut self) {
-        let Some(item_id) = self.selected_item_id.clone() else {
+        let Some(item_id) = self.browse.details.selected_item_id.clone() else {
             return;
         };
         if self.detail_backdrop_attempted {
@@ -9289,7 +9355,7 @@ impl KattriApp {
     }
 
     fn request_detail_primary_artwork(&mut self) {
-        let Some(item) = self.selected_details.as_ref() else {
+        let Some(item) = self.browse.details.selected_details.as_ref() else {
             return;
         };
         let tag = item
@@ -9335,7 +9401,9 @@ impl KattriApp {
     /// Series GUID of the playing item from its loaded record (M2-10). `None` means the record
     /// has not arrived for this item; `Some(None)` means it arrived and the item has no series.
     fn playing_series_id(&self, item_id: &str) -> Option<Option<String>> {
-        self.selected_details
+        self.browse
+            .details
+            .selected_details
             .as_ref()
             .filter(|details| details.id == item_id)
             .map(|details| details.series_id.clone())
@@ -9366,7 +9434,7 @@ impl KattriApp {
             return;
         };
         if request_id != self.playback_start_request_id
-            || self.selected_item_id.as_deref() != Some(item_id.as_str())
+            || self.browse.details.selected_item_id.as_deref() != Some(item_id.as_str())
         {
             return;
         }
@@ -9375,7 +9443,9 @@ impl KattriApp {
 
     pub fn playback_start_opening(&mut self) {
         self.playback_start_status = Some(ui_text(ids::PLAYBACK_STATUS_OPENING_LOCAL).into());
-        if self.music_queue_auto_play_item_id.as_deref() == self.selected_item_id.as_deref() {
+        if self.music_queue_auto_play_item_id.as_deref()
+            == self.browse.details.selected_item_id.as_deref()
+        {
             self.music_queue_auto_play_item_id = None;
             self.music_queue_notice = None;
         }
@@ -9406,7 +9476,7 @@ impl KattriApp {
     /// Retry an asynchronous open failure only for the still-current request.
     pub fn playback_open_failed(&mut self, item_id: &str, generation: u64) {
         if self.playback_start_request_id != generation
-            || self.selected_item_id.as_deref() != Some(item_id)
+            || self.browse.details.selected_item_id.as_deref() != Some(item_id)
         {
             return;
         }
@@ -9447,7 +9517,7 @@ impl KattriApp {
         position_ticks: Option<i64>,
     ) {
         if self.playback_start_request_id != generation
-            || self.selected_item_id.as_deref() != Some(item_id)
+            || self.browse.details.selected_item_id.as_deref() != Some(item_id)
         {
             return;
         }
@@ -9461,7 +9531,7 @@ impl KattriApp {
     pub fn playback_failed(&mut self, item_id: &str) {
         if self.music_queue_current_item_id() == Some(item_id) {
             self.on_music_track_ended(item_id, true);
-        } else if self.selected_item_id.as_deref() == Some(item_id) {
+        } else if self.browse.details.selected_item_id.as_deref() == Some(item_id) {
             self.playback_recovery = None;
             self.playback_start_loading = false;
             self.playback_start_status = None;
@@ -9628,7 +9698,7 @@ impl KattriApp {
         self.admin_users.reset(self.connection_request_id);
         self.browse.catalog_request_id = self.allocate_request_id();
         self.unsupported_catalog_filters.clear();
-        self.details_request_id = self.allocate_request_id();
+        self.browse.details.details_request_id = self.allocate_request_id();
         self.playback_request_id = self.allocate_request_id();
         self.playback_start_request_id = self.allocate_request_id();
         self.pending_artwork_requests.clear();
@@ -9651,13 +9721,13 @@ impl KattriApp {
         self.browse.catalog_loading = false;
         self.browse.catalog_error = None;
         self.search_query.clear();
-        self.selected_item_id = None;
-        self.selected_details = None;
+        self.browse.details.selected_item_id = None;
+        self.browse.details.selected_details = None;
         self.selected_artwork_texture = None;
         self.detail_artwork_request_id = self.allocate_request_id();
         self.detail_backdrop_attempted = false;
-        self.details_loading = false;
-        self.details_error = None;
+        self.browse.details.details_loading = false;
+        self.browse.details.details_error = None;
         self.reset_series_detail();
         self.reset_people_detail();
         self.reset_playback(PlaybackReset::Session);
@@ -10284,33 +10354,40 @@ impl KattriApp {
                 }
                 WorkerEvent::ItemDetailsLoaded {
                     request_id, item, ..
-                } if request_id == self.details_request_id
-                    && self.selected_item_id.as_deref() == Some(item.id.as_str()) =>
+                } if request_id == self.browse.details.details_request_id
+                    && self.browse.details.selected_item_id.as_deref()
+                        == Some(item.id.as_str()) =>
                 {
                     self.record_network_success();
-                    self.selected_details = Some(*item);
-                    self.details_loading = false;
-                    self.details_error = None;
+                    self.browse.details.selected_details = Some(*item);
+                    self.browse.details.details_loading = false;
+                    self.browse.details.details_error = None;
                     self.request_detail_backdrop();
                     self.request_similar_items();
                     self.queue_person_artwork();
                     if self
+                        .browse
+                        .details
                         .selected_details
                         .as_ref()
                         .is_some_and(|item| item.item_type.as_deref() == Some("Playlist"))
-                        && let Some(playlist_id) = self.selected_item_id.clone()
+                        && let Some(playlist_id) = self.browse.details.selected_item_id.clone()
                     {
                         self.request_playlist_items(playlist_id);
                     }
                     if self
+                        .browse
+                        .details
                         .selected_details
                         .as_ref()
                         .is_some_and(|item| item.item_type.as_deref() == Some("Series"))
-                        && let Some(series_id) = self.selected_item_id.clone()
+                        && let Some(series_id) = self.browse.details.selected_item_id.clone()
                     {
                         self.request_series_seasons(series_id);
                     }
                     if self
+                        .browse
+                        .details
                         .selected_details
                         .as_ref()
                         .is_some_and(|item| item.item_type.as_deref() == Some("MusicAlbum"))
@@ -10322,7 +10399,7 @@ impl KattriApp {
                     self.request_item_extras();
                     self.request_track_lyrics();
                     if self.music_queue_auto_play_item_id.as_deref()
-                        == self.selected_item_id.as_deref()
+                        == self.browse.details.selected_item_id.as_deref()
                     {
                         self.request_playback_options();
                     }
@@ -10335,16 +10412,18 @@ impl KattriApp {
                     error_class,
                     retry_after,
                     ..
-                } if request_id == self.details_request_id
-                    && self.selected_item_id.as_deref() == Some(item_id.as_str()) =>
+                } if request_id == self.browse.details.details_request_id
+                    && self.browse.details.selected_item_id.as_deref()
+                        == Some(item_id.as_str()) =>
                 {
                     self.record_network_error(error_class, retry_after);
-                    self.details_loading = false;
-                    self.details_error = Some(if error_class == ErrorClass::NotFound {
-                        item_details_error_message(&message)
-                    } else {
-                        crate::ui::status::message(error_class).to_owned()
-                    });
+                    self.browse.details.details_loading = false;
+                    self.browse.details.details_error =
+                        Some(if error_class == ErrorClass::NotFound {
+                            item_details_error_message(&message)
+                        } else {
+                            crate::ui::status::message(error_class).to_owned()
+                        });
                     // A failed record leaves no series, so the held stream goes out without one.
                     self.release_held_playback();
                 }
@@ -10353,7 +10432,8 @@ impl KattriApp {
                     series_id,
                     seasons,
                 } if request_id == self.series_seasons_request_id
-                    && self.selected_item_id.as_deref() == Some(series_id.as_str()) =>
+                    && self.browse.details.selected_item_id.as_deref()
+                        == Some(series_id.as_str()) =>
                 {
                     self.series_seasons_loading = false;
                     self.series_seasons_error = None;
@@ -10367,7 +10447,8 @@ impl KattriApp {
                     series_id,
                     message,
                 } if request_id == self.series_seasons_request_id
-                    && self.selected_item_id.as_deref() == Some(series_id.as_str()) =>
+                    && self.browse.details.selected_item_id.as_deref()
+                        == Some(series_id.as_str()) =>
                 {
                     self.series_seasons_loading = false;
                     self.series_seasons_error = Some(message);
@@ -10567,7 +10648,7 @@ impl KattriApp {
                     episodes,
                 } => {
                     if request_id == self.season_siblings_request_id {
-                        let current = self.selected_item_id.clone();
+                        let current = self.browse.details.selected_item_id.clone();
                         let ceiling = self.browse_rating_ceiling(ctx);
                         self.season_siblings = episodes
                             .into_iter()
@@ -10707,7 +10788,8 @@ impl KattriApp {
                     album_id,
                     tracks,
                 } if request_id == self.music_album_tracks_request_id
-                    && self.selected_item_id.as_deref() == Some(album_id.as_str()) =>
+                    && self.browse.details.selected_item_id.as_deref()
+                        == Some(album_id.as_str()) =>
                 {
                     self.record_network_success();
                     self.music_album_tracks_loading = false;
@@ -10732,7 +10814,8 @@ impl KattriApp {
                     album_id,
                     error_class,
                 } if request_id == self.music_album_tracks_request_id
-                    && self.selected_item_id.as_deref() == Some(album_id.as_str()) =>
+                    && self.browse.details.selected_item_id.as_deref()
+                        == Some(album_id.as_str()) =>
                 {
                     self.record_network_error(error_class, None);
                     self.music_album_tracks_loading = false;
@@ -10887,8 +10970,8 @@ impl KattriApp {
                         state.toggle.succeed(played);
                         state.error = None;
                     }
-                    if self.selected_item_id.as_deref() == Some(item_id.as_str())
-                        && let Some(details) = self.selected_details.as_mut()
+                    if self.browse.details.selected_item_id.as_deref() == Some(item_id.as_str())
+                        && let Some(details) = self.browse.details.selected_details.as_mut()
                     {
                         details.user_data = Some(*user_data);
                     }
@@ -10934,8 +11017,8 @@ impl KattriApp {
                         .favorite
                         .as_mut()
                         .and_then(|state| state.toggle.complete_success(favorite));
-                    if self.selected_item_id.as_deref() == Some(item_id.as_str())
-                        && let Some(details) = self.selected_details.as_mut()
+                    if self.browse.details.selected_item_id.as_deref() == Some(item_id.as_str())
+                        && let Some(details) = self.browse.details.selected_details.as_mut()
                     {
                         details.user_data = Some(*user_data);
                     }
@@ -10995,7 +11078,8 @@ impl KattriApp {
                     item_id,
                     items,
                 } if request_id == self.similar_request_id
-                    && self.selected_item_id.as_deref() == Some(item_id.as_str()) =>
+                    && self.browse.details.selected_item_id.as_deref()
+                        == Some(item_id.as_str()) =>
                 {
                     self.similar_loading = false;
                     let ceiling = self.browse_rating_ceiling(ctx);
@@ -11008,7 +11092,8 @@ impl KattriApp {
                     request_id,
                     item_id,
                 } if request_id == self.similar_request_id
-                    && self.selected_item_id.as_deref() == Some(item_id.as_str()) =>
+                    && self.browse.details.selected_item_id.as_deref()
+                        == Some(item_id.as_str()) =>
                 {
                     self.similar_loading = false;
                     self.similar_items.clear();
@@ -11020,7 +11105,7 @@ impl KattriApp {
                     songs,
                 } if self.theme_media_request_matches(request_id, &item_id) => {
                     self.theme_media_request = None;
-                    if self.selected_item_id.as_deref() == Some(item_id.as_str()) {
+                    if self.browse.details.selected_item_id.as_deref() == Some(item_id.as_str()) {
                         self.theme_media = preferred_theme_item(videos, songs)
                             .map(|item| ThemeMediaState { item_id, item });
                     }
@@ -11222,7 +11307,7 @@ impl KattriApp {
                     rgba,
                 } => {
                     if request_id == self.detail_artwork_request_id
-                        && self.selected_item_id.as_deref() == Some(item_id.as_str())
+                        && self.browse.details.selected_item_id.as_deref() == Some(item_id.as_str())
                     {
                         let color_image = egui::ColorImage::from_rgba_unmultiplied(
                             [width as usize, height as usize],
@@ -11368,7 +11453,8 @@ impl KattriApp {
                     height,
                     rgba,
                 } if request_id == self.detail_artwork_request_id
-                    && self.selected_item_id.as_deref() == Some(item_id.as_str()) =>
+                    && self.browse.details.selected_item_id.as_deref()
+                        == Some(item_id.as_str()) =>
                 {
                     let color_image = egui::ColorImage::from_rgba_unmultiplied(
                         [width as usize, height as usize],
@@ -11388,7 +11474,8 @@ impl KattriApp {
                     request_id,
                     item_id,
                 } if request_id == self.detail_artwork_request_id
-                    && self.selected_item_id.as_deref() == Some(item_id.as_str()) =>
+                    && self.browse.details.selected_item_id.as_deref()
+                        == Some(item_id.as_str()) =>
                 {
                     self.request_detail_primary_artwork();
                 }
@@ -11438,7 +11525,7 @@ impl KattriApp {
                     self.playback_loading = false;
                     self.playback_error = None;
                     if self.music_queue_auto_play_item_id.as_deref()
-                        == self.selected_item_id.as_deref()
+                        == self.browse.details.selected_item_id.as_deref()
                     {
                         self.start_automatic_music_track();
                     }
@@ -11464,7 +11551,8 @@ impl KattriApp {
                     item_id,
                     mut playback,
                 } if request_id == self.playback_start_request_id
-                    && self.selected_item_id.as_deref() == Some(item_id.as_str())
+                    && self.browse.details.selected_item_id.as_deref()
+                        == Some(item_id.as_str())
                     && self.sync_play_prepared_target_is_current(request_id, &item_id) =>
                 {
                     if let Some((repeat, order, queue)) =
@@ -11477,7 +11565,7 @@ impl KattriApp {
                     // Live TV has no series and no fixed segment list, so it never waits.
                     if playback.live_stream_id().is_none()
                         && self.playing_series_id(&item_id).is_none()
-                        && self.details_loading
+                        && self.browse.details.details_loading
                     {
                         self.held_playback = Some((request_id, item_id, playback));
                     } else {
@@ -13275,7 +13363,10 @@ mod home_navigation_tests {
 
         app.apply_home_action(HomeAction::Select("episode-42".into()));
 
-        assert_eq!(app.selected_item_id.as_deref(), Some("episode-42"));
+        assert_eq!(
+            app.browse.details.selected_item_id.as_deref(),
+            Some("episode-42")
+        );
     }
 
     #[test]
@@ -13314,7 +13405,7 @@ mod home_navigation_tests {
 
         app.activate_catalog_item("nested".into());
 
-        assert_eq!(app.selected_item_id, None);
+        assert_eq!(app.browse.details.selected_item_id, None);
         assert_eq!(
             app.browse_context,
             Some(BrowseContext {
@@ -13362,10 +13453,10 @@ mod home_navigation_tests {
     fn back_clears_item_details_before_returning_from_catalog_to_home() {
         let mut app = KattriApp::new(egui::Context::default());
         app.view = AppView::Library;
-        app.selected_item_id = Some("selected-item".into());
+        app.browse.details.selected_item_id = Some("selected-item".into());
 
         app.navigate_back();
-        assert_eq!(app.selected_item_id, None);
+        assert_eq!(app.browse.details.selected_item_id, None);
         assert_eq!(app.view, AppView::Library);
 
         app.navigate_back();
@@ -13517,9 +13608,9 @@ mod watched_state_event_tests {
         app.settings = crate::settings_state::SettingsState::open(None, None);
         let (worker, events) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.selected_item_id = Some("episode-1".into());
-        app.details_request_id = 7;
-        app.details_loading = true;
+        app.browse.details.selected_item_id = Some("episode-1".into());
+        app.browse.details.details_request_id = 7;
+        app.browse.details.details_loading = true;
         // Before the record arrives the playing item's series is unknown, so the stream waits.
         assert_eq!(app.playing_series_id("episode-1"), None);
 
@@ -13552,8 +13643,8 @@ mod watched_state_event_tests {
     fn movie_record_resolves_no_series_so_nothing_is_written() {
         let mut app = KattriApp::new(egui::Context::default());
         app.settings = crate::settings_state::SettingsState::open(None, None);
-        app.selected_item_id = Some("movie-9".into());
-        app.selected_details = Some(item("movie-9", false));
+        app.browse.details.selected_item_id = Some("movie-9".into());
+        app.browse.details.selected_details = Some(item("movie-9", false));
 
         let series = app.playing_series_id("movie-9");
         assert_eq!(series, Some(None));
@@ -13569,10 +13660,12 @@ mod watched_state_event_tests {
         let mut app = KattriApp::new(egui::Context::default());
         let (worker, events) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.selected_item_id = Some(item_id.into());
-        app.selected_details = Some(item(item_id, false));
+        app.browse.details.selected_item_id = Some(item_id.into());
+        app.browse.details.selected_details = Some(item(item_id, false));
         let mut toggle = crate::ui::detail::WatchedToggle::from_user_data(
-            app.selected_details
+            app.browse
+                .details
+                .selected_details
                 .as_ref()
                 .and_then(|details| details.user_data.as_ref()),
         );
@@ -13605,6 +13698,8 @@ mod watched_state_event_tests {
         app.receive_worker_events(&egui::Context::default());
 
         let user_data = app
+            .browse
+            .details
             .selected_details
             .as_ref()
             .and_then(|details| details.user_data.as_ref())
@@ -13620,8 +13715,8 @@ mod watched_state_event_tests {
     #[test]
     fn late_watched_success_does_not_replace_another_selected_item_data() {
         let (mut app, events) = app_with_pending_toggle("movie-1");
-        app.selected_item_id = Some("movie-2".into());
-        app.selected_details = Some(item("movie-2", false));
+        app.browse.details.selected_item_id = Some("movie-2".into());
+        app.browse.details.selected_details = Some(item("movie-2", false));
         events
             .try_send(WorkerEvent::WatchedStateUpdated {
                 request_id: 41,
@@ -13638,6 +13733,8 @@ mod watched_state_event_tests {
         app.receive_worker_events(&egui::Context::default());
 
         let user_data = app
+            .browse
+            .details
             .selected_details
             .as_ref()
             .and_then(|details| details.user_data.as_ref())
@@ -13661,8 +13758,8 @@ mod favorite_state_event_tests {
         let mut app = KattriApp::new(egui::Context::default());
         let (worker, events) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.selected_item_id = Some(item_id.into());
-        app.selected_details = Some(BaseItemDto {
+        app.browse.details.selected_item_id = Some(item_id.into());
+        app.browse.details.selected_details = Some(BaseItemDto {
             id: item_id.into(),
             name: item_id.into(),
             user_data: Some(UserItemDataDto {
@@ -13753,9 +13850,19 @@ mod favorite_state_event_tests {
             .expect("favorite state")
             .toggle
             .toggle();
-        app.selected_item_id = Some("movie-2".into());
-        app.selected_details.as_mut().expect("details").id = "movie-2".into();
-        app.selected_details.as_mut().expect("details").user_data = Some(UserItemDataDto {
+        app.browse.details.selected_item_id = Some("movie-2".into());
+        app.browse
+            .details
+            .selected_details
+            .as_mut()
+            .expect("details")
+            .id = "movie-2".into();
+        app.browse
+            .details
+            .selected_details
+            .as_mut()
+            .expect("details")
+            .user_data = Some(UserItemDataDto {
             is_favorite: Some(false),
             ..Default::default()
         });
@@ -13773,7 +13880,9 @@ mod favorite_state_event_tests {
         app.receive_worker_events(&egui::Context::default());
 
         assert_eq!(
-            app.selected_details
+            app.browse
+                .details
+                .selected_details
                 .as_ref()
                 .and_then(|item| item.user_data.as_ref())
                 .and_then(|data| data.is_favorite),
@@ -13875,7 +13984,7 @@ mod live_tv_event_tests {
         app.playback_start_request_id = 92;
         app.playback_start_loading = true;
         app.live_tv_tune_request_id = Some(92);
-        app.selected_item_id = Some("channel-1".into());
+        app.browse.details.selected_item_id = Some("channel-1".into());
 
         events
             .try_send(WorkerEvent::PlaybackPrepareFailed {
@@ -14129,8 +14238,8 @@ mod music_queue_app_tests {
     #[test]
     fn selected_audio_can_be_appended_or_inserted_next_with_a_safe_label() {
         let mut app = KattriApp::new(egui::Context::default());
-        app.selected_item_id = Some("track-1".to_owned());
-        app.selected_details = Some(audio("track-1"));
+        app.browse.details.selected_item_id = Some("track-1".to_owned());
+        app.browse.details.selected_details = Some(audio("track-1"));
 
         app.queue_selected_audio(false);
         assert_eq!(app.music_queue.items()[0].id, "track-1");
@@ -14143,8 +14252,8 @@ mod music_queue_app_tests {
             .add(jellyfin_api::session_reporting::QueueItem::new("track-2"))
             .expect("add");
         app.music_queue.select(0).expect("select current track");
-        app.selected_item_id = Some("track-3".to_owned());
-        app.selected_details = Some(audio("track-3"));
+        app.browse.details.selected_item_id = Some("track-3".to_owned());
+        app.browse.details.selected_details = Some(audio("track-3"));
         app.queue_selected_audio(true);
         assert_eq!(
             app.music_queue
@@ -14217,8 +14326,8 @@ mod music_queue_app_tests {
                 .expect("append track");
         }
         app.music_queue.select(0).expect("select first track");
-        app.selected_item_id = Some("track-1".to_owned());
-        app.selected_details = Some(audio("track-1"));
+        app.browse.details.selected_item_id = Some("track-1".to_owned());
+        app.browse.details.selected_details = Some(audio("track-1"));
 
         app.on_music_track_ended("unrelated-video", false);
         assert_eq!(
@@ -14232,7 +14341,10 @@ mod music_queue_app_tests {
             app.music_queue.current().map(|item| item.id.as_str()),
             Some("track-2")
         );
-        assert_eq!(app.selected_item_id.as_deref(), Some("track-2"));
+        assert_eq!(
+            app.browse.details.selected_item_id.as_deref(),
+            Some("track-2")
+        );
         assert_eq!(
             app.music_queue_auto_play_item_id.as_deref(),
             Some("track-2")
@@ -14240,7 +14352,7 @@ mod music_queue_app_tests {
 
         app.music_queue.select(0).expect("return to first track");
         app.music_queue.set_repeat(RepeatMode::One);
-        app.selected_item_id = Some("track-1".to_owned());
+        app.browse.details.selected_item_id = Some("track-1".to_owned());
         app.music_queue_auto_play_item_id = None;
         app.on_music_track_ended("track-1", true);
         assert_eq!(
@@ -14273,7 +14385,7 @@ mod music_queue_app_tests {
                 .expect("append track");
         }
         app.music_queue.select(1).expect("select second track");
-        app.selected_item_id = Some("track-2".to_owned());
+        app.browse.details.selected_item_id = Some("track-2".to_owned());
 
         assert!(!app.on_music_previous("video-not-in-queue", Duration::ZERO));
         assert_eq!(app.music_queue_current_item_id(), Some("track-2"));
@@ -14283,7 +14395,10 @@ mod music_queue_app_tests {
 
         assert!(!app.on_music_previous("track-2", Duration::from_secs(3)));
         assert_eq!(app.music_queue_current_item_id(), Some("track-1"));
-        assert_eq!(app.selected_item_id.as_deref(), Some("track-1"));
+        assert_eq!(
+            app.browse.details.selected_item_id.as_deref(),
+            Some("track-1")
+        );
         assert_eq!(
             app.music_queue_auto_play_item_id.as_deref(),
             Some("track-1")
@@ -14300,14 +14415,17 @@ mod music_queue_app_tests {
                 .expect("append track");
         }
         app.music_queue.select(0).expect("select first track");
-        app.selected_item_id = Some("track-1".to_owned());
+        app.browse.details.selected_item_id = Some("track-1".to_owned());
 
         app.on_music_next("unrelated-video");
         assert_eq!(app.music_queue_current_item_id(), Some("track-1"));
 
         app.on_music_next("track-1");
         assert_eq!(app.music_queue_current_item_id(), Some("track-2"));
-        assert_eq!(app.selected_item_id.as_deref(), Some("track-2"));
+        assert_eq!(
+            app.browse.details.selected_item_id.as_deref(),
+            Some("track-2")
+        );
 
         app.on_music_next("track-2");
         assert_eq!(app.music_queue_current_item_id(), Some("track-2"));
@@ -14417,7 +14535,10 @@ mod music_queue_app_tests {
         );
         assert_eq!(app.music_queue.current_index(), Some(1));
         assert_eq!(app.music_queue_resume.ms(), Some(12_345));
-        assert_eq!(app.selected_item_id, None, "restore must not auto-play");
+        assert_eq!(
+            app.browse.details.selected_item_id, None,
+            "restore must not auto-play"
+        );
         assert!(
             app.music_queue_notice
                 .as_deref()
@@ -14474,8 +14595,8 @@ mod music_queue_app_tests {
     #[test]
     fn selected_non_audio_item_cannot_enter_the_music_queue() {
         let mut app = KattriApp::new(egui::Context::default());
-        app.selected_item_id = Some("movie-1".to_owned());
-        app.selected_details = Some(BaseItemDto {
+        app.browse.details.selected_item_id = Some("movie-1".to_owned());
+        app.browse.details.selected_details = Some(BaseItemDto {
             id: "movie-1".to_owned(),
             name: "Movie".to_owned(),
             item_type: Some("Movie".to_owned()),
@@ -14492,8 +14613,8 @@ mod music_queue_app_tests {
         let mut app = KattriApp::new(egui::Context::default());
         let (worker, events) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.selected_item_id = Some("album-1".to_owned());
-        app.selected_details = Some(BaseItemDto {
+        app.browse.details.selected_item_id = Some("album-1".to_owned());
+        app.browse.details.selected_details = Some(BaseItemDto {
             id: "album-1".to_owned(),
             name: "Album".to_owned(),
             item_type: Some("MusicAlbum".to_owned()),
@@ -14512,7 +14633,10 @@ mod music_queue_app_tests {
             .expect("send stale album result");
         app.receive_worker_events(&egui::Context::default());
         assert!(app.music_queue.is_empty());
-        assert_eq!(app.selected_item_id.as_deref(), Some("album-1"));
+        assert_eq!(
+            app.browse.details.selected_item_id.as_deref(),
+            Some("album-1")
+        );
 
         events
             .try_send(WorkerEvent::MusicAlbumTracksLoaded {
@@ -14535,7 +14659,10 @@ mod music_queue_app_tests {
             app.music_queue.current().map(|item| item.id.as_str()),
             Some("track-1")
         );
-        assert_eq!(app.selected_item_id.as_deref(), Some("track-1"));
+        assert_eq!(
+            app.browse.details.selected_item_id.as_deref(),
+            Some("track-1")
+        );
         assert_eq!(
             app.music_track_names.get("track-1").map(String::as_str),
             Some("Track track-1")
@@ -15559,7 +15686,7 @@ mod remote_and_sync_play_tests {
 
         app.apply_sync_play_group_update(update);
 
-        assert_eq!(app.selected_item_id.as_deref(), Some(ITEM_A));
+        assert_eq!(app.browse.details.selected_item_id.as_deref(), Some(ITEM_A));
         assert!(
             app.playback_loading,
             "the normal PlaybackInfo path is queued"
@@ -15588,7 +15715,7 @@ mod remote_and_sync_play_tests {
                 .map(|entry| entry.playlist_item_id.as_str()),
             Some(ENTRY_A)
         );
-        assert_eq!(app.selected_item_id.as_deref(), Some(ITEM_A));
+        assert_eq!(app.browse.details.selected_item_id.as_deref(), Some(ITEM_A));
     }
 
     #[test]
@@ -16214,7 +16341,7 @@ mod photo_decode_event_tests {
         let mut app = KattriApp::new(Context::default());
         let (worker, sender) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.selected_details = Some(
+        app.browse.details.selected_details = Some(
             serde_json::from_value(serde_json::json!({
                 "Id": "e2", "Name": "Two", "Type": "Episode", "SeriesId": "show"
             }))
@@ -16273,7 +16400,7 @@ mod photo_decode_event_tests {
         assert_eq!(app.up_next_label("e2"), None);
 
         assert!(app.on_episode_next("e2"));
-        assert_eq!(app.selected_item_id.as_deref(), Some("e3"));
+        assert_eq!(app.browse.details.selected_item_id.as_deref(), Some("e3"));
         assert_eq!(
             app.auto_play.pending().map(|auto| auto.item_id.as_str()),
             Some("e3")
@@ -16496,7 +16623,7 @@ mod photo_decode_event_tests {
         });
         output.textures_delta.clear();
         assert_eq!(
-            app.selected_item_id.as_deref(),
+            app.browse.details.selected_item_id.as_deref(),
             Some("e7"),
             "the run starts"
         );
@@ -16507,9 +16634,9 @@ mod photo_decode_event_tests {
         app.cancel_up_next("e2");
         assert_eq!(app.up_next_label("e2"), None);
         assert!(app.on_episode_next("e2"));
-        assert_eq!(app.selected_item_id.as_deref(), Some("e5"));
+        assert_eq!(app.browse.details.selected_item_id.as_deref(), Some("e5"));
         assert!(app.on_episode_previous("e5"));
-        assert_eq!(app.selected_item_id.as_deref(), Some("e2"));
+        assert_eq!(app.browse.details.selected_item_id.as_deref(), Some("e2"));
     }
 
     #[test]
@@ -16595,8 +16722,8 @@ mod photo_decode_event_tests {
         let mut app = KattriApp::new(Context::default());
         let (worker, sender) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.selected_item_id = Some("e2".into());
-        app.selected_details = Some(
+        app.browse.details.selected_item_id = Some("e2".into());
+        app.browse.details.selected_details = Some(
             serde_json::from_value(serde_json::json!({
                 "Id": "e2", "Name": "Two", "Type": "Episode", "SeriesId": "show",
                 "ParentIndexNumber": 1
@@ -16635,11 +16762,11 @@ mod photo_decode_event_tests {
     fn a_picked_version_is_kept_for_its_item_only() {
         let mut app = KattriApp::new(Context::default());
         app.worker = None;
-        app.selected_item_id = Some("film".into());
+        app.browse.details.selected_item_id = Some("film".into());
         assert_eq!(app.preferred_source_index(), None);
         app.set_preferred_source(1);
         assert_eq!(app.preferred_source_index(), Some(1));
-        app.selected_item_id = Some("other".into());
+        app.browse.details.selected_item_id = Some("other".into());
         assert_eq!(
             app.preferred_source_index(),
             None,
@@ -16652,8 +16779,8 @@ mod photo_decode_event_tests {
         let mut app = KattriApp::new(Context::default());
         let (worker, sender) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.selected_item_id = Some("movie".into());
-        app.selected_details = Some(
+        app.browse.details.selected_item_id = Some("movie".into());
+        app.browse.details.selected_details = Some(
             serde_json::from_value(
                 serde_json::json!({"Id": "movie", "Name": "Film", "Type": "Movie"}),
             )
@@ -16676,9 +16803,12 @@ mod photo_decode_event_tests {
         output.textures_delta.clear();
         assert_eq!(app.item_extras.len(), 1);
         app.play_child_item("t1".into());
-        assert_eq!(app.selected_item_id.as_deref(), Some("t1"));
+        assert_eq!(app.browse.details.selected_item_id.as_deref(), Some("t1"));
         app.navigate_back();
-        assert_eq!(app.selected_item_id.as_deref(), Some("movie"));
+        assert_eq!(
+            app.browse.details.selected_item_id.as_deref(),
+            Some("movie")
+        );
     }
 
     #[test]
@@ -16726,7 +16856,7 @@ mod playback_recovery_tests {
     fn recovery_app() -> KattriApp {
         let mut app = KattriApp::new(egui::Context::default());
         app.worker = Some(ApiWorker::queued_for_test());
-        app.selected_item_id = Some("movie".into());
+        app.browse.details.selected_item_id = Some("movie".into());
         app.playback_request_id = 19;
         app.playback_recovery = Some(PlaybackRecovery {
             item_id: "movie".into(),
@@ -16768,7 +16898,7 @@ mod playback_recovery_tests {
     #[test]
     fn navigation_or_renegotiation_invalidates_recovery() {
         let mut app = recovery_app();
-        app.selected_item_id = Some("other".into());
+        app.browse.details.selected_item_id = Some("other".into());
         assert!(!app.retry_playback_start());
         assert!(app.playback_recovery.is_none());
         let mut app = recovery_app();
@@ -16835,7 +16965,7 @@ mod playback_recovery_tests {
     #[test]
     fn explicit_movie_start_builds_only_remaining_candidates_and_keeps_resume() {
         let mut app = recovery_app();
-        app.selected_details = Some(
+        app.browse.details.selected_details = Some(
             serde_json::from_value(
                 serde_json::json!({"Id":"movie", "Name":"Fixture", "Type":"Movie"}),
             )
@@ -16866,7 +16996,12 @@ mod playback_recovery_tests {
                 .remaining
                 .is_empty()
         );
-        app.selected_details.as_mut().expect("item").item_type = Some("Audio".into());
+        app.browse
+            .details
+            .selected_details
+            .as_mut()
+            .expect("item")
+            .item_type = Some("Audio".into());
         app.start_server_playback(0, jellyfin_api::PlayMethod::DirectPlay, None);
         assert!(app.playback_recovery.is_none());
     }
@@ -16917,7 +17052,7 @@ mod playback_recovery_tests {
 
     fn playing_movie_app() -> KattriApp {
         let mut app = recovery_app();
-        app.selected_details = Some(
+        app.browse.details.selected_details = Some(
             serde_json::from_value(
                 serde_json::json!({"Id":"movie", "Name":"Fixture", "Type":"Movie"}),
             )
@@ -17582,7 +17717,7 @@ mod theme_media_tests {
     #[test]
     fn theme_action_submits_playback_for_the_theme_item() {
         let mut app = app_with_worker(true);
-        app.selected_item_id = Some("movie-1".into());
+        app.browse.details.selected_item_id = Some("movie-1".into());
         app.theme_media = Some(ThemeMediaState {
             item_id: "movie-1".into(),
             item: item("theme-video"),
@@ -17818,7 +17953,7 @@ mod burn_in_subtitle_replacement_tests {
         let mut app = KattriApp::new(egui::Context::default());
         app.worker = Some(ApiWorker::queued_for_test());
         app.settings.settings_mut().subtitles.burn_in = true;
-        app.selected_item_id = Some("movie".into());
+        app.browse.details.selected_item_id = Some("movie".into());
         app.playback_request_id = 41;
         app.playback_start_request_id = 52;
         app.media_playing = true;
@@ -17928,7 +18063,7 @@ mod burn_in_subtitle_replacement_tests {
         app.playback_start_request_id = 53;
         assert!(!app.burn_in_replacement_matches(77, 52, "movie"));
         app.playback_start_request_id = 52;
-        app.selected_item_id = Some("next-movie".into());
+        app.browse.details.selected_item_id = Some("next-movie".into());
         assert!(!app.burn_in_replacement_matches(77, 52, "movie"));
     }
 
@@ -18191,7 +18326,7 @@ mod lyrics_lifecycle_tests {
         let mut app = KattriApp::new(egui::Context::default());
         let (worker, sender) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.selected_item_id = Some("old-track".into());
+        app.browse.details.selected_item_id = Some("old-track".into());
         app.track_lyrics_request_id = 17;
         app.track_lyrics = vec![LyricLine {
             text: "old line".into(),
