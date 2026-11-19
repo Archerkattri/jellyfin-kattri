@@ -457,27 +457,33 @@ pub enum WorkerEvent {
     },
     LiveTvChannelsLoaded {
         request_id: u64,
+        epoch: Epoch,
         page: LiveTvChannelPage,
     },
     LiveTvChannelsFailed {
         request_id: u64,
+        epoch: Epoch,
         error_class: ErrorClass,
     },
     LiveTvSearchResultsLoaded {
         request_id: u64,
+        epoch: Epoch,
         items: Vec<BaseItemDto>,
         start_index: u32,
         total_record_count: Option<u32>,
     },
     LiveTvSearchResultsFailed {
         request_id: u64,
+        epoch: Epoch,
     },
     LiveTvProgramsLoaded {
         request_id: u64,
+        epoch: Epoch,
         page: LiveTvProgramPage,
     },
     LiveTvProgramsFailed {
         request_id: u64,
+        epoch: Epoch,
         error_class: ErrorClass,
     },
     SeriesSeasonsLoaded {
@@ -588,6 +594,7 @@ pub enum WorkerEvent {
     /// Lyrics of the track on screen. Empty when it has none or on failure.
     LyricsLoaded {
         request_id: u64,
+        epoch: Epoch,
         lines: Vec<jellyfin_api::LyricLine>,
     },
     /// Trailers and special features of the item on screen. Empty on failure.
@@ -599,6 +606,7 @@ pub enum WorkerEvent {
     /// The episodes of the season an episode page belongs to. Empty on failure.
     SeasonSiblingsLoaded {
         request_id: u64,
+        epoch: Epoch,
         episodes: Vec<BaseItemDto>,
     },
     /// Live TV recordings and scheduled timers.
@@ -716,6 +724,7 @@ pub enum WorkerEvent {
     /// Theme media for one detail page. An empty pair means the item has no theme.
     ThemeMediaLoaded {
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
         videos: Vec<BaseItemDto>,
         songs: Vec<BaseItemDto>,
@@ -723,6 +732,7 @@ pub enum WorkerEvent {
     /// A theme lookup failed silently; the detail page simply shows no Theme action.
     ThemeMediaFailed {
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
     },
     PersonItemsLoaded {
@@ -806,6 +816,7 @@ pub enum WorkerEvent {
     },
     LiveTvLogoLoaded {
         request_id: u64,
+        epoch: Epoch,
         channel_id: String,
         width: u32,
         height: u32,
@@ -813,6 +824,7 @@ pub enum WorkerEvent {
     },
     LiveTvLogoFailed {
         request_id: u64,
+        epoch: Epoch,
         channel_id: String,
     },
     PlaybackInfoLoaded {
@@ -1027,7 +1039,19 @@ impl WorkerEvent {
             | Self::AdjacentEpisodesLoaded { epoch, .. }
             | Self::MusicAlbumTracksLoaded { epoch, .. }
             | Self::MusicAlbumTracksFailed { epoch, .. }
-            | Self::ExtrasLoaded { epoch, .. } => (*epoch != Epoch::NONE).then_some(*epoch),
+            | Self::ExtrasLoaded { epoch, .. }
+            | Self::LyricsLoaded { epoch, .. }
+            | Self::SeasonSiblingsLoaded { epoch, .. }
+            | Self::ThemeMediaLoaded { epoch, .. }
+            | Self::ThemeMediaFailed { epoch, .. }
+            | Self::LiveTvChannelsLoaded { epoch, .. }
+            | Self::LiveTvChannelsFailed { epoch, .. }
+            | Self::LiveTvSearchResultsLoaded { epoch, .. }
+            | Self::LiveTvSearchResultsFailed { epoch, .. }
+            | Self::LiveTvProgramsLoaded { epoch, .. }
+            | Self::LiveTvProgramsFailed { epoch, .. }
+            | Self::LiveTvLogoLoaded { epoch, .. }
+            | Self::LiveTvLogoFailed { epoch, .. } => (*epoch != Epoch::NONE).then_some(*epoch),
             _ => None,
         }
     }
@@ -1296,17 +1320,20 @@ pub(crate) enum WorkerCommand {
     },
     LoadLiveTvChannels {
         request_id: u64,
+        epoch: Epoch,
         start_index: u32,
         limit: u32,
     },
     SearchLiveTvChannels {
         request_id: u64,
+        epoch: Epoch,
         term: String,
         start_index: u32,
         limit: u32,
     },
     LoadLiveTvPrograms {
         request_id: u64,
+        epoch: Epoch,
         window: GuideWindow,
         channel_ids: Vec<String>,
     },
@@ -1416,6 +1443,7 @@ pub(crate) enum WorkerCommand {
     },
     ListSeasonSiblings {
         request_id: u64,
+        epoch: Epoch,
         series_id: String,
         season: i32,
     },
@@ -1426,6 +1454,7 @@ pub(crate) enum WorkerCommand {
     },
     GetLyrics {
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
     },
     GetTrickplayResolutions {
@@ -1500,6 +1529,7 @@ pub(crate) enum WorkerCommand {
     },
     ThemeMedia {
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
     },
     ListPersonItems {
@@ -1543,6 +1573,7 @@ pub(crate) enum WorkerCommand {
     },
     GetLiveTvLogo {
         request_id: u64,
+        epoch: Epoch,
         channel_id: String,
         image_tag: String,
     },
@@ -1883,11 +1914,13 @@ impl ApiWorker {
     pub fn load_live_tv_channels(
         &self,
         request_id: u64,
+        epoch: Epoch,
         start_index: u32,
         limit: u32,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::LoadLiveTvChannels {
             request_id,
+            epoch,
             start_index,
             limit,
         })
@@ -1896,12 +1929,14 @@ impl ApiWorker {
     pub(crate) fn search_live_tv_channels(
         &self,
         request_id: u64,
+        epoch: Epoch,
         term: String,
         start_index: u32,
         limit: u32,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::SearchLiveTvChannels {
             request_id,
+            epoch,
             term,
             start_index,
             limit,
@@ -1911,11 +1946,13 @@ impl ApiWorker {
     pub fn load_live_tv_programs(
         &self,
         request_id: u64,
+        epoch: Epoch,
         window: GuideWindow,
         channel_ids: Vec<String>,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::LoadLiveTvPrograms {
             request_id,
+            epoch,
             window,
             channel_ids,
         })
@@ -2206,10 +2243,12 @@ impl ApiWorker {
     pub(crate) fn get_lyrics(
         &self,
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::GetLyrics {
             request_id,
+            epoch,
             item_id,
         })
     }
@@ -2230,11 +2269,13 @@ impl ApiWorker {
     pub(crate) fn list_season_siblings(
         &self,
         request_id: u64,
+        epoch: Epoch,
         series_id: String,
         season: i32,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::ListSeasonSiblings {
             request_id,
+            epoch,
             series_id,
             season,
         })
@@ -2422,10 +2463,12 @@ impl ApiWorker {
     pub(crate) fn theme_media(
         &self,
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::ThemeMedia {
             request_id,
+            epoch,
             item_id,
         })
     }
@@ -2567,11 +2610,13 @@ impl ApiWorker {
     pub(crate) fn get_live_tv_logo(
         &self,
         request_id: u64,
+        epoch: Epoch,
         channel_id: String,
         image_tag: String,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::GetLiveTvLogo {
             request_id,
+            epoch,
             channel_id,
             image_tag,
         })
@@ -3883,6 +3928,7 @@ async fn execute_command(
             }
             WorkerCommand::LoadLiveTvChannels {
                 request_id,
+                epoch,
                 start_index,
                 limit,
             } => {
@@ -3899,7 +3945,11 @@ async fn execute_command(
                         send_event(
                             events,
                             ctx,
-                            WorkerEvent::LiveTvChannelsLoaded { request_id, page },
+                            WorkerEvent::LiveTvChannelsLoaded {
+                                request_id,
+                                epoch,
+                                page,
+                            },
                         )
                         .await
                     }
@@ -3924,6 +3974,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::LiveTvChannelsFailed {
                                 request_id,
+                                epoch,
                                 error_class: error.classify(),
                             },
                         )
@@ -3933,6 +3984,7 @@ async fn execute_command(
             }
             WorkerCommand::SearchLiveTvChannels {
                 request_id,
+                epoch,
                 term,
                 start_index,
                 limit,
@@ -3948,16 +4000,18 @@ async fn execute_command(
                 let event = match result {
                     Ok(page) => WorkerEvent::LiveTvSearchResultsLoaded {
                         request_id,
+                        epoch,
                         items: page.items.into_iter().map(|channel| channel.item).collect(),
                         start_index: page.start_index,
                         total_record_count: page.total_record_count,
                     },
-                    Err(_) => WorkerEvent::LiveTvSearchResultsFailed { request_id },
+                    Err(_) => WorkerEvent::LiveTvSearchResultsFailed { request_id, epoch },
                 };
                 send_event(events, ctx, event).await;
             }
             WorkerCommand::LoadLiveTvPrograms {
                 request_id,
+                epoch,
                 window,
                 channel_ids,
             } => {
@@ -3974,7 +4028,11 @@ async fn execute_command(
                         send_event(
                             events,
                             ctx,
-                            WorkerEvent::LiveTvProgramsLoaded { request_id, page },
+                            WorkerEvent::LiveTvProgramsLoaded {
+                                request_id,
+                                epoch,
+                                page,
+                            },
                         )
                         .await
                     }
@@ -3999,6 +4057,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::LiveTvProgramsFailed {
                                 request_id,
+                                epoch,
                                 error_class: error.classify(),
                             },
                         )
@@ -4893,6 +4952,7 @@ async fn execute_command(
             }
             WorkerCommand::GetLyrics {
                 request_id,
+                epoch,
                 item_id,
             } => {
                 let lines = match (client.as_ref(), session.as_ref()) {
@@ -4905,7 +4965,16 @@ async fn execute_command(
                         }),
                     _ => Vec::new(),
                 };
-                send_event(events, ctx, WorkerEvent::LyricsLoaded { request_id, lines }).await
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::LyricsLoaded {
+                        request_id,
+                        epoch,
+                        lines,
+                    },
+                )
+                .await
             }
             WorkerCommand::ListExtras {
                 request_id,
@@ -4935,6 +5004,7 @@ async fn execute_command(
             }
             WorkerCommand::ListSeasonSiblings {
                 request_id,
+                epoch,
                 series_id,
                 season,
             } => {
@@ -4954,6 +5024,7 @@ async fn execute_command(
                     ctx,
                     WorkerEvent::SeasonSiblingsLoaded {
                         request_id,
+                        epoch,
                         episodes,
                     },
                 )
@@ -5556,6 +5627,7 @@ async fn execute_command(
             }
             WorkerCommand::ThemeMedia {
                 request_id,
+                epoch,
                 item_id,
             } => {
                 let result = match (client.as_ref(), session.as_ref()) {
@@ -5569,6 +5641,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::ThemeMediaLoaded {
                                 request_id,
+                                epoch,
                                 item_id,
                                 videos: theme.theme_videos.items,
                                 songs: theme.theme_songs.items,
@@ -5599,6 +5672,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::ThemeMediaFailed {
                                 request_id,
+                                epoch,
                                 item_id,
                             },
                         )
@@ -5774,13 +5848,17 @@ async fn execute_command(
             }
             WorkerCommand::GetLiveTvLogo {
                 request_id,
+                epoch,
                 channel_id,
                 image_tag,
             } => {
                 start_live_tv_logo_load(
-                    request_id,
-                    channel_id,
-                    (!image_tag.is_empty()).then_some(image_tag),
+                    LiveTvLogoRequest {
+                        request_id,
+                        epoch,
+                        channel_id,
+                        image_tag: (!image_tag.is_empty()).then_some(image_tag),
+                    },
                     client.as_ref().cloned(),
                     session.as_ref().cloned(),
                     events.clone(),
@@ -7375,21 +7453,33 @@ async fn start_backdrop_artwork_load(
     }
 }
 
-async fn start_live_tv_logo_load(
+struct LiveTvLogoRequest {
     request_id: u64,
+    epoch: Epoch,
     channel_id: String,
     image_tag: Option<String>,
+}
+
+async fn start_live_tv_logo_load(
+    request: LiveTvLogoRequest,
     client: Option<JellyfinClient>,
     session: Option<Session>,
     events: WorkerSink,
     ctx: egui::Context,
 ) {
+    let LiveTvLogoRequest {
+        request_id,
+        epoch,
+        channel_id,
+        image_tag,
+    } = request;
     let (Some(client), Some(session)) = (client, session) else {
         send_event(
             &events,
             &ctx,
             WorkerEvent::LiveTvLogoFailed {
                 request_id,
+                epoch,
                 channel_id,
             },
         )
@@ -7408,6 +7498,7 @@ async fn start_live_tv_logo_load(
                     &ctx,
                     WorkerEvent::LiveTvLogoLoaded {
                         request_id,
+                        epoch,
                         channel_id,
                         width,
                         height,
@@ -7422,6 +7513,7 @@ async fn start_live_tv_logo_load(
                     &ctx,
                     WorkerEvent::LiveTvLogoFailed {
                         request_id,
+                        epoch,
                         channel_id,
                     },
                 )
@@ -7445,6 +7537,7 @@ async fn start_live_tv_logo_load(
                 &ctx,
                 WorkerEvent::LiveTvLogoFailed {
                     request_id,
+                    epoch,
                     channel_id,
                 },
             )
@@ -8650,12 +8743,20 @@ mod people_command_tests {
     fn theme_media_enqueues_item() {
         let (worker, commands) = worker_with_command_receiver();
 
-        assert_eq!(worker.theme_media(54, "item-theme".into()), Ok(()));
+        assert_eq!(
+            worker.theme_media(
+                54,
+                kattri_client_core::epoch::Epoch::NONE,
+                "item-theme".into()
+            ),
+            Ok(())
+        );
         assert!(matches!(
             commands.recv(),
             Ok(WorkerCommand::ThemeMedia {
                 request_id: 54,
                 item_id,
+                ..
             }) if item_id == "item-theme"
         ));
     }

@@ -5816,7 +5816,9 @@ impl KattriApp {
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
-            .and_then(|worker| worker.load_live_tv_channels(request_id, start_index, 100));
+            .and_then(|worker| {
+                worker.load_live_tv_channels(request_id, self.session_epoch, start_index, 100)
+            });
         if result.is_err() {
             self.live_tv_loading = false;
             self.live_tv_error = Some(ErrorClass::Unexpected);
@@ -5866,7 +5868,12 @@ impl KattriApp {
                 .as_ref()
                 .ok_or(WorkerSubmitError::Stopped)
                 .and_then(|worker| {
-                    worker.get_live_tv_logo(request_id, channel_id.clone(), image_tag.clone())
+                    worker.get_live_tv_logo(
+                        request_id,
+                        self.session_epoch,
+                        channel_id.clone(),
+                        image_tag.clone(),
+                    )
                 });
             if result.is_ok() {
                 self.live_tv_logo_attempted.insert(channel_id.clone());
@@ -6029,7 +6036,14 @@ impl KattriApp {
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
-            .and_then(|worker| worker.load_live_tv_programs(request_id, api_window, channel_ids));
+            .and_then(|worker| {
+                worker.load_live_tv_programs(
+                    request_id,
+                    self.session_epoch,
+                    api_window,
+                    channel_ids,
+                )
+            });
         if result.is_err() {
             self.live_tv_guide_loading = false;
             self.live_tv_guide_error = Some(ErrorClass::Unexpected);
@@ -7753,6 +7767,7 @@ impl KattriApp {
         self.live_tv_search_loading = worker
             .search_live_tv_channels(
                 request_id,
+                self.session_epoch,
                 term.to_owned(),
                 start_index,
                 if self.search.browse_group == Some(crate::ui::search::SearchGroup::Channels) {
@@ -7914,7 +7929,9 @@ impl KattriApp {
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
-            .and_then(|worker| worker.theme_media(request_id, item_id.to_owned()));
+            .and_then(|worker| {
+                worker.theme_media(request_id, self.session_epoch, item_id.to_owned())
+            });
         if submitted.is_ok() {
             self.theme_media_request = Some((request_id, item_id.to_owned()));
         }
@@ -9041,7 +9058,7 @@ impl KattriApp {
         };
         let request_id = self.track_lyrics_request_id;
         if let Some(worker) = self.worker.as_ref() {
-            let _ = worker.get_lyrics(request_id, item_id);
+            let _ = worker.get_lyrics(request_id, self.session_epoch, item_id);
         }
     }
 
@@ -9092,7 +9109,7 @@ impl KattriApp {
         };
         let request_id = self.season_siblings_request_id;
         if let Some(worker) = self.worker.as_ref() {
-            let _ = worker.list_season_siblings(request_id, series_id, season);
+            let _ = worker.list_season_siblings(request_id, self.session_epoch, series_id, season);
         }
     }
 
@@ -10301,9 +10318,9 @@ impl KattriApp {
                         crate::ui::status::message(error_class).to_owned(),
                     );
                 }
-                WorkerEvent::LiveTvChannelsLoaded { request_id, page }
-                    if self.live_tv_request_id == request_id =>
-                {
+                WorkerEvent::LiveTvChannelsLoaded {
+                    request_id, page, ..
+                } if self.live_tv_request_id == request_id => {
                     self.record_network_success();
                     let logo_channels = page.items.clone();
                     let channel_ids = page
@@ -10338,6 +10355,7 @@ impl KattriApp {
                 WorkerEvent::LiveTvChannelsFailed {
                     request_id,
                     error_class,
+                    ..
                 } if self.live_tv_request_id == request_id => {
                     self.record_network_error(error_class, None);
                     self.live_tv_loading = false;
@@ -10350,6 +10368,7 @@ impl KattriApp {
                     items,
                     start_index,
                     total_record_count,
+                    ..
                 } if self.live_tv_search_request_id == Some(request_id)
                     && self.live_tv_search_loading =>
                 {
@@ -10372,7 +10391,7 @@ impl KattriApp {
                     self.live_tv_search_start_index = start_index.saturating_add(page_count);
                     self.live_tv_search_total = total_record_count;
                 }
-                WorkerEvent::LiveTvSearchResultsFailed { request_id }
+                WorkerEvent::LiveTvSearchResultsFailed { request_id, .. }
                     if self.live_tv_search_request_id == Some(request_id) =>
                 {
                     self.live_tv_search_loading = false;
@@ -10384,6 +10403,7 @@ impl KattriApp {
                     width,
                     height,
                     rgba,
+                    ..
                 } => {
                     if self.live_tv_logo_pending.remove(&request_id).is_some_and(
                         |(expected_id, expected_tag)| {
@@ -10426,6 +10446,7 @@ impl KattriApp {
                 WorkerEvent::LiveTvLogoFailed {
                     request_id,
                     channel_id,
+                    ..
                 } => {
                     if self
                         .live_tv_logo_pending
@@ -10435,9 +10456,9 @@ impl KattriApp {
                         self.pump_live_tv_logo_requests();
                     }
                 }
-                WorkerEvent::LiveTvProgramsLoaded { request_id, page }
-                    if self.live_tv_guide_request_id == request_id =>
-                {
+                WorkerEvent::LiveTvProgramsLoaded {
+                    request_id, page, ..
+                } if self.live_tv_guide_request_id == request_id => {
                     self.record_network_success();
                     let requested = self
                         .live_tv_guide_requested_channel_ids
@@ -10475,6 +10496,7 @@ impl KattriApp {
                 WorkerEvent::LiveTvProgramsFailed {
                     request_id,
                     error_class,
+                    ..
                 } if self.live_tv_guide_request_id == request_id => {
                     self.record_network_error(error_class, None);
                     self.live_tv_guide_loading = false;
@@ -10816,7 +10838,9 @@ impl KattriApp {
                 } => {
                     self.remote_subtitle_downloaded(request_id, item_id, result);
                 }
-                WorkerEvent::LyricsLoaded { request_id, lines } => {
+                WorkerEvent::LyricsLoaded {
+                    request_id, lines, ..
+                } => {
                     if request_id == self.track_lyrics_request_id {
                         self.track_lyrics = lines;
                     }
@@ -10835,6 +10859,7 @@ impl KattriApp {
                 WorkerEvent::SeasonSiblingsLoaded {
                     request_id,
                     episodes,
+                    ..
                 } => {
                     if request_id == self.season_siblings_request_id {
                         let current = self.browse.details.selected_item_id.clone();
@@ -11299,6 +11324,7 @@ impl KattriApp {
                     item_id,
                     videos,
                     songs,
+                    ..
                 } if self.theme_media_request_matches(request_id, &item_id) => {
                     self.theme_media_request = None;
                     if self.browse.details.selected_item_id.as_deref() == Some(item_id.as_str()) {
@@ -11309,6 +11335,7 @@ impl KattriApp {
                 WorkerEvent::ThemeMediaFailed {
                     request_id,
                     item_id,
+                    ..
                 } if self.theme_media_request_matches(request_id, &item_id) => {
                     // Silent by design: no banner, no retry, and no Theme action.
                     self.theme_media_request = None;
@@ -14123,6 +14150,7 @@ mod live_tv_event_tests {
         events
             .try_send(WorkerEvent::LiveTvChannelsLoaded {
                 request_id: 44,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 page: LiveTvChannelPage {
                     items: vec![channel("channel-1")],
                     total_record_count: Some(1),
@@ -14144,6 +14172,7 @@ mod live_tv_event_tests {
         events
             .try_send(WorkerEvent::LiveTvChannelsFailed {
                 request_id: 45,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 error_class: ErrorClass::NotFound,
             })
             .expect("queue unavailable Live TV result");
@@ -14236,6 +14265,7 @@ mod live_tv_event_tests {
         events
             .try_send(WorkerEvent::LiveTvLogoLoaded {
                 request_id: 72,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 channel_id: "logo-channel".into(),
                 width: 2,
                 height: 2,
@@ -14250,6 +14280,7 @@ mod live_tv_event_tests {
         events
             .try_send(WorkerEvent::LiveTvLogoFailed {
                 request_id: 73,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 channel_id: "missing-logo".into(),
             })
             .expect("send logo 404 fallback");
@@ -14268,6 +14299,7 @@ mod live_tv_event_tests {
         events
             .try_send(WorkerEvent::LiveTvChannelsLoaded {
                 request_id: 91,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 page: LiveTvChannelPage {
                     items: vec![channel("stale")],
                     total_record_count: Some(1),
@@ -14294,6 +14326,7 @@ mod live_tv_event_tests {
         events
             .try_send(WorkerEvent::LiveTvSearchResultsLoaded {
                 request_id: 104,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 items: vec![channel("stale-channel").item],
                 start_index: 0,
                 total_record_count: Some(1),
@@ -14318,6 +14351,7 @@ mod live_tv_event_tests {
         events
             .try_send(WorkerEvent::LiveTvSearchResultsLoaded {
                 request_id: 301,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 items: vec![channel("channel-0").item, channel("channel-1").item],
                 start_index: 0,
                 total_record_count: Some(4),
@@ -14334,6 +14368,7 @@ mod live_tv_event_tests {
         events
             .try_send(WorkerEvent::LiveTvSearchResultsLoaded {
                 request_id: next_request_id,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 items: vec![channel("channel-2").item, channel("channel-3").item],
                 start_index: 2,
                 total_record_count: Some(4),
@@ -14362,6 +14397,7 @@ mod live_tv_event_tests {
         events
             .try_send(WorkerEvent::LiveTvChannelsLoaded {
                 request_id: 101,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 page: LiveTvChannelPage {
                     items: vec![channel("first"), channel("second")],
                     total_record_count: Some(150),
@@ -14377,6 +14413,7 @@ mod live_tv_event_tests {
         events
             .try_send(WorkerEvent::LiveTvChannelsLoaded {
                 request_id: 102,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 page: LiveTvChannelPage {
                     items: vec![channel("second"), channel("third")],
                     total_record_count: Some(150),
@@ -16944,6 +16981,7 @@ mod photo_decode_event_tests {
         sender
             .try_send(WorkerEvent::SeasonSiblingsLoaded {
                 request_id,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 episodes: vec![episode("e1"), episode("e2"), episode("e3")],
             })
             .expect("send season");
@@ -18549,6 +18587,7 @@ mod lyrics_lifecycle_tests {
         sender
             .try_send(WorkerEvent::LyricsLoaded {
                 request_id: 17,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 lines: vec![LyricLine {
                     text: "stale line".into(),
                     start_ticks: Some(20),
