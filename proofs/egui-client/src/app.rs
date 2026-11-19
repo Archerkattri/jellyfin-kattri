@@ -563,7 +563,7 @@ impl LibraryTab {
 /// Why the album track list was requested: the details page loads it to offer Download all,
 /// while Play album loads or reuses it to start the queue.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum AlbumTracksPurpose {
+pub(crate) enum AlbumTracksPurpose {
     #[default]
     Display,
     Play,
@@ -1397,6 +1397,31 @@ pub enum ConnectionStatus {
     LibraryError(String),
 }
 
+/// Owned album-tracks state: the track list for an album page and the request that produced it.
+///
+/// Six loose fields carried it: loading, error, request id, the tracks, the album they belong to and
+/// why they were requested (display or queueing).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct AlbumTracksState {
+    /// Whether the track request is in flight.
+    pub(crate) loading: bool,
+    /// The last track-request failure.
+    pub(crate) error: Option<ErrorClass>,
+    /// The request id of the track request in flight (or the last one issued).
+    pub(crate) request_id: u64,
+    /// The tracks for the album page.
+    pub(crate) tracks: Vec<CollectionItem>,
+    /// The album the tracks belong to.
+    pub(crate) album_id: Option<String>,
+    /// Why the tracks were requested.
+    pub(crate) purpose: AlbumTracksPurpose,
+}
+
+impl AlbumTracksState {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
 /// Owned search state: the query, the results, the active group and the debounce timer.
 ///
 /// Six loose fields carried the search box: the typed query, the results, the browse group they
@@ -1797,6 +1822,8 @@ pub struct KattriApp {
     metadata_thumbnail_requests: HashMap<u64, String>,
     pub(crate) items: Vec<crate::catalog::MediaItem>,
     /// Multi-select state for the catalog grid. Bounded to the loaded page; UI code owns it.
+    /// Owned album tracks: list, album, request id and purpose.
+    pub(crate) album_tracks: AlbumTracksState,
     /// Owned search: query, results, group, staleness and debouncer.
     pub(crate) search: SearchState,
     /// Owned navigation: page, view, library tab and its request id.
@@ -1947,14 +1974,8 @@ pub struct KattriApp {
     /// drawn).
     toast: Option<(String, Option<f64>)>,
     pub(crate) music_track_names: HashMap<String, String>,
-    pub(crate) music_album_tracks_loading: bool,
-    pub(crate) music_album_tracks_error: Option<ErrorClass>,
-    music_album_tracks_request_id: u64,
     /// The album's tracks from the last `MusicAlbumTracksLoaded`, for Play album and Download all.
-    pub(crate) music_album_tracks: Vec<CollectionItem>,
     /// Album the loaded tracks belong to; a different album page never reuses them.
-    music_album_tracks_album_id: Option<String>,
-    music_album_tracks_purpose: AlbumTracksPurpose,
     music_queue_auto_play_item_id: Option<String>,
     pub(crate) music_queue_notice: Option<String>,
     /// Saved-queue restore lifecycle; owns the pending queue and request id so a stale result is refused.
@@ -2475,6 +2496,7 @@ impl KattriApp {
             metadata_editor_request: 0,
             metadata_thumbnail_requests: HashMap::new(),
             items: Vec::new(),
+            album_tracks: AlbumTracksState::new(),
             search: SearchState::new(),
             navigation: NavigationState::new(),
             browse: BrowseState::new(),
@@ -2597,12 +2619,6 @@ impl KattriApp {
             menu_playlist_add: None,
             toast: None,
             music_track_names: HashMap::new(),
-            music_album_tracks_loading: false,
-            music_album_tracks_error: None,
-            music_album_tracks_request_id: 0,
-            music_album_tracks: Vec::new(),
-            music_album_tracks_album_id: None,
-            music_album_tracks_purpose: AlbumTracksPurpose::Display,
             music_queue_auto_play_item_id: None,
             music_queue_notice,
             music_queue_restore: {
@@ -5035,9 +5051,9 @@ impl KattriApp {
         self.playlist_candidates_loading = false;
         self.playlist_candidates_error = None;
         self.playlist_candidates_request_id = self.allocate_request_id();
-        self.music_album_tracks_loading = false;
-        self.music_album_tracks_error = None;
-        self.music_album_tracks_request_id = self.allocate_request_id();
+        self.album_tracks.loading = false;
+        self.album_tracks.error = None;
+        self.album_tracks.request_id = self.allocate_request_id();
         self.music_queue_auto_play_item_id = None;
         self.music_queue_notice = None;
         self.focus_graph = FocusGraph::default();
@@ -5995,25 +6011,25 @@ impl KattriApp {
         let Some(album_id) = self.selected_album_id() else {
             return;
         };
-        if self.music_album_tracks_album_id.as_deref() == Some(album_id.as_str()) {
+        if self.album_tracks.album_id.as_deref() == Some(album_id.as_str()) {
             if purpose == AlbumTracksPurpose::Play {
                 self.play_selected_album_tracks();
             }
             return;
         }
         let request_id = self.allocate_request_id();
-        self.music_album_tracks_request_id = request_id;
-        self.music_album_tracks_loading = true;
-        self.music_album_tracks_error = None;
-        self.music_album_tracks_purpose = purpose;
+        self.album_tracks.request_id = request_id;
+        self.album_tracks.loading = true;
+        self.album_tracks.error = None;
+        self.album_tracks.purpose = purpose;
         let result = self
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
             .and_then(|worker| worker.list_music_album_tracks(request_id, album_id));
         if result.is_err() {
-            self.music_album_tracks_loading = false;
-            self.music_album_tracks_error = Some(ErrorClass::Unexpected);
+            self.album_tracks.loading = false;
+            self.album_tracks.error = Some(ErrorClass::Unexpected);
         }
     }
 
@@ -6021,7 +6037,8 @@ impl KattriApp {
     fn play_selected_album_tracks(&mut self) {
         let mut names = HashMap::new();
         let queue_items = self
-            .music_album_tracks
+            .album_tracks
+            .tracks
             .iter()
             .filter(|track| track.item_type.as_deref() == Some("Audio"))
             .map(|track| {
@@ -6031,10 +6048,10 @@ impl KattriApp {
             .collect::<Vec<_>>();
         let first_id = queue_items.first().map(|item| item.id.clone());
         if queue_items.is_empty() || self.music_queue.add_album_and_play(queue_items).is_err() {
-            self.music_album_tracks_error = Some(ErrorClass::Unexpected);
+            self.album_tracks.error = Some(ErrorClass::Unexpected);
         } else if let Some(first_id) = first_id {
             self.music_track_names.extend(names);
-            self.music_album_tracks_error = None;
+            self.album_tracks.error = None;
             self.music_queue_position_ms = 0;
             self.music_queue_resume.clear();
             self.select_item(first_id);
@@ -6044,7 +6061,7 @@ impl KattriApp {
     /// The album page offers Download all only when the server permits downloads and the
     /// bounded track load returned at least one track.
     pub(crate) fn album_download_all_visible(&self) -> bool {
-        self.user_can_download && !self.music_album_tracks.is_empty()
+        self.user_can_download && !self.album_tracks.tracks.is_empty()
     }
 
     /// Downloads every loaded track of the open album through the bounded batch queue.
@@ -6055,8 +6072,8 @@ impl KattriApp {
         let plan = match plan_album_download(
             self.user_can_download,
             &album_id,
-            self.music_album_tracks_album_id.as_deref(),
-            &self.music_album_tracks,
+            self.album_tracks.album_id.as_deref(),
+            &self.album_tracks.tracks,
         ) {
             Ok(plan) => plan,
             Err(AlbumDownloadError::TooManyItems) => {
@@ -7431,12 +7448,12 @@ impl KattriApp {
         }
         self.detail_parent = None;
         self.cancel_navigation_requests();
-        self.music_album_tracks_request_id = self.allocate_request_id();
-        self.music_album_tracks_loading = false;
-        self.music_album_tracks_error = None;
-        self.music_album_tracks.clear();
-        self.music_album_tracks_album_id = None;
-        self.music_album_tracks_purpose = AlbumTracksPurpose::Display;
+        self.album_tracks.request_id = self.allocate_request_id();
+        self.album_tracks.loading = false;
+        self.album_tracks.error = None;
+        self.album_tracks.tracks.clear();
+        self.album_tracks.album_id = None;
+        self.album_tracks.purpose = AlbumTracksPurpose::Display;
         self.browse.details.selected_item_id = Some(item_id.clone());
         self.browse.details.selected_details = None;
         self.reset_series_detail();
@@ -9847,12 +9864,12 @@ impl KattriApp {
         self.playlist_candidates_loading = false;
         self.playlist_candidates_error = None;
         self.playlist_candidates_request_id = self.allocate_request_id();
-        self.music_album_tracks_loading = false;
-        self.music_album_tracks_error = None;
-        self.music_album_tracks_request_id = self.allocate_request_id();
-        self.music_album_tracks.clear();
-        self.music_album_tracks_album_id = None;
-        self.music_album_tracks_purpose = AlbumTracksPurpose::Display;
+        self.album_tracks.loading = false;
+        self.album_tracks.error = None;
+        self.album_tracks.request_id = self.allocate_request_id();
+        self.album_tracks.tracks.clear();
+        self.album_tracks.album_id = None;
+        self.album_tracks.purpose = AlbumTracksPurpose::Display;
         self.focus_graph = FocusGraph::default();
         self.invalidate_sync_play_queue();
         self.sync_play_state = SyncPlayState::NotJoined;
@@ -10845,13 +10862,13 @@ impl KattriApp {
                     request_id,
                     album_id,
                     tracks,
-                } if request_id == self.music_album_tracks_request_id
+                } if request_id == self.album_tracks.request_id
                     && self.browse.details.selected_item_id.as_deref()
                         == Some(album_id.as_str()) =>
                 {
                     self.record_network_success();
-                    self.music_album_tracks_loading = false;
-                    self.music_album_tracks = tracks
+                    self.album_tracks.loading = false;
+                    self.album_tracks.tracks = tracks
                         .iter()
                         .filter(|track| track.item_type.as_deref() == Some("Audio"))
                         .map(|track| CollectionItem {
@@ -10860,24 +10877,24 @@ impl KattriApp {
                             title: track.name.clone(),
                         })
                         .collect();
-                    self.music_album_tracks_album_id = Some(album_id.clone());
-                    if self.music_album_tracks_purpose == AlbumTracksPurpose::Play {
+                    self.album_tracks.album_id = Some(album_id.clone());
+                    if self.album_tracks.purpose == AlbumTracksPurpose::Play {
                         self.play_selected_album_tracks();
                     } else {
-                        self.music_album_tracks_error = None;
+                        self.album_tracks.error = None;
                     }
                 }
                 WorkerEvent::MusicAlbumTracksFailed {
                     request_id,
                     album_id,
                     error_class,
-                } if request_id == self.music_album_tracks_request_id
+                } if request_id == self.album_tracks.request_id
                     && self.browse.details.selected_item_id.as_deref()
                         == Some(album_id.as_str()) =>
                 {
                     self.record_network_error(error_class, None);
-                    self.music_album_tracks_loading = false;
-                    self.music_album_tracks_error = Some(error_class);
+                    self.album_tracks.loading = false;
+                    self.album_tracks.error = Some(error_class);
                 }
                 WorkerEvent::QueueItemsRestored {
                     request_id, items, ..
@@ -14679,9 +14696,9 @@ mod music_queue_app_tests {
             ..serde_json::from_str(r#"{"Id":"template","Name":"template"}"#)
                 .expect("valid minimal item fixture")
         });
-        app.music_album_tracks_request_id = 81;
-        app.music_album_tracks_loading = true;
-        app.music_album_tracks_purpose = AlbumTracksPurpose::Play;
+        app.album_tracks.request_id = 81;
+        app.album_tracks.loading = true;
+        app.album_tracks.purpose = AlbumTracksPurpose::Play;
         events
             .try_send(WorkerEvent::MusicAlbumTracksLoaded {
                 request_id: 80,
@@ -17445,14 +17462,14 @@ mod library_tab_tests {
     fn album_download_all_button_requires_permission_and_loaded_tracks() {
         let mut app = connected_app(Page::Music, "");
         assert!(!app.album_download_all_visible());
-        app.music_album_tracks = vec![track("track-1")];
+        app.album_tracks.tracks = vec![track("track-1")];
         assert!(
             !app.album_download_all_visible(),
             "the download policy is off"
         );
         app.user_can_download = true;
         assert!(app.album_download_all_visible());
-        app.music_album_tracks.clear();
+        app.album_tracks.tracks.clear();
         assert!(
             !app.album_download_all_visible(),
             "an empty album has no button"

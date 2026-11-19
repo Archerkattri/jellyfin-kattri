@@ -3036,7 +3036,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                     ui.horizontal(|ui| {
                         if ui
                             .add_enabled(
-                                !app.music_album_tracks_loading,
+                                !app.album_tracks.loading,
                                 egui::Button::new(ui_text(ids::MUSIC_ALBUM_PLAY_FIRST)),
                             )
                             .clicked()
@@ -3050,7 +3050,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                         {
                             download_album_clicked = true;
                         }
-                        if app.music_album_tracks_loading {
+                        if app.album_tracks.loading {
                             ui.spinner();
                             ui.label(
                                 RichText::new(ui_text(ids::MUSIC_ALBUM_LOADING_TRACKS))
@@ -3058,7 +3058,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                             );
                         }
                     });
-                    if let Some(error) = app.music_album_tracks_error {
+                    if let Some(error) = app.album_tracks.error {
                         ui.label(
                             RichText::new(ui_text_args(
                                 ids::MUSIC_ALBUM_LOAD_FAILED,
