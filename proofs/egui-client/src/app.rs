@@ -1520,6 +1520,81 @@ impl SearchState {
     pub(crate) fn new() -> Self {
         Self::default()
     }
+
+    /// Full reset: hide the box, drop the query, results and group, and supersede any pending
+    /// debounce with an empty input. `now` is the debouncer clock the caller already holds.
+    pub(crate) fn clear(&mut self, now: Duration) {
+        self.query.clear();
+        self.active = false;
+        self.results.clear();
+        self.browse_group = None;
+        self.stale = false;
+        self.debouncer.input("", now);
+    }
+
+    /// Like [`Self::clear`], but keeps the browse group: entering a folder or page and ending
+    /// the connection left the group selection alone in the loose-field code.
+    pub(crate) fn clear_keep_group(&mut self) {
+        self.query.clear();
+        self.active = false;
+        self.results.clear();
+        self.stale = false;
+        self.debouncer.input("", Duration::ZERO);
+    }
+
+    /// The user typed: show the box, leave any group browse, and debounce the new input.
+    pub(crate) fn begin_query(&mut self, input: &str, now: Duration) -> SearchInputAction {
+        self.query = input.to_owned();
+        self.browse_group = None;
+        self.active = true;
+        self.debouncer.input(input, now)
+    }
+
+    /// The debounce fired and the trimmed query was sent to the server; results still shown
+    /// belong to the previous query until the new page arrives.
+    pub(crate) fn query_dispatched(&mut self, query: &str) {
+        self.query = query.to_owned();
+        self.stale = !self.results.is_empty();
+    }
+
+    /// A catalog page arrived for the submitted search.
+    pub(crate) fn results_applied(&mut self, results: Vec<BaseItemDto>) {
+        self.results = results;
+        self.stale = false;
+    }
+
+    /// Drop the visible results without touching the query, the box or the group.
+    pub(crate) fn clear_results(&mut self) {
+        self.results.clear();
+        self.stale = false;
+    }
+
+    /// New input is pending while old results are still shown: mark them stale.
+    pub(crate) fn mark_stale(&mut self) {
+        self.stale = !self.results.is_empty();
+    }
+
+    /// The current catalog request failed: visible results stay, but count as stale only when
+    /// a search was actually submitted.
+    pub(crate) fn request_failed(&mut self, has_submitted_search: bool) {
+        self.stale = has_submitted_search && !self.results.is_empty();
+    }
+
+    /// Open one group's full browse: hide the box and drop the mixed results.
+    pub(crate) fn group_selected(&mut self, group: crate::ui::search::SearchGroup) {
+        self.browse_group = Some(group);
+        self.active = false;
+        self.results.clear();
+        self.stale = false;
+    }
+
+    /// Leave the group browse for the mixed results view; the caller re-requests the term.
+    pub(crate) fn leave_group(&mut self) {
+        self.browse_group = None;
+        self.active = false;
+        self.results.clear();
+        self.stale = false;
+    }
 }
 
 /// Owned similar-items state for the detail panel: the items, the loading flag and the request id.
@@ -5163,13 +5238,8 @@ impl KattriApp {
         self.artwork_access_ticks.clear();
         self.pending_playback = None;
         self.submitted_search = None;
-        self.search.active = false;
-        self.search.results.clear();
-        self.search.browse_group = None;
+        self.search.clear(Duration::ZERO);
         self.invalidate_live_tv_search();
-        self.search.stale = false;
-        self.search.debouncer.input("", Duration::ZERO);
-        self.search.query.clear();
         self.navigation.view = AppView::Home;
         self.browse_context = None;
         self.home = HomeState::default();
@@ -5392,13 +5462,8 @@ impl KattriApp {
         self.cancel_pending_photo_decodes();
         self.photo.thumbnail_attempted.clear();
         self.photo.full_size_failed.clear();
-        self.search.query.clear();
+        self.search.clear(Duration::ZERO);
         self.submitted_search = None;
-        self.search.active = false;
-        self.search.results.clear();
-        self.search.browse_group = None;
-        self.search.stale = false;
-        self.search.debouncer.input("", Duration::ZERO);
         self.browse.catalog_request_id = self.allocate_request_id();
         self.browse.catalog_loading = false;
         if page.is_catalog() && self.server.is_some() {
@@ -5637,12 +5702,8 @@ impl KattriApp {
             title,
             is_collection,
         });
-        self.search.query.clear();
+        self.search.clear_keep_group();
         self.submitted_search = None;
-        self.search.active = false;
-        self.search.results.clear();
-        self.search.stale = false;
-        self.search.debouncer.input("", Duration::ZERO);
         self.browse.catalog_request_id = self.allocate_request_id();
         self.browse.catalog_loading = false;
         if self.server.is_some() {
@@ -6671,12 +6732,8 @@ impl KattriApp {
                     self.navigation.view = AppView::Library;
                     self.navigation.page = Page::Playlists;
                     self.browse_context = None;
-                    self.search.query.clear();
+                    self.search.clear_keep_group();
                     self.submitted_search = None;
-                    self.search.active = false;
-                    self.search.results.clear();
-                    self.search.stale = false;
-                    self.search.debouncer.input("", Duration::ZERO);
                     if self.server.is_some() {
                         self.request_catalog(0, None);
                     }
@@ -6718,9 +6775,7 @@ impl KattriApp {
     }
 
     pub(crate) fn handle_search_input(&mut self, input: &str, now: Duration) {
-        self.search.query = input.to_owned();
-        self.search.browse_group = None;
-        self.search.active = true;
+        let action = self.search.begin_query(input, now);
         self.invalidate_track_lyrics();
         self.browse.details.selected_item_id = None;
         self.browse.details.selected_details = None;
@@ -6729,7 +6784,6 @@ impl KattriApp {
         self.reset_people_detail();
         self.browse.details.details_loading = false;
         self.browse.details.details_error = None;
-        let action = self.search.debouncer.input(input, now);
         self.browse.catalog_request_id = self.allocate_request_id();
         self.invalidate_live_tv_search();
         self.browse.catalog_loading = false;
@@ -6738,14 +6792,13 @@ impl KattriApp {
         match action {
             SearchInputAction::Clear { .. } => {
                 self.submitted_search = None;
-                self.search.results.clear();
-                self.search.stale = false;
+                self.search.clear_results();
                 self.items.clear();
                 self.browse.catalog_next_index = 0;
                 self.browse.catalog_end_reached = true;
             }
             SearchInputAction::Debouncing { .. } => {
-                self.search.stale = !self.search.results.is_empty();
+                self.search.mark_stale();
                 if self.search.results.is_empty() {
                     self.items.clear();
                 }
@@ -6762,13 +6815,11 @@ impl KattriApp {
     fn dispatch_search(&mut self, query: String) {
         let query = query.trim().to_owned();
         if query.chars().count() < 2 {
-            self.search.results.clear();
-            self.search.stale = false;
+            self.search.clear_results();
             return;
         }
-        self.search.query = query.clone();
+        self.search.query_dispatched(&query);
         self.submitted_search = Some(query.clone());
-        self.search.stale = !self.search.results.is_empty();
         self.request_catalog(0, Some(query));
     }
 
@@ -6777,12 +6828,7 @@ impl KattriApp {
             || !self.search.query.trim().is_empty()
             || self.submitted_search.is_some()
             || !self.search.results.is_empty();
-        self.search.query.clear();
-        self.search.active = false;
-        self.search.debouncer.input("", now);
-        self.search.stale = false;
-        self.search.results.clear();
-        self.search.browse_group = None;
+        self.search.clear(now);
         self.invalidate_live_tv_search();
         if had_search {
             self.submitted_search = None;
@@ -6827,15 +6873,12 @@ impl KattriApp {
         if let Some(worker) = self.worker.as_ref() {
             worker.cancel_navigation_reads();
         }
-        self.search.browse_group = Some(group);
-        self.search.active = false;
-        self.search.results.clear();
+        self.search.group_selected(group);
         self.items.clear();
         self.total_record_count = None;
         self.browse.catalog_next_index = 0;
         self.browse.catalog_end_reached = false;
         self.browse.catalog_error = None;
-        self.search.stale = false;
         if group == crate::ui::search::SearchGroup::Channels {
             self.invalidate_live_tv_search();
             self.start_live_tv_search_page(Some(&term), 0);
@@ -6853,14 +6896,11 @@ impl KattriApp {
         if let Some(worker) = self.worker.as_ref() {
             worker.cancel_navigation_reads();
         }
-        self.search.browse_group = None;
-        self.search.active = false;
+        self.search.leave_group();
         self.items.clear();
-        self.search.results.clear();
         self.total_record_count = None;
         self.browse.catalog_next_index = 0;
         self.browse.catalog_end_reached = false;
-        self.search.stale = false;
         self.request_catalog(0, Some(term));
     }
 
@@ -6912,11 +6952,9 @@ impl KattriApp {
         let page_start = page.start_index;
         self.start_index = 0;
         if self.submitted_search.is_some() && self.search.browse_group.is_none() {
-            self.search.results = shown.clone();
-            self.search.stale = false;
+            self.search.results_applied(shown.clone());
         } else {
-            self.search.results.clear();
-            self.search.stale = false;
+            self.search.clear_results();
         }
         if page_start == 0 {
             self.items.clear();
@@ -7353,8 +7391,7 @@ impl KattriApp {
         self.browse.catalog_end_reached = true;
         self.browse.catalog_loading = true;
         self.browse.catalog_error = None;
-        self.search.results.clear();
-        self.search.stale = false;
+        self.search.clear_results();
         self.loaded_search = None;
         self.invalidate_track_lyrics();
         self.browse.details.selected_item_id = None;
@@ -7453,8 +7490,7 @@ impl KattriApp {
             self.collection_runtime = CollectionRuntime::default();
             if !is_search {
                 self.items.clear();
-                self.search.results.clear();
-                self.search.stale = false;
+                self.search.clear_results();
             } else if self.search.results.is_empty() {
                 self.items.clear();
             }
@@ -10014,7 +10050,6 @@ impl KattriApp {
         self.loaded_search = None;
         self.browse.catalog_loading = false;
         self.browse.catalog_error = None;
-        self.search.query.clear();
         self.browse.details.selected_item_id = None;
         self.browse.details.selected_details = None;
         self.selected_artwork_texture = None;
@@ -10026,10 +10061,7 @@ impl KattriApp {
         self.reset_people_detail();
         self.reset_playback(PlaybackReset::Session);
         self.submitted_search = None;
-        self.search.results.clear();
-        self.search.stale = false;
-        self.search.active = false;
-        self.search.debouncer.input("", Duration::ZERO);
+        self.search.clear_keep_group();
         self.navigation.view = AppView::Home;
         self.browse_context = None;
         self.home = HomeState::default();
@@ -10636,8 +10668,7 @@ impl KattriApp {
                     ..
                 } if catalog_response_is_current(request_id, self.browse.catalog_request_id) => {
                     self.browse.catalog_loading = false;
-                    self.search.stale =
-                        self.submitted_search.is_some() && !self.search.results.is_empty();
+                    self.search.request_failed(self.submitted_search.is_some());
                     if let Some(filter) = unsupported_filter {
                         self.apply_unsupported_catalog_filter(filter);
                     } else {
@@ -18703,5 +18734,159 @@ mod lyrics_lifecycle_tests {
             .expect("queue stale lyrics result");
         app.update_background(&egui::Context::default());
         assert!(app.track_lyrics.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod search_state_tests {
+    use super::SearchState;
+    use crate::ui::search::SearchGroup;
+    use jellyfin_api::BaseItemDto;
+    use kattri_client_core::search::{SEARCH_DEBOUNCE, SearchInputAction};
+    use std::time::Duration;
+
+    fn item(id: &str) -> BaseItemDto {
+        serde_json::from_value(serde_json::json!({ "Id": id, "Name": id, "Type": "Movie" }))
+            .expect("search result fixture")
+    }
+
+    /// A mid-search state: typed query, visible results, an open group and a pending debounce.
+    fn populated() -> SearchState {
+        let mut state = SearchState::new();
+        state.query = "dune".into();
+        state.results = vec![item("movie-1")];
+        state.browse_group = Some(SearchGroup::Movies);
+        state.stale = true;
+        state.active = true;
+        state.debouncer.input("dune", Duration::ZERO);
+        state
+    }
+
+    #[test]
+    fn clear_matches_the_old_inline_reset() {
+        let mut method = populated();
+        let mut inline = method.clone();
+        let now = Duration::from_secs(3);
+
+        method.clear(now);
+
+        inline.query.clear();
+        inline.active = false;
+        inline.results.clear();
+        inline.browse_group = None;
+        inline.stale = false;
+        inline.debouncer.input("", now);
+        assert_eq!(method, inline);
+        assert!(method.query.is_empty());
+        assert!(!method.active);
+        assert!(method.results.is_empty());
+        assert_eq!(method.browse_group, None);
+        assert!(!method.stale);
+        assert!(method.debouncer.take_ready(now + SEARCH_DEBOUNCE).is_none());
+    }
+
+    #[test]
+    fn clear_keep_group_matches_the_old_inline_reset_but_keeps_the_group() {
+        let mut method = populated();
+        let mut inline = method.clone();
+
+        method.clear_keep_group();
+
+        inline.query.clear();
+        inline.active = false;
+        inline.results.clear();
+        inline.stale = false;
+        inline.debouncer.input("", Duration::ZERO);
+        assert_eq!(method, inline);
+        assert_eq!(method.browse_group, Some(SearchGroup::Movies));
+    }
+
+    #[test]
+    fn begin_query_matches_the_old_inline_input_and_debounce() {
+        let mut method = populated();
+        let mut inline = method.clone();
+        let now = Duration::from_secs(2);
+
+        let action = method.begin_query("  alien  ", now);
+
+        inline.query = "  alien  ".to_owned();
+        inline.browse_group = None;
+        inline.active = true;
+        let expected = inline.debouncer.input("  alien  ", now);
+        assert_eq!(method, inline);
+        assert_eq!(action, expected);
+        assert!(matches!(action, SearchInputAction::Debouncing { .. }));
+        let request = method
+            .debouncer
+            .take_ready(now + SEARCH_DEBOUNCE)
+            .expect("debounced request");
+        assert_eq!(request.query, "alien");
+    }
+
+    #[test]
+    fn results_applied_matches_the_old_inline_assignment() {
+        let mut method = populated();
+        let mut inline = method.clone();
+        let shown = vec![item("movie-2"), item("movie-3")];
+
+        method.results_applied(shown.clone());
+
+        inline.results = shown;
+        inline.stale = false;
+        assert_eq!(method, inline);
+        assert_eq!(method.results.len(), 2);
+        assert!(!method.stale);
+    }
+
+    #[test]
+    fn clear_results_and_mark_stale_track_the_visible_results() {
+        let mut state = populated();
+        state.mark_stale();
+        assert!(state.stale);
+        state.clear_results();
+        assert!(state.results.is_empty());
+        assert!(!state.stale);
+        state.mark_stale();
+        assert!(!state.stale);
+        // The query and the box survive both transitions.
+        assert_eq!(state.query, "dune");
+        assert!(state.active);
+    }
+
+    #[test]
+    fn query_dispatched_and_request_failed_mark_stale_only_with_results() {
+        let mut state = populated();
+        state.query_dispatched("alien");
+        assert_eq!(state.query, "alien");
+        assert!(state.stale);
+
+        state.request_failed(true);
+        assert!(state.stale);
+        state.request_failed(false);
+        assert!(!state.stale);
+
+        state.clear_results();
+        state.request_failed(true);
+        assert!(!state.stale);
+    }
+
+    #[test]
+    fn group_selected_and_leave_group_swap_the_browse_mode() {
+        let mut state = populated();
+        state.group_selected(SearchGroup::Photos);
+        assert_eq!(state.browse_group, Some(SearchGroup::Photos));
+        assert!(!state.active);
+        assert!(state.results.is_empty());
+        assert!(!state.stale);
+        assert_eq!(state.query, "dune");
+
+        state.results = vec![item("movie-9")];
+        state.active = true;
+        state.stale = true;
+        state.leave_group();
+        assert_eq!(state.browse_group, None);
+        assert!(!state.active);
+        assert!(state.results.is_empty());
+        assert!(!state.stale);
     }
 }
