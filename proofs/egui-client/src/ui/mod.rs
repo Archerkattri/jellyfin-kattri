@@ -247,9 +247,9 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
     // Keep each destination's scroll position independent; opening details starts at its title.
     let content_scroll_id = egui::Id::unique((
         "library_content_scroll",
-        format!("{:?}:{:?}", app.view, app.page),
+        format!("{:?}:{:?}", app.navigation.view, app.navigation.page),
         app.browse.details.selected_item_id.as_deref(),
-        app.library_tab,
+        app.navigation.library_tab,
     ));
 
     let (card_focus, visible_artwork, search_show_all_targets) = egui::CentralPanel::default()
@@ -259,8 +259,9 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
             let mut search_show_all_targets = Vec::new();
             let mut visible_artwork = Vec::new();
             app.request_custom_backdrop();
-            if app.view == AppView::Home
-                || (app.view == AppView::Library && matches!(app.page, Page::Movies | Page::Series))
+            if app.navigation.view == AppView::Home
+                || (app.navigation.view == AppView::Library
+                    && matches!(app.navigation.page, Page::Movies | Page::Series))
             {
                 let rect = ui.max_rect();
                 let backdrop = app.ambient_texture();
@@ -277,7 +278,9 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
                         ui.vertical(|ui| {
                             // A right gutter that matches the left one.
                             ui.set_max_width((ui.available_width() - 24.0).max(240.0));
-                            if app.view == AppView::Library && app.page == Page::Settings {
+                            if app.navigation.view == AppView::Library
+                                && app.navigation.page == Page::Settings
+                            {
                                 settings::show(ui, app, colors, &mut gamepad_actions);
                                 return;
                             }
@@ -294,7 +297,9 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
                                 ConnectionStatus::Connecting { message } => {
                                     connection_progress(ui, colors, &message);
                                 }
-                                ConnectionStatus::LoadingItems if app.view == AppView::Home => {
+                                ConnectionStatus::LoadingItems
+                                    if app.navigation.view == AppView::Home =>
+                                {
                                     render_connected(
                                         ui,
                                         app,
@@ -358,11 +363,12 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
         })
         .inner;
     app.request_visible_artwork(visible_artwork);
-    if app.view == AppView::Library && app.page.is_catalog() {
+    if app.navigation.view == AppView::Library && app.navigation.page.is_catalog() {
         // Each card occupies 150 px plus the 6 px shelf gap. Treat the number
         // visible across this window as one row when scheduling the next page.
         let items_per_row = ((window_width - 80.0) / 156.0).floor().max(1.0) as usize;
-        let grouped_home_catalog = app.page == Page::Home && app.submitted_search.is_none();
+        let grouped_home_catalog =
+            app.navigation.page == Page::Home && app.submitted_search.is_none();
         for entry in &card_focus {
             if !entry.focused {
                 continue;
@@ -663,8 +669,10 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs
             let more_width = measure(&more_label, &font) + padding;
             let shown = visible_tab_count(&widths, nav_width, more_width);
             let is_active = |target: TopbarTarget| match target {
-                TopbarTarget::Home => app.view == AppView::Home,
-                TopbarTarget::Page(page) => app.view == AppView::Library && app.page == page,
+                TopbarTarget::Home => app.navigation.view == AppView::Home,
+                TopbarTarget::Page(page) => {
+                    app.navigation.view == AppView::Library && app.navigation.page == page
+                }
                 TopbarTarget::More => false,
             };
             let mut clicked = None;
@@ -740,7 +748,7 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs
                         app.settings.settings_mut().general.high_contrast = app.high_contrast;
                         app.commit_settings(&before);
                     }
-                    if app.view == AppView::Home
+                    if app.navigation.view == AppView::Home
                         && ui.button(ui_text(ids::HOME_BUTTON_REFRESH)).clicked()
                     {
                         app.apply_home_action(home::HomeAction::Refresh);
@@ -793,10 +801,10 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs
     if clear_search {
         app.clear_search(search_now);
     } else if submit_search || search_changed {
-        if app.view == AppView::Home {
+        if app.navigation.view == AppView::Home {
             app.set_view(AppView::Library);
-            app.page = Page::Home;
-        } else if !shows_search_results(app.page) {
+            app.navigation.page = Page::Home;
+        } else if !shows_search_results(app.navigation.page) {
             // Pages that are not item grids have no place for results, so the search opens the
             // full catalog. Keep the typed text, which leaving the page clears.
             let query = std::mem::take(&mut app.search_query);
@@ -818,10 +826,10 @@ fn shows_search_results(page: Page) -> bool {
 /// Index in the top bar's tabs of the tab for the current view, so focus can return to it: the
 /// More button when the current page is in its menu.
 fn active_topbar_index(app: &KattriApp, tabs: &TopbarTabs) -> usize {
-    let current = if app.view == AppView::Home {
+    let current = if app.navigation.view == AppView::Home {
         TopbarTarget::Home
     } else {
-        TopbarTarget::Page(app.page)
+        TopbarTarget::Page(app.navigation.page)
     };
     tabs.targets
         .iter()
@@ -1627,23 +1635,23 @@ fn render_connected(
     visible_artwork: &mut Vec<(String, String)>,
     gamepad_actions: &mut Vec<NavAction>,
 ) {
-    if app.view == AppView::Home {
+    if app.navigation.view == AppView::Home {
         home_view(ui, app, colors, entries, visible_artwork);
         return;
     }
-    if app.page == Page::Settings {
+    if app.navigation.page == Page::Settings {
         settings::show(ui, app, colors, gamepad_actions);
         return;
     }
-    if app.page == Page::Downloads {
+    if app.navigation.page == Page::Downloads {
         downloads_page(ui, app, colors);
         return;
     }
-    if app.page == Page::LiveTv {
+    if app.navigation.page == Page::LiveTv {
         live_tv_page(ui, app, colors);
         return;
     }
-    if app.page == Page::Dashboard {
+    if app.navigation.page == Page::Dashboard {
         if app.admin_users_open
             && (!app.user_is_admin || !app.dashboard_enabled() || app.server.is_none())
         {
@@ -1680,16 +1688,16 @@ fn render_connected(
         }
         return;
     }
-    if app.page == Page::SyncPlay {
+    if app.navigation.page == Page::SyncPlay {
         syncplay::show(ui, app, colors);
         return;
     }
-    if app.page == Page::Photos {
+    if app.navigation.page == Page::Photos {
         photos_page(ui, app);
         return;
     }
-    if matches!(app.page, Page::Movies | Page::Series)
-        && app.view == AppView::Library
+    if matches!(app.navigation.page, Page::Movies | Page::Series)
+        && app.navigation.view == AppView::Library
         && app.search_browse_group.is_none()
         && !app.search_active
         && app.submitted_search.is_none()
@@ -1716,7 +1724,7 @@ fn render_connected(
         ui.add_space(10.0);
     }
 
-    if app.page == Page::Playlists {
+    if app.navigation.page == Page::Playlists {
         playlists_page(ui, app);
         return;
     }
@@ -1871,14 +1879,14 @@ fn render_connected(
         return;
     }
 
-    if app.page == Page::Music {
+    if app.navigation.page == Page::Music {
         music_queue_panel(ui, app, gamepad_actions);
     }
     // Sorting and paging belong to the list; an open item or person page replaces them.
     if app.browse.details.selected_item_id.is_none() && app.selected_person.is_none() {
         // Sort and filter controls only describe the library's own catalog. Suggestions and
         // Upcoming are one fixed page, and Episodes has its own newest-first ordering.
-        if app.library_tab == LibraryTab::Library {
+        if app.navigation.library_tab == LibraryTab::Library {
             catalog_controls(ui, app, colors);
         }
         catalog_pagination(ui, app, colors);
@@ -1927,7 +1935,7 @@ fn render_connected(
         return;
     }
 
-    if app.page == Page::Home {
+    if app.navigation.page == Page::Home {
         home_header(ui, app, colors);
         // All items groups the same loaded catalog into shelves, so the selection is bound to
         // this page before any shelf draws and is pruned to the kinds the page can show.
@@ -2099,31 +2107,33 @@ fn render_connected(
         .browse_context
         .as_ref()
         .is_some_and(|context| context.is_collection);
-    let matches_item: fn(MediaKind) -> bool =
-        if matches!(app.library_tab, LibraryTab::Upcoming | LibraryTab::Episodes) {
-            |kind| kind == MediaKind::Episode
-        } else {
-            match app.page {
-                Page::Movies => |kind| kind == MediaKind::Movie,
-                Page::Series => |kind| kind == MediaKind::Series,
-                Page::Music => |kind| kind == MediaKind::Audio,
-                Page::Photos => |kind| kind == MediaKind::Photo,
-                Page::Playlists => |kind| kind == MediaKind::Playlist,
-                // A collection holds any kind of item.
-                Page::Collections if open_collection => |_| true,
-                Page::Collections => |kind| kind == MediaKind::Folder,
-                Page::MusicVideos | Page::HomeVideos => |kind| kind == MediaKind::Video,
-                Page::Books => |kind| matches!(kind, MediaKind::Book | MediaKind::Audio),
-                // These pages do not render the catalog grid. A future caller must not crash the
-                // app; showing nothing is the safe default.
-                Page::Home
-                | Page::Downloads
-                | Page::LiveTv
-                | Page::Dashboard
-                | Page::SyncPlay
-                | Page::Settings => |_| false,
-            }
-        };
+    let matches_item: fn(MediaKind) -> bool = if matches!(
+        app.navigation.library_tab,
+        LibraryTab::Upcoming | LibraryTab::Episodes
+    ) {
+        |kind| kind == MediaKind::Episode
+    } else {
+        match app.navigation.page {
+            Page::Movies => |kind| kind == MediaKind::Movie,
+            Page::Series => |kind| kind == MediaKind::Series,
+            Page::Music => |kind| kind == MediaKind::Audio,
+            Page::Photos => |kind| kind == MediaKind::Photo,
+            Page::Playlists => |kind| kind == MediaKind::Playlist,
+            // A collection holds any kind of item.
+            Page::Collections if open_collection => |_| true,
+            Page::Collections => |kind| kind == MediaKind::Folder,
+            Page::MusicVideos | Page::HomeVideos => |kind| kind == MediaKind::Video,
+            Page::Books => |kind| matches!(kind, MediaKind::Book | MediaKind::Audio),
+            // These pages do not render the catalog grid. A future caller must not crash the
+            // app; showing nothing is the safe default.
+            Page::Home
+            | Page::Downloads
+            | Page::LiveTv
+            | Page::Dashboard
+            | Page::SyncPlay
+            | Page::Settings => |_| false,
+        }
+    };
     // Selection is bounded to the grid on screen: a page/library change clears it and a
     // reloaded list drops ids that are no longer loaded.
     app.catalog_selection
@@ -2142,18 +2152,18 @@ fn render_connected(
         .peekable();
     if items.peek().is_none() {
         if matches!(
-            app.library_tab,
+            app.navigation.library_tab,
             LibraryTab::Suggestions | LibraryTab::Upcoming | LibraryTab::Episodes
         ) {
-            let kind = match app.library_tab {
+            let kind = match app.navigation.library_tab {
                 LibraryTab::Upcoming => "upcoming episodes".to_owned(),
-                tab => tab.label(app.page).to_lowercase(),
+                tab => tab.label(app.navigation.page).to_lowercase(),
             };
             let title = ui_text_args(
                 ids::BROWSE_EMPTY_TYPE_LOADED_TITLE,
                 &[("kind", kind.as_str())],
             );
-            let message = match app.library_tab {
+            let message = match app.navigation.library_tab {
                 LibraryTab::Suggestions => ui_text(ids::LIBRARY_TAB_EMPTY_SUGGESTIONS),
                 LibraryTab::Upcoming => ui_text(ids::LIBRARY_TAB_EMPTY_UPCOMING),
                 _ => ui_text(ids::BROWSE_EMPTY_TYPE_SERVER_HINT),
@@ -2190,7 +2200,7 @@ fn render_connected(
             colors,
             &ui_text_args(
                 ids::BROWSE_EMPTY_TYPE_LOADED_TITLE,
-                &[("kind", &app.page.label().to_lowercase())],
+                &[("kind", &app.navigation.page.label().to_lowercase())],
             ),
             ui_text(ids::BROWSE_EMPTY_TYPE_SERVER_HINT),
             Some((ui_text(ids::BROWSE_BUTTON_SHOW_ALL), StateAction::OpenHome)),
@@ -2210,10 +2220,12 @@ fn render_connected(
     // An open collection's grid holds its items, not more collections.
     let grid_title = match app.browse_context.as_ref() {
         Some(context) if open_collection => context.title.clone(),
-        _ if matches!(app.page, Page::Movies | Page::Series) => {
-            app.library_tab.label(app.page).to_owned()
-        }
-        _ => app.page.label().to_owned(),
+        _ if matches!(app.navigation.page, Page::Movies | Page::Series) => app
+            .navigation
+            .library_tab
+            .label(app.navigation.page)
+            .to_owned(),
+        _ => app.navigation.page.label().to_owned(),
     };
     let mut catalog_view = CatalogView {
         colors,
@@ -2225,7 +2237,7 @@ fn render_connected(
         selection: &mut app.catalog_selection,
     };
     if let Some(item_id) = poster_grid(ui, &grid_title, &items, &mut catalog_view) {
-        if app.page == Page::Collections {
+        if app.navigation.page == Page::Collections {
             // A collection opens as its own page of items.
             app.activate_catalog_item(item_id);
         } else {
@@ -2508,7 +2520,7 @@ fn catalog_selection_scope(app: &KattriApp) -> String {
     let search = app.submitted_search.as_deref().unwrap_or("");
     format!(
         "{:?}:{:?}:{parent_id}:{search}:{:?}",
-        app.view, app.page, app.music_view
+        app.navigation.view, app.navigation.page, app.music_view
     )
 }
 
@@ -2743,7 +2755,7 @@ fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
             );
         }
     });
-    if app.page == Page::Music && app.browse_context.is_none() {
+    if app.navigation.page == Page::Music && app.browse_context.is_none() {
         let mut view = app.music_view;
         ui.horizontal(|ui| {
             for option in crate::app::MusicView::ALL {
@@ -2817,7 +2829,7 @@ fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
 /// to assistive technology by `Button::selectable`, and a focused tab moves with the same
 /// keyboard/gamepad actions as the rest of the shell.
 fn library_tab_strip(ui: &mut egui::Ui, app: &mut KattriApp, gamepad_actions: &mut Vec<NavAction>) {
-    let page = app.page;
+    let page = app.navigation.page;
     let tabs = LibraryTab::for_page(page);
     if tabs.is_empty() {
         return;
@@ -2828,7 +2840,7 @@ fn library_tab_strip(ui: &mut egui::Ui, app: &mut KattriApp, gamepad_actions: &m
         ui.spacing_mut().item_spacing.x = 6.0;
         for tab in tabs {
             let enabled = app.library_tab_available(*tab);
-            let selected = app.library_tab == *tab;
+            let selected = app.navigation.library_tab == *tab;
             let response = ui.add_enabled(
                 enabled,
                 egui::Button::selectable(selected, RichText::new(tab.label(page)).size(16.0)),
@@ -5084,7 +5096,7 @@ mod accessible_name_tests {
             context.enable_accesskit();
             let mut app = KattriApp::new(context.clone());
             app.apply_connection_status(ConnectionStatus::Connected);
-            app.view = AppView::Home;
+            app.navigation.view = AppView::Home;
             let mut output = context.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
@@ -5133,10 +5145,10 @@ mod accessible_name_tests {
         app.apply_connection_status(ConnectionStatus::Connected);
         match page {
             Some(page) => {
-                app.view = AppView::Library;
-                app.page = page;
+                app.navigation.view = AppView::Library;
+                app.navigation.page = page;
             }
-            None => app.view = AppView::Home,
+            None => app.navigation.view = AppView::Home,
         }
         let mut output = context.run_ui(
             egui::RawInput {

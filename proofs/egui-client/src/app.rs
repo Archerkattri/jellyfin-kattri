@@ -1045,6 +1045,18 @@ mod connection_boundary_tests {
         );
     }
     #[test]
+    fn navigation_state_starts_on_home_and_tracks_requests() {
+        use super::{AppView, LibraryTab, NavigationState, Page};
+        let mut navigation = NavigationState::new();
+        assert_eq!(navigation.page, Page::Home);
+        assert_eq!(navigation.view, AppView::Home);
+        assert_eq!(navigation.library_tab, LibraryTab::Library);
+        assert_eq!(navigation.library_tab_request_id, 0);
+
+        navigation.library_tab_request_id = 9;
+        assert_eq!(navigation.library_tab_request_id, 9);
+    }
+    #[test]
     fn beginning_a_connection_starts_a_new_session_generation() {
         let context = egui::Context::default();
         let mut app = KattriApp::new(context);
@@ -1383,6 +1395,35 @@ pub enum ConnectionStatus {
     LoadingItems,
     Connected,
     LibraryError(String),
+}
+
+/// Owned navigation state: which page and view are shown, and which library tab is selected.
+///
+/// These four fields were loose on `KattriApp`, written from the page/tab handlers and the session
+/// reset. They are owned here so the browse view reads one place and a tab request is ordered by its
+/// own id. `Page`, `AppView` and `LibraryTab` are UI enums, so this state lives with the app rather
+/// than in `client-core`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NavigationState {
+    /// The library page shown.
+    pub(crate) page: Page,
+    /// Whether the home screen or the library is shown.
+    pub(crate) view: AppView,
+    /// The selected library tab inside the page.
+    pub(crate) library_tab: LibraryTab,
+    /// The request id of the tab's item request in flight (or the last one issued).
+    pub(crate) library_tab_request_id: u64,
+}
+
+impl NavigationState {
+    pub(crate) const fn new() -> Self {
+        Self {
+            page: Page::Home,
+            view: AppView::Home,
+            library_tab: LibraryTab::Library,
+            library_tab_request_id: 0,
+        }
+    }
 }
 
 /// The display text carried by a [`ConnectionStatus`], held separately from the phase.
@@ -1729,6 +1770,8 @@ pub struct KattriApp {
     metadata_thumbnail_requests: HashMap<u64, String>,
     pub(crate) items: Vec<crate::catalog::MediaItem>,
     /// Multi-select state for the catalog grid. Bounded to the loaded page; UI code owns it.
+    /// Owned navigation: page, view, library tab and its request id.
+    pub(crate) navigation: NavigationState,
     /// Owned catalog page lifecycle: request id, loading/loaded flags, error, cursor.
     pub(crate) browse: BrowseState,
     pub(crate) catalog_selection: crate::ui::selection::LibrarySelection,
@@ -1736,9 +1779,7 @@ pub struct KattriApp {
     pub(crate) collection_runtime: CollectionRuntime,
     pub(crate) start_index: u32,
     /// The selected tab of the Movies or Series page. Reset whenever the page changes.
-    pub(crate) library_tab: LibraryTab,
     /// Latest Suggestions or Upcoming request; a reply for any other id is stale.
-    library_tab_request_id: u64,
     loaded_search: Option<String>,
     unsupported_catalog_filters: Vec<(Page, ItemFilter)>,
     pub(crate) selected_artwork_texture: Option<egui::TextureHandle>,
@@ -1792,8 +1833,6 @@ pub struct KattriApp {
     /// A prepared episode waiting for its item record, which carries the series ID (M2-10).
     /// Kept with its start request ID, so a newer request drops it.
     held_playback: Option<(u64, String, Box<PreparedPlayback>)>,
-    pub(crate) page: Page,
-    pub(crate) view: AppView,
     pub(crate) browse_context: Option<BrowseContext>,
     pub(crate) home: HomeState,
     pub(crate) live_tv_channels: Vec<LiveTvChannel>,
@@ -2413,13 +2452,12 @@ impl KattriApp {
             metadata_editor_request: 0,
             metadata_thumbnail_requests: HashMap::new(),
             items: Vec::new(),
+            navigation: NavigationState::new(),
             browse: BrowseState::new(),
             catalog_selection: crate::ui::selection::LibrarySelection::default(),
             total_record_count: None,
             collection_runtime: CollectionRuntime::default(),
             start_index: 0,
-            library_tab: LibraryTab::Library,
-            library_tab_request_id: 0,
             loaded_search: None,
             downloads: DownloadsState::default(),
             batch_downloads: BatchQueue::default(),
@@ -2469,8 +2507,6 @@ impl KattriApp {
             burn_in_subtitle_feedback: None,
             mid_stream_recoveries: 0,
             held_playback: None,
-            page: Page::Home,
-            view: AppView::Home,
             browse_context: None,
             home: HomeState::default(),
             live_tv_channels: Vec::new(),
@@ -4888,8 +4924,8 @@ impl KattriApp {
         self.clear_subtitle_management();
         self.items.clear();
         self.catalog_selection.clear();
-        self.library_tab = LibraryTab::Library;
-        self.library_tab_request_id = self.allocate_request_id();
+        self.navigation.library_tab = LibraryTab::Library;
+        self.navigation.library_tab_request_id = self.allocate_request_id();
         self.browse.details.selected_item_id = None;
         self.browse.details.selected_details = None;
         self.selected_artwork_texture = None;
@@ -4921,7 +4957,7 @@ impl KattriApp {
         self.search_stale = false;
         self.search_debouncer.input("", Duration::ZERO);
         self.search_query.clear();
-        self.view = AppView::Home;
+        self.navigation.view = AppView::Home;
         self.browse_context = None;
         self.home = HomeState::default();
         self.live_tv_channels.clear();
@@ -5020,7 +5056,7 @@ impl KattriApp {
             || self.browse.details.selected_item_id.is_some()
         {
             self.retry_item_details();
-        } else if self.view == AppView::Home {
+        } else if self.navigation.view == AppView::Home {
             self.refresh_home();
         } else {
             self.retry_items();
@@ -5032,8 +5068,8 @@ impl KattriApp {
             return;
         };
         let current_context = (
-            self.view,
-            self.page,
+            self.navigation.view,
+            self.navigation.page,
             self.browse.details.selected_item_id.clone(),
         );
         if self.network_retry_context.as_ref() != Some(&current_context) {
@@ -5080,8 +5116,8 @@ impl KattriApp {
         };
         self.network_retry_context = self.network_retry_deadline.map(|_| {
             (
-                self.view,
-                self.page,
+                self.navigation.view,
+                self.navigation.page,
                 self.browse.details.selected_item_id.clone(),
             )
         });
@@ -5119,15 +5155,15 @@ impl KattriApp {
         if page != Page::Dashboard && self.admin_users_open {
             self.close_admin_users();
         }
-        self.view = AppView::Library;
+        self.navigation.view = AppView::Library;
         let left_browse_context = self.browse_context.take().is_some();
-        if self.page == page && !left_browse_context {
+        if self.navigation.page == page && !left_browse_context {
             return;
         }
         self.cancel_navigation_requests();
-        self.page = page;
-        self.library_tab = LibraryTab::Library;
-        self.library_tab_request_id = self.allocate_request_id();
+        self.navigation.page = page;
+        self.navigation.library_tab = LibraryTab::Library;
+        self.navigation.library_tab_request_id = self.allocate_request_id();
         if page == Page::LiveTv {
             self.live_tv_recordings_state = RecordingsState::NotLoaded;
         }
@@ -5189,8 +5225,8 @@ impl KattriApp {
     }
 
     pub(crate) fn can_manage_admin_users(&self) -> bool {
-        self.view == AppView::Library
-            && self.page == Page::Dashboard
+        self.navigation.view == AppView::Library
+            && self.navigation.page == Page::Dashboard
             && self.dashboard_enabled()
             && self.user_is_admin
             && self.server.is_some()
@@ -5369,10 +5405,10 @@ impl KattriApp {
         is_collection: bool,
     ) {
         self.cancel_navigation_requests();
-        self.view = AppView::Library;
-        self.page = page;
-        self.library_tab = LibraryTab::Library;
-        self.library_tab_request_id = self.allocate_request_id();
+        self.navigation.view = AppView::Library;
+        self.navigation.page = page;
+        self.navigation.library_tab = LibraryTab::Library;
+        self.navigation.library_tab_request_id = self.allocate_request_id();
         self.catalog_name_prefix = None;
         self.catalog_genre = None;
         self.catalog_studio = None;
@@ -5410,7 +5446,7 @@ impl KattriApp {
             .map(|item| (item.id.clone(), item.title.clone()));
         if let Some((id, title)) = nested_collection {
             // Collections opened from the Collections page stay under its tab.
-            let page = if self.page == Page::Collections {
+            let page = if self.navigation.page == Page::Collections {
                 Page::Collections
             } else {
                 Page::Home
@@ -5441,7 +5477,7 @@ impl KattriApp {
         if view == AppView::Home && self.admin_users_open {
             self.close_admin_users();
         }
-        self.view = view;
+        self.navigation.view = view;
     }
 
     pub(crate) fn navigate_back(&mut self) {
@@ -5450,7 +5486,7 @@ impl KattriApp {
             self.cancel_pending_photo_decodes();
             return;
         }
-        if self.page == Page::Photos && self.browse_context.is_some() {
+        if self.navigation.page == Page::Photos && self.browse_context.is_some() {
             self.navigate_to(Page::Photos);
             return;
         }
@@ -5477,15 +5513,15 @@ impl KattriApp {
             self.reset_series_detail();
             self.reset_people_detail();
             self.reset_playback(PlaybackReset::Selection);
-        } else if self.page == Page::Collections
+        } else if self.navigation.page == Page::Collections
             && self
                 .browse_context
                 .as_ref()
                 .is_some_and(|context| context.is_collection)
         {
             self.navigate_to(Page::Collections);
-        } else if self.view == AppView::Library {
-            self.view = AppView::Home;
+        } else if self.navigation.view == AppView::Library {
+            self.navigation.view = AppView::Home;
         }
     }
 
@@ -6402,8 +6438,8 @@ impl KattriApp {
             HomeAction::RetryCatalog(kind) => self.request_home_catalog(kind),
             HomeAction::OpenLibrary(tile) => match tile.target {
                 HomeViewTarget::Playlists => {
-                    self.view = AppView::Library;
-                    self.page = Page::Playlists;
+                    self.navigation.view = AppView::Library;
+                    self.navigation.page = Page::Playlists;
                     self.browse_context = None;
                     self.search_query.clear();
                     self.submitted_search = None;
@@ -6634,7 +6670,7 @@ impl KattriApp {
             return false;
         }
 
-        if self.page == Page::Photos {
+        if self.navigation.page == Page::Photos {
             self.photo_items = crate::parental::shown_items(&page.items, ceiling);
             self.photo_page_start = page.start_index as usize;
             self.photo_thumbnail_attempted.clear();
@@ -6662,7 +6698,7 @@ impl KattriApp {
         );
         let mut collection_page_items = Vec::new();
         self.browse.catalog_next_index = page_start.saturating_add(page_size);
-        let page_limit = catalog_page_limit(self.submitted_search.is_some(), self.page);
+        let page_limit = catalog_page_limit(self.submitted_search.is_some(), self.navigation.page);
         self.browse.catalog_end_reached = page_size < page_limit
             || self
                 .total_record_count
@@ -6739,11 +6775,11 @@ impl KattriApp {
 
     /// The item types the current page lists, with the Music page's view applied.
     fn page_item_types(&self) -> Option<&'static [&'static str]> {
-        if self.page == Page::Music {
+        if self.navigation.page == Page::Music {
             return Some(self.music_view.item_types());
         }
         // An open collection lists whatever it holds.
-        if self.page == Page::Collections
+        if self.navigation.page == Page::Collections
             && self
                 .browse_context
                 .as_ref()
@@ -6751,14 +6787,14 @@ impl KattriApp {
         {
             return None;
         }
-        self.page.item_types()
+        self.navigation.page.item_types()
     }
 
     /// The library a typed page reads from when no library tile chose one: the first user view
     /// of that page's collection type. Home videos share the `Video` type with other libraries,
     /// so that page needs it; the others are already distinct by item type.
     fn page_library_parent(&self) -> Option<String> {
-        let collection_type = match self.page {
+        let collection_type = match self.navigation.page {
             Page::HomeVideos => "homevideos",
             _ => return None,
         };
@@ -6804,8 +6840,8 @@ impl KattriApp {
             .browse_context
             .as_ref()
             .map(|context| context.parent_id.clone());
-        let scope = (self.page, parent_id.clone());
-        if !Self::page_has_genres(self.page) {
+        let scope = (self.navigation.page, parent_id.clone());
+        if !Self::page_has_genres(self.navigation.page) {
             self.catalog_genres.clear();
             self.catalog_studios.clear();
             self.catalog_genres_scope = None;
@@ -6881,17 +6917,18 @@ impl KattriApp {
     pub(crate) fn catalog_filter_supported(&self, filter: ItemFilter) -> bool {
         !self
             .unsupported_catalog_filters
-            .contains(&(self.page, filter))
+            .contains(&(self.navigation.page, filter))
     }
 
     fn apply_unsupported_catalog_filter(&mut self, filter: ItemFilter) {
         if self
             .unsupported_catalog_filters
-            .contains(&(self.page, filter))
+            .contains(&(self.navigation.page, filter))
         {
             return;
         }
-        self.unsupported_catalog_filters.push((self.page, filter));
+        self.unsupported_catalog_filters
+            .push((self.navigation.page, filter));
         match filter {
             ItemFilter::IsPlayed if self.catalog_played_filter == CatalogPlayedFilter::Played => {
                 self.catalog_played_filter = CatalogPlayedFilter::Any;
@@ -7022,7 +7059,7 @@ impl KattriApp {
         if let Some(context) = self.browse_context.as_ref() {
             return Some(context.parent_id.clone());
         }
-        let collection_type = match self.page {
+        let collection_type = match self.navigation.page {
             Page::Movies => "movies",
             Page::Series => "tvshows",
             _ => return None,
@@ -7038,19 +7075,19 @@ impl KattriApp {
         match tab {
             LibraryTab::Library => true,
             LibraryTab::Suggestions => self.library_tab_library_id().is_some(),
-            LibraryTab::Upcoming | LibraryTab::Episodes => self.page == Page::Series,
+            LibraryTab::Upcoming | LibraryTab::Episodes => self.navigation.page == Page::Series,
         }
     }
 
     /// Switch the Movies or Series page to another tab, dropping the old page's selection,
     /// paging and scroll position before the new source loads.
     pub(crate) fn select_library_tab(&mut self, tab: LibraryTab) {
-        if self.library_tab == tab || !self.library_tab_available(tab) {
+        if self.navigation.library_tab == tab || !self.library_tab_available(tab) {
             return;
         }
-        self.library_tab = tab;
+        self.navigation.library_tab = tab;
         self.cancel_navigation_requests();
-        self.library_tab_request_id = self.allocate_request_id();
+        self.navigation.library_tab_request_id = self.allocate_request_id();
         self.catalog_selection.clear();
         self.items.clear();
         self.total_record_count = None;
@@ -7069,7 +7106,7 @@ impl KattriApp {
     /// are a single capped page, so they never page.
     fn begin_library_tab_request(&mut self) -> u64 {
         let request_id = self.allocate_request_id();
-        self.library_tab_request_id = request_id;
+        self.navigation.library_tab_request_id = request_id;
         self.browse.catalog_request_id = request_id;
         self.items.clear();
         self.total_record_count = None;
@@ -7142,13 +7179,13 @@ impl KattriApp {
     }
 
     fn request_catalog(&mut self, start_index: u32, search_term: Option<String>) {
-        if search_term.is_none() && matches!(self.page, Page::Movies | Page::Series) {
-            match self.library_tab {
+        if search_term.is_none() && matches!(self.navigation.page, Page::Movies | Page::Series) {
+            match self.navigation.library_tab {
                 LibraryTab::Suggestions => {
                     self.request_library_suggestions();
                     return;
                 }
-                LibraryTab::Upcoming if self.page == Page::Series => {
+                LibraryTab::Upcoming if self.navigation.page == Page::Series => {
                     self.request_upcoming_episodes();
                     return;
                 }
@@ -7156,8 +7193,8 @@ impl KattriApp {
             }
         }
         let episodes_tab = search_term.is_none()
-            && self.library_tab == LibraryTab::Episodes
-            && self.page == Page::Series;
+            && self.navigation.library_tab == LibraryTab::Episodes
+            && self.navigation.page == Page::Series;
         let is_search = search_term.is_some() && self.search_browse_group.is_none();
         let is_search_browse = search_term.is_some() && self.search_browse_group.is_some();
         let channel_search_term = if start_index == 0
@@ -7301,9 +7338,12 @@ impl KattriApp {
                         request_id,
                         self.session_epoch,
                         ItemQuery {
-                            recursive: self.page != Page::Photos,
+                            recursive: self.navigation.page != Page::Photos,
                             start_index,
-                            limit: catalog_page_limit(is_search || is_search_browse, self.page),
+                            limit: catalog_page_limit(
+                                is_search || is_search_browse,
+                                self.navigation.page,
+                            ),
                             parent_id,
                             include_item_types,
                             search_term,
@@ -7333,7 +7373,7 @@ impl KattriApp {
             if !self.browse.catalog_loaded {
                 self.apply_connection_status(ConnectionStatus::LibraryError(message));
             }
-        } else if start_index == 0 && self.page == Page::Playlists && !is_search {
+        } else if start_index == 0 && self.navigation.page == Page::Playlists && !is_search {
             self.request_playlist_candidates();
         }
         if start_index == 0 {
@@ -9230,7 +9270,7 @@ impl KattriApp {
 
     /// Loads separate sharp hero and blurred ambient textures for the selected item.
     fn request_home_hero_backdrop(&mut self) {
-        if self.view != AppView::Home {
+        if self.navigation.view != AppView::Home {
             return;
         }
         let Some(item_id) = self.home.hero_item_id() else {
@@ -9315,7 +9355,7 @@ impl KattriApp {
                 self.custom_backdrop_texture.as_ref().map(sized_texture)
             }
             kattri_settings::BackdropPreference::Server => {
-                if self.view == AppView::Home {
+                if self.navigation.view == AppView::Home {
                     self.home_ambient_backdrop
                         .as_ref()
                         .map(|(_, texture)| sized_texture(texture))
@@ -9736,7 +9776,7 @@ impl KattriApp {
         self.search_stale = false;
         self.search_active = false;
         self.search_debouncer.input("", Duration::ZERO);
-        self.view = AppView::Home;
+        self.navigation.view = AppView::Home;
         self.browse_context = None;
         self.home = HomeState::default();
         self.live_tv_channels.clear();
@@ -10542,8 +10582,8 @@ impl KattriApp {
                     }
                 }
                 WorkerEvent::LibrarySuggestionsLoaded { request_id, items }
-                    if request_id == self.library_tab_request_id
-                        && self.library_tab == LibraryTab::Suggestions =>
+                    if request_id == self.navigation.library_tab_request_id
+                        && self.navigation.library_tab == LibraryTab::Suggestions =>
                 {
                     self.record_network_success();
                     let ceiling = self.browse_rating_ceiling(ctx);
@@ -10553,8 +10593,8 @@ impl KattriApp {
                     request_id,
                     error_class,
                     retry_after,
-                } if request_id == self.library_tab_request_id
-                    && self.library_tab == LibraryTab::Suggestions =>
+                } if request_id == self.navigation.library_tab_request_id
+                    && self.navigation.library_tab == LibraryTab::Suggestions =>
                 {
                     self.record_network_error(error_class, retry_after);
                     self.browse.catalog_loading = false;
@@ -10562,8 +10602,8 @@ impl KattriApp {
                         Some(crate::ui::status::message(error_class).to_owned());
                 }
                 WorkerEvent::UpcomingEpisodesLoaded { request_id, items }
-                    if request_id == self.library_tab_request_id
-                        && self.library_tab == LibraryTab::Upcoming =>
+                    if request_id == self.navigation.library_tab_request_id
+                        && self.navigation.library_tab == LibraryTab::Upcoming =>
                 {
                     self.record_network_success();
                     let ceiling = self.browse_rating_ceiling(ctx);
@@ -10573,8 +10613,8 @@ impl KattriApp {
                     request_id,
                     error_class,
                     retry_after,
-                } if request_id == self.library_tab_request_id
-                    && self.library_tab == LibraryTab::Upcoming =>
+                } if request_id == self.navigation.library_tab_request_id
+                    && self.navigation.library_tab == LibraryTab::Upcoming =>
                 {
                     self.record_network_error(error_class, retry_after);
                     self.browse.catalog_loading = false;
@@ -10871,7 +10911,7 @@ impl KattriApp {
                 }
                 WorkerEvent::PlaylistCandidatesLoaded { request_id, items }
                     if request_id == self.playlist_candidates_request_id
-                        && self.page == Page::Playlists =>
+                        && self.navigation.page == Page::Playlists =>
                 {
                     self.record_network_success();
                     self.playlist_candidates_loading = false;
@@ -10882,7 +10922,7 @@ impl KattriApp {
                     request_id,
                     error_class,
                 } if request_id == self.playlist_candidates_request_id
-                    && self.page == Page::Playlists =>
+                    && self.navigation.page == Page::Playlists =>
                 {
                     self.record_network_error(error_class, None);
                     self.playlist_candidates_loading = false;
@@ -12221,8 +12261,8 @@ mod search_browse_tests {
         let mut app = KattriApp::new(egui::Context::default());
         let (worker, _events) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.view = AppView::Library;
-        app.page = Page::Home;
+        app.navigation.view = AppView::Library;
+        app.navigation.page = Page::Home;
         app.submitted_search = Some("quiet river".into());
         app.search_active = true;
         app.show_all_search_group(SearchGroup::Photos);
@@ -13345,8 +13385,8 @@ mod home_navigation_tests {
             target: HomeViewTarget::Movies,
         }));
 
-        assert_eq!(app.view, AppView::Library);
-        assert_eq!(app.page, Page::Movies);
+        assert_eq!(app.navigation.view, AppView::Library);
+        assert_eq!(app.navigation.page, Page::Movies);
         assert_eq!(
             app.browse_context,
             Some(BrowseContext {
@@ -13376,7 +13416,7 @@ mod home_navigation_tests {
             id: "box-set".into(),
             name: "Collection".into(),
         });
-        assert_eq!(app.page, Page::Home);
+        assert_eq!(app.navigation.page, Page::Home);
         assert_eq!(
             app.browse_context,
             Some(BrowseContext {
@@ -13387,14 +13427,14 @@ mod home_navigation_tests {
         );
 
         app.browse_context = None;
-        app.view = AppView::Home;
+        app.navigation.view = AppView::Home;
         app.apply_home_action(HomeAction::OpenLibrary(MyMediaTile {
             id: "playlists-view".into(),
             name: "Playlists".into(),
             target: HomeViewTarget::Playlists,
         }));
-        assert_eq!(app.view, AppView::Library);
-        assert_eq!(app.page, Page::Playlists);
+        assert_eq!(app.navigation.view, AppView::Library);
+        assert_eq!(app.navigation.page, Page::Playlists);
         assert_eq!(app.browse_context, None);
     }
 
@@ -13425,14 +13465,14 @@ mod home_navigation_tests {
 
         app.activate_catalog_item("set".into());
 
-        assert_eq!(app.page, Page::Collections);
+        assert_eq!(app.navigation.page, Page::Collections);
         assert!(app.browse_context.as_ref().is_some_and(|c| c.is_collection));
         // An open collection lists every kind of item it holds.
         assert_eq!(app.page_item_types(), None);
 
         app.navigate_back();
-        assert_eq!(app.view, AppView::Library);
-        assert_eq!(app.page, Page::Collections);
+        assert_eq!(app.navigation.view, AppView::Library);
+        assert_eq!(app.navigation.page, Page::Collections);
         assert_eq!(app.browse_context, None);
     }
 
@@ -13452,15 +13492,15 @@ mod home_navigation_tests {
     #[test]
     fn back_clears_item_details_before_returning_from_catalog_to_home() {
         let mut app = KattriApp::new(egui::Context::default());
-        app.view = AppView::Library;
+        app.navigation.view = AppView::Library;
         app.browse.details.selected_item_id = Some("selected-item".into());
 
         app.navigate_back();
         assert_eq!(app.browse.details.selected_item_id, None);
-        assert_eq!(app.view, AppView::Library);
+        assert_eq!(app.navigation.view, AppView::Library);
 
         app.navigate_back();
-        assert_eq!(app.view, AppView::Home);
+        assert_eq!(app.navigation.view, AppView::Home);
     }
 
     #[test]
@@ -17268,8 +17308,8 @@ mod library_tab_tests {
             id: None,
         });
         app.connection = ConnectionStatus::Connected;
-        app.view = AppView::Library;
-        app.page = page;
+        app.navigation.view = AppView::Library;
+        app.navigation.page = page;
         app.browse_context = Some(BrowseContext {
             parent_id: parent_id.to_owned(),
             title: "Library".into(),
@@ -17291,7 +17331,7 @@ mod library_tab_tests {
         let mut app = connected_app(Page::Movies, "movies-lib");
 
         app.select_library_tab(LibraryTab::Suggestions);
-        assert_eq!(app.library_tab, LibraryTab::Suggestions);
+        assert_eq!(app.navigation.library_tab, LibraryTab::Suggestions);
         assert!(app.browse.catalog_loading);
         let commands = take_commands(&mut app);
         assert_eq!(commands.len(), 1, "one tab request");
@@ -17302,13 +17342,13 @@ mod library_tab_tests {
             _ => panic!("unexpected suggestions command"),
         }
 
-        app.page = Page::Series;
+        app.navigation.page = Page::Series;
         app.browse_context = Some(BrowseContext {
             parent_id: "series-lib".into(),
             title: "Shows".into(),
             is_collection: false,
         });
-        app.library_tab = LibraryTab::Library;
+        app.navigation.library_tab = LibraryTab::Library;
         app.select_library_tab(LibraryTab::Upcoming);
         let commands = take_commands(&mut app);
         assert_eq!(commands.len(), 1, "one tab request");
@@ -17317,7 +17357,7 @@ mod library_tab_tests {
             _ => panic!("unexpected upcoming command"),
         }
 
-        app.library_tab = LibraryTab::Library;
+        app.navigation.library_tab = LibraryTab::Library;
         app.select_library_tab(LibraryTab::Episodes);
         let commands = take_commands(&mut app);
         assert_eq!(commands.len(), 1, "one tab request");
@@ -17466,7 +17506,7 @@ mod library_tab_tests {
             crate::ui::draw(ui, &mut app, 1600.0);
         });
         clicked.textures_delta.clear();
-        assert_eq!(app.library_tab, LibraryTab::Suggestions);
+        assert_eq!(app.navigation.library_tab, LibraryTab::Suggestions);
         let commands = take_commands(&mut app);
         let request_id = commands
             .iter()
