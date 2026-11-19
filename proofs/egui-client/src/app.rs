@@ -4421,7 +4421,9 @@ impl KattriApp {
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
-            .and_then(|worker| worker.list_media_segments(request_id, item_id.to_owned()));
+            .and_then(|worker| {
+                worker.list_media_segments(request_id, self.session_epoch, item_id.to_owned())
+            });
         if result.is_ok() {
             self.media_segments_request = Some((request_id, item_id.to_owned()));
         }
@@ -8901,7 +8903,12 @@ impl KattriApp {
         let request_id = self.allocate_request_id();
         let submitted = self.worker.as_ref().is_some_and(|worker| {
             worker
-                .get_adjacent_episodes(request_id, series_id, episode_id.clone())
+                .get_adjacent_episodes(
+                    request_id,
+                    self.session_epoch,
+                    series_id,
+                    episode_id.clone(),
+                )
                 .is_ok()
         });
         self.episode_neighbors = submitted.then_some(EpisodeNeighbors {
@@ -9058,7 +9065,7 @@ impl KattriApp {
         };
         let request_id = self.item_extras_request_id;
         if let Some(worker) = self.worker.as_ref() {
-            let _ = worker.list_extras(request_id, item_id);
+            let _ = worker.list_extras(request_id, self.session_epoch, item_id);
         }
     }
 
@@ -10805,7 +10812,9 @@ impl KattriApp {
                         self.track_lyrics = lines;
                     }
                 }
-                WorkerEvent::ExtrasLoaded { request_id, extras } => {
+                WorkerEvent::ExtrasLoaded {
+                    request_id, extras, ..
+                } => {
                     if request_id == self.item_extras_request_id {
                         let ceiling = self.browse_rating_ceiling(ctx);
                         self.item_extras = extras
@@ -10936,6 +10945,7 @@ impl KattriApp {
                     episode_id,
                     previous,
                     next,
+                    ..
                 } => {
                     let matches = self.episode_neighbors.as_ref().is_some_and(|neighbors| {
                         neighbors.request_id == request_id && neighbors.episode_id == episode_id
@@ -11932,11 +11942,12 @@ impl KattriApp {
                     request_id,
                     item_id,
                     segments,
+                    ..
                 } if self.media_segments_request == Some((request_id, item_id.clone())) => {
                     self.media_segments_request = None;
                     self.loaded_media_segments = Some((item_id, segments));
                 }
-                WorkerEvent::MediaSegmentsFailed { request_id }
+                WorkerEvent::MediaSegmentsFailed { request_id, .. }
                     if self
                         .media_segments_request
                         .as_ref()
@@ -16544,6 +16555,7 @@ mod photo_decode_event_tests {
         sender
             .try_send(WorkerEvent::AdjacentEpisodesLoaded {
                 request_id: request_id + 100,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 episode_id: "e2".into(),
                 previous: dto("x"),
                 next: dto("y"),
@@ -16552,6 +16564,7 @@ mod photo_decode_event_tests {
         sender
             .try_send(WorkerEvent::AdjacentEpisodesLoaded {
                 request_id,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 episode_id: "e2".into(),
                 previous: None,
                 next: dto("e3"),
@@ -16970,6 +16983,7 @@ mod photo_decode_event_tests {
         sender
             .try_send(WorkerEvent::ExtrasLoaded {
                 request_id: app.item_extras_request_id,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 extras: vec![
                     serde_json::from_value(serde_json::json!({"Id": "t1", "Name": "Trailer"}))
                         .expect("trailer"),

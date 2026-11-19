@@ -587,6 +587,7 @@ pub enum WorkerEvent {
     /// Trailers and special features of the item on screen. Empty on failure.
     ExtrasLoaded {
         request_id: u64,
+        epoch: Epoch,
         extras: Vec<BaseItemDto>,
     },
     /// The episodes of the season an episode page belongs to. Empty on failure.
@@ -628,6 +629,7 @@ pub enum WorkerEvent {
     /// The episodes either side of `episode_id`. Both are `None` when the request failed.
     AdjacentEpisodesLoaded {
         request_id: u64,
+        epoch: Epoch,
         episode_id: String,
         previous: Option<Box<BaseItemDto>>,
         next: Option<Box<BaseItemDto>>,
@@ -837,12 +839,14 @@ pub enum WorkerEvent {
     /// Intro and outro segments for one item. Only sent when a skip setting is on (M2-08).
     MediaSegmentsLoaded {
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
         segments: Vec<kattri_client_core::segments::MediaSegment>,
     },
     /// The segments request failed. Not shown to the viewer: playback continues without skip.
     MediaSegmentsFailed {
         request_id: u64,
+        epoch: Epoch,
     },
     /// A remote session command, parsed on the worker, that asks for this player action (M4-13).
     RemoteAction {
@@ -1003,7 +1007,11 @@ impl WorkerEvent {
             | Self::SimilarItemsLoaded { epoch, .. }
             | Self::SimilarItemsFailed { epoch, .. }
             | Self::PlaylistItemsLoaded { epoch, .. }
-            | Self::PlaylistItemsFailed { epoch, .. } => (*epoch != Epoch::NONE).then_some(*epoch),
+            | Self::PlaylistItemsFailed { epoch, .. }
+            | Self::MediaSegmentsLoaded { epoch, .. }
+            | Self::MediaSegmentsFailed { epoch, .. }
+            | Self::AdjacentEpisodesLoaded { epoch, .. }
+            | Self::ExtrasLoaded { epoch, .. } => (*epoch != Epoch::NONE).then_some(*epoch),
             _ => None,
         }
     }
@@ -1290,6 +1298,7 @@ pub(crate) enum WorkerCommand {
     },
     ListMediaSegments {
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
     },
     RemoteSessionMessage {
@@ -1343,6 +1352,7 @@ pub(crate) enum WorkerCommand {
     },
     GetAdjacentEpisodes {
         request_id: u64,
+        epoch: Epoch,
         series_id: String,
         episode_id: String,
     },
@@ -1392,6 +1402,7 @@ pub(crate) enum WorkerCommand {
     },
     ListExtras {
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
     },
     GetLyrics {
@@ -1898,10 +1909,12 @@ impl ApiWorker {
     pub(crate) fn list_media_segments(
         &self,
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::ListMediaSegments {
             request_id,
+            epoch,
             item_id,
         })
     }
@@ -2050,11 +2063,13 @@ impl ApiWorker {
     pub(crate) fn get_adjacent_episodes(
         &self,
         request_id: u64,
+        epoch: Epoch,
         series_id: String,
         episode_id: String,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::GetAdjacentEpisodes {
             request_id,
+            epoch,
             series_id,
             episode_id,
         })
@@ -2174,10 +2189,12 @@ impl ApiWorker {
     pub(crate) fn list_extras(
         &self,
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::ListExtras {
             request_id,
+            epoch,
             item_id,
         })
     }
@@ -4323,6 +4340,7 @@ async fn execute_command(
             }
             WorkerCommand::ListMediaSegments {
                 request_id,
+                epoch,
                 item_id,
             } => {
                 // Only intro and outro segments are used. The filter keeps the response small.
@@ -4357,6 +4375,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::MediaSegmentsLoaded {
                                 request_id,
+                                epoch,
                                 item_id,
                                 segments,
                             },
@@ -4379,8 +4398,12 @@ async fn execute_command(
                         .await;
                     }
                     Err(_) => {
-                        send_event(events, ctx, WorkerEvent::MediaSegmentsFailed { request_id })
-                            .await
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::MediaSegmentsFailed { request_id, epoch },
+                        )
+                        .await
                     }
                 }
             }
@@ -4442,6 +4465,7 @@ async fn execute_command(
             }
             WorkerCommand::GetAdjacentEpisodes {
                 request_id,
+                epoch,
                 series_id,
                 episode_id,
             } => {
@@ -4460,6 +4484,7 @@ async fn execute_command(
                     ctx,
                     WorkerEvent::AdjacentEpisodesLoaded {
                         request_id,
+                        epoch,
                         episode_id,
                         previous: adjacent.previous.map(Box::new),
                         next: adjacent.next.map(Box::new),
@@ -4831,6 +4856,7 @@ async fn execute_command(
             }
             WorkerCommand::ListExtras {
                 request_id,
+                epoch,
                 item_id,
             } => {
                 let extras = match (client.as_ref(), session.as_ref()) {
@@ -4846,7 +4872,11 @@ async fn execute_command(
                 send_event(
                     events,
                     ctx,
-                    WorkerEvent::ExtrasLoaded { request_id, extras },
+                    WorkerEvent::ExtrasLoaded {
+                        request_id,
+                        epoch,
+                        extras,
+                    },
                 )
                 .await
             }
@@ -8425,12 +8455,20 @@ mod series_command_tests {
     fn list_media_segments_enqueues_the_item_request() {
         let (worker, commands) = worker_with_command_receiver();
 
-        assert_eq!(worker.list_media_segments(51, "episode-4".into()), Ok(()));
+        assert_eq!(
+            worker.list_media_segments(
+                51,
+                kattri_client_core::epoch::Epoch::NONE,
+                "episode-4".into()
+            ),
+            Ok(())
+        );
         assert!(matches!(
             commands.recv(),
             Ok(WorkerCommand::ListMediaSegments {
                 request_id: 51,
                 item_id,
+                ..
             }) if item_id == "episode-4"
         ));
     }
