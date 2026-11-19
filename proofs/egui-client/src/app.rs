@@ -5775,7 +5775,7 @@ impl KattriApp {
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
-            .and_then(|worker| worker.load_home_row(request_id, kind));
+            .and_then(|worker| worker.load_home_row(request_id, self.session_epoch, kind));
         if result.is_err() {
             self.home.apply_failure(
                 kind,
@@ -5792,7 +5792,7 @@ impl KattriApp {
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
-            .and_then(|worker| worker.load_home_catalog(request_id, kind));
+            .and_then(|worker| worker.load_home_catalog(request_id, self.session_epoch, kind));
         if result.is_err() {
             self.home.apply_catalog_failure(
                 kind,
@@ -6115,7 +6115,9 @@ impl KattriApp {
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
-            .and_then(|worker| worker.list_music_album_tracks(request_id, album_id));
+            .and_then(|worker| {
+                worker.list_music_album_tracks(request_id, self.session_epoch, album_id)
+            });
         if result.is_err() {
             self.album_tracks.loading = false;
             self.album_tracks.error = Some(ErrorClass::Unexpected);
@@ -7262,7 +7264,9 @@ impl KattriApp {
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
-            .and_then(|worker| worker.list_library_suggestions(request_id, library_id));
+            .and_then(|worker| {
+                worker.list_library_suggestions(request_id, self.session_epoch, library_id)
+            });
         if result.is_err() {
             self.browse.catalog_loading = false;
             self.browse.catalog_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).to_owned());
@@ -10239,6 +10243,7 @@ impl KattriApp {
                     request_id,
                     row,
                     items,
+                    ..
                 } if self.home.is_pending(row, request_id) => {
                     self.record_network_success();
                     let ceiling = self.browse_rating_ceiling(ctx);
@@ -10254,6 +10259,7 @@ impl KattriApp {
                     row,
                     error_class,
                     retry_after,
+                    ..
                 } if self.home.is_pending(row, request_id) => {
                     self.record_network_error(error_class, retry_after);
                     self.home.apply_failure(
@@ -10262,9 +10268,9 @@ impl KattriApp {
                         crate::ui::status::message(error_class).to_owned(),
                     );
                 }
-                WorkerEvent::HomeCatalogLoaded { request_id, data }
-                    if self.home.is_catalog_pending(data.kind(), request_id) =>
-                {
+                WorkerEvent::HomeCatalogLoaded {
+                    request_id, data, ..
+                } if self.home.is_catalog_pending(data.kind(), request_id) => {
                     self.record_network_success();
                     match data {
                         HomeCatalogData::Libraries(views) => {
@@ -10286,6 +10292,7 @@ impl KattriApp {
                     kind,
                     error_class,
                     retry_after,
+                    ..
                 } if self.home.is_catalog_pending(kind, request_id) => {
                     self.record_network_error(error_class, retry_after);
                     self.home.apply_catalog_failure(
@@ -10719,9 +10726,10 @@ impl KattriApp {
                         self.catalog_studios = studios;
                     }
                 }
-                WorkerEvent::LibrarySuggestionsLoaded { request_id, items }
-                    if request_id == self.navigation.library_tab_request_id
-                        && self.navigation.library_tab == LibraryTab::Suggestions =>
+                WorkerEvent::LibrarySuggestionsLoaded {
+                    request_id, items, ..
+                } if request_id == self.navigation.library_tab_request_id
+                    && self.navigation.library_tab == LibraryTab::Suggestions =>
                 {
                     self.record_network_success();
                     let ceiling = self.browse_rating_ceiling(ctx);
@@ -10731,6 +10739,7 @@ impl KattriApp {
                     request_id,
                     error_class,
                     retry_after,
+                    ..
                 } if request_id == self.navigation.library_tab_request_id
                     && self.navigation.library_tab == LibraryTab::Suggestions =>
                 {
@@ -10968,6 +10977,7 @@ impl KattriApp {
                     request_id,
                     album_id,
                     tracks,
+                    ..
                 } if request_id == self.album_tracks.request_id
                     && self.browse.details.selected_item_id.as_deref()
                         == Some(album_id.as_str()) =>
@@ -10994,6 +11004,7 @@ impl KattriApp {
                     request_id,
                     album_id,
                     error_class,
+                    ..
                 } if request_id == self.album_tracks.request_id
                     && self.browse.details.selected_item_id.as_deref()
                         == Some(album_id.as_str()) =>
@@ -14817,6 +14828,7 @@ mod music_queue_app_tests {
         events
             .try_send(WorkerEvent::MusicAlbumTracksLoaded {
                 request_id: 80,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 album_id: "album-1".to_owned(),
                 tracks: vec![indexed_audio("stale-track", 1)],
             })
@@ -14831,6 +14843,7 @@ mod music_queue_app_tests {
         events
             .try_send(WorkerEvent::MusicAlbumTracksLoaded {
                 request_id: 81,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 album_id: "album-1".to_owned(),
                 tracks: vec![indexed_audio("track-1", 1), indexed_audio("track-2", 2)],
             })
@@ -17668,6 +17681,7 @@ mod library_tab_tests {
                 WorkerCommand::ListLibrarySuggestions {
                     request_id,
                     library_id,
+                    ..
                 } => {
                     assert_eq!(library_id, "movies-lib");
                     Some(*request_id)
@@ -17679,6 +17693,7 @@ mod library_tab_tests {
         sender
             .try_send(WorkerEvent::LibrarySuggestionsLoaded {
                 request_id,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 items: vec![movie("suggested", "Suggested Movie")],
             })
             .expect("send suggestions result");

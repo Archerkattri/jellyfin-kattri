@@ -43,6 +43,7 @@ fn background_read_can_run_when_no_foreground_read_is_waiting() {
     queue
         .send(WorkerCommand::LoadHomeRow {
             request_id: 1,
+            epoch: kattri_client_core::epoch::Epoch::NONE,
             row: HomeRowKind::Latest,
         })
         .expect("queue background row");
@@ -159,6 +160,7 @@ fn disconnect_and_read_cancellation_invalidate_queued_reads_and_artwork() {
     queue
         .send(WorkerCommand::LoadHomeRow {
             request_id: 5,
+            epoch: kattri_client_core::epoch::Epoch::NONE,
             row: HomeRowKind::Latest,
         })
         .expect("queue background home read");
@@ -500,6 +502,7 @@ fn scheduler_caps_reads_at_three_and_keeps_control_and_queued_read_moving() {
     queue
         .send(WorkerCommand::LoadHomeRow {
             request_id: 14,
+            epoch: kattri_client_core::epoch::Epoch::NONE,
             row: HomeRowKind::Latest,
         })
         .expect("queue background read");
@@ -616,6 +619,7 @@ fn hiding_a_home_row_aborts_its_active_read_and_keeps_other_rows() {
     queue
         .send(WorkerCommand::LoadHomeRow {
             request_id: 10,
+            epoch: kattri_client_core::epoch::Epoch::NONE,
             row: HomeRowKind::Latest,
         })
         .expect("queue latest row");
@@ -624,6 +628,7 @@ fn hiding_a_home_row_aborts_its_active_read_and_keeps_other_rows() {
     queue
         .send(WorkerCommand::LoadHomeRow {
             request_id: 11,
+            epoch: kattri_client_core::epoch::Epoch::NONE,
             row: HomeRowKind::NextUp,
         })
         .expect("queue next-up row");

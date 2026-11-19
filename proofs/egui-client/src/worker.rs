@@ -432,21 +432,25 @@ pub enum WorkerEvent {
     },
     HomeRowLoaded {
         request_id: u64,
+        epoch: Epoch,
         row: HomeRowKind,
         items: Vec<BaseItemDto>,
     },
     HomeRowFailed {
         request_id: u64,
+        epoch: Epoch,
         row: HomeRowKind,
         error_class: ErrorClass,
         retry_after: Option<std::time::Duration>,
     },
     HomeCatalogLoaded {
         request_id: u64,
+        epoch: Epoch,
         data: HomeCatalogData,
     },
     HomeCatalogFailed {
         request_id: u64,
+        epoch: Epoch,
         kind: HomeCatalogKind,
         error_class: ErrorClass,
         retry_after: Option<std::time::Duration>,
@@ -532,10 +536,12 @@ pub enum WorkerEvent {
     /// The server's suggestions for the library page's Suggestions tab.
     LibrarySuggestionsLoaded {
         request_id: u64,
+        epoch: Epoch,
         items: Vec<BaseItemDto>,
     },
     LibrarySuggestionsFailed {
         request_id: u64,
+        epoch: Epoch,
         error_class: ErrorClass,
         retry_after: Option<std::time::Duration>,
     },
@@ -636,11 +642,13 @@ pub enum WorkerEvent {
     },
     MusicAlbumTracksLoaded {
         request_id: u64,
+        epoch: Epoch,
         album_id: String,
         tracks: Vec<BaseItemDto>,
     },
     MusicAlbumTracksFailed {
         request_id: u64,
+        epoch: Epoch,
         album_id: String,
         error_class: ErrorClass,
     },
@@ -997,11 +1005,17 @@ impl WorkerEvent {
             | Self::SyncPlayJoinFailed { epoch, .. }
             | Self::SyncPlayLeft { epoch, .. }
             | Self::SyncPlayLeaveFailed { epoch, .. }
+            | Self::HomeRowLoaded { epoch, .. }
+            | Self::HomeRowFailed { epoch, .. }
+            | Self::HomeCatalogLoaded { epoch, .. }
+            | Self::HomeCatalogFailed { epoch, .. }
             | Self::SeriesSeasonsLoaded { epoch, .. }
             | Self::SeriesSeasonsFailed { epoch, .. }
             | Self::SeriesEpisodesLoaded { epoch, .. }
             | Self::SeriesEpisodesFailed { epoch, .. }
             | Self::GenresLoaded { epoch, .. }
+            | Self::LibrarySuggestionsLoaded { epoch, .. }
+            | Self::LibrarySuggestionsFailed { epoch, .. }
             | Self::PersonItemsLoaded { epoch, .. }
             | Self::PersonItemsFailed { epoch, .. }
             | Self::SimilarItemsLoaded { epoch, .. }
@@ -1011,6 +1025,8 @@ impl WorkerEvent {
             | Self::MediaSegmentsLoaded { epoch, .. }
             | Self::MediaSegmentsFailed { epoch, .. }
             | Self::AdjacentEpisodesLoaded { epoch, .. }
+            | Self::MusicAlbumTracksLoaded { epoch, .. }
+            | Self::MusicAlbumTracksFailed { epoch, .. }
             | Self::ExtrasLoaded { epoch, .. } => (*epoch != Epoch::NONE).then_some(*epoch),
             _ => None,
         }
@@ -1216,6 +1232,7 @@ pub(crate) enum WorkerCommand {
     /// The server's suggestions for one library (`GET /Items/{id}/Suggestions`).
     ListLibrarySuggestions {
         request_id: u64,
+        epoch: Epoch,
         library_id: String,
     },
     /// Episodes that have not premiered yet (`GET /Shows/Upcoming`).
@@ -1269,10 +1286,12 @@ pub(crate) enum WorkerCommand {
     },
     LoadHomeRow {
         request_id: u64,
+        epoch: Epoch,
         row: HomeRowKind,
     },
     LoadHomeCatalog {
         request_id: u64,
+        epoch: Epoch,
         kind: HomeCatalogKind,
     },
     LoadLiveTvChannels {
@@ -1442,6 +1461,7 @@ pub(crate) enum WorkerCommand {
     },
     ListMusicAlbumTracks {
         request_id: u64,
+        epoch: Epoch,
         album_id: String,
     },
     ListPlaylistItems {
@@ -1837,19 +1857,27 @@ impl ApiWorker {
     pub fn load_home_row(
         &self,
         request_id: u64,
+        epoch: Epoch,
         row: HomeRowKind,
     ) -> Result<(), WorkerSubmitError> {
-        self.commands
-            .send(WorkerCommand::LoadHomeRow { request_id, row })
+        self.commands.send(WorkerCommand::LoadHomeRow {
+            request_id,
+            epoch,
+            row,
+        })
     }
 
     pub fn load_home_catalog(
         &self,
         request_id: u64,
+        epoch: Epoch,
         kind: HomeCatalogKind,
     ) -> Result<(), WorkerSubmitError> {
-        self.commands
-            .send(WorkerCommand::LoadHomeCatalog { request_id, kind })
+        self.commands.send(WorkerCommand::LoadHomeCatalog {
+            request_id,
+            epoch,
+            kind,
+        })
     }
 
     pub fn load_live_tv_channels(
@@ -2260,10 +2288,12 @@ impl ApiWorker {
     pub(crate) fn list_library_suggestions(
         &self,
         request_id: u64,
+        epoch: Epoch,
         library_id: String,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::ListLibrarySuggestions {
             request_id,
+            epoch,
             library_id,
         })
     }
@@ -2292,10 +2322,12 @@ impl ApiWorker {
     pub(crate) fn list_music_album_tracks(
         &self,
         request_id: u64,
+        epoch: Epoch,
         album_id: String,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::ListMusicAlbumTracks {
             request_id,
+            epoch,
             album_id,
         })
     }
@@ -3740,7 +3772,11 @@ async fn execute_command(
                     }
                 }
             }
-            WorkerCommand::LoadHomeRow { request_id, row } => {
+            WorkerCommand::LoadHomeRow {
+                request_id,
+                epoch,
+                row,
+            } => {
                 let result = match (client.as_ref(), session.as_ref()) {
                     (Some(client), Some(session)) => (load_home_row(client, session, row)).await,
                     _ => Err(ApiError::InvalidConfiguration),
@@ -3752,6 +3788,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::HomeRowLoaded {
                                 request_id,
+                                epoch,
                                 row,
                                 items,
                             },
@@ -3779,6 +3816,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::HomeRowFailed {
                                 request_id,
+                                epoch,
                                 row,
                                 error_class: error.classify(),
                                 retry_after: error.retry_after(),
@@ -3788,7 +3826,11 @@ async fn execute_command(
                     }
                 }
             }
-            WorkerCommand::LoadHomeCatalog { request_id, kind } => {
+            WorkerCommand::LoadHomeCatalog {
+                request_id,
+                epoch,
+                kind,
+            } => {
                 let result = match (client.as_ref(), session.as_ref()) {
                     (Some(client), Some(session)) => {
                         (load_home_catalog(client, session, kind)).await
@@ -3800,7 +3842,11 @@ async fn execute_command(
                         send_event(
                             events,
                             ctx,
-                            WorkerEvent::HomeCatalogLoaded { request_id, data },
+                            WorkerEvent::HomeCatalogLoaded {
+                                request_id,
+                                epoch,
+                                data,
+                            },
                         )
                         .await
                     }
@@ -3825,6 +3871,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::HomeCatalogFailed {
                                 request_id,
+                                epoch,
                                 kind,
                                 error_class: error.classify(),
                                 retry_after: error.retry_after(),
@@ -4620,6 +4667,7 @@ async fn execute_command(
             }
             WorkerCommand::ListLibrarySuggestions {
                 request_id,
+                epoch,
                 library_id,
             } => {
                 let result = match (client.as_ref(), session.as_ref()) {
@@ -4635,7 +4683,11 @@ async fn execute_command(
                         send_event(
                             events,
                             ctx,
-                            WorkerEvent::LibrarySuggestionsLoaded { request_id, items },
+                            WorkerEvent::LibrarySuggestionsLoaded {
+                                request_id,
+                                epoch,
+                                items,
+                            },
                         )
                         .await
                     }
@@ -4660,6 +4712,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::LibrarySuggestionsFailed {
                                 request_id,
+                                epoch,
                                 error_class: error.classify(),
                                 retry_after: error.retry_after(),
                             },
@@ -5058,6 +5111,7 @@ async fn execute_command(
             }
             WorkerCommand::ListMusicAlbumTracks {
                 request_id,
+                epoch,
                 album_id,
             } => {
                 let result = match (client.as_ref(), session.as_ref()) {
@@ -5073,6 +5127,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::MusicAlbumTracksLoaded {
                                 request_id,
+                                epoch,
                                 album_id,
                                 tracks,
                             },
@@ -5100,6 +5155,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::MusicAlbumTracksFailed {
                                 request_id,
+                                epoch,
                                 album_id,
                                 error_class: error.classify(),
                             },
