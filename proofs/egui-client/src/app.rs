@@ -858,7 +858,7 @@ mod connection_boundary_tests {
             .insert(81, "old-episode".to_owned());
         app.episode_thumbnail_queue
             .push_back(("queued-episode".to_owned(), "queued-tag".to_owned()));
-        app.similar_items = vec![item("old-similar")];
+        app.similar.items = vec![item("old-similar")];
     }
 
     fn assert_detail_state_cleared(app: &KattriApp) {
@@ -876,7 +876,7 @@ mod connection_boundary_tests {
         assert!(app.episode_thumbnails.is_empty());
         assert!(app.episode_thumbnail_pending.is_empty());
         assert!(app.episode_thumbnail_queue.is_empty());
-        assert!(app.similar_items.is_empty());
+        assert!(app.similar.items.is_empty());
     }
 
     #[test]
@@ -1520,6 +1520,19 @@ impl SearchState {
     }
 }
 
+/// Owned similar-items state for the detail panel: the items, the loading flag and the request id.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SimilarState {
+    pub(crate) items: Vec<BaseItemDto>,
+    pub(crate) loading: bool,
+    pub(crate) request_id: u64,
+}
+
+impl SimilarState {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
 /// Owned series-detail state: seasons, episodes, the selected season and the Next Up episode.
 ///
 /// Ten loose fields carried the series panel. They are owned here so the series detail reads one
@@ -1920,6 +1933,8 @@ pub struct KattriApp {
     pub(crate) album_tracks: AlbumTracksState,
     /// Owned search: query, results, group, staleness and debouncer.
     pub(crate) search: SearchState,
+    /// Owned similar items for the detail panel.
+    pub(crate) similar: SimilarState,
     /// Owned series detail: seasons, episodes, selected season, Next Up, request ids.
     pub(crate) series: SeriesState,
     /// Owned navigation: page, view, library tab and its request id.
@@ -1948,8 +1963,6 @@ pub struct KattriApp {
     custom_backdrop_request: Option<(u64, std::path::PathBuf)>,
     /// Set by `play_item`; consumed by `poll_auto_play` once the stream can start.
     pub(crate) auto_play: AutoPlayMachine,
-    pub(crate) similar_items: Vec<BaseItemDto>,
-    pub(crate) similar_loading: bool,
     pub(crate) selected_person: Option<BaseItemPerson>,
     pub(crate) person_items: Vec<BaseItemDto>,
     pub(crate) person_items_loading: bool,
@@ -2197,7 +2210,6 @@ pub struct KattriApp {
     sync_play_clock: ClockEstimator,
     /// Player view for the SyncPlay outbound path and the update gate (M4-11, M4-16).
     player_view: PlayerView,
-    similar_request_id: u64,
     /// Theme media result for the open detail page, and the request still in flight.
     theme_media: Option<ThemeMediaState>,
     theme_media_request: Option<(u64, String)>,
@@ -2584,6 +2596,7 @@ impl KattriApp {
             items: Vec::new(),
             album_tracks: AlbumTracksState::new(),
             search: SearchState::new(),
+            similar: SimilarState::new(),
             series: SeriesState::new(),
             navigation: NavigationState::new(),
             browse: BrowseState::new(),
@@ -2608,8 +2621,6 @@ impl KattriApp {
             custom_backdrop_texture: None,
             custom_backdrop_request: None,
             auto_play: AutoPlayMachine::new(),
-            similar_items: Vec::new(),
-            similar_loading: false,
             selected_person: None,
             person_items: Vec::new(),
             person_items_loading: false,
@@ -2794,7 +2805,6 @@ impl KattriApp {
             sync_play_drift: DriftController::new(),
             sync_play_clock: ClockEstimator::new(),
             player_view: PlayerView::new(),
-            similar_request_id: 0,
             theme_media: None,
             theme_media_request: None,
             person_items_request_id: 0,
@@ -5250,13 +5260,13 @@ impl KattriApp {
         self.browse.details.details_request_id = self.allocate_request_id();
         self.series.seasons_request_id = self.allocate_request_id();
         self.series.episodes_request_id = self.allocate_request_id();
-        self.similar_request_id = self.allocate_request_id();
+        self.similar.request_id = self.allocate_request_id();
         self.person_items_request_id = self.allocate_request_id();
         self.browse.catalog_loading = false;
         self.browse.details.details_loading = false;
         self.series.seasons_loading = false;
         self.series.episodes_loading = false;
-        self.similar_loading = false;
+        self.similar.loading = false;
         self.person_items_loading = false;
         self.clear_theme_media();
         self.cancel_network_retry_for_user_action();
@@ -7850,10 +7860,10 @@ impl KattriApp {
     }
 
     fn reset_people_detail(&mut self) {
-        self.similar_request_id = self.allocate_request_id();
+        self.similar.request_id = self.allocate_request_id();
         self.person_items_request_id = self.allocate_request_id();
-        self.similar_items.clear();
-        self.similar_loading = false;
+        self.similar.items.clear();
+        self.similar.loading = false;
         self.selected_person = None;
         self.person_items.clear();
         self.person_items_loading = false;
@@ -7868,16 +7878,16 @@ impl KattriApp {
         let Some(item_id) = self.browse.details.selected_item_id.clone() else {
             return;
         };
-        self.similar_items.clear();
-        self.similar_loading = true;
+        self.similar.items.clear();
+        self.similar.loading = true;
         let request_id = self.allocate_request_id();
-        self.similar_request_id = request_id;
+        self.similar.request_id = request_id;
         if self.worker.as_ref().is_none_or(|worker| {
             worker
                 .list_similar(request_id, self.session_epoch, item_id, 12)
                 .is_err()
         }) {
-            self.similar_loading = false;
+            self.similar.loading = false;
         }
     }
 
@@ -11241,13 +11251,13 @@ impl KattriApp {
                     item_id,
                     items,
                     ..
-                } if request_id == self.similar_request_id
+                } if request_id == self.similar.request_id
                     && self.browse.details.selected_item_id.as_deref()
                         == Some(item_id.as_str()) =>
                 {
-                    self.similar_loading = false;
+                    self.similar.loading = false;
                     let ceiling = self.browse_rating_ceiling(ctx);
-                    self.similar_items = remove_current_item(&item_id, items)
+                    self.similar.items = remove_current_item(&item_id, items)
                         .into_iter()
                         .filter(|item| crate::parental::item_record_is_shown(ceiling, item))
                         .collect();
@@ -11256,12 +11266,12 @@ impl KattriApp {
                     request_id,
                     item_id,
                     ..
-                } if request_id == self.similar_request_id
+                } if request_id == self.similar.request_id
                     && self.browse.details.selected_item_id.as_deref()
                         == Some(item_id.as_str()) =>
                 {
-                    self.similar_loading = false;
-                    self.similar_items.clear();
+                    self.similar.loading = false;
+                    self.similar.items.clear();
                 }
                 WorkerEvent::ThemeMediaLoaded {
                     request_id,

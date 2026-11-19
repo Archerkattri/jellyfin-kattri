@@ -3228,7 +3228,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                 let people_action = people::draw(
                     ui,
                     &cast,
-                    &app.similar_items,
+                    &app.similar.items,
                     &item.id,
                     &app.person_artwork_textures,
                 );
