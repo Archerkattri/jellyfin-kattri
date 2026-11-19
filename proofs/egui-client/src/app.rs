@@ -839,14 +839,16 @@ mod connection_boundary_tests {
             egui::ColorImage::from_rgba_unmultiplied([1, 1], &[255, 255, 255, 255]),
             egui::TextureOptions::LINEAR,
         );
-        app.selected_person = Some(person.clone());
-        app.person_items = vec![item("old-person-item")];
-        app.person_items_loading = true;
-        app.person_artwork_queue.push(person);
-        app.pending_person_artwork
+        app.person.selected = Some(person.clone());
+        app.person.items = vec![item("old-person-item")];
+        app.person.items_loading = true;
+        app.person.artwork_queue.push(person);
+        app.person
+            .pending_artwork
             .insert(80, "old-person".to_owned());
-        app.attempted_person_artwork.insert("old-person".to_owned());
-        app.person_artwork_textures
+        app.person.attempted_artwork.insert("old-person".to_owned());
+        app.person
+            .artwork_textures
             .insert("old-person".to_owned(), texture.clone());
         app.series.seasons = vec![item("old-season")];
         app.series.episodes = vec![item("old-episode")];
@@ -862,13 +864,13 @@ mod connection_boundary_tests {
     }
 
     fn assert_detail_state_cleared(app: &KattriApp) {
-        assert!(app.selected_person.is_none());
-        assert!(app.person_items.is_empty());
-        assert!(!app.person_items_loading);
-        assert!(app.person_artwork_queue.is_empty());
-        assert!(app.pending_person_artwork.is_empty());
-        assert!(app.attempted_person_artwork.is_empty());
-        assert!(app.person_artwork_textures.is_empty());
+        assert!(app.person.selected.is_none());
+        assert!(app.person.items.is_empty());
+        assert!(!app.person.items_loading);
+        assert!(app.person.artwork_queue.is_empty());
+        assert!(app.person.pending_artwork.is_empty());
+        assert!(app.person.attempted_artwork.is_empty());
+        assert!(app.person.artwork_textures.is_empty());
         assert!(app.series.seasons.is_empty());
         assert!(!app.series.seasons_loading);
         assert!(app.series.episodes.is_empty());
@@ -884,13 +886,13 @@ mod connection_boundary_tests {
         let context = egui::Context::default();
         let mut app = KattriApp::new(context.clone());
         seed_detail_state(&mut app, &context);
-        let old_person_request = app.person_items_request_id;
+        let old_person_request = app.person.items_request_id;
         let old_series_request = app.series.episodes_request_id;
 
         app.begin_connection("Checking server");
 
         assert_detail_state_cleared(&app);
-        assert_ne!(app.person_items_request_id, old_person_request);
+        assert_ne!(app.person.items_request_id, old_person_request);
         assert_ne!(app.series.episodes_request_id, old_series_request);
     }
 
@@ -899,13 +901,13 @@ mod connection_boundary_tests {
         let context = egui::Context::default();
         let mut app = KattriApp::new(context.clone());
         seed_detail_state(&mut app, &context);
-        let old_person_request = app.person_items_request_id;
+        let old_person_request = app.person.items_request_id;
         let old_series_request = app.series.episodes_request_id;
 
         app.clear_connection();
 
         assert_detail_state_cleared(&app);
-        assert_ne!(app.person_items_request_id, old_person_request);
+        assert_ne!(app.person.items_request_id, old_person_request);
         assert_ne!(app.series.episodes_request_id, old_series_request);
     }
 
@@ -1585,6 +1587,150 @@ impl NavigationState {
     }
 }
 
+/// Owned playlist state: the opened playlist's entries, the add-candidate list, and the
+/// create/add/remove/move mutation lifecycle, each ordered by its own request id.
+///
+/// Fourteen loose fields carried the playlist page. They are owned here so the page reads one
+/// struct and the entry, candidate and mutation request ids live with the data they order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct PlaylistState {
+    /// The entries of the opened playlist, in server order.
+    pub(crate) entries: Vec<PlaylistEntry>,
+    /// Whether the entry request is in flight.
+    pub(crate) items_loading: bool,
+    /// The last entry-request failure.
+    pub(crate) items_error: Option<ErrorClass>,
+    /// The playlist whose entries are loaded.
+    pub(crate) opened_id: Option<String>,
+    /// The request id of the entry request in flight (or the last one issued).
+    pub(crate) items_request_id: u64,
+    /// Whether a create/add/remove/move mutation is in flight.
+    pub(crate) mutation_loading: bool,
+    /// The last mutation failure.
+    pub(crate) mutation_error: Option<ErrorClass>,
+    /// A short confirmation of the last successful mutation.
+    pub(crate) mutation_notice: Option<String>,
+    /// The request id of the mutation in flight (or the last one issued).
+    pub(crate) mutation_request_id: u64,
+    /// Ephemeral component state for the playlist page (create name, selection).
+    pub(crate) ui_state: PlaylistUiState,
+    /// Media candidates offered for adding to the opened playlist.
+    pub(crate) candidates: Vec<BaseItemDto>,
+    /// Whether the candidate request is in flight.
+    pub(crate) candidates_loading: bool,
+    /// The last candidate-request failure.
+    pub(crate) candidates_error: Option<ErrorClass>,
+    /// The request id of the candidate request in flight (or the last one issued).
+    pub(crate) candidates_request_id: u64,
+}
+
+impl PlaylistState {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Owned person-detail state: the selected person, their credited items, and the primary-artwork
+/// textures loaded for the person row, ordered by the items request id.
+///
+/// Nine loose fields carried the person page. `egui::TextureHandle` has no `Debug`, so the texture
+/// map is reported by its length in a manual `Debug` impl rather than a derive.
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct PersonState {
+    /// The person whose detail page is open.
+    pub(crate) selected: Option<BaseItemPerson>,
+    /// The items credited to the selected person.
+    pub(crate) items: Vec<BaseItemDto>,
+    /// Whether the items request is in flight.
+    pub(crate) items_loading: bool,
+    /// The last items-request failure.
+    pub(crate) items_error: Option<String>,
+    /// Primary-artwork textures for the person row, keyed by person name.
+    pub(crate) artwork_textures: HashMap<String, egui::TextureHandle>,
+    /// The request id of the items request in flight (or the last one issued).
+    pub(crate) items_request_id: u64,
+    /// People whose artwork is queued for loading.
+    pub(crate) artwork_queue: Vec<BaseItemPerson>,
+    /// Artwork requests in flight: request id to person name.
+    pub(crate) pending_artwork: HashMap<u64, String>,
+    /// Person names whose artwork was already attempted.
+    pub(crate) attempted_artwork: HashSet<String>,
+}
+
+impl PersonState {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for PersonState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PersonState")
+            .field("selected", &self.selected)
+            .field("items", &self.items)
+            .field("items_loading", &self.items_loading)
+            .field("items_error", &self.items_error)
+            .field("artwork_textures", &self.artwork_textures.len())
+            .field("items_request_id", &self.items_request_id)
+            .field("artwork_queue", &self.artwork_queue)
+            .field("pending_artwork", &self.pending_artwork)
+            .field("attempted_artwork", &self.attempted_artwork)
+            .finish()
+    }
+}
+
+/// Owned photo-page state: the folder's items, their thumbnail and full-size textures, the
+/// selected photo, and the bounded decode bookkeeping.
+///
+/// Ten loose fields carried the photo page. `egui::TextureHandle` has no `Debug`, so the texture
+/// maps are reported by their length in a manual `Debug` impl rather than a derive.
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct PhotoState {
+    /// The items of the opened photo folder.
+    pub(crate) items: Vec<BaseItemDto>,
+    /// Decoded thumbnail textures, keyed by item id.
+    pub(crate) thumbnails: HashMap<String, egui::TextureHandle>,
+    /// Decoded full-size textures, keyed by item id (a few kept at once).
+    pub(crate) full_size_images: HashMap<String, egui::TextureHandle>,
+    /// The photo shown full-size, if any.
+    pub(crate) selected_id: Option<String>,
+    /// The catalog start index of the loaded photo page.
+    pub(crate) page_start: usize,
+    /// Thumbnail decode requests in flight: request id to item id.
+    pub(crate) thumbnail_pending: HashMap<u64, String>,
+    /// Item ids whose thumbnail decode was already attempted.
+    pub(crate) thumbnail_attempted: HashSet<String>,
+    /// Photo ids in the visible thumbnail window of the latest frame.
+    pub(crate) visible_ids: HashSet<String>,
+    /// Full-size decode requests in flight: request id to item id.
+    pub(crate) full_size_pending: HashMap<u64, String>,
+    /// Item ids whose full-size decode failed.
+    pub(crate) full_size_failed: HashSet<String>,
+}
+
+impl PhotoState {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for PhotoState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhotoState")
+            .field("items", &self.items)
+            .field("thumbnails", &self.thumbnails.len())
+            .field("full_size_images", &self.full_size_images.len())
+            .field("selected_id", &self.selected_id)
+            .field("page_start", &self.page_start)
+            .field("thumbnail_pending", &self.thumbnail_pending)
+            .field("thumbnail_attempted", &self.thumbnail_attempted)
+            .field("visible_ids", &self.visible_ids)
+            .field("full_size_pending", &self.full_size_pending)
+            .field("full_size_failed", &self.full_size_failed)
+            .finish()
+    }
+}
+
 /// The display text carried by a [`ConnectionStatus`], held separately from the phase.
 ///
 /// The phase belongs to owned state (the session machine's connecting phase and the catalog flags);
@@ -1963,11 +2109,8 @@ pub struct KattriApp {
     custom_backdrop_request: Option<(u64, std::path::PathBuf)>,
     /// Set by `play_item`; consumed by `poll_auto_play` once the stream can start.
     pub(crate) auto_play: AutoPlayMachine,
-    pub(crate) selected_person: Option<BaseItemPerson>,
-    pub(crate) person_items: Vec<BaseItemDto>,
-    pub(crate) person_items_loading: bool,
-    pub(crate) person_items_error: Option<String>,
-    pub(crate) person_artwork_textures: HashMap<String, egui::TextureHandle>,
+    /// Owned person detail: selected person, items, artwork textures and request id.
+    pub(crate) person: PersonState,
     pub(crate) playback_info: Option<PlaybackInfoResponse>,
     device_profile: DeviceProfile,
     /// Output devices mpv reported, for the Settings device picker. Empty until the player
@@ -2018,17 +2161,8 @@ pub struct KattriApp {
     live_tv_guide_requested_channel_ids: Vec<String>,
     live_tv_guide_pending_channel_ids: Vec<String>,
     pub(crate) live_tv_guide_refreshed_at_unix: Option<i64>,
-    pub(crate) photo_items: Vec<BaseItemDto>,
-    pub(crate) photo_thumbnails: HashMap<String, egui::TextureHandle>,
-    pub(crate) photo_full_size_images: HashMap<String, egui::TextureHandle>,
-    pub(crate) photo_selected_id: Option<String>,
-    pub(crate) photo_page_start: usize,
-    photo_thumbnail_pending: HashMap<u64, String>,
-    photo_thumbnail_attempted: HashSet<String>,
-    /// Photo ids in the visible thumbnail window of the latest frame.
-    photo_visible_ids: HashSet<String>,
-    photo_full_size_pending: HashMap<u64, String>,
-    pub(crate) photo_full_size_failed: HashSet<String>,
+    /// Owned photo page: items, thumbnail/full-size textures, selection and decode bookkeeping.
+    pub(crate) photo: PhotoState,
     pub(crate) music_queue: Queue,
     /// Neighbours of the episode last started, for previous/next and auto-play.
     episode_neighbors: Option<EpisodeNeighbors>,
@@ -2086,20 +2220,8 @@ pub struct KattriApp {
     /// Save debounce and checkpoint bookkeeping for the music queue.
     music_queue_persistence: MusicQueuePersistence,
     music_queue_position_ms: u64,
-    pub(crate) playlist_entries: Vec<PlaylistEntry>,
-    pub(crate) playlist_items_loading: bool,
-    pub(crate) playlist_items_error: Option<ErrorClass>,
-    pub(crate) opened_playlist_id: Option<String>,
-    playlist_items_request_id: u64,
-    pub(crate) playlist_mutation_loading: bool,
-    pub(crate) playlist_mutation_error: Option<ErrorClass>,
-    pub(crate) playlist_mutation_notice: Option<String>,
-    playlist_mutation_request_id: u64,
-    pub(crate) playlist_ui_state: PlaylistUiState,
-    pub(crate) playlist_candidates: Vec<BaseItemDto>,
-    pub(crate) playlist_candidates_loading: bool,
-    pub(crate) playlist_candidates_error: Option<ErrorClass>,
-    playlist_candidates_request_id: u64,
+    /// Owned playlist page: entries, candidates, mutation lifecycle and component state.
+    pub(crate) playlist: PlaylistState,
     pub(crate) focus_graph: FocusGraph,
     pub(crate) gamepad: Box<dyn GamepadBackend>,
     /// True while the native player surface owns gamepad input instead of the hidden library.
@@ -2213,10 +2335,6 @@ pub struct KattriApp {
     /// Theme media result for the open detail page, and the request still in flight.
     theme_media: Option<ThemeMediaState>,
     theme_media_request: Option<(u64, String)>,
-    person_items_request_id: u64,
-    person_artwork_queue: Vec<BaseItemPerson>,
-    pending_person_artwork: HashMap<u64, String>,
-    attempted_person_artwork: HashSet<String>,
     /// Card-menu played toggles in flight: request id -> (item id, previous value). The detail
     /// page owns `watched`; a rejected card toggle must revert the card by itself.
     menu_watched_pending: HashMap<u64, (String, bool)>,
@@ -2357,9 +2475,10 @@ impl KattriApp {
 
     fn cancel_pending_photo_decodes(&mut self) {
         let request_ids = self
-            .photo_thumbnail_pending
+            .photo
+            .thumbnail_pending
             .keys()
-            .chain(self.photo_full_size_pending.keys())
+            .chain(self.photo.full_size_pending.keys())
             .copied()
             .collect::<Vec<_>>();
         if let Some(worker) = self.worker.as_ref()
@@ -2371,18 +2490,19 @@ impl KattriApp {
         if let Some(worker) = self.worker.as_ref() {
             worker.record_photo_decode_cancellations(request_ids.len());
         }
-        self.photo_thumbnail_pending.clear();
-        self.photo_full_size_pending.clear();
+        self.photo.thumbnail_pending.clear();
+        self.photo.full_size_pending.clear();
     }
 
     pub(crate) fn update_photo_thumbnail_window(&mut self, visible: &[(String, String)]) {
-        self.photo_visible_ids = visible.iter().map(|(item_id, _)| item_id.clone()).collect();
+        self.photo.visible_ids = visible.iter().map(|(item_id, _)| item_id.clone()).collect();
         let requested_ids = visible
             .iter()
             .map(|(item_id, _)| item_id.as_str())
             .collect::<HashSet<_>>();
         let cancelled = self
-            .photo_thumbnail_pending
+            .photo
+            .thumbnail_pending
             .iter()
             .filter(|(_, item_id)| !requested_ids.contains(item_id.as_str()))
             .map(|(&request_id, _)| request_id)
@@ -2391,8 +2511,8 @@ impl KattriApp {
             return;
         }
         for request_id in &cancelled {
-            if let Some(item_id) = self.photo_thumbnail_pending.remove(request_id) {
-                self.photo_thumbnail_attempted.remove(&item_id);
+            if let Some(item_id) = self.photo.thumbnail_pending.remove(request_id) {
+                self.photo.thumbnail_attempted.remove(&item_id);
             }
         }
         if let Some(worker) = self.worker.as_ref()
@@ -2621,11 +2741,7 @@ impl KattriApp {
             custom_backdrop_texture: None,
             custom_backdrop_request: None,
             auto_play: AutoPlayMachine::new(),
-            selected_person: None,
-            person_items: Vec::new(),
-            person_items_loading: false,
-            person_items_error: None,
-            person_artwork_textures: HashMap::new(),
+            person: PersonState::new(),
             playback_info: None,
             device_profile: baseline_device_profile(),
             audio_devices: Vec::new(),
@@ -2671,16 +2787,7 @@ impl KattriApp {
             live_tv_guide_requested_channel_ids: Vec::new(),
             live_tv_guide_pending_channel_ids: Vec::new(),
             live_tv_guide_refreshed_at_unix: None,
-            photo_items: Vec::new(),
-            photo_thumbnails: HashMap::new(),
-            photo_full_size_images: HashMap::new(),
-            photo_selected_id: None,
-            photo_page_start: 0,
-            photo_thumbnail_pending: HashMap::new(),
-            photo_thumbnail_attempted: HashSet::new(),
-            photo_visible_ids: HashSet::new(),
-            photo_full_size_pending: HashMap::new(),
-            photo_full_size_failed: HashSet::new(),
+            photo: PhotoState::new(),
             music_queue: Queue::new(),
             episode_neighbors: None,
             shuffle_queue: None,
@@ -2719,20 +2826,7 @@ impl KattriApp {
             music_queue_resume: ResumePosition::None,
             music_queue_persistence: MusicQueuePersistence::new(),
             music_queue_position_ms: 0,
-            playlist_entries: Vec::new(),
-            playlist_items_loading: false,
-            playlist_items_error: None,
-            opened_playlist_id: None,
-            playlist_items_request_id: 0,
-            playlist_mutation_loading: false,
-            playlist_mutation_error: None,
-            playlist_mutation_notice: None,
-            playlist_mutation_request_id: 0,
-            playlist_ui_state: PlaylistUiState::default(),
-            playlist_candidates: Vec::new(),
-            playlist_candidates_loading: false,
-            playlist_candidates_error: None,
-            playlist_candidates_request_id: 0,
+            playlist: PlaylistState::new(),
             focus_graph: FocusGraph::default(),
             gamepad: Box::new(ObservedGamepad {
                 ctx: ctx.clone(),
@@ -2807,10 +2901,6 @@ impl KattriApp {
             player_view: PlayerView::new(),
             theme_media: None,
             theme_media_request: None,
-            person_items_request_id: 0,
-            person_artwork_queue: Vec::new(),
-            pending_person_artwork: HashMap::new(),
-            attempted_person_artwork: HashSet::new(),
             playback_request_id: 0,
             playback_start_request_id: 0,
             pending_playback_report_requests: HashMap::new(),
@@ -5088,13 +5178,13 @@ impl KattriApp {
         self.live_tv_logo_queue.clear();
         self.live_tv_logo_pending.clear();
         self.live_tv_logo_attempted.clear();
-        self.photo_items.clear();
-        self.photo_thumbnails.clear();
-        self.photo_full_size_images.clear();
-        self.photo_selected_id = None;
+        self.photo.items.clear();
+        self.photo.thumbnails.clear();
+        self.photo.full_size_images.clear();
+        self.photo.selected_id = None;
         self.cancel_pending_photo_decodes();
-        self.photo_thumbnail_attempted.clear();
-        self.photo_full_size_failed.clear();
+        self.photo.thumbnail_attempted.clear();
+        self.photo.full_size_failed.clear();
         self.live_tv_total_count = None;
         self.live_tv_loading = false;
         self.live_tv_loaded = false;
@@ -5127,19 +5217,19 @@ impl KattriApp {
         self.music_queue_persistence.reset();
         self.music_queue_persistence
             .set_suspended(self.music_queue_restore.has_pending());
-        self.playlist_entries.clear();
-        self.playlist_items_loading = false;
-        self.playlist_items_error = None;
-        self.opened_playlist_id = None;
-        self.playlist_items_request_id = self.allocate_request_id();
-        self.playlist_mutation_loading = false;
-        self.playlist_mutation_error = None;
-        self.playlist_mutation_notice = None;
-        self.playlist_mutation_request_id = self.allocate_request_id();
-        self.playlist_candidates.clear();
-        self.playlist_candidates_loading = false;
-        self.playlist_candidates_error = None;
-        self.playlist_candidates_request_id = self.allocate_request_id();
+        self.playlist.entries.clear();
+        self.playlist.items_loading = false;
+        self.playlist.items_error = None;
+        self.playlist.opened_id = None;
+        self.playlist.items_request_id = self.allocate_request_id();
+        self.playlist.mutation_loading = false;
+        self.playlist.mutation_error = None;
+        self.playlist.mutation_notice = None;
+        self.playlist.mutation_request_id = self.allocate_request_id();
+        self.playlist.candidates.clear();
+        self.playlist.candidates_loading = false;
+        self.playlist.candidates_error = None;
+        self.playlist.candidates_request_id = self.allocate_request_id();
         self.album_tracks.loading = false;
         self.album_tracks.error = None;
         self.album_tracks.request_id = self.allocate_request_id();
@@ -5263,13 +5353,13 @@ impl KattriApp {
         self.series.seasons_request_id = self.allocate_request_id();
         self.series.episodes_request_id = self.allocate_request_id();
         self.similar.request_id = self.allocate_request_id();
-        self.person_items_request_id = self.allocate_request_id();
+        self.person.items_request_id = self.allocate_request_id();
         self.browse.catalog_loading = false;
         self.browse.details.details_loading = false;
         self.series.seasons_loading = false;
         self.series.episodes_loading = false;
         self.similar.loading = false;
-        self.person_items_loading = false;
+        self.person.items_loading = false;
         self.clear_theme_media();
         self.cancel_network_retry_for_user_action();
     }
@@ -5294,14 +5384,14 @@ impl KattriApp {
         self.catalog_genre = None;
         self.catalog_studio = None;
         self.detail_parent = None;
-        self.photo_selected_id = None;
-        self.photo_page_start = 0;
-        self.photo_items.clear();
-        self.photo_thumbnails.clear();
-        self.photo_full_size_images.clear();
+        self.photo.selected_id = None;
+        self.photo.page_start = 0;
+        self.photo.items.clear();
+        self.photo.thumbnails.clear();
+        self.photo.full_size_images.clear();
         self.cancel_pending_photo_decodes();
-        self.photo_thumbnail_attempted.clear();
-        self.photo_full_size_failed.clear();
+        self.photo.thumbnail_attempted.clear();
+        self.photo.full_size_failed.clear();
         self.search.query.clear();
         self.submitted_search = None;
         self.search.active = false;
@@ -5535,13 +5625,13 @@ impl KattriApp {
         self.catalog_name_prefix = None;
         self.catalog_genre = None;
         self.catalog_studio = None;
-        self.photo_selected_id = None;
-        self.photo_items.clear();
-        self.photo_thumbnails.clear();
-        self.photo_full_size_images.clear();
+        self.photo.selected_id = None;
+        self.photo.items.clear();
+        self.photo.thumbnails.clear();
+        self.photo.full_size_images.clear();
         self.cancel_pending_photo_decodes();
-        self.photo_thumbnail_attempted.clear();
-        self.photo_full_size_failed.clear();
+        self.photo.thumbnail_attempted.clear();
+        self.photo.full_size_failed.clear();
         self.browse_context = Some(BrowseContext {
             parent_id,
             title,
@@ -5605,7 +5695,7 @@ impl KattriApp {
 
     pub(crate) fn navigate_back(&mut self) {
         self.cancel_navigation_requests();
-        if self.photo_selected_id.take().is_some() {
+        if self.photo.selected_id.take().is_some() {
             self.cancel_pending_photo_decodes();
             return;
         }
@@ -5613,11 +5703,11 @@ impl KattriApp {
             self.navigate_to(Page::Photos);
             return;
         }
-        if self.selected_person.take().is_some() {
-            self.person_items_request_id = self.allocate_request_id();
-            self.person_items.clear();
-            self.person_items_loading = false;
-            self.person_items_error = None;
+        if self.person.selected.take().is_some() {
+            self.person.items_request_id = self.allocate_request_id();
+            self.person.items.clear();
+            self.person.items_loading = false;
+            self.person.items_error = None;
             return;
         }
         if self.browse.details.selected_item_id.is_some()
@@ -6811,9 +6901,9 @@ impl KattriApp {
         }
 
         if self.navigation.page == Page::Photos {
-            self.photo_items = crate::parental::shown_items(&page.items, ceiling);
-            self.photo_page_start = page.start_index as usize;
-            self.photo_thumbnail_attempted.clear();
+            self.photo.items = crate::parental::shown_items(&page.items, ceiling);
+            self.photo.page_start = page.start_index as usize;
+            self.photo.thumbnail_attempted.clear();
             self.cancel_pending_photo_decodes();
         }
         // Paging counts use the raw page length. Hidden items still advance the server offset.
@@ -7096,32 +7186,34 @@ impl KattriApp {
         let Ok(start_index) = u32::try_from(start_index) else {
             return;
         };
-        self.photo_items.clear();
-        self.photo_thumbnails.clear();
+        self.photo.items.clear();
+        self.photo.thumbnails.clear();
         self.cancel_pending_photo_decodes();
-        self.photo_thumbnail_attempted.clear();
+        self.photo.thumbnail_attempted.clear();
         self.items.clear();
-        self.photo_page_start = start_index as usize;
+        self.photo.page_start = start_index as usize;
         self.request_catalog(start_index, None);
     }
 
     pub(crate) fn request_photo_thumbnail(&mut self, item_id: &str, image_tag: Option<&str>) {
-        if self.photo_thumbnails.contains_key(item_id)
-            || self.photo_thumbnail_attempted.contains(item_id)
+        if self.photo.thumbnails.contains_key(item_id)
+            || self.photo.thumbnail_attempted.contains(item_id)
             || self
-                .photo_thumbnail_pending
+                .photo
+                .thumbnail_pending
                 .values()
                 .any(|pending| pending == item_id)
-            || self.photo_thumbnail_pending.len() >= MAX_PENDING_ARTWORK_REQUESTS
+            || self.photo.thumbnail_pending.len() >= MAX_PENDING_ARTWORK_REQUESTS
         {
             return;
         }
         let request_id = self.allocate_request_id();
         let fallback_index = self
-            .photo_items
+            .photo
+            .items
             .iter()
             .position(|item| item.id == item_id)
-            .map_or(self.photo_page_start, |index| self.photo_page_start + index);
+            .map_or(self.photo.page_start, |index| self.photo.page_start + index);
         let (image_tag, photo_index, visible) =
             image_tag.map_or((None, fallback_index, true), |tag| {
                 decode_photo_request_tag(tag)
@@ -7142,24 +7234,27 @@ impl KattriApp {
         {
             #[cfg(feature = "photo-counters")]
             worker.record_photo_decode_request();
-            self.photo_thumbnail_pending
+            self.photo
+                .thumbnail_pending
                 .insert(request_id, item_id.to_owned());
-            self.photo_thumbnail_attempted.insert(item_id.to_owned());
+            self.photo.thumbnail_attempted.insert(item_id.to_owned());
         }
     }
 
     pub(crate) fn request_photo_full_size(&mut self, item_id: &str) {
-        if self.photo_full_size_images.contains_key(item_id)
+        if self.photo.full_size_images.contains_key(item_id)
             || self
-                .photo_full_size_pending
+                .photo
+                .full_size_pending
                 .values()
                 .any(|pending| pending == item_id)
         {
             return;
         }
-        self.photo_full_size_failed.remove(item_id);
+        self.photo.full_size_failed.remove(item_id);
         let image_tag = self
-            .photo_items
+            .photo
+            .items
             .iter()
             .find(|item| item.id == item_id)
             .and_then(|item| item.image_tags.as_ref())
@@ -7167,11 +7262,12 @@ impl KattriApp {
             .and_then(Option::as_deref)
             .map(str::to_owned);
         let photo_index = self
-            .photo_items
+            .photo
+            .items
             .iter()
             .position(|item| item.id == item_id)
-            .map_or(self.photo_page_start, |index| self.photo_page_start + index);
-        let visible = self.photo_selected_id.as_deref() == Some(item_id);
+            .map_or(self.photo.page_start, |index| self.photo.page_start + index);
+        let visible = self.photo.selected_id.as_deref() == Some(item_id);
         let request_id = self.allocate_request_id();
         let Some(worker) = self.worker.as_ref() else {
             return;
@@ -7186,7 +7282,8 @@ impl KattriApp {
             )
             .is_ok()
         {
-            self.photo_full_size_pending
+            self.photo
+                .full_size_pending
                 .insert(request_id, item_id.to_owned());
             #[cfg(feature = "photo-counters")]
             worker.record_photo_decode_request();
@@ -7525,17 +7622,17 @@ impl KattriApp {
 
     fn request_playlist_candidates(&mut self) {
         let request_id = self.allocate_request_id();
-        self.playlist_candidates_request_id = request_id;
-        self.playlist_candidates_loading = true;
-        self.playlist_candidates_error = None;
+        self.playlist.candidates_request_id = request_id;
+        self.playlist.candidates_loading = true;
+        self.playlist.candidates_error = None;
         let result = self
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
             .and_then(|worker| worker.load_playlist_candidates(request_id));
         if result.is_err() {
-            self.playlist_candidates_loading = false;
-            self.playlist_candidates_error = Some(ErrorClass::Unexpected);
+            self.playlist.candidates_loading = false;
+            self.playlist.candidates_error = Some(ErrorClass::Unexpected);
         }
     }
 
@@ -7578,14 +7675,14 @@ impl KattriApp {
 
     fn request_playlist_items(&mut self, playlist_id: String) {
         let request_id = self.allocate_request_id();
-        self.playlist_items_request_id = request_id;
-        if self.opened_playlist_id.as_deref() != Some(playlist_id.as_str()) {
-            self.playlist_ui_state.selected_media_ids.clear();
+        self.playlist.items_request_id = request_id;
+        if self.playlist.opened_id.as_deref() != Some(playlist_id.as_str()) {
+            self.playlist.ui_state.selected_media_ids.clear();
         }
-        self.opened_playlist_id = Some(playlist_id.clone());
-        self.playlist_entries.clear();
-        self.playlist_items_loading = true;
-        self.playlist_items_error = None;
+        self.playlist.opened_id = Some(playlist_id.clone());
+        self.playlist.entries.clear();
+        self.playlist.items_loading = true;
+        self.playlist.items_error = None;
         let result = self
             .worker
             .as_ref()
@@ -7594,14 +7691,15 @@ impl KattriApp {
                 worker.list_playlist_items(request_id, self.session_epoch, playlist_id)
             });
         if result.is_err() {
-            self.playlist_items_loading = false;
-            self.playlist_items_error = Some(ErrorClass::Unexpected);
+            self.playlist.items_loading = false;
+            self.playlist.items_error = Some(ErrorClass::Unexpected);
         }
     }
 
     pub(crate) fn play_selected_playlist(&mut self) {
         let queue_items = self
-            .playlist_entries
+            .playlist
+            .entries
             .iter()
             .filter(|entry| entry.item.item_type.as_deref() == Some("Audio"))
             .map(|entry| QueueItem::new(entry.item.id.clone()))
@@ -7616,7 +7714,8 @@ impl KattriApp {
             return;
         }
         self.music_track_names.extend(
-            self.playlist_entries
+            self.playlist
+                .entries
                 .iter()
                 .filter(|entry| entry.item.item_type.as_deref() == Some("Audio"))
                 .map(|entry| (entry.item.id.clone(), entry.item.name.clone())),
@@ -7631,7 +7730,7 @@ impl KattriApp {
             PlaylistIntent::DownloadAll { items, .. } => self.download_playlist_items(items),
             PlaylistIntent::SubmitCreateName { name } => {
                 let Ok(name) = crate::ui::playlists::validate_playlist_name(&name) else {
-                    self.playlist_mutation_error = Some(ErrorClass::Unexpected);
+                    self.playlist.mutation_error = Some(ErrorClass::Unexpected);
                     return;
                 };
                 let request_id = self.begin_playlist_mutation();
@@ -7643,7 +7742,7 @@ impl KattriApp {
                 self.mark_playlist_mutation_submission(result);
             }
             PlaylistIntent::PlayPlaylist { playlist_id } => {
-                if self.opened_playlist_id.as_deref() == Some(playlist_id.as_str()) {
+                if self.playlist.opened_id.as_deref() == Some(playlist_id.as_str()) {
                     self.play_selected_playlist();
                 }
             }
@@ -7652,7 +7751,7 @@ impl KattriApp {
                 media_ids,
             } => {
                 if media_ids.is_empty()
-                    || self.opened_playlist_id.as_deref() != Some(playlist_id.as_str())
+                    || self.playlist.opened_id.as_deref() != Some(playlist_id.as_str())
                 {
                     return;
                 }
@@ -7670,7 +7769,7 @@ impl KattriApp {
                 playlist_id,
                 playlist_entry_id,
             } => {
-                if self.opened_playlist_id.as_deref() != Some(playlist_id.as_str()) {
+                if self.playlist.opened_id.as_deref() != Some(playlist_id.as_str()) {
                     return;
                 }
                 let request_id = self.begin_playlist_mutation();
@@ -7688,11 +7787,12 @@ impl KattriApp {
                 playlist_entry_id,
                 direction,
             } => {
-                if self.opened_playlist_id.as_deref() != Some(playlist_id.as_str()) {
+                if self.playlist.opened_id.as_deref() != Some(playlist_id.as_str()) {
                     return;
                 }
                 let model_entries = self
-                    .playlist_entries
+                    .playlist
+                    .entries
                     .iter()
                     .filter_map(|entry| {
                         entry.playlist_item_id.as_deref().and_then(|entry_id| {
@@ -7784,17 +7884,17 @@ impl KattriApp {
 
     fn begin_playlist_mutation(&mut self) -> u64 {
         let request_id = self.allocate_request_id();
-        self.playlist_mutation_request_id = request_id;
-        self.playlist_mutation_loading = true;
-        self.playlist_mutation_error = None;
-        self.playlist_mutation_notice = None;
+        self.playlist.mutation_request_id = request_id;
+        self.playlist.mutation_loading = true;
+        self.playlist.mutation_error = None;
+        self.playlist.mutation_notice = None;
         request_id
     }
 
     fn mark_playlist_mutation_submission(&mut self, result: Result<(), WorkerSubmitError>) {
         if result.is_err() {
-            self.playlist_mutation_loading = false;
-            self.playlist_mutation_error = Some(ErrorClass::Unexpected);
+            self.playlist.mutation_loading = false;
+            self.playlist.mutation_error = Some(ErrorClass::Unexpected);
         }
     }
 
@@ -7882,17 +7982,17 @@ impl KattriApp {
 
     fn reset_people_detail(&mut self) {
         self.similar.request_id = self.allocate_request_id();
-        self.person_items_request_id = self.allocate_request_id();
+        self.person.items_request_id = self.allocate_request_id();
         self.similar.items.clear();
         self.similar.loading = false;
-        self.selected_person = None;
-        self.person_items.clear();
-        self.person_items_loading = false;
-        self.person_items_error = None;
-        self.person_artwork_queue.clear();
-        self.pending_person_artwork.clear();
-        self.attempted_person_artwork.clear();
-        self.person_artwork_textures.clear();
+        self.person.selected = None;
+        self.person.items.clear();
+        self.person.items_loading = false;
+        self.person.items_error = None;
+        self.person.artwork_queue.clear();
+        self.person.pending_artwork.clear();
+        self.person.attempted_artwork.clear();
+        self.person.artwork_textures.clear();
     }
 
     fn request_similar_items(&mut self) {
@@ -7966,19 +8066,19 @@ impl KattriApp {
         let Some(person_id) = person.id.clone() else {
             return;
         };
-        self.selected_person = Some(person);
-        self.person_items.clear();
-        self.person_items_error = None;
-        self.person_items_loading = true;
+        self.person.selected = Some(person);
+        self.person.items.clear();
+        self.person.items_error = None;
+        self.person.items_loading = true;
         let request_id = self.allocate_request_id();
-        self.person_items_request_id = request_id;
+        self.person.items_request_id = request_id;
         if self.worker.as_ref().is_none_or(|worker| {
             worker
                 .list_person_items(request_id, self.session_epoch, person_id, 50)
                 .is_err()
         }) {
-            self.person_items_loading = false;
-            self.person_items_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into());
+            self.person.items_loading = false;
+            self.person.items_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into());
         }
     }
 
@@ -7999,7 +8099,7 @@ impl KattriApp {
     }
 
     fn queue_person_artwork(&mut self) {
-        self.person_artwork_queue = self
+        self.person.artwork_queue = self
             .browse
             .details
             .selected_details
@@ -8020,8 +8120,8 @@ impl KattriApp {
     }
 
     fn pump_person_artwork_requests(&mut self) {
-        while self.pending_person_artwork.len() < MAX_PENDING_ARTWORK_REQUESTS {
-            let Some(person) = self.person_artwork_queue.pop() else {
+        while self.person.pending_artwork.len() < MAX_PENDING_ARTWORK_REQUESTS {
+            let Some(person) = self.person.artwork_queue.pop() else {
                 break;
             };
             let Some(name) = person
@@ -8033,13 +8133,13 @@ impl KattriApp {
             else {
                 continue;
             };
-            if self.person_artwork_textures.contains_key(&name)
-                || !self.attempted_person_artwork.insert(name.clone())
+            if self.person.artwork_textures.contains_key(&name)
+                || !self.person.attempted_artwork.insert(name.clone())
             {
                 continue;
             }
             let request_id = self.allocate_request_id();
-            self.pending_person_artwork.insert(request_id, name.clone());
+            self.person.pending_artwork.insert(request_id, name.clone());
             let result = self
                 .worker
                 .as_ref()
@@ -8048,7 +8148,7 @@ impl KattriApp {
                     worker.get_person_artwork(request_id, name, person.primary_image_tag.clone())
                 });
             if result.is_err() {
-                self.pending_person_artwork.remove(&request_id);
+                self.person.pending_artwork.remove(&request_id);
             }
         }
     }
@@ -9970,19 +10070,19 @@ impl KattriApp {
         self.music_queue_persistence.reset();
         self.music_queue_persistence
             .set_suspended(self.music_queue_restore.has_pending());
-        self.playlist_entries.clear();
-        self.playlist_items_loading = false;
-        self.playlist_items_error = None;
-        self.opened_playlist_id = None;
-        self.playlist_items_request_id = self.allocate_request_id();
-        self.playlist_mutation_loading = false;
-        self.playlist_mutation_error = None;
-        self.playlist_mutation_notice = None;
-        self.playlist_mutation_request_id = self.allocate_request_id();
-        self.playlist_candidates.clear();
-        self.playlist_candidates_loading = false;
-        self.playlist_candidates_error = None;
-        self.playlist_candidates_request_id = self.allocate_request_id();
+        self.playlist.entries.clear();
+        self.playlist.items_loading = false;
+        self.playlist.items_error = None;
+        self.playlist.opened_id = None;
+        self.playlist.items_request_id = self.allocate_request_id();
+        self.playlist.mutation_loading = false;
+        self.playlist.mutation_error = None;
+        self.playlist.mutation_notice = None;
+        self.playlist.mutation_request_id = self.allocate_request_id();
+        self.playlist.candidates.clear();
+        self.playlist.candidates_loading = false;
+        self.playlist.candidates_error = None;
+        self.playlist.candidates_request_id = self.allocate_request_id();
         self.album_tracks.loading = false;
         self.album_tracks.error = None;
         self.album_tracks.request_id = self.allocate_request_id();
@@ -10957,7 +11057,7 @@ impl KattriApp {
                         });
                     }
                     if let WorkerEvent::PlaylistMutationCompleted { playlist_id, .. } = &event
-                        && self.opened_playlist_id.as_deref() == Some(playlist_id.as_str())
+                        && self.playlist.opened_id.as_deref() == Some(playlist_id.as_str())
                     {
                         self.request_playlist_items(playlist_id.clone());
                     }
@@ -11064,14 +11164,14 @@ impl KattriApp {
                     playlist_id,
                     entries,
                     ..
-                } if request_id == self.playlist_items_request_id
-                    && self.opened_playlist_id.as_deref() == Some(playlist_id.as_str()) =>
+                } if request_id == self.playlist.items_request_id
+                    && self.playlist.opened_id.as_deref() == Some(playlist_id.as_str()) =>
                 {
                     self.record_network_success();
-                    self.playlist_items_loading = false;
-                    self.playlist_items_error = None;
+                    self.playlist.items_loading = false;
+                    self.playlist.items_error = None;
                     let ceiling = self.browse_rating_ceiling(ctx);
-                    self.playlist_entries = entries
+                    self.playlist.entries = entries
                         .into_iter()
                         .filter(|entry| crate::parental::item_record_is_shown(ceiling, &entry.item))
                         .collect();
@@ -11081,44 +11181,44 @@ impl KattriApp {
                     playlist_id,
                     error_class,
                     ..
-                } if request_id == self.playlist_items_request_id
-                    && self.opened_playlist_id.as_deref() == Some(playlist_id.as_str()) =>
+                } if request_id == self.playlist.items_request_id
+                    && self.playlist.opened_id.as_deref() == Some(playlist_id.as_str()) =>
                 {
                     self.record_network_error(error_class, None);
-                    self.playlist_items_loading = false;
-                    self.playlist_items_error = Some(error_class);
+                    self.playlist.items_loading = false;
+                    self.playlist.items_error = Some(error_class);
                 }
                 WorkerEvent::PlaylistCandidatesLoaded { request_id, items }
-                    if request_id == self.playlist_candidates_request_id
+                    if request_id == self.playlist.candidates_request_id
                         && self.navigation.page == Page::Playlists =>
                 {
                     self.record_network_success();
-                    self.playlist_candidates_loading = false;
-                    self.playlist_candidates_error = None;
-                    self.playlist_candidates = items;
+                    self.playlist.candidates_loading = false;
+                    self.playlist.candidates_error = None;
+                    self.playlist.candidates = items;
                 }
                 WorkerEvent::PlaylistCandidatesFailed {
                     request_id,
                     error_class,
-                } if request_id == self.playlist_candidates_request_id
+                } if request_id == self.playlist.candidates_request_id
                     && self.navigation.page == Page::Playlists =>
                 {
                     self.record_network_error(error_class, None);
-                    self.playlist_candidates_loading = false;
-                    self.playlist_candidates_error = Some(error_class);
+                    self.playlist.candidates_loading = false;
+                    self.playlist.candidates_error = Some(error_class);
                 }
                 WorkerEvent::PlaylistCreated {
                     request_id,
                     playlist_id,
                     name,
-                } if request_id == self.playlist_mutation_request_id => {
+                } if request_id == self.playlist.mutation_request_id => {
                     self.record_network_success();
-                    self.playlist_mutation_loading = false;
-                    self.playlist_mutation_error = None;
-                    if self.playlist_ui_state.create_name.trim() == name {
-                        self.playlist_ui_state.create_name.clear();
+                    self.playlist.mutation_loading = false;
+                    self.playlist.mutation_error = None;
+                    if self.playlist.ui_state.create_name.trim() == name {
+                        self.playlist.ui_state.create_name.clear();
                     }
-                    self.playlist_mutation_notice =
+                    self.playlist.mutation_notice =
                         Some(ui_text(ids::PLAYLISTS_NOTICE_CREATED).into());
                     self.request_menu_playlists();
                     self.request_catalog(0, None);
@@ -11127,24 +11227,24 @@ impl KattriApp {
                 WorkerEvent::PlaylistCreateFailed {
                     request_id,
                     error_class,
-                } if request_id == self.playlist_mutation_request_id => {
+                } if request_id == self.playlist.mutation_request_id => {
                     self.record_network_error(error_class, None);
-                    self.playlist_mutation_loading = false;
-                    self.playlist_mutation_error = Some(error_class);
-                    self.playlist_mutation_notice =
+                    self.playlist.mutation_loading = false;
+                    self.playlist.mutation_error = Some(error_class);
+                    self.playlist.mutation_notice =
                         Some(ui_text(ids::PLAYLISTS_ERROR_CREATE_FAILED).into());
                 }
                 WorkerEvent::PlaylistMutationCompleted {
                     request_id,
                     playlist_id,
                     kind,
-                } if request_id == self.playlist_mutation_request_id
-                    && self.opened_playlist_id.as_deref() == Some(playlist_id.as_str()) =>
+                } if request_id == self.playlist.mutation_request_id
+                    && self.playlist.opened_id.as_deref() == Some(playlist_id.as_str()) =>
                 {
                     self.record_network_success();
-                    self.playlist_mutation_loading = false;
-                    self.playlist_mutation_error = None;
-                    self.playlist_mutation_notice = Some(
+                    self.playlist.mutation_loading = false;
+                    self.playlist.mutation_error = None;
+                    self.playlist.mutation_notice = Some(
                         match kind {
                             PlaylistMutationKind::Added => ui_text(ids::PLAYLISTS_NOTICE_ADDED),
                             PlaylistMutationKind::Removed => ui_text(ids::PLAYLISTS_NOTICE_REMOVED),
@@ -11152,7 +11252,7 @@ impl KattriApp {
                         }
                         .into(),
                     );
-                    self.playlist_ui_state.selected_media_ids.clear();
+                    self.playlist.ui_state.selected_media_ids.clear();
                     self.request_playlist_items(playlist_id);
                 }
                 WorkerEvent::PlaylistMutationFailed {
@@ -11160,13 +11260,13 @@ impl KattriApp {
                     playlist_id,
                     kind,
                     error_class,
-                } if request_id == self.playlist_mutation_request_id
-                    && self.opened_playlist_id.as_deref() == Some(playlist_id.as_str()) =>
+                } if request_id == self.playlist.mutation_request_id
+                    && self.playlist.opened_id.as_deref() == Some(playlist_id.as_str()) =>
                 {
                     self.record_network_error(error_class, None);
-                    self.playlist_mutation_loading = false;
-                    self.playlist_mutation_error = Some(error_class);
-                    self.playlist_mutation_notice = Some(
+                    self.playlist.mutation_loading = false;
+                    self.playlist.mutation_error = Some(error_class);
+                    self.playlist.mutation_notice = Some(
                         match kind {
                             PlaylistMutationKind::Added => ui_text(ids::PLAYLISTS_ERROR_ADD_FAILED),
                             PlaylistMutationKind::Removed => {
@@ -11345,17 +11445,18 @@ impl KattriApp {
                     person_id,
                     items,
                     ..
-                } if request_id == self.person_items_request_id
+                } if request_id == self.person.items_request_id
                     && self
-                        .selected_person
+                        .person
+                        .selected
                         .as_ref()
                         .and_then(|person| person.id.as_deref())
                         == Some(person_id.as_str()) =>
                 {
-                    self.person_items_loading = false;
-                    self.person_items_error = None;
+                    self.person.items_loading = false;
+                    self.person.items_error = None;
                     let ceiling = self.browse_rating_ceiling(ctx);
-                    self.person_items = items
+                    self.person.items = items
                         .into_iter()
                         .filter(|item| crate::parental::item_record_is_shown(ceiling, item))
                         .collect();
@@ -11365,15 +11466,16 @@ impl KattriApp {
                     person_id,
                     message,
                     ..
-                } if request_id == self.person_items_request_id
+                } if request_id == self.person.items_request_id
                     && self
-                        .selected_person
+                        .person
+                        .selected
                         .as_ref()
                         .and_then(|person| person.id.as_deref())
                         == Some(person_id.as_str()) =>
                 {
-                    self.person_items_loading = false;
-                    self.person_items_error = Some(message);
+                    self.person.items_loading = false;
+                    self.person.items_error = Some(message);
                 }
                 WorkerEvent::PersonImageLoaded {
                     request_id,
@@ -11382,18 +11484,18 @@ impl KattriApp {
                     height,
                     rgba,
                 } => {
-                    let expected_name = self.pending_person_artwork.remove(&request_id);
+                    let expected_name = self.person.pending_artwork.remove(&request_id);
                     if expected_name.as_deref() == Some(name.as_str()) {
-                        if self.person_artwork_textures.len() >= MAX_PERSON_ARTWORK_TEXTURES {
+                        if self.person.artwork_textures.len() >= MAX_PERSON_ARTWORK_TEXTURES {
                             // Drop the whole cache rather than grow without bound while browsing.
-                            self.person_artwork_textures.clear();
-                            self.attempted_person_artwork.clear();
+                            self.person.artwork_textures.clear();
+                            self.person.attempted_artwork.clear();
                         }
                         let color_image = egui::ColorImage::from_rgba_unmultiplied(
                             [width as usize, height as usize],
                             &rgba,
                         );
-                        self.person_artwork_textures.insert(
+                        self.person.artwork_textures.insert(
                             name.clone(),
                             ctx.load_texture(
                                 format!("jellyfin-person:{name}"),
@@ -11407,7 +11509,7 @@ impl KattriApp {
                     }
                 }
                 WorkerEvent::PersonImageFailed { request_id } => {
-                    if self.pending_person_artwork.remove(&request_id).is_some() {
+                    if self.person.pending_artwork.remove(&request_id).is_some() {
                         self.pump_person_artwork_requests();
                     }
                 }
@@ -11418,15 +11520,15 @@ impl KattriApp {
                     height,
                     rgba,
                 } => {
-                    if self.photo_thumbnail_pending.remove(&request_id).as_deref()
+                    if self.photo.thumbnail_pending.remove(&request_id).as_deref()
                         == Some(item_id.as_str())
-                        && self.photo_items.iter().any(|item| item.id == item_id)
+                        && self.photo.items.iter().any(|item| item.id == item_id)
                     {
                         let image = egui::ColorImage::from_rgba_unmultiplied(
                             [width as usize, height as usize],
                             &rgba,
                         );
-                        self.photo_thumbnails.insert(
+                        self.photo.thumbnails.insert(
                             item_id.clone(),
                             ctx.load_texture(
                                 format!("jellyfin-photo-thumb:{item_id}"),
@@ -11435,9 +11537,9 @@ impl KattriApp {
                             ),
                         );
                         evict_photo_thumbnails(
-                            &mut self.photo_thumbnails,
-                            &mut self.photo_thumbnail_attempted,
-                            &self.photo_visible_ids,
+                            &mut self.photo.thumbnails,
+                            &mut self.photo.thumbnail_attempted,
+                            &self.photo.visible_ids,
                             &item_id,
                         );
                     }
@@ -11447,11 +11549,12 @@ impl KattriApp {
                     item_id,
                 } => {
                     if self
-                        .photo_thumbnail_pending
+                        .photo
+                        .thumbnail_pending
                         .get(&request_id)
                         .is_some_and(|expected| expected == &item_id)
                     {
-                        self.photo_thumbnail_pending.remove(&request_id);
+                        self.photo.thumbnail_pending.remove(&request_id);
                     }
                 }
                 WorkerEvent::PhotoFullSizeLoaded {
@@ -11461,16 +11564,16 @@ impl KattriApp {
                     height,
                     rgba,
                 } => {
-                    let selected = self.photo_selected_id.as_deref() == Some(item_id.as_str());
-                    if self.photo_full_size_pending.remove(&request_id).as_deref()
+                    let selected = self.photo.selected_id.as_deref() == Some(item_id.as_str());
+                    if self.photo.full_size_pending.remove(&request_id).as_deref()
                         == Some(item_id.as_str())
-                        && self.photo_items.iter().any(|item| item.id == item_id)
+                        && self.photo.items.iter().any(|item| item.id == item_id)
                     {
                         let image = egui::ColorImage::from_rgba_unmultiplied(
                             [width as usize, height as usize],
                             &rgba,
                         );
-                        self.photo_full_size_images.insert(
+                        self.photo.full_size_images.insert(
                             item_id.clone(),
                             ctx.load_texture(
                                 format!("jellyfin-photo-full:{item_id}"),
@@ -11478,29 +11581,31 @@ impl KattriApp {
                                 egui::TextureOptions::LINEAR,
                             ),
                         );
-                        self.photo_full_size_failed.remove(&item_id);
-                        while self.photo_full_size_images.len() > 3 {
+                        self.photo.full_size_failed.remove(&item_id);
+                        while self.photo.full_size_images.len() > 3 {
                             let evict = self
-                                .photo_full_size_images
+                                .photo
+                                .full_size_images
                                 .keys()
-                                .find(|id| self.photo_selected_id.as_deref() != Some(id.as_str()))
+                                .find(|id| self.photo.selected_id.as_deref() != Some(id.as_str()))
                                 .cloned();
                             if let Some(evict) = evict {
-                                self.photo_full_size_images.remove(&evict);
+                                self.photo.full_size_images.remove(&evict);
                             } else {
                                 break;
                             }
                         }
                         if selected {
                             let neighbors = self
-                                .photo_items
+                                .photo
+                                .items
                                 .iter()
                                 .position(|item| item.id == item_id)
                                 .into_iter()
                                 .flat_map(|index| {
                                     [false, true].map(|next| {
                                         crate::ui::photos::adjacent_photo_id(
-                                            &self.photo_items,
+                                            &self.photo.items,
                                             index,
                                             next,
                                         )
@@ -11519,9 +11624,9 @@ impl KattriApp {
                     request_id,
                     item_id,
                 } => {
-                    self.photo_full_size_pending.remove(&request_id);
-                    if self.photo_selected_id.as_deref() == Some(item_id.as_str()) {
-                        self.photo_full_size_failed.insert(item_id);
+                    self.photo.full_size_pending.remove(&request_id);
+                    if self.photo.selected_id.as_deref() == Some(item_id.as_str()) {
+                        self.photo.full_size_failed.insert(item_id);
                     }
                 }
                 WorkerEvent::PrimaryArtworkLoaded {
@@ -14676,9 +14781,9 @@ mod music_queue_app_tests {
         let mut app = KattriApp::new(egui::Context::default());
         let (worker, sender) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.opened_playlist_id = Some("playlist-1".into());
-        app.playlist_items_request_id = 82;
-        app.playlist_items_loading = true;
+        app.playlist.opened_id = Some("playlist-1".into());
+        app.playlist.items_request_id = 82;
+        app.playlist.items_loading = true;
         sender
             .try_send(WorkerEvent::PlaylistItemsLoaded {
                 request_id: 81,
@@ -14688,8 +14793,8 @@ mod music_queue_app_tests {
             })
             .expect("send stale fixture");
         app.receive_worker_events(&egui::Context::default());
-        assert!(app.playlist_entries.is_empty());
-        assert!(app.playlist_items_loading);
+        assert!(app.playlist.entries.is_empty());
+        assert!(app.playlist.items_loading);
 
         sender
             .try_send(WorkerEvent::PlaylistItemsLoaded {
@@ -14703,8 +14808,8 @@ mod music_queue_app_tests {
             })
             .expect("send current fixture");
         app.receive_worker_events(&egui::Context::default());
-        assert_eq!(app.playlist_entries.len(), 2);
-        assert!(!app.playlist_items_loading);
+        assert_eq!(app.playlist.entries.len(), 2);
+        assert!(!app.playlist.items_loading);
 
         app.play_selected_playlist();
         assert_eq!(app.music_queue.len(), 2);
@@ -14723,15 +14828,16 @@ mod music_queue_app_tests {
     fn switching_playlists_clears_selected_candidates() {
         let mut app = KattriApp::new(egui::Context::default());
         app.worker = Some(ApiWorker::queued_for_test());
-        app.opened_playlist_id = Some("playlist-1".into());
-        app.playlist_ui_state
+        app.playlist.opened_id = Some("playlist-1".into());
+        app.playlist
+            .ui_state
             .selected_media_ids
             .insert("movie-1".into());
 
         app.request_playlist_items("playlist-2".into());
 
-        assert_eq!(app.opened_playlist_id.as_deref(), Some("playlist-2"));
-        assert!(app.playlist_ui_state.selected_media_ids.is_empty());
+        assert_eq!(app.playlist.opened_id.as_deref(), Some("playlist-2"));
+        assert!(app.playlist.ui_state.selected_media_ids.is_empty());
     }
 
     #[test]
@@ -16535,13 +16641,13 @@ mod photo_decode_event_tests {
         let mut app = KattriApp::new(Context::default());
         let (worker, sender) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.photo_items.push(
+        app.photo.items.push(
             serde_json::from_value(serde_json::json!({
                 "Id": "photo-1", "Name": "Photo", "Type": "Photo"
             }))
             .expect("photo DTO fixture"),
         );
-        app.photo_thumbnail_pending.insert(41, "photo-1".into());
+        app.photo.thumbnail_pending.insert(41, "photo-1".into());
         sender
             .try_send(WorkerEvent::PhotoThumbnailLoaded {
                 request_id: 41,
@@ -16557,8 +16663,8 @@ mod photo_decode_event_tests {
             app.receive_worker_events(ui.ctx())
         });
         output.textures_delta.clear();
-        assert!(app.photo_thumbnails.contains_key("photo-1"));
-        assert!(!app.photo_thumbnail_pending.contains_key(&41));
+        assert!(app.photo.thumbnails.contains_key("photo-1"));
+        assert!(!app.photo.thumbnail_pending.contains_key(&41));
 
         sender
             .try_send(WorkerEvent::PhotoThumbnailLoaded {
@@ -16573,7 +16679,7 @@ mod photo_decode_event_tests {
             app.receive_worker_events(ui.ctx())
         });
         output.textures_delta.clear();
-        assert_eq!(app.photo_thumbnails.len(), 1);
+        assert_eq!(app.photo.thumbnails.len(), 1);
     }
 
     #[test]
@@ -17061,20 +17167,21 @@ mod photo_decode_event_tests {
         let mut app = KattriApp::new(Context::default());
         let (worker, _sender) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.photo_thumbnail_pending.insert(7, "photo-7".into());
-        app.photo_thumbnail_pending.insert(8, "photo-8".into());
-        app.photo_thumbnail_attempted
+        app.photo.thumbnail_pending.insert(7, "photo-7".into());
+        app.photo.thumbnail_pending.insert(8, "photo-8".into());
+        app.photo
+            .thumbnail_attempted
             .extend(["photo-7".into(), "photo-8".into()]);
 
         app.update_photo_thumbnail_window(&[("photo-7".into(), "tag".into())]);
 
         assert_eq!(
-            app.photo_thumbnail_pending.get(&7).map(String::as_str),
+            app.photo.thumbnail_pending.get(&7).map(String::as_str),
             Some("photo-7")
         );
-        assert!(!app.photo_thumbnail_pending.contains_key(&8));
-        assert!(app.photo_thumbnail_attempted.contains("photo-7"));
-        assert!(!app.photo_thumbnail_attempted.contains("photo-8"));
+        assert!(!app.photo.thumbnail_pending.contains_key(&8));
+        assert!(app.photo.thumbnail_attempted.contains("photo-7"));
+        assert!(!app.photo.thumbnail_attempted.contains("photo-8"));
     }
 
     #[cfg(feature = "photo-counters")]
@@ -17083,7 +17190,7 @@ mod photo_decode_event_tests {
         let mut app = KattriApp::new(Context::default());
         let (worker, _sender) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.photo_thumbnail_pending.insert(7, "photo-7".into());
+        app.photo.thumbnail_pending.insert(7, "photo-7".into());
         app.cancel_pending_photo_decodes();
         assert_eq!(
             app.photo_decode_counter_snapshot()

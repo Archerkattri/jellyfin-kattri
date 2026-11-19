@@ -1528,19 +1528,20 @@ fn photos_page(ui: &mut egui::Ui, app: &mut KattriApp) {
         ui,
         &mut photos::PhotosView {
             folder_title,
-            items: &app.photo_items,
-            thumbnails: &app.photo_thumbnails,
-            full_size_images: &app.photo_full_size_images,
+            items: &app.photo.items,
+            thumbnails: &app.photo.thumbnails,
+            full_size_images: &app.photo.full_size_images,
             loading: app.browse.catalog_loading,
             error: app.browse.catalog_error.as_deref(),
-            page_start: app.photo_page_start,
+            page_start: app.photo.page_start,
             page_size: 100,
             total_count: app.total_record_count.map(|value| value as usize),
-            selected_photo_id: app.photo_selected_id.as_deref(),
+            selected_photo_id: app.photo.selected_id.as_deref(),
             full_size_error: app
-                .photo_selected_id
+                .photo
+                .selected_id
                 .as_ref()
-                .is_some_and(|id| app.photo_full_size_failed.contains(id)),
+                .is_some_and(|id| app.photo.full_size_failed.contains(id)),
             visible_thumbnails: &mut visible_thumbnails,
         },
     );
@@ -1553,18 +1554,18 @@ fn photos_page(ui: &mut egui::Ui, app: &mut KattriApp) {
             app.request_photo_page(start_index);
         }
         Some(photos::PhotosAction::OpenFolder(folder_id)) => {
-            if let Some(folder) = app.photo_items.iter().find(|item| item.id == folder_id) {
+            if let Some(folder) = app.photo.items.iter().find(|item| item.id == folder_id) {
                 app.navigate_to_parent(Page::Photos, folder_id, folder.name.clone(), false);
             }
         }
         Some(photos::PhotosAction::OpenPhoto(item_id))
         | Some(photos::PhotosAction::PreviousPhoto(item_id))
         | Some(photos::PhotosAction::NextPhoto(item_id)) => {
-            app.photo_selected_id = Some(item_id.clone());
+            app.photo.selected_id = Some(item_id.clone());
             app.request_photo_full_size(&item_id);
         }
         Some(photos::PhotosAction::ClosePhoto) => {
-            app.photo_selected_id = None;
+            app.photo.selected_id = None;
         }
         None => {}
     }
@@ -1580,7 +1581,7 @@ fn home_view(
     entries: &mut Vec<CardFocus>,
     visible_artwork: &mut Vec<(String, String)>,
 ) {
-    if app.browse.details.selected_item_id.is_some() || app.selected_person.is_some() {
+    if app.browse.details.selected_item_id.is_some() || app.person.selected.is_some() {
         details_panel(ui, app, colors);
         return;
     }
@@ -1883,7 +1884,7 @@ fn render_connected(
         music_queue_panel(ui, app, gamepad_actions);
     }
     // Sorting and paging belong to the list; an open item or person page replaces them.
-    if app.browse.details.selected_item_id.is_none() && app.selected_person.is_none() {
+    if app.browse.details.selected_item_id.is_none() && app.person.selected.is_none() {
         // Sort and filter controls only describe the library's own catalog. Suggestions and
         // Upcoming are one fixed page, and Episodes has its own newest-first ordering.
         if app.navigation.library_tab == LibraryTab::Library {
@@ -1894,7 +1895,7 @@ fn render_connected(
     details_panel(ui, app, colors);
     // An open item or person page replaces the browse grid: without this return the grid drew
     // below the details and reappeared when the viewer scrolled down past the details.
-    if app.browse.details.selected_item_id.is_some() || app.selected_person.is_some() {
+    if app.browse.details.selected_item_id.is_some() || app.person.selected.is_some() {
         return;
     }
 
@@ -2296,12 +2297,13 @@ fn playlists_page(ui: &mut egui::Ui, app: &mut KattriApp) {
         .map(|item| PlaylistCard {
             playlist_id: item.id.clone(),
             name: item.title.clone(),
-            entry_count: (app.opened_playlist_id.as_deref() == Some(item.id.as_str()))
-                .then_some(app.playlist_entries.len()),
+            entry_count: (app.playlist.opened_id.as_deref() == Some(item.id.as_str()))
+                .then_some(app.playlist.entries.len()),
         })
         .collect::<Vec<_>>();
     let entries = app
-        .playlist_entries
+        .playlist
+        .entries
         .iter()
         .map(|entry| UiPlaylistEntry {
             playlist_entry_id: entry.playlist_item_id.clone().unwrap_or_default(),
@@ -2310,7 +2312,8 @@ fn playlists_page(ui: &mut egui::Ui, app: &mut KattriApp) {
         })
         .collect::<Vec<_>>();
     let addable_media = app
-        .playlist_candidates
+        .playlist
+        .candidates
         .iter()
         .filter(|item| {
             matches!(
@@ -2323,7 +2326,7 @@ fn playlists_page(ui: &mut egui::Ui, app: &mut KattriApp) {
             title: item.name.clone(),
         })
         .collect::<Vec<_>>();
-    let opened_name = app.opened_playlist_id.as_deref().and_then(|playlist_id| {
+    let opened_name = app.playlist.opened_id.as_deref().and_then(|playlist_id| {
         app.items
             .iter()
             .find(|item| item.id == playlist_id)
@@ -2338,7 +2341,8 @@ fn playlists_page(ui: &mut egui::Ui, app: &mut KattriApp) {
             })
     });
     let opened = app
-        .opened_playlist_id
+        .playlist
+        .opened_id
         .as_deref()
         .zip(opened_name.as_deref())
         .map(|(playlist_id, name)| OpenPlaylist {
@@ -2347,27 +2351,28 @@ fn playlists_page(ui: &mut egui::Ui, app: &mut KattriApp) {
             entries: &entries,
         });
     let error = app
-        .playlist_mutation_error
-        .or(app.playlist_items_error)
-        .or(app.playlist_candidates_error)
+        .playlist
+        .mutation_error
+        .or(app.playlist.items_error)
+        .or(app.playlist.candidates_error)
         .map(|error| match error {
             jellyfin_api::ErrorClass::NotFound => ui_text(ids::PLAYLISTS_ERROR_NOT_FOUND),
             jellyfin_api::ErrorClass::Forbidden => ui_text(ids::PLAYLISTS_ERROR_FORBIDDEN),
             other => status::message(other),
         });
-    if app.playlist_items_loading || app.playlist_candidates_loading {
+    if app.playlist.items_loading || app.playlist.candidates_loading {
         ui.horizontal(|ui| {
             ui.spinner();
             ui.label(ui_text(ids::PLAYLISTS_STATUS_LOADING));
         });
     }
-    if app.playlist_mutation_loading {
+    if app.playlist.mutation_loading {
         ui.horizontal(|ui| {
             ui.spinner();
             ui.label(ui_text(ids::PLAYLISTS_STATUS_SAVING));
         });
     }
-    if let Some(notice) = app.playlist_mutation_notice.as_deref() {
+    if let Some(notice) = app.playlist.mutation_notice.as_deref() {
         ui.label(notice);
     }
     let response = playlists::show(
@@ -2378,7 +2383,7 @@ fn playlists_page(ui: &mut egui::Ui, app: &mut KattriApp) {
             addable_media: &addable_media,
             error,
         },
-        &mut app.playlist_ui_state,
+        &mut app.playlist.ui_state,
     );
     for intent in response.intents {
         app.apply_playlist_intent(intent);
@@ -2957,7 +2962,7 @@ mod download_button_tests {
 }
 
 fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
-    if app.selected_person.is_some() {
+    if app.person.selected.is_some() {
         person_page_panel(ui, app, colors);
         return;
     }
@@ -3230,7 +3235,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                     &cast,
                     &app.similar.items,
                     &item.id,
-                    &app.person_artwork_textures,
+                    &app.person.artwork_textures,
                 );
                 person_to_open = people_action.person_id;
                 similar_item_to_open = people_action.item_id;
@@ -3753,7 +3758,7 @@ fn detail_play_buttons(
 }
 
 fn person_page_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
-    let Some(person) = app.selected_person.as_ref() else {
+    let Some(person) = app.person.selected.as_ref() else {
         return;
     };
     let mut go_back = false;
@@ -3778,24 +3783,24 @@ fn person_page_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                         .unwrap_or(ui_text(ids::PERSON_TITLE_DEFAULT)),
                 );
             });
-            if app.person_items_loading {
+            if app.person.items_loading {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(
                         RichText::new(ui_text(ids::PERSON_STATUS_LOADING)).color(colors.muted),
                     );
                 });
-            } else if let Some(error) = app.person_items_error.as_deref() {
+            } else if let Some(error) = app.person.items_error.as_deref() {
                 ui.label(
                     RichText::new(ui_text_args(ids::PERSON_ERROR_LOAD, &[("error", error)]))
                         .color(colors.danger),
                 );
-            } else if app.person_items.is_empty() {
+            } else if app.person.items.is_empty() {
                 ui.label(RichText::new(ui_text(ids::PERSON_EMPTY)).color(colors.muted));
             } else {
                 ui.add_space(8.0);
                 ui.horizontal_wrapped(|ui| {
-                    for item in &app.person_items {
+                    for item in &app.person.items {
                         if ui
                             .add(egui::Button::new(&item.name).min_size(egui::vec2(180.0, 56.0)))
                             .clicked()
