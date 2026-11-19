@@ -46,6 +46,7 @@ pub mod segments;
 pub mod servers;
 pub mod stream_url;
 pub mod subtitle_ass;
+pub mod subtitle_replace;
 pub mod subtitle_style;
 pub mod subtitle_sync;
 pub mod subtitles;

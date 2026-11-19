@@ -58,6 +58,7 @@ use kattri_client_core::remote::{LocalAction, local_action};
 use kattri_client_core::retry::{RetryDecision, RetryPolicy, RetrySchedule};
 use kattri_client_core::search::{SearchDebouncer, SearchInputAction};
 use kattri_client_core::segments::{MediaSegment, SkipSettings};
+use kattri_client_core::subtitle_replace::{PendingReplacement, SubtitleReplaceMachine};
 use kattri_client_core::syncplay::playback::group_command_from_wire;
 use kattri_client_core::syncplay::{
     ClockEstimate, ClockEstimator, DriftController, GroupCommand, LocalAction as GroupAction,
@@ -1331,17 +1332,6 @@ struct ActivePlayback {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct PendingBurnInSubtitleReplacement {
-    request_id: u64,
-    playback_generation: u64,
-    item_id: String,
-    subtitle_stream_index: Option<i32>,
-    position_ticks: i64,
-    was_paused: bool,
-    rollback: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct BurnInSubtitleReplacementLoad {
     playback_generation: u64,
     item_id: String,
@@ -1616,10 +1606,10 @@ pub struct KattriApp {
     pending_playback: Option<PreparedPlayback>,
     playback_recovery: Option<PlaybackRecovery>,
     active_playback: Option<ActivePlayback>,
-    pending_burn_in_subtitle_replacement: Option<PendingBurnInSubtitleReplacement>,
+    /// The in-flight subtitle replacement and its terminal failure, owned by one machine.
+    burn_in_replace: SubtitleReplaceMachine,
     burn_in_subtitle_replacement_load: Option<BurnInSubtitleReplacementLoad>,
     burn_in_subtitle_feedback: Option<String>,
-    terminal_burn_in_replacement_failure_generation: Option<u64>,
     mid_stream_recoveries: u8,
     /// A prepared episode waiting for its item record, which carries the series ID (M2-10).
     /// Kept with its start request ID, so a newer request drops it.
@@ -1950,8 +1940,8 @@ impl KattriApp {
     /// handle and playback-report accounting.
     pub(crate) fn reset_playback(&mut self, what: PlaybackReset) {
         let replacement_was_paused = self
-            .pending_burn_in_subtitle_replacement
-            .take()
+            .burn_in_replace
+            .take_pending()
             .map(|pending| pending.was_paused)
             .or_else(|| {
                 self.burn_in_subtitle_replacement_load
@@ -1969,10 +1959,10 @@ impl KattriApp {
         self.playback_start_error = None;
         self.playback_start_status = None;
         self.pending_playback = None;
-        self.pending_burn_in_subtitle_replacement = None;
+        self.burn_in_replace.clear_pending();
         self.burn_in_subtitle_replacement_load = None;
         self.burn_in_subtitle_feedback = None;
-        self.terminal_burn_in_replacement_failure_generation = None;
+        self.burn_in_replace.reset();
         if what != PlaybackReset::Options {
             self.invalidate_track_lyrics();
             self.held_playback = None;
@@ -2305,10 +2295,9 @@ impl KattriApp {
             pending_playback: None,
             playback_recovery: None,
             active_playback: None,
-            pending_burn_in_subtitle_replacement: None,
+            burn_in_replace: SubtitleReplaceMachine::new(),
             burn_in_subtitle_replacement_load: None,
             burn_in_subtitle_feedback: None,
-            terminal_burn_in_replacement_failure_generation: None,
             mid_stream_recoveries: 0,
             held_playback: None,
             page: Page::Home,
@@ -2696,9 +2685,8 @@ impl KattriApp {
             .get(active.selection.source_index)?;
         let streams = source.media_streams.as_ref()?;
         let selected = self
-            .pending_burn_in_subtitle_replacement
-            .as_ref()
-            .filter(|pending| pending.playback_generation == active.start_request_id)
+            .burn_in_replace
+            .pending_for_generation(active.start_request_id)
             .map(|pending| pending.subtitle_stream_index)
             .unwrap_or(active.burn_in_subtitle_stream_index);
         let mut choices = vec![(None, "Off".to_owned(), selected.is_none())];
@@ -2743,7 +2731,7 @@ impl KattriApp {
 
     /// A terminal rollback failure must end the host's generation-scoped SyncPlay bridge.
     pub fn take_terminal_burn_in_replacement_failure(&mut self) -> Option<u64> {
-        self.terminal_burn_in_replacement_failure_generation.take()
+        self.burn_in_replace.take_terminal_failure()
     }
 
     /// Ask the worker to renegotiate and replace only the current transcoded subtitle track.
@@ -2759,18 +2747,17 @@ impl KattriApp {
             return None;
         }
         if self
-            .pending_burn_in_subtitle_replacement
-            .as_ref()
+            .burn_in_replace
+            .pending()
             .is_some_and(|pending| pending.subtitle_stream_index == subtitle_stream_index)
-            || (self.pending_burn_in_subtitle_replacement.is_none()
+            || (!self.burn_in_replace.is_pending()
                 && active.burn_in_subtitle_stream_index == subtitle_stream_index)
         {
             return None;
         }
         let pending_position = self
-            .pending_burn_in_subtitle_replacement
-            .as_ref()
-            .filter(|pending| pending.playback_generation == active.start_request_id)
+            .burn_in_replace
+            .pending_for_generation(active.start_request_id)
             .map(|pending| (pending.position_ticks, pending.was_paused));
         let (position_ticks, was_paused) = if let Some(pending) = pending_position {
             pending
@@ -2824,7 +2811,7 @@ impl KattriApp {
                 )
             });
         if result.is_ok() {
-            self.pending_burn_in_subtitle_replacement = Some(PendingBurnInSubtitleReplacement {
+            self.burn_in_replace.prepare(PendingReplacement {
                 request_id,
                 playback_generation: active.start_request_id,
                 item_id: active.item_id,
@@ -2855,19 +2842,14 @@ impl KattriApp {
         playback_generation: u64,
         item_id: &str,
     ) -> bool {
-        self.pending_burn_in_subtitle_replacement
-            .as_ref()
-            .is_some_and(|pending| {
-                pending.request_id == request_id
-                    && pending.playback_generation == playback_generation
-                    && pending.item_id == item_id
-                    && self.playback_start_request_id == playback_generation
-                    && self.selected_item_id.as_deref() == Some(item_id)
-                    && self.active_playback.as_ref().is_some_and(|active| {
-                        active.item_id == item_id
-                            && active.start_request_id == playback_generation
-                            && active.selection.method == PlaybackMethod::Transcode
-                    })
+        self.burn_in_replace
+            .pending_matches(request_id, playback_generation, item_id)
+            && self.playback_start_request_id == playback_generation
+            && self.selected_item_id.as_deref() == Some(item_id)
+            && self.active_playback.as_ref().is_some_and(|active| {
+                active.item_id == item_id
+                    && active.start_request_id == playback_generation
+                    && active.selection.method == PlaybackMethod::Transcode
             })
     }
 
@@ -2982,15 +2964,15 @@ impl KattriApp {
                 return BurnInReplacementEnd::Failed;
             }
             self.burn_in_subtitle_replacement_load = None;
-            self.pending_burn_in_subtitle_replacement = None;
+            self.burn_in_replace.clear_pending();
         }
         if let Some(generation) = generation {
             if self
-                .pending_burn_in_subtitle_replacement
-                .as_ref()
-                .is_some_and(|pending| pending.playback_generation == generation)
+                .burn_in_replace
+                .pending_for_generation(generation)
+                .is_some()
             {
-                self.pending_burn_in_subtitle_replacement = None;
+                self.burn_in_replace.clear_pending();
             }
             if self
                 .burn_in_subtitle_replacement_load
@@ -8852,7 +8834,7 @@ impl KattriApp {
         };
         let request_id = self.allocate_request_id();
         self.playback_start_request_id = request_id;
-        self.pending_burn_in_subtitle_replacement = None;
+        self.burn_in_replace.clear_pending();
         self.burn_in_subtitle_replacement_load = None;
         self.burn_in_subtitle_feedback = None;
         let burn_in_subtitles = self.settings.settings().subtitles.burn_in;
@@ -11316,8 +11298,8 @@ impl KattriApp {
                     &item_id,
                 ) =>
                 {
-                    let Some(pending) = self.pending_burn_in_subtitle_replacement.take() else {
-                        self.pending_burn_in_subtitle_replacement = None;
+                    let Some(pending) = self.burn_in_replace.take_pending() else {
+                        self.burn_in_replace.clear_pending();
                         drop(playback);
                         continue;
                     };
@@ -11361,7 +11343,7 @@ impl KattriApp {
                     &item_id,
                 ) =>
                 {
-                    if let Some(pending) = self.pending_burn_in_subtitle_replacement.take() {
+                    if let Some(pending) = self.burn_in_replace.take_pending() {
                         if !pending.was_paused {
                             self.queue_player_intent(LocalAction::Play, false);
                         }
@@ -11369,8 +11351,8 @@ impl KattriApp {
                             self.burn_in_subtitle_feedback =
                                 Some("Could not restore the previous subtitle stream.".into());
                             self.playback_failed(&item_id);
-                            self.terminal_burn_in_replacement_failure_generation =
-                                Some(playback_generation);
+                            self.burn_in_replace
+                                .record_terminal_failure(playback_generation);
                         } else {
                             self.burn_in_subtitle_feedback =
                                 Some("Could not rebuild the server subtitle stream.".into());
@@ -17604,10 +17586,11 @@ mod catalog_page_tests {
 mod burn_in_subtitle_replacement_tests {
     use super::{
         ActivePlayback, ActiveSubtitleTitle, BurnInReplacementEnd, BurnInSubtitleReplacementLoad,
-        KattriApp, PendingBurnInSubtitleReplacement,
+        KattriApp,
     };
     use crate::worker::{ApiWorker, WorkerCommand, WorkerEvent};
     use kattri_client_core::playback_plan::{PlaybackMethod, PlaybackSelection};
+    use kattri_client_core::subtitle_replace::PendingReplacement;
 
     fn active_transcode_app(paused: bool) -> KattriApp {
         let mut app = KattriApp::new(egui::Context::default());
@@ -17697,8 +17680,8 @@ mod burn_in_subtitle_replacement_tests {
             } if item_id == "movie"
         ));
         assert_eq!(
-            app.pending_burn_in_subtitle_replacement
-                .as_ref()
+            app.burn_in_replace
+                .pending()
                 .map(|pending| (pending.position_ticks, pending.was_paused)),
             Some((822_500_000, false))
         );
@@ -17707,7 +17690,7 @@ mod burn_in_subtitle_replacement_tests {
     #[test]
     fn stale_subtitle_replacement_results_are_rejected_by_operation_and_generation() {
         let mut app = active_transcode_app(true);
-        app.pending_burn_in_subtitle_replacement = Some(PendingBurnInSubtitleReplacement {
+        app.burn_in_replace.prepare(PendingReplacement {
             request_id: 77,
             playback_generation: 52,
             item_id: "movie".into(),
@@ -17787,10 +17770,7 @@ mod burn_in_subtitle_replacement_tests {
                 .and_then(|active| active.burn_in_subtitle_stream_index),
             Some(2)
         );
-        let pending = app
-            .pending_burn_in_subtitle_replacement
-            .as_ref()
-            .expect("rollback request");
+        let pending = app.burn_in_replace.pending().expect("rollback request");
         assert_eq!(
             (
                 pending.subtitle_stream_index,
@@ -17830,7 +17810,7 @@ mod burn_in_subtitle_replacement_tests {
             app.on_playback_end(Some(52), false, true, false),
             BurnInReplacementEnd::Failed
         );
-        assert!(app.pending_burn_in_subtitle_replacement.is_none());
+        assert!(!app.burn_in_replace.is_pending());
         assert!(app.burn_in_subtitle_replacement_load.is_none());
         assert!(app.playback_start_error.is_some());
         assert!(
@@ -17847,7 +17827,7 @@ mod burn_in_subtitle_replacement_tests {
         let mut app = active_transcode_app(true);
         let (worker, sender) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.pending_burn_in_subtitle_replacement = Some(PendingBurnInSubtitleReplacement {
+        app.burn_in_replace.prepare(PendingReplacement {
             request_id: 77,
             playback_generation: 52,
             item_id: "movie".into(),
@@ -17901,7 +17881,7 @@ mod burn_in_subtitle_replacement_tests {
     #[test]
     fn selection_reset_cancels_prepared_replacement_and_rejects_its_late_result() {
         let mut app = active_transcode_app(false);
-        app.pending_burn_in_subtitle_replacement = Some(PendingBurnInSubtitleReplacement {
+        app.burn_in_replace.prepare(PendingReplacement {
             request_id: 77,
             playback_generation: 52,
             item_id: "movie".into(),
@@ -17923,7 +17903,7 @@ mod burn_in_subtitle_replacement_tests {
 
         app.reset_playback(super::PlaybackReset::Selection);
 
-        assert!(app.pending_burn_in_subtitle_replacement.is_none());
+        assert!(!app.burn_in_replace.is_pending());
         assert!(app.burn_in_subtitle_replacement_load.is_none());
         assert!(!app.burn_in_replacement_matches(77, 52, "movie"));
     }
