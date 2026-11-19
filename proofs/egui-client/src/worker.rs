@@ -478,21 +478,25 @@ pub enum WorkerEvent {
     },
     SeriesSeasonsLoaded {
         request_id: u64,
+        epoch: Epoch,
         series_id: String,
         seasons: Vec<BaseItemDto>,
     },
     SeriesSeasonsFailed {
         request_id: u64,
+        epoch: Epoch,
         series_id: String,
         message: String,
     },
     SeriesEpisodesLoaded {
         request_id: u64,
+        epoch: Epoch,
         season_id: String,
         episodes: Vec<BaseItemDto>,
     },
     SeriesEpisodesFailed {
         request_id: u64,
+        epoch: Epoch,
         season_id: String,
         message: String,
     },
@@ -521,6 +525,7 @@ pub enum WorkerEvent {
     /// Genre names and studios `(id, name)` for the library page's filters. Empty on failure.
     GenresLoaded {
         request_id: u64,
+        epoch: Epoch,
         genres: Vec<String>,
         studios: Vec<(String, String)>,
     },
@@ -981,7 +986,12 @@ impl WorkerEvent {
             | Self::SyncPlayJoined { epoch, .. }
             | Self::SyncPlayJoinFailed { epoch, .. }
             | Self::SyncPlayLeft { epoch, .. }
-            | Self::SyncPlayLeaveFailed { epoch, .. } => (*epoch != Epoch::NONE).then_some(*epoch),
+            | Self::SyncPlayLeaveFailed { epoch, .. }
+            | Self::SeriesSeasonsLoaded { epoch, .. }
+            | Self::SeriesSeasonsFailed { epoch, .. }
+            | Self::SeriesEpisodesLoaded { epoch, .. }
+            | Self::SeriesEpisodesFailed { epoch, .. }
+            | Self::GenresLoaded { epoch, .. } => (*epoch != Epoch::NONE).then_some(*epoch),
             _ => None,
         }
     }
@@ -1263,6 +1273,7 @@ pub(crate) enum WorkerCommand {
     },
     ListSeasons {
         request_id: u64,
+        epoch: Epoch,
         series_id: String,
     },
     ListMediaSegments {
@@ -1314,6 +1325,7 @@ pub(crate) enum WorkerCommand {
     },
     ListEpisodes {
         request_id: u64,
+        epoch: Epoch,
         series_id: String,
         season_id: String,
     },
@@ -1331,6 +1343,7 @@ pub(crate) enum WorkerCommand {
     },
     ListGenres {
         request_id: u64,
+        epoch: Epoch,
         parent_id: Option<String>,
         item_types: Option<Vec<String>>,
     },
@@ -1857,10 +1870,12 @@ impl ApiWorker {
     pub(crate) fn list_seasons(
         &self,
         request_id: u64,
+        epoch: Epoch,
         series_id: String,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::ListSeasons {
             request_id,
+            epoch,
             series_id,
         })
     }
@@ -2005,11 +2020,13 @@ impl ApiWorker {
     pub(crate) fn list_episodes(
         &self,
         request_id: u64,
+        epoch: Epoch,
         series_id: String,
         season_id: String,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::ListEpisodes {
             request_id,
+            epoch,
             series_id,
             season_id,
         })
@@ -2196,11 +2213,13 @@ impl ApiWorker {
     pub(crate) fn list_genres(
         &self,
         request_id: u64,
+        epoch: Epoch,
         parent_id: Option<String>,
         item_types: Option<Vec<String>>,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::ListGenres {
             request_id,
+            epoch,
             parent_id,
             item_types,
         })
@@ -3904,6 +3923,7 @@ async fn execute_command(
             }
             WorkerCommand::ListSeasons {
                 request_id,
+                epoch,
                 series_id,
             } => {
                 let result = match (client.as_ref(), session.as_ref()) {
@@ -3919,6 +3939,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::SeriesSeasonsLoaded {
                                 request_id,
+                                epoch,
                                 series_id,
                                 seasons: response.items,
                             },
@@ -3946,6 +3967,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::SeriesSeasonsFailed {
                                 request_id,
+                                epoch,
                                 series_id,
                                 message: error.to_string(),
                             },
@@ -4343,6 +4365,7 @@ async fn execute_command(
             }
             WorkerCommand::ListEpisodes {
                 request_id,
+                epoch,
                 series_id,
                 season_id,
             } => {
@@ -4359,6 +4382,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::SeriesEpisodesLoaded {
                                 request_id,
+                                epoch,
                                 season_id,
                                 episodes: response.items,
                             },
@@ -4386,6 +4410,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::SeriesEpisodesFailed {
                                 request_id,
+                                epoch,
                                 season_id,
                                 message: error.to_string(),
                             },
@@ -4511,6 +4536,7 @@ async fn execute_command(
             }
             WorkerCommand::ListGenres {
                 request_id,
+                epoch,
                 parent_id,
                 item_types,
             } => {
@@ -4539,6 +4565,7 @@ async fn execute_command(
                     ctx,
                     WorkerEvent::GenresLoaded {
                         request_id,
+                        epoch,
                         genres,
                         studios,
                     },
@@ -8382,12 +8409,20 @@ mod series_command_tests {
     fn list_seasons_enqueues_the_series_request() {
         let (worker, commands) = worker_with_command_receiver();
 
-        assert_eq!(worker.list_seasons(41, "series-7".into()), Ok(()));
+        assert_eq!(
+            worker.list_seasons(
+                41,
+                kattri_client_core::epoch::Epoch::NONE,
+                "series-7".into()
+            ),
+            Ok(())
+        );
         assert!(matches!(
             commands.recv(),
             Ok(WorkerCommand::ListSeasons {
                 request_id: 41,
                 series_id,
+                ..
             }) if series_id == "series-7"
         ));
     }
@@ -8397,7 +8432,12 @@ mod series_command_tests {
         let (worker, commands) = worker_with_command_receiver();
 
         assert_eq!(
-            worker.list_episodes(42, "series-7".into(), "season-3".into()),
+            worker.list_episodes(
+                42,
+                kattri_client_core::epoch::Epoch::NONE,
+                "series-7".into(),
+                "season-3".into()
+            ),
             Ok(())
         );
         assert!(matches!(
@@ -8406,6 +8446,7 @@ mod series_command_tests {
                 request_id: 42,
                 series_id,
                 season_id,
+                ..
             }) if series_id == "series-7" && season_id == "season-3"
         ));
     }

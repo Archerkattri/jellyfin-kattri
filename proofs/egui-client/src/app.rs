@@ -983,6 +983,77 @@ mod connection_boundary_tests {
         );
     }
     #[test]
+    fn stale_detail_and_series_results_are_dropped_across_a_session_bump() {
+        use super::{BaseItemDto, WorkerEvent};
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context.clone());
+        let (worker, events) = super::ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.begin_connection("first");
+        let stale_epoch = app.session_epoch;
+        app.begin_connection("second");
+        let current_epoch = app.session_epoch;
+
+        app.browse.details.selected_item_id = Some("movie".into());
+        app.browse.details.details_request_id = 7;
+        app.series_seasons_request_id = 8;
+        let item: BaseItemDto =
+            serde_json::from_value(serde_json::json!({ "Id": "movie", "Name": "Fixture" }))
+                .expect("item fixture");
+
+        // Stale detail + series results from the abandoned generation must not apply.
+        events
+            .try_send(WorkerEvent::ItemDetailsLoaded {
+                request_id: 7,
+                epoch: stale_epoch,
+                item: Box::new(item.clone()),
+            })
+            .expect("stale detail queued");
+        events
+            .try_send(WorkerEvent::SeriesSeasonsLoaded {
+                request_id: 8,
+                epoch: stale_epoch,
+                series_id: "movie".into(),
+                seasons: vec![item.clone()],
+            })
+            .expect("stale seasons queued");
+        app.receive_worker_events(&context);
+        assert!(
+            app.browse.details.selected_details.is_none(),
+            "a stale detail must not fill the panel"
+        );
+        assert!(
+            app.series_seasons.is_empty(),
+            "stale seasons must not fill the series panel"
+        );
+
+        // The same results under the live generation apply.
+        events
+            .try_send(WorkerEvent::ItemDetailsLoaded {
+                request_id: 7,
+                epoch: current_epoch,
+                item: Box::new(item.clone()),
+            })
+            .expect("current detail queued");
+        events
+            .try_send(WorkerEvent::SeriesSeasonsLoaded {
+                request_id: 8,
+                epoch: current_epoch,
+                series_id: "movie".into(),
+                seasons: vec![item],
+            })
+            .expect("current seasons queued");
+        app.receive_worker_events(&context);
+        assert!(
+            app.browse.details.selected_details.is_some(),
+            "a live-generation detail fills the panel"
+        );
+        assert!(
+            !app.series_seasons.is_empty(),
+            "live-generation seasons fill the series panel"
+        );
+    }
+    #[test]
     fn a_catalog_result_from_an_abandoned_session_is_dropped() {
         use super::{ItemsResponse, ServerIdentity, WorkerEvent};
         use jellyfin_api::UserDto;
@@ -6890,7 +6961,7 @@ impl KattriApp {
         let request_id = self.allocate_request_id();
         if self.worker.as_ref().is_some_and(|worker| {
             worker
-                .list_genres(request_id, parent_id, item_types)
+                .list_genres(request_id, self.session_epoch, parent_id, item_types)
                 .is_ok()
         }) {
             self.catalog_genres_request_id = request_id;
@@ -7964,11 +8035,11 @@ impl KattriApp {
             });
         let request_id = self.allocate_request_id();
         self.series_seasons_request_id = request_id;
-        if self
-            .worker
-            .as_ref()
-            .is_none_or(|worker| worker.list_seasons(request_id, series_id).is_err())
-        {
+        if self.worker.as_ref().is_none_or(|worker| {
+            worker
+                .list_seasons(request_id, self.session_epoch, series_id)
+                .is_err()
+        }) {
             self.series_seasons_loading = false;
             self.series_seasons_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into());
         }
@@ -8006,7 +8077,7 @@ impl KattriApp {
         self.series_episodes_request_id = request_id;
         if self.worker.as_ref().is_none_or(|worker| {
             worker
-                .list_episodes(request_id, series_id, season_id)
+                .list_episodes(request_id, self.session_epoch, series_id, season_id)
                 .is_err()
         }) {
             self.series_episodes_loading = false;
@@ -10506,6 +10577,7 @@ impl KattriApp {
                     request_id,
                     series_id,
                     seasons,
+                    ..
                 } if request_id == self.series_seasons_request_id
                     && self.browse.details.selected_item_id.as_deref()
                         == Some(series_id.as_str()) =>
@@ -10521,6 +10593,7 @@ impl KattriApp {
                     request_id,
                     series_id,
                     message,
+                    ..
                 } if request_id == self.series_seasons_request_id
                     && self.browse.details.selected_item_id.as_deref()
                         == Some(series_id.as_str()) =>
@@ -10532,6 +10605,7 @@ impl KattriApp {
                     request_id,
                     season_id,
                     episodes,
+                    ..
                 } if request_id == self.series_episodes_request_id
                     && self.series_selected_season_id.as_deref() == Some(season_id.as_str()) =>
                 {
@@ -10544,6 +10618,7 @@ impl KattriApp {
                     request_id,
                     season_id,
                     message,
+                    ..
                 } if request_id == self.series_episodes_request_id
                     && self.series_selected_season_id.as_deref() == Some(season_id.as_str()) =>
                 {
@@ -10610,6 +10685,7 @@ impl KattriApp {
                     request_id,
                     genres,
                     studios,
+                    ..
                 } => {
                     if request_id == self.catalog_genres_request_id {
                         self.catalog_genres = genres;
