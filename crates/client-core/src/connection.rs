@@ -35,13 +35,29 @@ impl SessionId {
     }
 }
 
+/// Which connecting screen the viewer is looking at. The phase is display state owned by the
+/// machine so the UI does not have to keep it in a second place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectingPhase {
+    /// Probing the server before a sign-in attempt.
+    CheckingServer,
+    /// Signing in: a saved sign-in resume, a manual submit, or a quick-connect exchange.
+    SigningIn,
+    /// Signed in; the first catalog page is loading.
+    LoadingItems,
+}
+
 /// Where the session lifecycle is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionState {
     /// No session. Nothing asynchronous is in flight that could be applied.
     SignedOut,
-    /// A sign-in or reconnect attempt is running. `epoch` is the generation its results must carry.
-    Connecting { epoch: Epoch },
+    /// A sign-in or reconnect attempt is running. `epoch` is the generation its results must carry;
+    /// `phase` is the connecting screen to show.
+    Connecting {
+        epoch: Epoch,
+        phase: ConnectingPhase,
+    },
     /// A session record exists and the socket for it is up.
     Live { session: SessionId, epoch: Epoch },
     /// A session record exists but its socket dropped. A retry keeps the same record until the
@@ -78,6 +94,11 @@ pub enum SessionEvent {
     SocketLost { epoch: Epoch },
     /// The attempt failed permanently.
     Failed { epoch: Epoch, reason: FailureReason },
+    /// The connecting screen changed (server check done, signing in, loading items).
+    ConnectingPhaseChanged {
+        epoch: Epoch,
+        phase: ConnectingPhase,
+    },
     /// A retry is due (the caller owns the timer).
     RetryDue { epoch: Epoch },
     /// The viewer signed out.
@@ -156,9 +177,9 @@ impl SessionState {
     pub const fn epoch(self) -> Option<Epoch> {
         match self {
             Self::SignedOut | Self::Failed { .. } => None,
-            Self::Connecting { epoch } | Self::Live { epoch, .. } | Self::Lost { epoch, .. } => {
-                Some(epoch)
-            }
+            Self::Connecting { epoch, .. }
+            | Self::Live { epoch, .. }
+            | Self::Lost { epoch, .. } => Some(epoch),
         }
     }
 
@@ -221,6 +242,7 @@ impl SessionMachine {
             | SessionEvent::SocketConnected { epoch }
             | SessionEvent::SocketLost { epoch }
             | SessionEvent::Failed { epoch, .. }
+            | SessionEvent::ConnectingPhaseChanged { epoch, .. }
             | SessionEvent::RetryDue { epoch } => !epoch.is_current_for(current),
         };
         if stale {
@@ -229,12 +251,15 @@ impl SessionMachine {
         match (self.state, event) {
             // Start (or restart) a connection attempt under a fresh generation.
             (_, SessionEvent::SignInStarted { epoch }) => {
-                self.state = SessionState::Connecting { epoch };
+                self.state = SessionState::Connecting {
+                    epoch,
+                    phase: ConnectingPhase::CheckingServer,
+                };
                 self.transition(SessionEffects::EMPTY)
             }
             // A sign-in result only counts for the attempt that asked for it.
             (
-                SessionState::Connecting { epoch: attempt },
+                SessionState::Connecting { epoch: attempt, .. },
                 SessionEvent::SignedIn { session, .. },
             ) if attempt == self.epoch() => {
                 self.state = SessionState::Live {
@@ -262,7 +287,21 @@ impl SessionMachine {
                 self.transition(SessionEffects::of(SessionEffect::StopSocket))
             }
             (SessionState::Lost { epoch, .. }, SessionEvent::RetryDue { .. }) => {
-                self.state = SessionState::Connecting { epoch };
+                self.state = SessionState::Connecting {
+                    epoch,
+                    phase: ConnectingPhase::CheckingServer,
+                };
+                self.transition(SessionEffects::EMPTY)
+            }
+            // The connecting screen moved on (server checked, signing in, first page loading).
+            (
+                SessionState::Connecting { epoch, .. },
+                SessionEvent::ConnectingPhaseChanged {
+                    epoch: event_epoch,
+                    phase,
+                },
+            ) if epoch == event_epoch => {
+                self.state = SessionState::Connecting { epoch, phase };
                 self.transition(SessionEffects::EMPTY)
             }
             (
@@ -299,7 +338,8 @@ impl SessionMachine {
 #[cfg(test)]
 mod tests {
     use super::{
-        FailureReason, SessionEffect, SessionEvent, SessionId, SessionMachine, SessionState,
+        ConnectingPhase, FailureReason, SessionEffect, SessionEvent, SessionId, SessionMachine,
+        SessionState,
     };
     use crate::epoch::Epoch;
 
@@ -311,12 +351,82 @@ mod tests {
     }
 
     #[test]
+    fn a_new_attempt_starts_by_checking_the_server() {
+        let mut machine = SessionMachine::new();
+        let started = machine.reduce(SessionEvent::SignInStarted { epoch: E });
+        assert_eq!(
+            started.state,
+            SessionState::Connecting {
+                epoch: E,
+                phase: ConnectingPhase::CheckingServer,
+            }
+        );
+    }
+
+    #[test]
+    fn the_connecting_phase_follows_the_viewer_through_sign_in_and_first_page() {
+        let mut machine = SessionMachine::new();
+        let _ = machine.reduce(SessionEvent::SignInStarted { epoch: E });
+        for phase in [
+            ConnectingPhase::SigningIn,
+            ConnectingPhase::LoadingItems,
+            ConnectingPhase::SigningIn,
+        ] {
+            let transition =
+                machine.reduce(SessionEvent::ConnectingPhaseChanged { epoch: E, phase });
+            assert_eq!(
+                transition.state,
+                SessionState::Connecting { epoch: E, phase }
+            );
+            assert!(
+                transition.effects.is_empty(),
+                "a phase change runs no effect"
+            );
+        }
+    }
+
+    #[test]
+    fn a_phase_change_outside_connecting_or_from_an_older_epoch_is_ignored() {
+        let mut live = SessionMachine::new();
+        let _ = live.reduce(SessionEvent::SignInStarted { epoch: E });
+        let _ = live.reduce(SessionEvent::SignedIn {
+            epoch: E,
+            session: S,
+        });
+        let ignored = live.reduce(SessionEvent::ConnectingPhaseChanged {
+            epoch: E,
+            phase: ConnectingPhase::LoadingItems,
+        });
+        assert!(matches!(ignored.state, SessionState::Live { .. }));
+
+        let mut connecting = SessionMachine::new();
+        let _ = connecting.reduce(SessionEvent::SignInStarted { epoch: E });
+        let stale = connecting.reduce(SessionEvent::ConnectingPhaseChanged {
+            epoch: Epoch::NONE,
+            phase: ConnectingPhase::SigningIn,
+        });
+        assert_eq!(
+            stale.state,
+            SessionState::Connecting {
+                epoch: E,
+                phase: ConnectingPhase::CheckingServer,
+            }
+        );
+    }
+
+    #[test]
     fn a_sign_in_starts_a_socket_advertises_and_loads_the_catalog() {
         let mut machine = SessionMachine::new();
         assert_eq!(machine.state(), SessionState::SignedOut);
 
         let started = machine.reduce(SessionEvent::SignInStarted { epoch: E });
-        assert_eq!(started.state, SessionState::Connecting { epoch: E });
+        assert_eq!(
+            started.state,
+            SessionState::Connecting {
+                epoch: E,
+                phase: ConnectingPhase::CheckingServer,
+            }
+        );
         assert!(effects(&started).is_empty());
 
         let signed_in = machine.reduce(SessionEvent::SignedIn {
@@ -381,7 +491,13 @@ mod tests {
         assert_eq!(effects(&lost), vec![SessionEffect::StopSocket]);
 
         let retry = machine.reduce(SessionEvent::RetryDue { epoch: E });
-        assert_eq!(retry.state, SessionState::Connecting { epoch: E });
+        assert_eq!(
+            retry.state,
+            SessionState::Connecting {
+                epoch: E,
+                phase: ConnectingPhase::CheckingServer,
+            }
+        );
         // The retry reconnects under the same epoch; the following socket event re-advertises.
         let reconnected = machine.reduce(SessionEvent::SocketConnected { epoch: E });
         assert!(
@@ -419,14 +535,23 @@ mod tests {
         });
         assert_eq!(
             ignored.state,
-            SessionState::Connecting { epoch: E },
+            SessionState::Connecting {
+                epoch: E,
+                phase: ConnectingPhase::CheckingServer,
+            },
             "a result from an older generation cannot sign the app in"
         );
         assert!(effects(&ignored).is_empty());
 
         let future = E.next();
         let ignored = machine.reduce(SessionEvent::SocketConnected { epoch: future });
-        assert_eq!(ignored.state, SessionState::Connecting { epoch: E });
+        assert_eq!(
+            ignored.state,
+            SessionState::Connecting {
+                epoch: E,
+                phase: ConnectingPhase::CheckingServer,
+            }
+        );
     }
 
     #[test]
