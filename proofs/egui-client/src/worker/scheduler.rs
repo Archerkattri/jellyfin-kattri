@@ -129,6 +129,7 @@ impl WorkerCommand {
                 message,
             }),
             Self::PlaybackInfo { request_id, .. } => Some(WorkerEvent::PlaybackInfoFailed {
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 request_id: *request_id,
                 error_class: jellyfin_api::ErrorClass::Unexpected,
                 retry_after: None,
@@ -779,6 +780,7 @@ mod photo_cancellation_tests {
         queue
             .send(WorkerCommand::GetItem {
                 request_id: 13,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
                 item_id: "metadata".into(),
             })
             .expect("queue unrelated API read");

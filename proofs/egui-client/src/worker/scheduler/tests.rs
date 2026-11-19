@@ -521,6 +521,7 @@ fn scheduler_caps_reads_at_three_and_keeps_control_and_queued_read_moving() {
     queue
         .send(WorkerCommand::GetItem {
             request_id: 13,
+            epoch: kattri_client_core::epoch::Epoch::NONE,
             item_id: "fixture-item".into(),
         })
         .expect("queue fourth foreground read");
@@ -629,6 +630,7 @@ fn hiding_a_home_row_aborts_its_active_read_and_keeps_other_rows() {
     queue
         .send(WorkerCommand::GetItem {
             request_id: 12,
+            epoch: kattri_client_core::epoch::Epoch::NONE,
             item_id: "fixture-item".into(),
         })
         .expect("queue foreground item read");

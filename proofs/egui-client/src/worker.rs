@@ -397,10 +397,12 @@ pub enum WorkerEvent {
     },
     ItemDetailsLoaded {
         request_id: u64,
+        epoch: Epoch,
         item: Box<BaseItemDto>,
     },
     ItemDetailsFailed {
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
         message: String,
         error_class: ErrorClass,
@@ -655,10 +657,12 @@ pub enum WorkerEvent {
     },
     QueueItemsRestored {
         request_id: u64,
+        epoch: Epoch,
         items: Vec<BaseItemDto>,
     },
     QueueItemsRestoreFailed {
         request_id: u64,
+        epoch: Epoch,
         error_class: ErrorClass,
     },
     PlaylistCreated {
@@ -792,10 +796,12 @@ pub enum WorkerEvent {
     },
     PlaybackInfoLoaded {
         request_id: u64,
+        epoch: Epoch,
         response: PlaybackInfoResponse,
     },
     PlaybackInfoFailed {
         request_id: u64,
+        epoch: Epoch,
         error_class: ErrorClass,
         retry_after: Option<std::time::Duration>,
     },
@@ -960,7 +966,14 @@ impl WorkerEvent {
     /// are never dropped by that boundary.
     pub(crate) fn session_epoch(&self) -> Option<Epoch> {
         match self {
-            Self::ItemsLoaded { epoch, .. } | Self::ItemsFailed { epoch, .. } => {
+            Self::ItemsLoaded { epoch, .. }
+            | Self::ItemsFailed { epoch, .. }
+            | Self::ItemDetailsLoaded { epoch, .. }
+            | Self::ItemDetailsFailed { epoch, .. }
+            | Self::PlaybackInfoLoaded { epoch, .. }
+            | Self::PlaybackInfoFailed { epoch, .. }
+            | Self::QueueItemsRestored { epoch, .. }
+            | Self::QueueItemsRestoreFailed { epoch, .. } => {
                 (*epoch != Epoch::NONE).then_some(*epoch)
             }
             _ => None,
@@ -1175,10 +1188,12 @@ pub(crate) enum WorkerCommand {
     },
     RestoreQueueItems {
         request_id: u64,
+        epoch: Epoch,
         item_ids: Vec<String>,
     },
     GetItem {
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
     },
     SetPlayed {
@@ -1466,6 +1481,7 @@ pub(crate) enum WorkerCommand {
     },
     PlaybackInfo {
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
         is_audio: bool,
         request: Box<PlaybackInfoRequest>,
@@ -1669,17 +1685,25 @@ impl ApiWorker {
     pub(crate) fn restore_queue_items(
         &self,
         request_id: u64,
+        epoch: Epoch,
         item_ids: Vec<String>,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::RestoreQueueItems {
             request_id,
+            epoch,
             item_ids,
         })
     }
 
-    pub fn get_item(&self, request_id: u64, item_id: String) -> Result<(), WorkerSubmitError> {
+    pub fn get_item(
+        &self,
+        request_id: u64,
+        epoch: Epoch,
+        item_id: String,
+    ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::GetItem {
             request_id,
+            epoch,
             item_id,
         })
     }
@@ -2453,12 +2477,14 @@ impl ApiWorker {
     pub fn playback_info(
         &self,
         request_id: u64,
+        epoch: Epoch,
         item_id: String,
         is_audio: bool,
         request: PlaybackInfoRequest,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::PlaybackInfo {
             request_id,
+            epoch,
             item_id,
             is_audio,
             request: Box::new(request),
@@ -3428,6 +3454,7 @@ async fn execute_command(
             }
             WorkerCommand::RestoreQueueItems {
                 request_id,
+                epoch,
                 item_ids,
             } => {
                 let result = match (client.as_ref(), session.as_ref()) {
@@ -3441,7 +3468,11 @@ async fn execute_command(
                         send_event(
                             events,
                             ctx,
-                            WorkerEvent::QueueItemsRestored { request_id, items },
+                            WorkerEvent::QueueItemsRestored {
+                                request_id,
+                                epoch,
+                                items,
+                            },
                         )
                         .await
                     }
@@ -3466,6 +3497,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::QueueItemsRestoreFailed {
                                 request_id,
+                                epoch,
                                 error_class: error.classify(),
                             },
                         )
@@ -3475,6 +3507,7 @@ async fn execute_command(
             }
             WorkerCommand::GetItem {
                 request_id,
+                epoch,
                 item_id,
             } => {
                 let result = match (client.as_ref(), session.as_ref()) {
@@ -3488,6 +3521,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::ItemDetailsLoaded {
                                 request_id,
+                                epoch,
                                 item: Box::new(item),
                             },
                         )
@@ -3514,6 +3548,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::ItemDetailsFailed {
                                 request_id,
+                                epoch,
                                 item_id,
                                 message: error.to_string(),
                                 error_class: error.classify(),
@@ -5587,6 +5622,7 @@ async fn execute_command(
             }
             WorkerCommand::PlaybackInfo {
                 request_id,
+                epoch,
                 item_id,
                 is_audio,
                 request,
@@ -5620,6 +5656,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::PlaybackInfoLoaded {
                                 request_id,
+                                epoch,
                                 response,
                             },
                         )
@@ -5646,6 +5683,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::PlaybackInfoFailed {
                                 request_id,
+                                epoch,
                                 error_class: error.classify(),
                                 retry_after: error.retry_after(),
                             },

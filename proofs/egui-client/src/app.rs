@@ -6159,7 +6159,9 @@ impl KattriApp {
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
-            .and_then(|worker| worker.restore_queue_items(request_id, item_ids));
+            .and_then(|worker| {
+                worker.restore_queue_items(request_id, self.session_epoch, item_ids)
+            });
         if result.is_err() {
             self.music_queue_restore.request_failed();
             self.music_queue_notice = Some(ui_text(ids::MUSIC_QUEUE_REFRESH_FAILED).into());
@@ -7612,7 +7614,7 @@ impl KattriApp {
             .worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)
-            .and_then(|worker| worker.get_item(request_id, item_id));
+            .and_then(|worker| worker.get_item(request_id, self.session_epoch, item_id));
         if result.is_err() {
             self.details_loading = false;
             self.details_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into());
@@ -8581,6 +8583,7 @@ impl KattriApp {
             .and_then(|worker| {
                 worker.playback_info(
                     request_id,
+                    self.session_epoch,
                     item_id,
                     is_audio,
                     PlaybackInfoRequest::for_mpv_profile(
@@ -10286,9 +10289,10 @@ impl KattriApp {
                         });
                     }
                 }
-                WorkerEvent::ItemDetailsLoaded { request_id, item }
-                    if request_id == self.details_request_id
-                        && self.selected_item_id.as_deref() == Some(item.id.as_str()) =>
+                WorkerEvent::ItemDetailsLoaded {
+                    request_id, item, ..
+                } if request_id == self.details_request_id
+                    && self.selected_item_id.as_deref() == Some(item.id.as_str()) =>
                 {
                     self.record_network_success();
                     self.selected_details = Some(*item);
@@ -10337,6 +10341,7 @@ impl KattriApp {
                     message,
                     error_class,
                     retry_after,
+                    ..
                 } if request_id == self.details_request_id
                     && self.selected_item_id.as_deref() == Some(item_id.as_str()) =>
                 {
@@ -10738,7 +10743,9 @@ impl KattriApp {
                     self.music_album_tracks_loading = false;
                     self.music_album_tracks_error = Some(error_class);
                 }
-                WorkerEvent::QueueItemsRestored { request_id, items } => {
+                WorkerEvent::QueueItemsRestored {
+                    request_id, items, ..
+                } => {
                     // The machine refuses a result that is not for the request in flight, so a
                     // stale restore cannot overwrite a newer queue.
                     if let Some(stored) = self.music_queue_restore.restored(request_id) {
@@ -10749,6 +10756,7 @@ impl KattriApp {
                 WorkerEvent::QueueItemsRestoreFailed {
                     request_id,
                     error_class,
+                    ..
                 } => {
                     if self.music_queue_restore.restore_failed(request_id) {
                         self.record_network_error(error_class, None);
@@ -11422,6 +11430,7 @@ impl KattriApp {
                 WorkerEvent::PlaybackInfoLoaded {
                     request_id,
                     response,
+                    ..
                 } if request_id == self.playback_request_id => {
                     self.record_network_success();
                     if let Some(error_code) = response.error_code {
@@ -11443,6 +11452,7 @@ impl KattriApp {
                     request_id,
                     error_class,
                     retry_after,
+                    ..
                 } if request_id == self.playback_request_id => {
                     self.record_network_error(error_class, retry_after);
                     self.playback_loading = false;
@@ -13522,6 +13532,7 @@ mod watched_state_event_tests {
         events
             .try_send(WorkerEvent::ItemDetailsLoaded {
                 request_id: 7,
+                epoch: app.session_epoch,
                 item: Box::new(episode),
             })
             .expect("queue item record");
@@ -14393,6 +14404,7 @@ mod music_queue_app_tests {
         sender
             .try_send(WorkerEvent::QueueItemsRestored {
                 request_id: 91,
+                epoch: app.session_epoch,
                 items: vec![audio("track-1")],
             })
             .expect("send restored fixture");
