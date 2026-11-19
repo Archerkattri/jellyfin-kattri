@@ -26,6 +26,7 @@ pub mod live_tv;
 pub mod media_info;
 pub mod media_info_mpv;
 pub mod mpv_options;
+pub mod music_queue_persistence;
 pub mod music_queue_restore;
 pub mod paging;
 pub mod photo_grid;

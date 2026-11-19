@@ -44,6 +44,7 @@ use kattri_client_core::epg::{EpgProgram, EpgWindow};
 use kattri_client_core::epoch::Epoch;
 use kattri_client_core::focus::FocusGraph;
 use kattri_client_core::language_memory::{RecordOutcome, SeriesLanguageMemory, TrackLanguage};
+use kattri_client_core::music_queue_persistence::MusicQueuePersistence;
 use kattri_client_core::music_queue_restore::MusicQueueRestoreMachine;
 use kattri_client_core::paging::PagingState;
 use kattri_client_core::playback_plan::{
@@ -1724,12 +1725,9 @@ pub struct KattriApp {
     pub(crate) music_queue_restore: MusicQueueRestoreMachine,
     pub(crate) music_queue_resume_position_ms: Option<u64>,
     music_queue_resume_position_ticks: Option<i64>,
-    music_queue_last_saved_json: Option<String>,
-    /// Cheap fingerprint of the queue at the last save, used to skip per-frame JSON encoding.
-    music_queue_saved_fingerprint: u64,
-    music_queue_last_saved_at: Duration,
+    /// Save debounce and checkpoint bookkeeping for the music queue.
+    music_queue_persistence: MusicQueuePersistence,
     music_queue_position_ms: u64,
-    music_queue_persistence_suspended: bool,
     pub(crate) playlist_entries: Vec<PlaylistEntry>,
     pub(crate) playlist_items_loading: bool,
     pub(crate) playlist_items_error: Option<ErrorClass>,
@@ -2396,11 +2394,8 @@ impl KattriApp {
             },
             music_queue_resume_position_ms: None,
             music_queue_resume_position_ticks: None,
-            music_queue_last_saved_json: None,
-            music_queue_saved_fingerprint: u64::MAX,
-            music_queue_last_saved_at: Duration::ZERO,
+            music_queue_persistence: MusicQueuePersistence::new(),
             music_queue_position_ms: 0,
-            music_queue_persistence_suspended: false,
             playlist_entries: Vec::new(),
             playlist_items_loading: false,
             playlist_items_error: None,
@@ -4796,9 +4791,9 @@ impl KattriApp {
         self.music_queue_restore.loaded(stored_queue);
         self.music_queue_resume_position_ms = None;
         self.music_queue_resume_position_ticks = None;
-        self.music_queue_last_saved_json = None;
-        self.music_queue_saved_fingerprint = u64::MAX;
-        self.music_queue_persistence_suspended = self.music_queue_restore.has_pending();
+        self.music_queue_persistence.reset();
+        self.music_queue_persistence
+            .set_suspended(self.music_queue_restore.has_pending());
         self.playlist_entries.clear();
         self.playlist_items_loading = false;
         self.playlist_items_error = None;
@@ -6018,9 +6013,8 @@ impl KattriApp {
         }
         self.music_queue = stored.queue;
         self.music_queue_resume_position_ms = Some(stored.position_ms);
-        self.music_queue_persistence_suspended = false;
-        self.music_queue_last_saved_json = None;
-        self.music_queue_saved_fingerprint = u64::MAX;
+        self.music_queue_persistence.set_suspended(false);
+        self.music_queue_persistence.reset();
         self.music_queue_position_ms = stored.position_ms;
         self.music_queue_notice = match (removed, self.music_queue.is_empty()) {
             (_, true) => Some(ui_text(ids::MUSIC_QUEUE_NO_SAVED_TRACKS).into()),
@@ -6144,7 +6138,7 @@ impl KattriApp {
     }
 
     fn persist_music_queue_if_needed(&mut self) {
-        if self.music_queue_persistence_suspended
+        if self.music_queue_persistence.is_suspended()
             || self.music_queue_restore.has_pending()
             || self.music_queue_restore.is_loading()
         {
@@ -6152,19 +6146,22 @@ impl KattriApp {
         }
         // Cheap change detection first: serializing the whole queue every frame is wasted work
         // for a queue that did not change.
-        let checkpoint_due =
-            self.ui_time.saturating_sub(self.music_queue_last_saved_at) >= Duration::from_secs(10);
         let fingerprint = self.music_queue_fingerprint();
-        if fingerprint == self.music_queue_saved_fingerprint && !checkpoint_due {
+        if !self
+            .music_queue_persistence
+            .needs_encode(fingerprint, self.ui_time)
+        {
             return;
         }
         let Ok(encoded) = self.music_queue.encode() else {
             self.music_queue_notice = Some(ui_text(ids::MUSIC_QUEUE_SAVE_FAILED).into());
             return;
         };
-        let dirty = self.music_queue_last_saved_json.as_deref() != Some(encoded.as_str());
-        if !dirty && !checkpoint_due {
-            self.music_queue_saved_fingerprint = fingerprint;
+        if !self
+            .music_queue_persistence
+            .should_write(&encoded, self.ui_time)
+        {
+            self.music_queue_persistence.record_unchanged(fingerprint);
             return;
         }
         match self
@@ -6172,18 +6169,16 @@ impl KattriApp {
             .save_queue(&self.music_queue, self.music_queue_position_ms)
         {
             Some(Ok(())) => {
-                self.music_queue_last_saved_json = Some(encoded);
-                self.music_queue_saved_fingerprint = fingerprint;
-                self.music_queue_last_saved_at = self.ui_time;
+                self.music_queue_persistence
+                    .record(encoded, fingerprint, self.ui_time);
             }
             Some(Err(_)) => {
-                self.music_queue_last_saved_json = Some(encoded);
-                self.music_queue_saved_fingerprint = fingerprint;
-                self.music_queue_last_saved_at = self.ui_time;
+                self.music_queue_persistence
+                    .record(encoded, fingerprint, self.ui_time);
                 self.music_queue_notice = Some(ui_text(ids::MUSIC_QUEUE_SAVE_FAILED).into());
             }
             None => {
-                self.music_queue_persistence_suspended = true;
+                self.music_queue_persistence.set_suspended(true);
                 self.music_queue_notice =
                     Some(ui_text(ids::MUSIC_QUEUE_PERSISTENCE_UNAVAILABLE).into());
             }
@@ -9534,9 +9529,9 @@ impl KattriApp {
         self.music_queue_restore.loaded(stored_queue);
         self.music_queue_resume_position_ms = None;
         self.music_queue_resume_position_ticks = None;
-        self.music_queue_last_saved_json = None;
-        self.music_queue_saved_fingerprint = u64::MAX;
-        self.music_queue_persistence_suspended = self.music_queue_restore.has_pending();
+        self.music_queue_persistence.reset();
+        self.music_queue_persistence
+            .set_suspended(self.music_queue_restore.has_pending());
         self.playlist_entries.clear();
         self.playlist_items_loading = false;
         self.playlist_items_error = None;
@@ -12312,11 +12307,10 @@ impl KattriApp {
         self.receive_worker_events(ctx);
         self.persist_music_queue_if_needed();
         if !self.music_queue.is_empty()
-            && !self.music_queue_persistence_suspended
+            && !self.music_queue_persistence.is_suspended()
             && !self.music_queue_restore.has_pending()
         {
-            let elapsed = now.saturating_sub(self.music_queue_last_saved_at);
-            ctx.request_repaint_after(Duration::from_secs(10).saturating_sub(elapsed));
+            ctx.request_repaint_after(self.music_queue_persistence.next_checkpoint_in(now));
         }
         self.tick_network_retry(now, ctx);
         self.tick_downloads(ctx);
