@@ -3638,7 +3638,7 @@ impl KattriApp {
         self.worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)?
-            .sync_play_join(request_id, group_id.clone())?;
+            .sync_play_join(request_id, self.session_epoch, group_id.clone())?;
         let _ = self
             .sync_play_membership
             .reduce(MembershipEvent::JoinRequested {
@@ -3710,7 +3710,7 @@ impl KattriApp {
         self.worker
             .as_ref()
             .ok_or(WorkerSubmitError::Stopped)?
-            .sync_play_leave(request_id)?;
+            .sync_play_leave(request_id, self.session_epoch)?;
         let _ = self
             .sync_play_membership
             .reduce(MembershipEvent::LeaveRequested { request_id });
@@ -11762,6 +11762,7 @@ impl KattriApp {
                 WorkerEvent::SyncPlayJoined {
                     request_id,
                     group_id,
+                    ..
                 } => {
                     let transition =
                         self.sync_play_membership
@@ -11771,19 +11772,19 @@ impl KattriApp {
                             });
                     self.apply_membership_effects(transition.effects);
                 }
-                WorkerEvent::SyncPlayJoinFailed { request_id } => {
+                WorkerEvent::SyncPlayJoinFailed { request_id, .. } => {
                     let transition = self
                         .sync_play_membership
                         .reduce(MembershipEvent::JoinFailed { request_id });
                     self.apply_membership_effects(transition.effects);
                 }
-                WorkerEvent::SyncPlayLeft { request_id } => {
+                WorkerEvent::SyncPlayLeft { request_id, .. } => {
                     let transition = self
                         .sync_play_membership
                         .reduce(MembershipEvent::LeaveConfirmed { request_id });
                     self.apply_membership_effects(transition.effects);
                 }
-                WorkerEvent::SyncPlayLeaveFailed { request_id } => {
+                WorkerEvent::SyncPlayLeaveFailed { request_id, .. } => {
                     let transition = self
                         .sync_play_membership
                         .reduce(MembershipEvent::LeaveFailed { request_id });
@@ -15827,6 +15828,7 @@ mod remote_and_sync_play_tests {
         events
             .try_send(WorkerEvent::SyncPlayJoinFailed {
                 request_id: request_id.wrapping_add(1),
+                epoch: app.session_epoch,
             })
             .expect("stale event queued");
         app.receive_worker_events(&ctx);
@@ -15835,6 +15837,7 @@ mod remote_and_sync_play_tests {
         events
             .try_send(WorkerEvent::SyncPlayJoined {
                 request_id,
+                epoch: app.session_epoch,
                 group_id: "group-1".into(),
             })
             .expect("join event queued");
@@ -15864,7 +15867,10 @@ mod remote_and_sync_play_tests {
             .expect("leave is pending");
 
         events
-            .try_send(WorkerEvent::SyncPlayLeaveFailed { request_id })
+            .try_send(WorkerEvent::SyncPlayLeaveFailed {
+                request_id,
+                epoch: app.session_epoch,
+            })
             .expect("failure queued");
         app.receive_worker_events(&ctx);
         assert!(matches!(app.sync_play_state, SyncPlayState::Joined { .. }));
@@ -15876,7 +15882,10 @@ mod remote_and_sync_play_tests {
             .pending_request_id()
             .expect("leave is pending");
         events
-            .try_send(WorkerEvent::SyncPlayLeft { request_id })
+            .try_send(WorkerEvent::SyncPlayLeft {
+                request_id,
+                epoch: app.session_epoch,
+            })
             .expect("leave confirmed");
         app.receive_worker_events(&ctx);
         assert_eq!(app.sync_play_state, SyncPlayState::NotJoined);

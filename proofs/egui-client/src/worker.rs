@@ -879,16 +879,20 @@ pub enum WorkerEvent {
     /// Outcome of a SyncPlay join or leave (M4-11). `request_id` is the command's.
     SyncPlayJoined {
         request_id: u64,
+        epoch: Epoch,
         group_id: String,
     },
     SyncPlayJoinFailed {
         request_id: u64,
+        epoch: Epoch,
     },
     SyncPlayLeft {
         request_id: u64,
+        epoch: Epoch,
     },
     SyncPlayLeaveFailed {
         request_id: u64,
+        epoch: Epoch,
     },
     /// The named REST operation returned success. This is not a group-readiness signal.
     SyncPlayActionAccepted {
@@ -973,9 +977,11 @@ impl WorkerEvent {
             | Self::PlaybackInfoLoaded { epoch, .. }
             | Self::PlaybackInfoFailed { epoch, .. }
             | Self::QueueItemsRestored { epoch, .. }
-            | Self::QueueItemsRestoreFailed { epoch, .. } => {
-                (*epoch != Epoch::NONE).then_some(*epoch)
-            }
+            | Self::QueueItemsRestoreFailed { epoch, .. }
+            | Self::SyncPlayJoined { epoch, .. }
+            | Self::SyncPlayJoinFailed { epoch, .. }
+            | Self::SyncPlayLeft { epoch, .. }
+            | Self::SyncPlayLeaveFailed { epoch, .. } => (*epoch != Epoch::NONE).then_some(*epoch),
             _ => None,
         }
     }
@@ -1273,6 +1279,7 @@ pub(crate) enum WorkerCommand {
     AdvertiseCapabilities,
     SyncPlayJoin {
         request_id: u64,
+        epoch: Epoch,
         group_id: String,
     },
     SyncPlayList {
@@ -1284,6 +1291,7 @@ pub(crate) enum WorkerCommand {
     },
     SyncPlayLeave {
         request_id: u64,
+        epoch: Epoch,
     },
     SyncPlaySetNewQueue {
         request_id: u64,
@@ -1890,10 +1898,12 @@ impl ApiWorker {
     pub(crate) fn sync_play_join(
         &self,
         request_id: u64,
+        epoch: Epoch,
         group_id: String,
     ) -> Result<(), WorkerSubmitError> {
         self.commands.send(WorkerCommand::SyncPlayJoin {
             request_id,
+            epoch,
             group_id,
         })
     }
@@ -1914,9 +1924,13 @@ impl ApiWorker {
         })
     }
 
-    pub(crate) fn sync_play_leave(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+    pub(crate) fn sync_play_leave(
+        &self,
+        request_id: u64,
+        epoch: Epoch,
+    ) -> Result<(), WorkerSubmitError> {
         self.commands
-            .send(WorkerCommand::SyncPlayLeave { request_id })
+            .send(WorkerCommand::SyncPlayLeave { request_id, epoch })
     }
 
     /// Replace the group queue. The queue is bounded before it enters the worker's control lane.
@@ -3964,6 +3978,7 @@ async fn execute_command(
             }
             WorkerCommand::SyncPlayJoin {
                 request_id,
+                epoch,
                 group_id,
             } => {
                 let result = match (client.as_ref(), session.as_ref()) {
@@ -3982,6 +3997,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::SyncPlayJoined {
                                 request_id,
+                                epoch,
                                 group_id,
                             },
                         )
@@ -4003,8 +4019,12 @@ async fn execute_command(
                         .await;
                     }
                     Err(_) => {
-                        send_event(events, ctx, WorkerEvent::SyncPlayJoinFailed { request_id })
-                            .await
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::SyncPlayJoinFailed { request_id, epoch },
+                        )
+                        .await
                     }
                 }
             }
@@ -4095,7 +4115,7 @@ async fn execute_command(
                     }
                 }
             }
-            WorkerCommand::SyncPlayLeave { request_id } => {
+            WorkerCommand::SyncPlayLeave { request_id, epoch } => {
                 let result = match (client.as_ref(), session.as_ref()) {
                     (Some(client), Some(session)) => client.leave_sync_play_group(session).await,
                     _ => Err(ApiError::InvalidConfiguration),
@@ -4105,7 +4125,8 @@ async fn execute_command(
                         if let Some(sampler) = clock_sampler.as_ref() {
                             sampler.set_joined(false);
                         }
-                        send_event(events, ctx, WorkerEvent::SyncPlayLeft { request_id }).await
+                        send_event(events, ctx, WorkerEvent::SyncPlayLeft { request_id, epoch })
+                            .await
                     }
                     Err(ApiError::ReauthenticationRequired) => {
                         session = None;
@@ -4123,8 +4144,12 @@ async fn execute_command(
                         .await;
                     }
                     Err(_) => {
-                        send_event(events, ctx, WorkerEvent::SyncPlayLeaveFailed { request_id })
-                            .await
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::SyncPlayLeaveFailed { request_id, epoch },
+                        )
+                        .await
                     }
                 }
             }
