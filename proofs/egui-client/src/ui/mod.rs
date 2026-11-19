@@ -3137,7 +3137,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                     });
                     ui.add_space(14.0);
                     ui.heading(ui_text(ids::SERIES_HEADING_SEASONS));
-                    if app.series_seasons_loading {
+                    if app.series.seasons_loading {
                         ui.horizontal(|ui| {
                             ui.spinner();
                             ui.label(
@@ -3145,7 +3145,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                     .color(colors.muted),
                             );
                         });
-                    } else if let Some(error) = app.series_seasons_error.as_deref() {
+                    } else if let Some(error) = app.series.seasons_error.as_deref() {
                         ui.label(
                             RichText::new(ui_text_args(
                                 ids::SERIES_ERROR_LOAD_SEASONS,
@@ -3153,7 +3153,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                             ))
                             .color(colors.danger),
                         );
-                    } else if app.series_seasons.is_empty() {
+                    } else if app.series.seasons.is_empty() {
                         ui.label(
                             RichText::new(ui_text(ids::SERIES_EMPTY_SEASONS)).color(colors.muted),
                         );
@@ -3168,12 +3168,12 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                             if let Some((_, presentation)) = state.as_mut() {
                                 let response = presentation.show(
                                     ui,
-                                    &app.series_seasons,
-                                    &app.series_episodes,
+                                    &app.series.seasons,
+                                    &app.series.episodes,
                                     &app.episode_thumbnails,
                                 );
                                 if response.selected_season_id.as_deref()
-                                    != app.series_selected_season_id.as_deref()
+                                    != app.series.selected_season_id.as_deref()
                                 {
                                     season_to_load = response.selected_season_id.clone();
                                 }
@@ -3181,7 +3181,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                 episode_page_to_open = response.opened_episode_id.clone();
                             }
                         });
-                        if app.series_episodes_loading {
+                        if app.series.episodes_loading {
                             ui.horizontal(|ui| {
                                 ui.spinner();
                                 ui.label(
@@ -3189,7 +3189,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                         .color(colors.muted),
                                 );
                             });
-                        } else if let Some(error) = app.series_episodes_error.as_deref() {
+                        } else if let Some(error) = app.series.episodes_error.as_deref() {
                             ui.label(
                                 RichText::new(ui_text_args(
                                     ids::SERIES_ERROR_LOAD_SEASON,

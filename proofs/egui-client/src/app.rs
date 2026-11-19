@@ -848,10 +848,10 @@ mod connection_boundary_tests {
         app.attempted_person_artwork.insert("old-person".to_owned());
         app.person_artwork_textures
             .insert("old-person".to_owned(), texture.clone());
-        app.series_seasons = vec![item("old-season")];
-        app.series_episodes = vec![item("old-episode")];
-        app.series_seasons_loading = true;
-        app.series_episodes_loading = true;
+        app.series.seasons = vec![item("old-season")];
+        app.series.episodes = vec![item("old-episode")];
+        app.series.seasons_loading = true;
+        app.series.episodes_loading = true;
         app.episode_thumbnails
             .insert("old-episode".to_owned(), texture);
         app.episode_thumbnail_pending
@@ -869,10 +869,10 @@ mod connection_boundary_tests {
         assert!(app.pending_person_artwork.is_empty());
         assert!(app.attempted_person_artwork.is_empty());
         assert!(app.person_artwork_textures.is_empty());
-        assert!(app.series_seasons.is_empty());
-        assert!(!app.series_seasons_loading);
-        assert!(app.series_episodes.is_empty());
-        assert!(!app.series_episodes_loading);
+        assert!(app.series.seasons.is_empty());
+        assert!(!app.series.seasons_loading);
+        assert!(app.series.episodes.is_empty());
+        assert!(!app.series.episodes_loading);
         assert!(app.episode_thumbnails.is_empty());
         assert!(app.episode_thumbnail_pending.is_empty());
         assert!(app.episode_thumbnail_queue.is_empty());
@@ -885,13 +885,13 @@ mod connection_boundary_tests {
         let mut app = KattriApp::new(context.clone());
         seed_detail_state(&mut app, &context);
         let old_person_request = app.person_items_request_id;
-        let old_series_request = app.series_episodes_request_id;
+        let old_series_request = app.series.episodes_request_id;
 
         app.begin_connection("Checking server");
 
         assert_detail_state_cleared(&app);
         assert_ne!(app.person_items_request_id, old_person_request);
-        assert_ne!(app.series_episodes_request_id, old_series_request);
+        assert_ne!(app.series.episodes_request_id, old_series_request);
     }
 
     #[test]
@@ -900,13 +900,13 @@ mod connection_boundary_tests {
         let mut app = KattriApp::new(context.clone());
         seed_detail_state(&mut app, &context);
         let old_person_request = app.person_items_request_id;
-        let old_series_request = app.series_episodes_request_id;
+        let old_series_request = app.series.episodes_request_id;
 
         app.clear_connection();
 
         assert_detail_state_cleared(&app);
         assert_ne!(app.person_items_request_id, old_person_request);
-        assert_ne!(app.series_episodes_request_id, old_series_request);
+        assert_ne!(app.series.episodes_request_id, old_series_request);
     }
 
     #[test]
@@ -996,7 +996,7 @@ mod connection_boundary_tests {
 
         app.browse.details.selected_item_id = Some("movie".into());
         app.browse.details.details_request_id = 7;
-        app.series_seasons_request_id = 8;
+        app.series.seasons_request_id = 8;
         let item: BaseItemDto =
             serde_json::from_value(serde_json::json!({ "Id": "movie", "Name": "Fixture" }))
                 .expect("item fixture");
@@ -1023,7 +1023,7 @@ mod connection_boundary_tests {
             "a stale detail must not fill the panel"
         );
         assert!(
-            app.series_seasons.is_empty(),
+            app.series.seasons.is_empty(),
             "stale seasons must not fill the series panel"
         );
 
@@ -1049,7 +1049,7 @@ mod connection_boundary_tests {
             "a live-generation detail fills the panel"
         );
         assert!(
-            !app.series_seasons.is_empty(),
+            !app.series.seasons.is_empty(),
             "live-generation seasons fill the series panel"
         );
     }
@@ -1520,6 +1520,29 @@ impl SearchState {
     }
 }
 
+/// Owned series-detail state: seasons, episodes, the selected season and the Next Up episode.
+///
+/// Ten loose fields carried the series panel. They are owned here so the series detail reads one
+/// struct and the season/episode request ids live with the data they order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SeriesState {
+    pub(crate) seasons: Vec<BaseItemDto>,
+    pub(crate) seasons_loading: bool,
+    pub(crate) seasons_error: Option<String>,
+    pub(crate) selected_season_id: Option<String>,
+    pub(crate) episodes: Vec<BaseItemDto>,
+    pub(crate) episodes_loading: bool,
+    pub(crate) episodes_error: Option<String>,
+    pub(crate) next_up: Option<SeriesNextUp>,
+    pub(crate) seasons_request_id: u64,
+    pub(crate) episodes_request_id: u64,
+}
+
+impl SeriesState {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
 /// Owned navigation state: which page and view are shown, and which library tab is selected.
 ///
 /// These four fields were loose on `KattriApp`, written from the page/tab handlers and the session
@@ -1897,6 +1920,8 @@ pub struct KattriApp {
     pub(crate) album_tracks: AlbumTracksState,
     /// Owned search: query, results, group, staleness and debouncer.
     pub(crate) search: SearchState,
+    /// Owned series detail: seasons, episodes, selected season, Next Up, request ids.
+    pub(crate) series: SeriesState,
     /// Owned navigation: page, view, library tab and its request id.
     pub(crate) navigation: NavigationState,
     /// Owned catalog page lifecycle: request id, loading/loaded flags, error, cursor.
@@ -1923,13 +1948,6 @@ pub struct KattriApp {
     custom_backdrop_request: Option<(u64, std::path::PathBuf)>,
     /// Set by `play_item`; consumed by `poll_auto_play` once the stream can start.
     pub(crate) auto_play: AutoPlayMachine,
-    pub(crate) series_seasons: Vec<BaseItemDto>,
-    pub(crate) series_seasons_loading: bool,
-    pub(crate) series_seasons_error: Option<String>,
-    pub(crate) series_selected_season_id: Option<String>,
-    pub(crate) series_episodes: Vec<BaseItemDto>,
-    pub(crate) series_episodes_loading: bool,
-    pub(crate) series_episodes_error: Option<String>,
     pub(crate) similar_items: Vec<BaseItemDto>,
     pub(crate) similar_loading: bool,
     pub(crate) selected_person: Option<BaseItemPerson>,
@@ -2002,7 +2020,6 @@ pub struct KattriApp {
     /// Neighbours of the episode last started, for previous/next and auto-play.
     episode_neighbors: Option<EpisodeNeighbors>,
     /// The episode to play next in the series on screen.
-    series_next_up: Option<SeriesNextUp>,
     /// The version (media source index) the viewer picked for an item.
     preferred_source: Option<(String, usize)>,
     /// Lyrics of the music track on screen.
@@ -2148,8 +2165,6 @@ pub struct KattriApp {
     pub(crate) admin_users: AdminUsersData,
     watched: Option<WatchedItemState>,
     favorite: Option<FavoriteItemState>,
-    series_seasons_request_id: u64,
-    series_episodes_request_id: u64,
     /// The segments request for the item being prepared: (request id, item id).
     media_segments_request: Option<(u64, String)>,
     /// Segments fetched for the current item, waiting for the native host to take them.
@@ -2569,6 +2584,7 @@ impl KattriApp {
             items: Vec::new(),
             album_tracks: AlbumTracksState::new(),
             search: SearchState::new(),
+            series: SeriesState::new(),
             navigation: NavigationState::new(),
             browse: BrowseState::new(),
             catalog_selection: crate::ui::selection::LibrarySelection::default(),
@@ -2592,13 +2608,6 @@ impl KattriApp {
             custom_backdrop_texture: None,
             custom_backdrop_request: None,
             auto_play: AutoPlayMachine::new(),
-            series_seasons: Vec::new(),
-            series_seasons_loading: false,
-            series_seasons_error: None,
-            series_selected_season_id: None,
-            series_episodes: Vec::new(),
-            series_episodes_loading: false,
-            series_episodes_error: None,
             similar_items: Vec::new(),
             similar_loading: false,
             selected_person: None,
@@ -2663,7 +2672,6 @@ impl KattriApp {
             photo_full_size_failed: HashSet::new(),
             music_queue: Queue::new(),
             episode_neighbors: None,
-            series_next_up: None,
             shuffle_queue: None,
             preferred_source: None,
             track_lyrics: Vec::new(),
@@ -2770,8 +2778,6 @@ impl KattriApp {
             admin_users: AdminUsersData::default(),
             watched: None,
             favorite: None,
-            series_seasons_request_id: 0,
-            series_episodes_request_id: 0,
             media_segments_request: None,
             loaded_media_segments: None,
             pending_player_intents: Vec::new(),
@@ -5242,14 +5248,14 @@ impl KattriApp {
         }
         self.browse.catalog_request_id = self.allocate_request_id();
         self.browse.details.details_request_id = self.allocate_request_id();
-        self.series_seasons_request_id = self.allocate_request_id();
-        self.series_episodes_request_id = self.allocate_request_id();
+        self.series.seasons_request_id = self.allocate_request_id();
+        self.series.episodes_request_id = self.allocate_request_id();
         self.similar_request_id = self.allocate_request_id();
         self.person_items_request_id = self.allocate_request_id();
         self.browse.catalog_loading = false;
         self.browse.details.details_loading = false;
-        self.series_seasons_loading = false;
-        self.series_episodes_loading = false;
+        self.series.seasons_loading = false;
+        self.series.episodes_loading = false;
         self.similar_loading = false;
         self.person_items_loading = false;
         self.clear_theme_media();
@@ -5712,7 +5718,7 @@ impl KattriApp {
     fn forget_deleted_item(&mut self, item_id: &str) {
         self.items.retain(|item| item.id != item_id);
         self.home.remove_item(item_id);
-        self.series_episodes.retain(|episode| episode.id != item_id);
+        self.series.episodes.retain(|episode| episode.id != item_id);
         if self.browse.details.selected_item_id.as_deref() == Some(item_id) {
             self.navigate_back();
         }
@@ -7782,15 +7788,15 @@ impl KattriApp {
     }
 
     fn reset_series_detail(&mut self) {
-        self.series_seasons_request_id = self.allocate_request_id();
-        self.series_episodes_request_id = self.allocate_request_id();
-        self.series_seasons.clear();
-        self.series_seasons_loading = false;
-        self.series_seasons_error = None;
-        self.series_selected_season_id = None;
-        self.series_episodes.clear();
-        self.series_episodes_loading = false;
-        self.series_episodes_error = None;
+        self.series.seasons_request_id = self.allocate_request_id();
+        self.series.episodes_request_id = self.allocate_request_id();
+        self.series.seasons.clear();
+        self.series.seasons_loading = false;
+        self.series.seasons_error = None;
+        self.series.selected_season_id = None;
+        self.series.episodes.clear();
+        self.series.episodes_loading = false;
+        self.series.episodes_error = None;
         self.episode_thumbnails.clear();
         self.episode_thumbnail_pending.clear();
         self.episode_thumbnail_queue.clear();
@@ -7804,7 +7810,8 @@ impl KattriApp {
             self.episode_thumbnails.clear();
         }
         let wanted: Vec<(String, String)> = self
-            .series_episodes
+            .series
+            .episodes
             .iter()
             .filter(|episode| !self.episode_thumbnails.contains_key(&episode.id))
             .filter_map(|episode| {
@@ -8012,15 +8019,15 @@ impl KattriApp {
     }
 
     fn request_series_seasons(&mut self, series_id: String) {
-        self.series_seasons.clear();
-        self.series_episodes.clear();
-        self.series_selected_season_id = None;
-        self.series_seasons_error = None;
-        self.series_episodes_error = None;
-        self.series_seasons_loading = true;
-        self.series_episodes_loading = false;
+        self.series.seasons.clear();
+        self.series.episodes.clear();
+        self.series.selected_season_id = None;
+        self.series.seasons_error = None;
+        self.series.episodes_error = None;
+        self.series.seasons_loading = true;
+        self.series.episodes_loading = false;
         let next_up_request_id = self.allocate_request_id();
-        self.series_next_up = self
+        self.series.next_up = self
             .worker
             .as_ref()
             .is_some_and(|worker| {
@@ -8034,20 +8041,21 @@ impl KattriApp {
                 episode: None,
             });
         let request_id = self.allocate_request_id();
-        self.series_seasons_request_id = request_id;
+        self.series.seasons_request_id = request_id;
         if self.worker.as_ref().is_none_or(|worker| {
             worker
                 .list_seasons(request_id, self.session_epoch, series_id)
                 .is_err()
         }) {
-            self.series_seasons_loading = false;
-            self.series_seasons_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into());
+            self.series.seasons_loading = false;
+            self.series.seasons_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into());
         }
     }
 
     /// The episode the series page offers to play, once the server has named one.
     pub(crate) fn series_next_up_episode(&self, series_id: &str) -> Option<&BaseItemDto> {
-        self.series_next_up
+        self.series
+            .next_up
             .as_ref()
             .filter(|next_up| next_up.series_id == series_id)
             .and_then(|next_up| next_up.episode.as_ref())
@@ -8064,24 +8072,24 @@ impl KattriApp {
         else {
             return;
         };
-        if self.series_selected_season_id.as_deref() == Some(season_id.as_str())
-            && (self.series_episodes_loading || !self.series_episodes.is_empty())
+        if self.series.selected_season_id.as_deref() == Some(season_id.as_str())
+            && (self.series.episodes_loading || !self.series.episodes.is_empty())
         {
             return;
         }
-        self.series_selected_season_id = Some(season_id.clone());
-        self.series_episodes.clear();
-        self.series_episodes_error = None;
-        self.series_episodes_loading = true;
+        self.series.selected_season_id = Some(season_id.clone());
+        self.series.episodes.clear();
+        self.series.episodes_error = None;
+        self.series.episodes_loading = true;
         let request_id = self.allocate_request_id();
-        self.series_episodes_request_id = request_id;
+        self.series.episodes_request_id = request_id;
         if self.worker.as_ref().is_none_or(|worker| {
             worker
                 .list_episodes(request_id, self.session_epoch, series_id, season_id)
                 .is_err()
         }) {
-            self.series_episodes_loading = false;
-            self.series_episodes_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into());
+            self.series.episodes_loading = false;
+            self.series.episodes_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into());
         }
     }
 
@@ -10578,14 +10586,14 @@ impl KattriApp {
                     series_id,
                     seasons,
                     ..
-                } if request_id == self.series_seasons_request_id
+                } if request_id == self.series.seasons_request_id
                     && self.browse.details.selected_item_id.as_deref()
                         == Some(series_id.as_str()) =>
                 {
-                    self.series_seasons_loading = false;
-                    self.series_seasons_error = None;
-                    self.series_seasons = seasons;
-                    if let Some(season_id) = ordered_season_ids(&self.series_seasons).first() {
+                    self.series.seasons_loading = false;
+                    self.series.seasons_error = None;
+                    self.series.seasons = seasons;
+                    if let Some(season_id) = ordered_season_ids(&self.series.seasons).first() {
                         self.select_series_season(season_id.clone());
                     }
                 }
@@ -10594,24 +10602,24 @@ impl KattriApp {
                     series_id,
                     message,
                     ..
-                } if request_id == self.series_seasons_request_id
+                } if request_id == self.series.seasons_request_id
                     && self.browse.details.selected_item_id.as_deref()
                         == Some(series_id.as_str()) =>
                 {
-                    self.series_seasons_loading = false;
-                    self.series_seasons_error = Some(message);
+                    self.series.seasons_loading = false;
+                    self.series.seasons_error = Some(message);
                 }
                 WorkerEvent::SeriesEpisodesLoaded {
                     request_id,
                     season_id,
                     episodes,
                     ..
-                } if request_id == self.series_episodes_request_id
-                    && self.series_selected_season_id.as_deref() == Some(season_id.as_str()) =>
+                } if request_id == self.series.episodes_request_id
+                    && self.series.selected_season_id.as_deref() == Some(season_id.as_str()) =>
                 {
-                    self.series_episodes_loading = false;
-                    self.series_episodes_error = None;
-                    self.series_episodes = episodes;
+                    self.series.episodes_loading = false;
+                    self.series.episodes_error = None;
+                    self.series.episodes = episodes;
                     self.request_episode_thumbnails();
                 }
                 WorkerEvent::SeriesEpisodesFailed {
@@ -10619,11 +10627,11 @@ impl KattriApp {
                     season_id,
                     message,
                     ..
-                } if request_id == self.series_episodes_request_id
-                    && self.series_selected_season_id.as_deref() == Some(season_id.as_str()) =>
+                } if request_id == self.series.episodes_request_id
+                    && self.series.selected_season_id.as_deref() == Some(season_id.as_str()) =>
                 {
-                    self.series_episodes_loading = false;
-                    self.series_episodes_error = Some(message);
+                    self.series.episodes_loading = false;
+                    self.series.episodes_error = Some(message);
                 }
                 WorkerEvent::ForgotPasswordFinished { request_id, result } => {
                     if request_id == self.forgot_password_request_id {
@@ -10904,7 +10912,7 @@ impl KattriApp {
                     series_id,
                     episode,
                 } => {
-                    if let Some(next_up) = self.series_next_up.as_mut()
+                    if let Some(next_up) = self.series.next_up.as_mut()
                         && next_up.request_id == request_id
                         && next_up.series_id == series_id
                     {
@@ -12513,7 +12521,7 @@ struct Adjacent<'a> {
 
 /// The server's Next Up episode for one series.
 #[derive(Clone, Debug, PartialEq)]
-struct SeriesNextUp {
+pub(crate) struct SeriesNextUp {
     series_id: String,
     request_id: u64,
     episode: Option<BaseItemDto>,
@@ -16565,7 +16573,8 @@ mod photo_decode_event_tests {
         app.worker = Some(worker);
         app.request_series_seasons("show".into());
         let request_id = app
-            .series_next_up
+            .series
+            .next_up
             .as_ref()
             .expect("next up requested")
             .request_id;
@@ -16661,7 +16670,7 @@ mod photo_decode_event_tests {
         let mut app = KattriApp::new(Context::default());
         let (worker, sender) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
-        app.series_episodes = vec![
+        app.series.episodes = vec![
             serde_json::from_value(serde_json::json!({
                 "Id": "e1", "Name": "One", "ImageTags": {"Primary": "still-1"}
             }))
