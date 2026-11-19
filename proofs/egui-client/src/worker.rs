@@ -32,6 +32,7 @@ use jellyfin_api::{
     QuickConnectStatus, Session, UserDto, UserItemDataDto, UserView,
 };
 use jellyfin_playback_relay::{RelayHandle, RelayPlaybackUrl, start_relay};
+use kattri_client_core::epoch::Epoch;
 use kattri_client_core::playback_reporting::{PlaybackReportAction, PlaybackReportMetadata};
 use kattri_client_core::queue::MAX_QUEUE_LEN;
 use kattri_client_core::quick_connect_poll::PollOutcome;
@@ -382,12 +383,14 @@ pub enum WorkerEvent {
     },
     ItemsLoaded {
         request_id: u64,
+        epoch: Epoch,
         server: ServerIdentity,
         user: UserDto,
         page: ItemsResponse,
     },
     ItemsFailed {
         request_id: u64,
+        epoch: Epoch,
         unsupported_filter: Option<ItemFilter>,
         error_class: ErrorClass,
         retry_after: Option<std::time::Duration>,
@@ -949,6 +952,21 @@ pub enum WorkerEvent {
         message: String,
     },
 }
+impl WorkerEvent {
+    /// The session generation this event belongs to, when it is session-scoped.
+    ///
+    /// The app drops an event whose epoch is not the live one before matching, so a result from an
+    /// abandoned session cannot touch state. Events that are not session-scoped return `None` and
+    /// are never dropped by that boundary.
+    pub(crate) fn session_epoch(&self) -> Option<Epoch> {
+        match self {
+            Self::ItemsLoaded { epoch, .. } | Self::ItemsFailed { epoch, .. } => {
+                (*epoch != Epoch::NONE).then_some(*epoch)
+            }
+            _ => None,
+        }
+    }
+}
 
 /// A Quick Connect request in flight. The secret stays inside the worker; the UI only
 /// sees the short code.
@@ -1142,6 +1160,8 @@ pub(crate) enum WorkerCommand {
     },
     FetchItems {
         request_id: u64,
+        /// The session generation this request belongs to; echoed on the result.
+        epoch: Epoch,
         query: ItemQuery,
     },
     /// The server's suggestions for one library (`GET /Items/{id}/Suggestions`).
@@ -1633,9 +1653,17 @@ impl ApiWorker {
         })
     }
 
-    pub fn fetch_items(&self, request_id: u64, query: ItemQuery) -> Result<(), WorkerSubmitError> {
-        self.commands
-            .send(WorkerCommand::FetchItems { request_id, query })
+    pub fn fetch_items(
+        &self,
+        request_id: u64,
+        epoch: Epoch,
+        query: ItemQuery,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::FetchItems {
+            request_id,
+            epoch,
+            query,
+        })
     }
 
     pub(crate) fn restore_queue_items(
@@ -3158,6 +3186,7 @@ async fn execute_command(
                 handle_items_result(
                     page_result,
                     request_id,
+                    Epoch::NONE,
                     identity,
                     user,
                     events,
@@ -3325,6 +3354,7 @@ async fn execute_command(
                 handle_items_result(
                     page_result,
                     request_id,
+                    Epoch::NONE,
                     identity,
                     user,
                     events,
@@ -3336,7 +3366,11 @@ async fn execute_command(
                 )
                 .await;
             }
-            WorkerCommand::FetchItems { request_id, query } => {
+            WorkerCommand::FetchItems {
+                request_id,
+                epoch,
+                query,
+            } => {
                 let Some(current_server) = server.clone() else {
                     send_event(
                         events,
@@ -3380,6 +3414,7 @@ async fn execute_command(
                 handle_items_result(
                     page_result,
                     request_id,
+                    epoch,
                     current_server,
                     current_user,
                     events,
@@ -6073,6 +6108,7 @@ async fn execute_command(
                 handle_items_result(
                     page_result,
                     request_id,
+                    Epoch::NONE,
                     identity,
                     user,
                     events,
@@ -7828,6 +7864,7 @@ fn live_tune_error(error: ApiError) -> String {
 async fn handle_items_result(
     result: Result<ItemsResponse, ApiError>,
     request_id: u64,
+    epoch: Epoch,
     server_identity: ServerIdentity,
     user: UserDto,
     events: &WorkerSink,
@@ -7844,6 +7881,7 @@ async fn handle_items_result(
                 ctx,
                 WorkerEvent::ItemsLoaded {
                     request_id,
+                    epoch,
                     server: server_identity,
                     user,
                     page,
@@ -7876,6 +7914,7 @@ async fn handle_items_result(
                 ctx,
                 WorkerEvent::ItemsFailed {
                     request_id,
+                    epoch,
                     unsupported_filter,
                     error_class: error.classify(),
                     retry_after: error.retry_after(),

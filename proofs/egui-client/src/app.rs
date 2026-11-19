@@ -715,8 +715,10 @@ mod launch_intent_tests {
             Some(request_id)
         );
 
+        let session_epoch = app.session_epoch;
         let signed_in = || WorkerEvent::ItemsLoaded {
             request_id,
+            epoch: session_epoch,
             server: ServerIdentity {
                 name: "Media server".into(),
                 version: Some("test".into()),
@@ -971,6 +973,68 @@ mod connection_boundary_tests {
             app.connection_text.text(),
             "reason",
             "the disconnect reason replaces the connecting message"
+        );
+    }
+    #[test]
+    fn a_catalog_result_from_an_abandoned_session_is_dropped() {
+        use super::{ItemsResponse, ServerIdentity, WorkerEvent};
+        use jellyfin_api::UserDto;
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context.clone());
+        let (worker, events) = super::ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.begin_connection("first");
+        let stale_epoch = app.session_epoch;
+        app.begin_connection("second");
+        let current_epoch = app.session_epoch;
+        app.catalog_request_id = 5;
+
+        events
+            .try_send(WorkerEvent::ItemsLoaded {
+                request_id: 5,
+                epoch: stale_epoch,
+                server: ServerIdentity {
+                    name: "server".into(),
+                    version: None,
+                    id: None,
+                },
+                user: UserDto {
+                    id: "user".into(),
+                    name: "Alice".into(),
+                    server_id: None,
+                    policy: None,
+                },
+                page: ItemsResponse::default(),
+            })
+            .expect("stale result queued");
+        app.receive_worker_events(&context);
+        assert!(
+            app.server.is_none(),
+            "a result issued under an abandoned generation must not touch state"
+        );
+
+        events
+            .try_send(WorkerEvent::ItemsLoaded {
+                request_id: 5,
+                epoch: current_epoch,
+                server: ServerIdentity {
+                    name: "server".into(),
+                    version: None,
+                    id: None,
+                },
+                user: UserDto {
+                    id: "user".into(),
+                    name: "Alice".into(),
+                    server_id: None,
+                    policy: None,
+                },
+                page: ItemsResponse::default(),
+            })
+            .expect("current result queued");
+        app.receive_worker_events(&context);
+        assert!(
+            app.server.is_some(),
+            "a result from the live generation is applied"
         );
     }
     #[test]
@@ -7220,6 +7284,7 @@ impl KattriApp {
                     };
                     worker.fetch_items(
                         request_id,
+                        self.session_epoch,
                         ItemQuery {
                             recursive: self.page != Page::Photos,
                             start_index,
@@ -9682,6 +9747,14 @@ impl KattriApp {
                 break;
             };
 
+            // One staleness boundary for every session-scoped event: a result issued under an
+            // abandoned generation is dropped before the match can touch state.
+            if let Some(epoch) = event.session_epoch()
+                && !epoch.is_current_for(self.session_epoch)
+            {
+                continue;
+            }
+
             match event {
                 WorkerEvent::ServerChecked { request_id, server } => {
                     if let Some((pending_id, server_url, allow_http)) =
@@ -10170,6 +10243,7 @@ impl KattriApp {
                     server,
                     user,
                     page,
+                    ..
                 } => {
                     self.record_network_success();
                     let ceiling = self.browse_rating_ceiling(ctx);
@@ -10191,6 +10265,7 @@ impl KattriApp {
                     unsupported_filter,
                     error_class,
                     retry_after,
+                    ..
                 } if catalog_response_is_current(request_id, self.catalog_request_id) => {
                     self.catalog_loading = false;
                     self.search_stale =

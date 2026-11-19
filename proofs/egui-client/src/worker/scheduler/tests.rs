@@ -12,6 +12,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 fn fetch(id: u64, term: &str) -> WorkerCommand {
     WorkerCommand::FetchItems {
         request_id: id,
+        epoch: kattri_client_core::epoch::Epoch::NONE,
         query: ItemQuery {
             search_term: Some(term.into()),
             ..ItemQuery::default()
@@ -31,7 +32,7 @@ fn rapid_searches_keep_only_latest_key_and_invalidate_started_ticket() {
         .expect("enqueue latest search");
 
     assert!(
-        matches!(queue.pop(Lane::Read).map(|entry| entry.command), Some(WorkerCommand::FetchItems { request_id: 3, query }) if query.search_term.as_deref() == Some("three"))
+        matches!(queue.pop(Lane::Read).map(|entry| entry.command), Some(WorkerCommand::FetchItems { request_id: 3, query, .. }) if query.search_term.as_deref() == Some("three"))
     );
     assert!(queue.pop(Lane::Read).is_none());
 }
