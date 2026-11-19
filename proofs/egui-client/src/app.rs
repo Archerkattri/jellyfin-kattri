@@ -38,6 +38,7 @@ use jellyfin_api::{
 use kattri_client_core::auto_play::{
     AutoPlayEffect, AutoPlayMachine, AutoPlayObservations, PlayRequest,
 };
+use kattri_client_core::browse_state::BrowseState;
 use kattri_client_core::connection::{SessionEffect, SessionEvent, SessionId, SessionMachine};
 use kattri_client_core::downloads::DownloadState;
 use kattri_client_core::epg::{EpgProgram, EpgWindow};
@@ -987,7 +988,7 @@ mod connection_boundary_tests {
         let stale_epoch = app.session_epoch;
         app.begin_connection("second");
         let current_epoch = app.session_epoch;
-        app.catalog_request_id = 5;
+        app.browse.catalog_request_id = 5;
 
         events
             .try_send(WorkerEvent::ItemsLoaded {
@@ -1722,21 +1723,17 @@ pub struct KattriApp {
     metadata_thumbnail_requests: HashMap<u64, String>,
     pub(crate) items: Vec<crate::catalog::MediaItem>,
     /// Multi-select state for the catalog grid. Bounded to the loaded page; UI code owns it.
+    /// Owned catalog page lifecycle: request id, loading/loaded flags, error, cursor.
+    pub(crate) browse: BrowseState,
     pub(crate) catalog_selection: crate::ui::selection::LibrarySelection,
     pub(crate) total_record_count: Option<u32>,
     pub(crate) collection_runtime: CollectionRuntime,
     pub(crate) start_index: u32,
-    pub(crate) catalog_next_index: u32,
-    pub(crate) catalog_end_reached: bool,
-    pub(crate) catalog_loaded: bool,
     /// The selected tab of the Movies or Series page. Reset whenever the page changes.
     pub(crate) library_tab: LibraryTab,
     /// Latest Suggestions or Upcoming request; a reply for any other id is stale.
     library_tab_request_id: u64,
     loaded_search: Option<String>,
-    pub(crate) catalog_loading: bool,
-    pub(crate) catalog_error: Option<String>,
-    pub(crate) catalog_filter_notice: Option<String>,
     unsupported_catalog_filters: Vec<(Page, ItemFilter)>,
     pub(crate) selected_item_id: Option<String>,
     pub(crate) selected_details: Option<BaseItemDto>,
@@ -1988,7 +1985,6 @@ pub struct KattriApp {
     /// earlier session can never match a later one (C1). The machine tracks the active generation;
     /// this counter is what new generations are issued from.
     session_epoch: Epoch,
-    catalog_request_id: u64,
     /// Latest admin dashboard read (M4-22). A reply for any other request is stale.
     pub(crate) admin_load: AdminLoad,
     admin_request_id: Option<u64>,
@@ -2270,8 +2266,8 @@ impl KattriApp {
             connection,
             self.connection_text.text(),
             self.server_check_error,
-            self.catalog_error,
-            self.catalog_loading,
+            self.browse.catalog_error,
+            self.browse.catalog_loading,
             self.items.len(),
             self.user_name.is_some(),
             self.selected_item_id,
@@ -2416,23 +2412,18 @@ impl KattriApp {
             metadata_editor_request: 0,
             metadata_thumbnail_requests: HashMap::new(),
             items: Vec::new(),
+            browse: BrowseState::new(),
             catalog_selection: crate::ui::selection::LibrarySelection::default(),
             total_record_count: None,
             collection_runtime: CollectionRuntime::default(),
             start_index: 0,
-            catalog_next_index: 0,
-            catalog_end_reached: false,
-            catalog_loaded: false,
             library_tab: LibraryTab::Library,
             library_tab_request_id: 0,
             loaded_search: None,
-            catalog_loading: false,
-            catalog_error: None,
             downloads: DownloadsState::default(),
             batch_downloads: BatchQueue::default(),
             batch_started: HashMap::new(),
             update: UpdateState::default(),
-            catalog_filter_notice: None,
             unsupported_catalog_filters: Vec::new(),
             selected_item_id: None,
             selected_details: None,
@@ -2635,7 +2626,6 @@ impl KattriApp {
             session_machine: SessionMachine::new(),
             session_id_counter: 0,
             session_epoch: Epoch::NONE,
-            catalog_request_id: 0,
             admin_load: AdminLoad::Pending,
             admin_request_id: None,
             admin_users_open: false,
@@ -4427,7 +4417,7 @@ impl KattriApp {
                 worker.resume_sign_in(request_id, server_url, allow_insecure, saved)
             });
         if submitted.is_err() {
-            self.catalog_loading = false;
+            self.browse.catalog_loading = false;
             self.apply_connection_status(ConnectionStatus::Disconnected { error: None });
         }
     }
@@ -4486,7 +4476,7 @@ impl KattriApp {
                     )
                 });
         if connect_result.is_err() {
-            self.catalog_loading = false;
+            self.browse.catalog_loading = false;
             self.apply_connection_status(ConnectionStatus::Disconnected {
                 error: Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).into()),
             });
@@ -4886,7 +4876,7 @@ impl KattriApp {
         }
         let request_id = self.allocate_request_id();
         self.connection_request_id = request_id;
-        self.catalog_request_id = request_id;
+        self.browse.catalog_request_id = request_id;
         self.details_request_id = self.allocate_request_id();
         self.playback_request_id = self.allocate_request_id();
         self.playback_start_request_id = self.allocate_request_id();
@@ -4908,12 +4898,12 @@ impl KattriApp {
         self.total_record_count = None;
         self.unsupported_catalog_filters.clear();
         self.start_index = 0;
-        self.catalog_next_index = 0;
-        self.catalog_end_reached = false;
-        self.catalog_loaded = false;
+        self.browse.catalog_next_index = 0;
+        self.browse.catalog_end_reached = false;
+        self.browse.catalog_loaded = false;
         self.loaded_search = None;
-        self.catalog_loading = true;
-        self.catalog_error = None;
+        self.browse.catalog_loading = true;
+        self.browse.catalog_error = None;
         self.details_loading = false;
         self.details_error = None;
         self.reset_series_detail();
@@ -5009,7 +4999,10 @@ impl KattriApp {
     }
 
     pub(crate) fn retry_items(&mut self) {
-        self.request_catalog(self.catalog_next_index, self.submitted_search.clone());
+        self.request_catalog(
+            self.browse.catalog_next_index,
+            self.submitted_search.clone(),
+        );
     }
 
     pub(crate) fn retry_current_network_request(&mut self) {
@@ -5096,13 +5089,13 @@ impl KattriApp {
         if let Some(worker) = self.worker.as_ref() {
             worker.cancel_navigation_reads();
         }
-        self.catalog_request_id = self.allocate_request_id();
+        self.browse.catalog_request_id = self.allocate_request_id();
         self.details_request_id = self.allocate_request_id();
         self.series_seasons_request_id = self.allocate_request_id();
         self.series_episodes_request_id = self.allocate_request_id();
         self.similar_request_id = self.allocate_request_id();
         self.person_items_request_id = self.allocate_request_id();
-        self.catalog_loading = false;
+        self.browse.catalog_loading = false;
         self.details_loading = false;
         self.series_seasons_loading = false;
         self.series_episodes_loading = false;
@@ -5147,8 +5140,8 @@ impl KattriApp {
         self.search_browse_group = None;
         self.search_stale = false;
         self.search_debouncer.input("", Duration::ZERO);
-        self.catalog_request_id = self.allocate_request_id();
-        self.catalog_loading = false;
+        self.browse.catalog_request_id = self.allocate_request_id();
+        self.browse.catalog_loading = false;
         if page.is_catalog() && self.server.is_some() {
             self.request_catalog(0, None);
         }
@@ -5391,8 +5384,8 @@ impl KattriApp {
         self.search_results.clear();
         self.search_stale = false;
         self.search_debouncer.input("", Duration::ZERO);
-        self.catalog_request_id = self.allocate_request_id();
-        self.catalog_loading = false;
+        self.browse.catalog_request_id = self.allocate_request_id();
+        self.browse.catalog_loading = false;
         if self.server.is_some() {
             self.request_catalog(0, None);
         }
@@ -6451,10 +6444,10 @@ impl KattriApp {
         self.details_loading = false;
         self.details_error = None;
         let action = self.search_debouncer.input(input, now);
-        self.catalog_request_id = self.allocate_request_id();
+        self.browse.catalog_request_id = self.allocate_request_id();
         self.invalidate_live_tv_search();
-        self.catalog_loading = false;
-        self.catalog_error = None;
+        self.browse.catalog_loading = false;
+        self.browse.catalog_error = None;
 
         match action {
             SearchInputAction::Clear { .. } => {
@@ -6462,8 +6455,8 @@ impl KattriApp {
                 self.search_results.clear();
                 self.search_stale = false;
                 self.items.clear();
-                self.catalog_next_index = 0;
-                self.catalog_end_reached = true;
+                self.browse.catalog_next_index = 0;
+                self.browse.catalog_end_reached = true;
             }
             SearchInputAction::Debouncing { .. } => {
                 self.search_stale = !self.search_results.is_empty();
@@ -6518,8 +6511,8 @@ impl KattriApp {
     }
 
     fn request_next_page(&mut self) {
-        let next_start = self.catalog_next_index;
-        if !self.catalog_loading && !self.catalog_end_reached {
+        let next_start = self.browse.catalog_next_index;
+        if !self.browse.catalog_loading && !self.browse.catalog_end_reached {
             self.request_catalog(next_start, self.submitted_search.clone());
         }
     }
@@ -6530,8 +6523,8 @@ impl KattriApp {
         items_per_row: usize,
     ) {
         if (self.submitted_search.is_some() && self.search_browse_group.is_none())
-            || self.catalog_loading
-            || self.catalog_end_reached
+            || self.browse.catalog_loading
+            || self.browse.catalog_end_reached
         {
             return;
         }
@@ -6553,9 +6546,9 @@ impl KattriApp {
         self.search_results.clear();
         self.items.clear();
         self.total_record_count = None;
-        self.catalog_next_index = 0;
-        self.catalog_end_reached = false;
-        self.catalog_error = None;
+        self.browse.catalog_next_index = 0;
+        self.browse.catalog_end_reached = false;
+        self.browse.catalog_error = None;
         self.search_stale = false;
         if group == crate::ui::search::SearchGroup::Channels {
             self.invalidate_live_tv_search();
@@ -6579,8 +6572,8 @@ impl KattriApp {
         self.items.clear();
         self.search_results.clear();
         self.total_record_count = None;
-        self.catalog_next_index = 0;
-        self.catalog_end_reached = false;
+        self.browse.catalog_next_index = 0;
+        self.browse.catalog_end_reached = false;
         self.search_stale = false;
         self.request_catalog(0, Some(term));
     }
@@ -6617,7 +6610,7 @@ impl KattriApp {
         page: ItemsResponse,
         ceiling: Option<u32>,
     ) -> bool {
-        if !catalog_response_is_current(request_id, self.catalog_request_id) {
+        if !catalog_response_is_current(request_id, self.browse.catalog_request_id) {
             return false;
         }
 
@@ -6648,12 +6641,12 @@ impl KattriApp {
             page.total_record_count,
         );
         let mut collection_page_items = Vec::new();
-        self.catalog_next_index = page_start.saturating_add(page_size);
+        self.browse.catalog_next_index = page_start.saturating_add(page_size);
         let page_limit = catalog_page_limit(self.submitted_search.is_some(), self.page);
-        self.catalog_end_reached = page_size < page_limit
+        self.browse.catalog_end_reached = page_size < page_limit
             || self
                 .total_record_count
-                .is_some_and(|total| self.catalog_next_index >= total);
+                .is_some_and(|total| self.browse.catalog_next_index >= total);
         self.loaded_search = self.submitted_search.clone();
         let is_collection_browse = self
             .browse_context
@@ -6685,9 +6678,9 @@ impl KattriApp {
         }
         self.attempted_artwork.clear();
         self.artwork_access_ticks.clear();
-        self.catalog_loaded = true;
-        self.catalog_loading = false;
-        self.catalog_error = None;
+        self.browse.catalog_loaded = true;
+        self.browse.catalog_loading = false;
+        self.browse.catalog_error = None;
         self.apply_connection_status(ConnectionStatus::Connected);
         true
     }
@@ -6891,7 +6884,7 @@ impl KattriApp {
             ItemFilter::IsFavorite => self.catalog_favorites_only = false,
             _ => {}
         }
-        self.catalog_filter_notice = Some(ui_text_args(
+        self.browse.catalog_filter_notice = Some(ui_text_args(
             ids::BROWSE_FILTER_UNSUPPORTED,
             &[("filter", &format!("{filter:?}"))],
         ));
@@ -7043,10 +7036,10 @@ impl KattriApp {
         self.total_record_count = None;
         self.collection_runtime = CollectionRuntime::default();
         self.start_index = 0;
-        self.catalog_next_index = 0;
-        self.catalog_end_reached = false;
-        self.catalog_error = None;
-        self.catalog_filter_notice = None;
+        self.browse.catalog_next_index = 0;
+        self.browse.catalog_end_reached = false;
+        self.browse.catalog_error = None;
+        self.browse.catalog_filter_notice = None;
         if self.server.is_some() {
             self.request_catalog(0, None);
         }
@@ -7057,15 +7050,15 @@ impl KattriApp {
     fn begin_library_tab_request(&mut self) -> u64 {
         let request_id = self.allocate_request_id();
         self.library_tab_request_id = request_id;
-        self.catalog_request_id = request_id;
+        self.browse.catalog_request_id = request_id;
         self.items.clear();
         self.total_record_count = None;
         self.collection_runtime = CollectionRuntime::default();
         self.start_index = 0;
-        self.catalog_next_index = 0;
-        self.catalog_end_reached = true;
-        self.catalog_loading = true;
-        self.catalog_error = None;
+        self.browse.catalog_next_index = 0;
+        self.browse.catalog_end_reached = true;
+        self.browse.catalog_loading = true;
+        self.browse.catalog_error = None;
         self.search_results.clear();
         self.search_stale = false;
         self.loaded_search = None;
@@ -7079,8 +7072,8 @@ impl KattriApp {
 
     fn request_library_suggestions(&mut self) {
         let Some(library_id) = self.library_tab_library_id() else {
-            self.catalog_loading = false;
-            self.catalog_error = Some(ui_text(ids::BROWSE_ERROR_LOAD_FAILED).to_owned());
+            self.browse.catalog_loading = false;
+            self.browse.catalog_error = Some(ui_text(ids::BROWSE_ERROR_LOAD_FAILED).to_owned());
             return;
         };
         let request_id = self.begin_library_tab_request();
@@ -7090,8 +7083,8 @@ impl KattriApp {
             .ok_or(WorkerSubmitError::Stopped)
             .and_then(|worker| worker.list_library_suggestions(request_id, library_id));
         if result.is_err() {
-            self.catalog_loading = false;
-            self.catalog_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).to_owned());
+            self.browse.catalog_loading = false;
+            self.browse.catalog_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).to_owned());
         }
     }
 
@@ -7103,8 +7096,8 @@ impl KattriApp {
             .ok_or(WorkerSubmitError::Stopped)
             .and_then(|worker| worker.list_upcoming_episodes(request_id));
         if result.is_err() {
-            self.catalog_loading = false;
-            self.catalog_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).to_owned());
+            self.browse.catalog_loading = false;
+            self.browse.catalog_error = Some(ui_text(ids::APP_ERROR_QUEUE_NETWORK).to_owned());
         }
     }
 
@@ -7118,13 +7111,13 @@ impl KattriApp {
         self.items = shown;
         self.total_record_count = Some(count);
         self.start_index = 0;
-        self.catalog_next_index = count;
-        self.catalog_end_reached = true;
+        self.browse.catalog_next_index = count;
+        self.browse.catalog_end_reached = true;
         self.attempted_artwork.clear();
         self.artwork_access_ticks.clear();
-        self.catalog_loaded = true;
-        self.catalog_loading = false;
-        self.catalog_error = None;
+        self.browse.catalog_loaded = true;
+        self.browse.catalog_loading = false;
+        self.browse.catalog_error = None;
         self.apply_connection_status(ConnectionStatus::Connected);
     }
 
@@ -7158,7 +7151,7 @@ impl KattriApp {
             self.invalidate_live_tv_search();
         }
         let request_id = self.allocate_request_id();
-        self.catalog_request_id = request_id;
+        self.browse.catalog_request_id = request_id;
         self.start_index = start_index;
         if start_index == 0 {
             self.collection_runtime = CollectionRuntime::default();
@@ -7169,14 +7162,14 @@ impl KattriApp {
             } else if self.search_results.is_empty() {
                 self.items.clear();
             }
-            self.catalog_next_index = 0;
-            self.catalog_end_reached = false;
+            self.browse.catalog_next_index = 0;
+            self.browse.catalog_end_reached = false;
         }
         if start_index == 0 || search_term != self.loaded_search {
             self.total_record_count = None;
         }
-        self.catalog_loading = true;
-        self.catalog_error = None;
+        self.browse.catalog_loading = true;
+        self.browse.catalog_error = None;
         // Appending a page must not close an open detail page or invalidate an in-flight
         // playback start: auto-prefetch while scrolling would otherwise cancel playback.
         if start_index == 0 {
@@ -7189,13 +7182,13 @@ impl KattriApp {
             self.playback_request_id = self.allocate_request_id();
             self.playback_start_request_id = self.allocate_request_id();
         }
-        if !self.catalog_loaded {
+        if !self.browse.catalog_loaded {
             self.apply_connection_status(ConnectionStatus::LoadingItems);
         }
 
         if self.worker.is_none() {
-            self.catalog_loading = false;
-            self.catalog_error = Some(ui_text(ids::CONNECT_WORKER_UNAVAILABLE).into());
+            self.browse.catalog_loading = false;
+            self.browse.catalog_error = Some(ui_text(ids::CONNECT_WORKER_UNAVAILABLE).into());
             return;
         }
 
@@ -7314,10 +7307,10 @@ impl KattriApp {
                     )
                 });
         if request_result.is_err() {
-            self.catalog_loading = false;
+            self.browse.catalog_loading = false;
             let message = ui_text(ids::APP_ERROR_QUEUE_NETWORK).to_owned();
-            self.catalog_error = Some(message.clone());
-            if !self.catalog_loaded {
+            self.browse.catalog_error = Some(message.clone());
+            if !self.browse.catalog_loaded {
                 self.apply_connection_status(ConnectionStatus::LibraryError(message));
             }
         } else if start_index == 0 && self.page == Page::Playlists && !is_search {
@@ -9633,7 +9626,7 @@ impl KattriApp {
         self.connection_request_id = self.allocate_request_id();
         self.admin_users_open = false;
         self.admin_users.reset(self.connection_request_id);
-        self.catalog_request_id = self.allocate_request_id();
+        self.browse.catalog_request_id = self.allocate_request_id();
         self.unsupported_catalog_filters.clear();
         self.details_request_id = self.allocate_request_id();
         self.playback_request_id = self.allocate_request_id();
@@ -9651,12 +9644,12 @@ impl KattriApp {
         self.items.clear();
         self.total_record_count = None;
         self.start_index = 0;
-        self.catalog_next_index = 0;
-        self.catalog_end_reached = false;
-        self.catalog_loaded = false;
+        self.browse.catalog_next_index = 0;
+        self.browse.catalog_end_reached = false;
+        self.browse.catalog_loaded = false;
         self.loaded_search = None;
-        self.catalog_loading = false;
-        self.catalog_error = None;
+        self.browse.catalog_loading = false;
+        self.browse.catalog_error = None;
         self.search_query.clear();
         self.selected_item_id = None;
         self.selected_details = None;
@@ -9906,7 +9899,7 @@ impl KattriApp {
                     request_id,
                     server,
                     user,
-                } if catalog_response_is_current(request_id, self.catalog_request_id) => {
+                } if catalog_response_is_current(request_id, self.browse.catalog_request_id) => {
                     let signed_in = request_id == self.connection_request_id;
                     if signed_in {
                         // The session record is now live. Record its identity in the machine and
@@ -9937,8 +9930,8 @@ impl KattriApp {
                     if !self.user_is_admin && self.admin_users_open {
                         self.close_admin_users();
                     }
-                    self.catalog_loading = true;
-                    if !self.catalog_loaded {
+                    self.browse.catalog_loading = true;
+                    if !self.browse.catalog_loaded {
                         self.apply_connection_status(ConnectionStatus::LoadingItems);
                     }
                     if signed_in {
@@ -10269,8 +10262,8 @@ impl KattriApp {
                     error_class,
                     retry_after,
                     ..
-                } if catalog_response_is_current(request_id, self.catalog_request_id) => {
-                    self.catalog_loading = false;
+                } if catalog_response_is_current(request_id, self.browse.catalog_request_id) => {
+                    self.browse.catalog_loading = false;
                     self.search_stale =
                         self.submitted_search.is_some() && !self.search_results.is_empty();
                     if let Some(filter) = unsupported_filter {
@@ -10281,8 +10274,8 @@ impl KattriApp {
                         self.record_error_for_crash_report(&format!(
                             "catalog load failed: {error_class:?}"
                         ));
-                        self.catalog_error = Some(safe_message.clone());
-                        self.apply_connection_status(if self.catalog_loaded {
+                        self.browse.catalog_error = Some(safe_message.clone());
+                        self.apply_connection_status(if self.browse.catalog_loaded {
                             ConnectionStatus::Connected
                         } else {
                             ConnectionStatus::LibraryError(safe_message)
@@ -10483,8 +10476,9 @@ impl KattriApp {
                     && self.library_tab == LibraryTab::Suggestions =>
                 {
                     self.record_network_error(error_class, retry_after);
-                    self.catalog_loading = false;
-                    self.catalog_error = Some(crate::ui::status::message(error_class).to_owned());
+                    self.browse.catalog_loading = false;
+                    self.browse.catalog_error =
+                        Some(crate::ui::status::message(error_class).to_owned());
                 }
                 WorkerEvent::UpcomingEpisodesLoaded { request_id, items }
                     if request_id == self.library_tab_request_id
@@ -10502,8 +10496,9 @@ impl KattriApp {
                     && self.library_tab == LibraryTab::Upcoming =>
                 {
                     self.record_network_error(error_class, retry_after);
-                    self.catalog_loading = false;
-                    self.catalog_error = Some(crate::ui::status::message(error_class).to_owned());
+                    self.browse.catalog_loading = false;
+                    self.browse.catalog_error =
+                        Some(crate::ui::status::message(error_class).to_owned());
                 }
                 WorkerEvent::TrickplayResolutionsLoaded {
                     request_id,
@@ -11424,7 +11419,7 @@ impl KattriApp {
                         .is_some_and(|(wanted, _)| *wanted == request_id) =>
                 {
                     self.custom_backdrop_texture = None;
-                    self.catalog_filter_notice =
+                    self.browse.catalog_filter_notice =
                         Some(ui_text(ids::SETTINGS_GENERAL_BACKDROP_LOAD_FAILED).to_owned());
                 }
                 WorkerEvent::PlaybackInfoLoaded {
@@ -11626,7 +11621,7 @@ impl KattriApp {
                     request_id,
                     message,
                 } if request_id.is_none_or(|id| {
-                    id == self.connection_request_id || id == self.catalog_request_id
+                    id == self.connection_request_id || id == self.browse.catalog_request_id
                 }) =>
                 {
                     if self
@@ -12147,8 +12142,8 @@ mod search_browse_tests {
         assert_eq!(app.search_browse_group, Some(SearchGroup::Photos));
         assert_eq!(app.submitted_search.as_deref(), Some("quiet river"));
         assert!(!app.search_active);
-        assert!(app.catalog_loading);
-        assert_eq!(app.catalog_next_index, 0);
+        assert!(app.browse.catalog_loading);
+        assert_eq!(app.browse.catalog_next_index, 0);
         assert_eq!(app.items.len(), 0);
     }
 
@@ -12188,7 +12183,7 @@ mod search_browse_tests {
         assert_eq!(app.search_browse_group, None);
         assert_eq!(app.submitted_search.as_deref(), Some("news"));
         assert!(!app.search_active);
-        assert!(app.catalog_loading);
+        assert!(app.browse.catalog_loading);
         assert!(app.live_tv_search_loading);
         assert!(app.live_tv_search_results.is_empty());
         assert_eq!(app.live_tv_search_start_index, 0);
@@ -17145,7 +17140,7 @@ mod library_tab_tests {
             title: "Library".into(),
             is_collection: false,
         });
-        app.catalog_loaded = true;
+        app.browse.catalog_loaded = true;
         app
     }
 
@@ -17162,7 +17157,7 @@ mod library_tab_tests {
 
         app.select_library_tab(LibraryTab::Suggestions);
         assert_eq!(app.library_tab, LibraryTab::Suggestions);
-        assert!(app.catalog_loading);
+        assert!(app.browse.catalog_loading);
         let commands = take_commands(&mut app);
         assert_eq!(commands.len(), 1, "one tab request");
         match &commands[0] {
@@ -17212,8 +17207,8 @@ mod library_tab_tests {
         app.apply_library_tab_items(items, None);
         assert_eq!(app.items.len(), 50);
         assert_eq!(app.total_record_count, Some(50));
-        assert!(app.catalog_end_reached);
-        assert!(!app.catalog_loading);
+        assert!(app.browse.catalog_end_reached);
+        assert!(!app.browse.catalog_loading);
     }
 
     #[test]
@@ -17790,7 +17785,7 @@ mod catalog_page_tests {
         let mut app = KattriApp::new(egui::Context::default());
         app.submitted_search = Some("term".into());
         let request_id = app.allocate_request_id();
-        app.catalog_request_id = request_id;
+        app.browse.catalog_request_id = request_id;
         let page = ItemsResponse {
             items: (0..30)
                 .map(|index| item(&format!("item-{index}")))
@@ -17801,9 +17796,9 @@ mod catalog_page_tests {
 
         assert!(app.apply_catalog_response(request_id, page, None));
 
-        assert_eq!(app.catalog_next_index, 30);
+        assert_eq!(app.browse.catalog_next_index, 30);
         assert!(
-            !app.catalog_end_reached,
+            !app.browse.catalog_end_reached,
             "a full 30-item search page has more pages"
         );
     }

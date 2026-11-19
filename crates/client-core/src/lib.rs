@@ -5,6 +5,7 @@ pub mod audio;
 pub mod audio_device;
 pub mod audio_filters;
 pub mod auto_play;
+pub mod browse_state;
 pub mod cache;
 pub mod chapters;
 pub mod connection;

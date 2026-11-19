@@ -1523,8 +1523,8 @@ fn photos_page(ui: &mut egui::Ui, app: &mut KattriApp) {
             items: &app.photo_items,
             thumbnails: &app.photo_thumbnails,
             full_size_images: &app.photo_full_size_images,
-            loading: app.catalog_loading,
-            error: app.catalog_error.as_deref(),
+            loading: app.browse.catalog_loading,
+            error: app.browse.catalog_error.as_deref(),
             page_start: app.photo_page_start,
             page_size: 100,
             total_count: app.total_record_count.map(|value| value as usize),
@@ -1697,13 +1697,13 @@ fn render_connected(
         library_tab_strip(ui, app, gamepad_actions);
         ui.add_space(10.0);
     }
-    if let Some(message) = app.catalog_error.clone() {
+    if let Some(message) = app.browse.catalog_error.clone() {
         error_banner(ui, app, colors, &message);
     }
-    if let Some(message) = app.catalog_filter_notice.take() {
+    if let Some(message) = app.browse.catalog_filter_notice.take() {
         ui.label(RichText::new(message).color(colors.muted));
     }
-    if app.catalog_loading {
+    if app.browse.catalog_loading {
         ui.horizontal(|ui| {
             ui.spinner();
             let message = if app.search_active || app.submitted_search.is_some() {
@@ -1736,13 +1736,13 @@ fn render_connected(
             &[("group", group.label()), ("term", term)],
         ));
         ui.add_space(8.0);
-        if app.catalog_loading || app.live_tv_search_loading {
+        if app.browse.catalog_loading || app.live_tv_search_loading {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(ui_text(ids::SEARCH_STATUS_LOADING_ALL));
             });
         }
-        if let Some(error) = app.catalog_error.as_deref() {
+        if let Some(error) = app.browse.catalog_error.as_deref() {
             ui.label(RichText::new(error).color(colors.muted));
         }
         if group == search::SearchGroup::Channels {
@@ -1791,9 +1791,9 @@ fn render_connected(
         }
         if app.items.is_empty()
             && app.live_tv_search_results.is_empty()
-            && !app.catalog_loading
+            && !app.browse.catalog_loading
             && !app.live_tv_search_loading
-            && app.catalog_error.is_none()
+            && app.browse.catalog_error.is_none()
         {
             ui.label(ui_text(ids::SEARCH_EMPTY_NO_MATCHES));
         }
@@ -1817,9 +1817,9 @@ fn render_connected(
             };
         if grouped_results.is_empty() {
             if let Some(query) = query {
-                if !app.catalog_loading
+                if !app.browse.catalog_loading
                     && !app.live_tv_search_loading
-                    && app.catalog_error.is_none()
+                    && app.browse.catalog_error.is_none()
                 {
                     state_panel(
                         ui,
@@ -1839,7 +1839,7 @@ fn render_connected(
                     None,
                     app,
                 );
-            } else if !app.catalog_loading {
+            } else if !app.browse.catalog_loading {
                 ui.label(RichText::new(ui_text(ids::SEARCH_STATUS_WAITING)).color(colors.muted));
             }
         } else {
@@ -1923,7 +1923,7 @@ fn render_connected(
         ui.add_space(8.0);
     }
 
-    if app.items.is_empty() && app.catalog_loading {
+    if app.items.is_empty() && app.browse.catalog_loading {
         return;
     }
 
@@ -1941,7 +1941,7 @@ fn render_connected(
         );
         catalog_selection_toolbar(ui, app, colors);
         if app.items.is_empty() {
-            if app.catalog_error.is_some() {
+            if app.browse.catalog_error.is_some() {
                 return;
             }
             if let Some((title, message)) = empty_collection_detail(app.browse_context.as_ref()) {
@@ -2442,17 +2442,17 @@ fn collection_summary_text(
 
 fn catalog_pagination(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     // Everything is loaded: the page title already shows the count.
-    if app.catalog_end_reached && !app.catalog_loading {
+    if app.browse.catalog_end_reached && !app.browse.catalog_loading {
         return;
     }
     let range_label = catalog_count_label(app.items.len(), app.total_record_count);
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
             // Once the server has sent every item there is no next page to offer.
-            if !app.catalog_end_reached
+            if !app.browse.catalog_end_reached
                 && with_access_name(
                     ui.add_enabled(
-                        !app.catalog_loading,
+                        !app.browse.catalog_loading,
                         egui::Button::new(ui_text(ids::BROWSE_BUTTON_NEXT_PAGE)),
                     ),
                     egui::Role::Button,
