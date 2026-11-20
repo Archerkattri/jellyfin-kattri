@@ -7,7 +7,7 @@
 //!
 //! [UNCONFIRMED] The route and the field names come from memory of the Jellyfin server
 //! source, not from its OpenAPI document. Confirm them on a live server before relying on
-//! them. The mock server in `mock-jellyfin` does not serve this route.
+//! them.
 
 use reqwest::Method;
 use serde::Deserialize;

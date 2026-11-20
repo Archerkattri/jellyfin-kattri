@@ -24,12 +24,11 @@ use egui::ViewportId;
 use egui_winit::State as EguiWinitState;
 use gl_adapter::{ContextParts, HostGlContextProvider};
 use glow::HasContext;
-use glutin::config::ConfigTemplateBuilder;
+use glutin::config::{Config, ConfigTemplate, ConfigTemplateBuilder};
 use glutin::context::{ContextApi, ContextAttributesBuilder, NotCurrentGlContext};
-use glutin::display::{GetGlDisplay, GlDisplay};
+use glutin::display::{Display, DisplayApiPreference, GetGlDisplay, GlDisplay};
 use glutin::prelude::GlSurface;
 use glutin::surface::{SwapInterval, WindowSurface};
-use glutin_winit::{ApiPreference, DisplayBuilder};
 use jellyfin_egui_client::BurnInReplacementEnd;
 use jellyfin_egui_client::KattriApp;
 use kattri_client_core::PlaybackPhase;
@@ -54,7 +53,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::raw_window_handle::HasWindowHandle;
+use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 mod debug_validation;
@@ -167,6 +166,80 @@ fn window_icon() -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(RGBA.to_vec(), SIZE, SIZE).ok()
 }
 
+/// Open the GL display and pick the window config, or report why that failed.
+///
+/// `glutin_winit::DisplayBuilder::build` keeps its picker on the `-> Config` signature, so an
+/// empty config list cannot become an error there. This repeats the same bootstrap (same
+/// preferences, same call order) to return a typed error instead of panicking.
+fn create_window_and_config(
+    event_loop: &ActiveEventLoop,
+    window_attributes: WindowAttributes,
+    template: ConfigTemplateBuilder,
+) -> Result<(Option<Window>, Config), Box<dyn Error>> {
+    #[cfg(windows)]
+    {
+        // The WGL backend needs the native window before it can pick a config.
+        let window = event_loop.create_window(window_attributes)?;
+        let raw_window = window.window_handle()?.as_raw();
+        // SAFETY: the raw handles come from the live window and event loop, which outlive the
+        // display.
+        let display = unsafe {
+            Display::new(
+                event_loop.display_handle()?.as_raw(),
+                DisplayApiPreference::WglThenEgl(Some(raw_window)),
+            )?
+        };
+        let template = template.compatible_with_native_window(raw_window).build();
+        let config = pick_config(&display, template)?;
+        Ok((Some(window), config))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // SAFETY: the display handle comes from the live event loop.
+        let display = unsafe {
+            Display::new(
+                event_loop.display_handle()?.as_raw(),
+                DisplayApiPreference::GlxThenEgl(Box::new(
+                    winit::platform::x11::register_xlib_error_hook,
+                )),
+            )?
+        };
+        let config = pick_config(&display, template.build())?;
+        let window = glutin_winit::finalize_window(event_loop, window_attributes, &config)?;
+        Ok((Some(window), config))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: the display handle comes from the live event loop.
+        let display = unsafe {
+            Display::new(
+                event_loop.display_handle()?.as_raw(),
+                DisplayApiPreference::Cgl,
+            )?
+        };
+        let config = pick_config(&display, template.build())?;
+        let window = glutin_winit::finalize_window(event_loop, window_attributes, &config)?;
+        Ok((Some(window), config))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = (event_loop, window_attributes, template);
+        Err(std::io::Error::other("no GL display backend for this platform").into())
+    }
+}
+
+/// First config the display offers; the window and context calls must use that display.
+fn pick_config(display: &Display, template: ConfigTemplate) -> Result<Config, Box<dyn Error>> {
+    // SAFETY: any raw handles in the template come from the live host window.
+    let mut configs = unsafe { display.find_configs(template)? };
+    let Some(config) = configs.next() else {
+        return Err(
+            std::io::Error::other("the platform returned no compatible GL configurations").into(),
+        );
+    };
+    Ok(config)
+}
+
 impl<'session> GlHost<'session> {
     fn new(
         event_loop: &ActiveEventLoop,
@@ -187,14 +260,8 @@ impl<'session> GlHost<'session> {
             .with_stencil_size(0)
             .with_transparency(false);
 
-        let (window, config) = DisplayBuilder::new()
-            .with_preference(ApiPreference::FallbackEgl)
-            .with_window_attributes(Some(window_attributes.clone()))
-            .build(event_loop, template, |mut configs| {
-                configs
-                    .next()
-                    .expect("the platform returned no compatible GL configurations")
-            })?;
+        let (window, config) =
+            create_window_and_config(event_loop, window_attributes.clone(), template)?;
         let display = config.display();
         let window = match window {
             Some(window) => window,
@@ -654,6 +721,7 @@ impl<'session> GlHost<'session> {
         if self.physical_size.width == 0 || self.physical_size.height == 0 {
             return self.report_retry_delay().unwrap_or(Duration::MAX);
         }
+        // `mut` is only used by the debug harness injection below.
         #[allow(unused_mut)]
         let mut input = self.egui_winit.take_egui_input(&self.window);
         #[cfg(debug_assertions)]
@@ -2740,9 +2808,8 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
         if self.host.is_some() || self.failed {
             return;
         }
-        // Convert any panic during window/GL/libmpv initialization (for example a driver that
-        // exposes no usable config) into the normal failure path, and make the process exit
-        // non-zero so automation does not read a dead window as success.
+        // Convert any panic during window/GL/libmpv initialization into the normal failure path,
+        // and make the process exit non-zero so automation does not read a dead window as success.
         let created = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             GlHost::new(
                 event_loop,

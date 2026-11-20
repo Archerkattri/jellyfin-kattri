@@ -2694,6 +2694,7 @@ impl KattriApp {
     /// Start the app on the profile named by `--profile`, or on the active profile when it is
     /// `None`. A missing profile falls back to `default` with a launch notice.
     pub fn with_launch_profile(ctx: egui::Context, requested: Option<&str>) -> Self {
+        // `mut` is only used by the debug sign-in block below.
         #[allow(unused_mut)]
         let mut app = Self::with_launch_profile_inner(ctx, requested);
         #[cfg(debug_assertions)]

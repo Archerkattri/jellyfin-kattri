@@ -15,6 +15,7 @@ mod settings_state;
 mod sign_in;
 mod theme;
 mod ui;
+// The GL host uses worker hooks through the library API, not from this demo binary.
 #[allow(dead_code)]
 mod worker;
 

@@ -8159,6 +8159,7 @@ fn live_tune_error(error: ApiError) -> String {
     }
 }
 
+// The result and the worker state slots it must update are one request's context.
 #[allow(clippy::too_many_arguments)]
 async fn handle_items_result(
     result: Result<ItemsResponse, ApiError>,

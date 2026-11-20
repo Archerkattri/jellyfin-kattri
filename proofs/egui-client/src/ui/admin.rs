@@ -747,8 +747,8 @@ mod tests {
         }
     }
 
-    /// The fixture shape from `mock-jellyfin`: three libraries, one active
-    /// session, three users and two scheduled tasks.
+    /// A representative dashboard shape: three libraries, one active session,
+    /// three users and two scheduled tasks.
     fn mock_snapshot() -> AdminSnapshot {
         let libraries = [
             library(Some("Movies")),

@@ -2,7 +2,6 @@
 //!
 //! The paged collection-fetch helpers and the Album kind are kept for the collection pages'
 //! "Download all" action; the catalog selection batch uses the rest today.
-#![allow(dead_code)]
 
 use std::collections::{HashSet, VecDeque};
 use std::future::Future;
@@ -10,6 +9,8 @@ use std::future::Future;
 use jellyfin_api::BaseItemDto;
 use kattri_downloads::batch::MAX_BATCH_ITEMS;
 
+// Kept for the collection pages' Download all action; not called yet.
+#[allow(dead_code)]
 pub(crate) const COLLECTION_PAGE_SIZE: u32 = 100;
 pub(crate) const MAX_BATCH_DOWNLOADS_IN_FLIGHT: usize = 3;
 const MAX_ITEM_ID_BYTES: usize = 256;
@@ -23,6 +24,8 @@ pub(crate) enum CollectionKind {
 }
 
 impl CollectionKind {
+    // Kept for the collection pages' Download all action; not called yet.
+    #[allow(dead_code)]
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Album => "album",
@@ -41,12 +44,16 @@ pub(crate) struct BatchIdentity {
 }
 
 /// A page from one bounded collection endpoint.
+// Kept for the collection pages' Download all action; only the tests build one.
+#[allow(dead_code)]
 pub(crate) struct CollectionPage<T> {
     pub items: Vec<T>,
     pub total_record_count: Option<u32>,
 }
 
 /// Failure while fetching or bounding a paged collection.
+// Kept for the collection pages' Download all action; only the tests match it.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum CollectionPageError<E> {
     Fetch(E),
@@ -55,6 +62,8 @@ pub(crate) enum CollectionPageError<E> {
 }
 
 /// Read every page or return an error; callers never receive a silently truncated prefix.
+// Kept for the collection pages' Download all action; only the tests call it.
+#[allow(dead_code)]
 pub(crate) async fn collect_pages<T, E, F, Fut>(
     page_size: u32,
     max_items: usize,
@@ -236,6 +245,8 @@ pub(crate) enum BatchPlanError {
 pub(crate) enum DispatchResult {
     Started,
     AlreadyTracked,
+    // Only the tests refuse a dispatch; the app starts it or sees a tracked row.
+    #[allow(dead_code)]
     Failed,
 }
 
@@ -361,6 +372,8 @@ impl BatchQueue {
 }
 
 /// A permission check shared by the worker and deterministic tests.
+// Only the tests call it today.
+#[allow(dead_code)]
 pub(crate) fn authorize(allowed: bool) -> Result<(), PermissionDenied> {
     if allowed {
         Ok(())
@@ -369,6 +382,8 @@ pub(crate) fn authorize(allowed: bool) -> Result<(), PermissionDenied> {
     }
 }
 
+// Only the tests construct this today.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PermissionDenied;
 

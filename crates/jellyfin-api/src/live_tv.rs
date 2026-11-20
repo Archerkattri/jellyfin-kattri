@@ -94,6 +94,7 @@ pub struct LiveStreamResponse {
 
 /// Open a Live TV source and retain the server's media source for the caller.
 /// All request values are checked before any network request is sent.
+// One parameter per OpenLiveStreamDto field keeps the request mapping direct.
 #[allow(clippy::too_many_arguments)]
 async fn open_live_stream(
     client: &JellyfinClient,
@@ -275,6 +276,7 @@ impl JellyfinClient {
     /// Open a Live TV stream (`POST /LiveStreams/Open`). The optional values
     /// mirror Jellyfin's `OpenLiveStreamDto`; invalid or oversized values are
     /// rejected before any request is sent.
+    // One parameter per OpenLiveStreamDto field keeps the request mapping direct.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_live_stream(
         &self,
