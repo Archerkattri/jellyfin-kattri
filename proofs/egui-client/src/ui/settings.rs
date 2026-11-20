@@ -1771,7 +1771,7 @@ mod tests {
 
     fn about_fixture(libmpv_version: Option<&str>) -> AboutInfo {
         AboutInfo {
-            version: "0.1.0".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
             target: "x86_64-windows".to_owned(),
             libmpv_version: libmpv_version.map(str::to_owned),
             gpu_name: None,
@@ -1810,9 +1810,10 @@ mod tests {
 
     #[test]
     fn about_reports_app_version_from_the_package() {
+        // The About page, ClientVersion, and update check all read this one crate version.
+        assert_eq!(AboutInfo::current().version, env!("CARGO_PKG_VERSION"));
         let rows = about_rows(&about_fixture(None));
-        assert_eq!(value(&rows, "App version"), "0.1.0");
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.1.0");
+        assert_eq!(value(&rows, "App version"), env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

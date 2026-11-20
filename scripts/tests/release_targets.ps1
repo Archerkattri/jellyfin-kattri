@@ -23,8 +23,9 @@ try {
     if ($workspaceManifest -notmatch '(?m)^version = "([^"]+)"') {
         throw 'Could not read the workspace release version.'
     }
-    if ($hostPackage[0].version -ne $Matches[1]) {
-        throw "Release host version $($hostPackage[0].version) must match workspace version $($Matches[1]) for deb/rpm metadata."
+    $workspaceVersion = $Matches[1]
+    if ($hostPackage[0].version -ne $workspaceVersion) {
+        throw "Release host version $($hostPackage[0].version) must match workspace version $workspaceVersion for deb/rpm metadata."
     }
     if (-not $releaseBinary[0].src_path.EndsWith('/src/main.rs') -and
         -not $releaseBinary[0].src_path.EndsWith('\src\main.rs')) {
@@ -38,6 +39,12 @@ try {
         throw 'The release host package must not declare or enable eframe-demo.'
     }
     $demoPackage = @($metadata.packages | Where-Object { $_.name -eq 'jellyfin-egui-client' })
+    if ($demoPackage.Count -ne 1) {
+        throw "Expected one jellyfin-egui-client package; found $($demoPackage.Count)."
+    }
+    if ($demoPackage[0].version -ne $workspaceVersion) {
+        throw "egui client version $($demoPackage[0].version) must match workspace version $workspaceVersion so the About page and reported ClientVersion match the release."
+    }
     $demoTarget = @($demoPackage[0].targets | Where-Object { $_.name -eq 'jellyfin-egui-client' })
     $demoRequiredFeatures = $demoTarget[0].PSObject.Properties['required-features']
     if ($null -eq $demoRequiredFeatures -or @($demoRequiredFeatures.Value) -notcontains 'eframe-demo') {
