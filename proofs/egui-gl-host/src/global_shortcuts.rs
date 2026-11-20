@@ -71,7 +71,9 @@ mod imp {
                         if RegisterHotKey(null_mut(), id, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, key)
                             == 0
                         {
-                            eprintln!("global shortcuts: key {key:#x} is already reserved");
+                            crate::report_warning(format!(
+                                "global shortcuts: key {key:#x} is already reserved"
+                            ));
                             for (done, _, _) in bindings.iter().take(registered) {
                                 UnregisterHotKey(null_mut(), *done);
                             }
@@ -102,7 +104,7 @@ mod imp {
                 }
             });
         if spawned.is_err() {
-            eprintln!("global shortcuts: could not start the hotkey thread");
+            crate::report_warning("global shortcuts: could not start the hotkey thread");
         }
     }
 }

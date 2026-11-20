@@ -1,3 +1,31 @@
+kattri (1.0.0-1) unstable; urgency=medium
+
+  * First stable release.
+  * SyncPlay group pause, seek and unpause reach the group while stream-only
+    playback reporting is disabled; a queued start joins at the current
+    position.
+  * Two-client SyncPlay drift measured p95 77 ms and max 321 ms, with no sample
+    over the 500 ms threshold.
+
+ -- Jellyfin Kattri <krishiattriwork@gmail.com>  Wed, 18 Nov 2026 00:00:00 +0000
+
+kattri (0.8.0-1) unstable; urgency=medium
+
+  * Accessible row cards and stream-address field names.
+  * Bounded episode pages with Previous/Next and a paginated API fallback.
+  * Local video files open in the theater player, with source recovery.
+  * Explicit subtitle and Dolby Vision policies; upgrade-path regression tests.
+
+ -- Jellyfin Kattri <krishiattriwork@gmail.com>  Mon, 16 Nov 2026 00:00:00 +0000
+
+kattri (0.7.0-1) unstable; urgency=medium
+
+  * Library tabs for Movies and Shows, downloadable albums, per-title subtitle
+    styles and subtitle burn-in for server transcodes.
+  * Idle screensaver and theme media from a title's detail page.
+
+ -- Jellyfin Kattri <krishiattriwork@gmail.com>  Thu, 05 Nov 2026 00:00:00 +0000
+
 kattri (0.6.0-1) unstable; urgency=medium
 
   * LAN server discovery, jellyfin:// deep links, administrator user

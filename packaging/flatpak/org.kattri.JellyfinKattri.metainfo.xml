@@ -67,6 +67,16 @@
   </screenshots>
 
   <releases>
+    <release version="1.0.0" date="2026-11-18">
+      <description>
+        <p>First stable release. SyncPlay group pause, seek and unpause work while stream-only reporting is off, a queued start joins at the current position, and two-client drift measured p95 77 ms.</p>
+      </description>
+    </release>
+    <release version="0.8.0" date="2026-11-16">
+      <description>
+        <p>Accessible row cards and stream-address names, bounded episode pages, local video in the theater player, and explicit subtitle and Dolby Vision policies.</p>
+      </description>
+    </release>
     <release version="0.7.0" date="2026-11-05">
       <description>
         <p>Library tabs, album batch downloads, live and per-title subtitle styles, subtitle burn-in, idle screensaver and theme media.</p>

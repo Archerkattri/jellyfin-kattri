@@ -1899,6 +1899,7 @@ pub(crate) enum ConnectionText {
 
 impl ConnectionText {
     /// The text as the viewer would read it, for diagnostics.
+    #[cfg(any(debug_assertions, test))]
     fn text(&self) -> &str {
         match self {
             Self::None | Self::Error(None) => "",
