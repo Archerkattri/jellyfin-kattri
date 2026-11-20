@@ -120,6 +120,8 @@ modules:
       - cargo --offline build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri
       - install -Dm755 target/release/jellyfin-kattri /app/bin/kattri
       - install -Dm644 LICENSE /app/share/licenses/org.kattri.JellyfinKattri/LICENSE
+      - install -Dm644 assets/fonts/OFL.txt /app/share/licenses/org.kattri.JellyfinKattri/OFL.txt
+      - install -Dm644 NOTICE /app/share/licenses/org.kattri.JellyfinKattri/NOTICE
       - mkdir -p /app/share/applications
       - sed 's/^Icon=kattri$/Icon=org.kattri.JellyfinKattri/' packaging/linux/share/kattri.desktop > /app/share/applications/org.kattri.JellyfinKattri.desktop
       - install -Dm644 packaging/linux/icons/kattri.svg /app/share/icons/hicolor/scalable/apps/org.kattri.JellyfinKattri.svg

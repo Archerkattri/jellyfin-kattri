@@ -17,6 +17,14 @@ build/
 # Debug-build QA captures (logs, framebuffer PNGs, UI trees)
 _dbg_audio/
 **/_dbg_audio/
+
+# Debug-harness output (KATTRI_DEBUG_DIR captures) and the local device id
+position-trace-*.csv
+ui-tree.txt
+screenshot.png
+qa-metrics.txt
+device-id
+
 /docs/
 /legacy/
 /spikes/

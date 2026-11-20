@@ -128,9 +128,12 @@ install -m 644 "$DESKTOP_NORMALIZED" "$APPDIR/usr/share/applications/kattri.desk
 install -m 644 "$ICON" "$APPDIR/usr/share/icons/hicolor/scalable/apps/kattri.svg"
 # fetch.sh downloads and verifies the archive before either its library or its licenses are used.
 LIBMPV="$("$ROOT/packaging/libmpv/fetch.sh" linux-x64)"
-# Redistribution requires the project license and the bundled libmpv notice.
+# Redistribution requires the project license, the embedded Inter font license, the
+# third-party crate notice, and the bundled libmpv notice.
 mkdir -p "$APPDIR/usr/share/licenses/kattri"
 install -m 644 "$ROOT/LICENSE" "$APPDIR/usr/share/licenses/kattri/LICENSE"
+install -m 644 "$ROOT/assets/fonts/OFL.txt" "$APPDIR/usr/share/licenses/kattri/OFL.txt"
+install -m 644 "$ROOT/NOTICE" "$APPDIR/usr/share/licenses/kattri/NOTICE"
 install -m 644 "$ROOT/packaging/libmpv/NOTICE.txt" \
   "$APPDIR/usr/share/licenses/kattri/libmpv-NOTICE.txt"
 

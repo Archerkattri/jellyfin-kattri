@@ -37,8 +37,11 @@ assets = [
     ["../../packaging/linux/icons/kattri.svg", "usr/share/icons/hicolor/scalable/apps/kattri.svg", "644"],
     # Compressed by the release workflow (gzip -9n) before cargo deb runs.
     ["../../target/kattri.1.gz", "usr/share/man/man1/kattri.1.gz", "644"],
-    # Ship the project license, pinned archive notice/licenses, build record, and bundled JPEG notice.
+    # Ship the project license, embedded font license, third-party notice, pinned archive
+    # notice/licenses, build record, and bundled JPEG notice.
     ["../../LICENSE", "usr/share/doc/kattri/LICENSE", "644"],
+    ["../../assets/fonts/OFL.txt", "usr/share/doc/kattri/OFL.txt", "644"],
+    ["../../NOTICE", "usr/share/doc/kattri/NOTICE", "644"],
     ["../../packaging/libmpv/NOTICE.txt", "usr/share/doc/kattri/libmpv-NOTICE.txt", "644"],
     ["../../target/kattri-libmpv/BUILD-INFO.txt", "usr/share/doc/kattri/libmpv-BUILD-INFO.txt", "644"],
     ["../../target/kattri-libmpv/BUILD-INFO.libjpeg-turbo.txt", "usr/share/doc/kattri/libjpeg-turbo-BUILD-INFO.txt", "644"],

@@ -93,6 +93,15 @@ if [[ -f "$ROOT/LICENSE" ]]; then
   cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
 fi
 
+# The embedded Inter font is redistributed under the SIL Open Font License, and NOTICE
+# lists the third-party crates.
+if [[ -f "$ROOT/assets/fonts/OFL.txt" ]]; then
+  cp "$ROOT/assets/fonts/OFL.txt" "$APP/Contents/Resources/OFL.txt"
+fi
+if [[ -f "$ROOT/NOTICE" ]]; then
+  cp "$ROOT/NOTICE" "$APP/Contents/Resources/NOTICE"
+fi
+
 # The app dlopens libmpv and does not link it, so the binary gets no -change entry.
 # MpvLibrary::load (proofs/mpv-render/src/library.rs) tries
 # Contents/Frameworks/libmpv.2.dylib before the bare names. Its own dependencies (FFmpeg

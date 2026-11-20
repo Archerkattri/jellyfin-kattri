@@ -158,6 +158,11 @@ if (-not $wix) {
 $licenseFull = (Resolve-Path -LiteralPath $LicensePath).Path
 $iconFull = (Resolve-Path -LiteralPath $IconPath).Path
 
+# The embedded Inter font is OFL-licensed, and NOTICE lists the third-party crates; both are
+# installed next to the executable with the project license.
+$fontLicenseFull = (Resolve-Path -LiteralPath (Join-Path $repoRoot 'assets\fonts\OFL.txt')).Path
+$noticeFull = (Resolve-Path -LiteralPath (Join-Path $repoRoot 'NOTICE')).Path
+
 # The pinned libmpv builds ship no license texts, so the verified upstream texts are installed
 # next to the executable. This fails loudly if a pinned text changed or is missing.
 $libmpvLicenseDirectory = Join-Path $PSScriptRoot 'libmpv-licenses'
@@ -265,6 +270,8 @@ try {
         '-d', "Arm64ExePath=$($arm64Payload.Executable)",
         '-d', "Arm64LibmpvPath=$($arm64Payload.Libmpv)",
         '-d', "LicensePath=$licenseFull",
+        '-d', "FontLicensePath=$fontLicenseFull",
+        '-d', "NoticePath=$noticeFull",
         '-d', "LibmpvNoticePath=$libmpvNoticePath",
         '-d', "LibmpvLicenseDirectory=$libmpvLicenseDirectory",
         '-d', "IconPath=$iconFull",

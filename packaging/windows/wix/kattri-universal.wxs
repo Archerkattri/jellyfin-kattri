@@ -12,6 +12,8 @@
     Arm64ExePath             arm64 executable copied from the arm64 payload folder
     Arm64LibmpvPath          arm64 libmpv-2.dll copied from the arm64 payload folder
     LicensePath              project license installed next to the executable
+    FontLicensePath          SIL Open Font License of the embedded Inter font
+    NoticePath               third-party NOTICE installed next to the executable
     LibmpvNoticePath         notice describing the bundled libmpv builds
     LibmpvLicenseDirectory   verified upstream libmpv and FFmpeg license texts
     IconPath                 ICO for the Add/Remove Programs entry and the shortcut
@@ -80,6 +82,8 @@
       <ComponentGroupRef Id="Arm64ExtraPayloadComponents" />
 <?endif?>
       <ComponentRef Id="LicenseComponent" />
+      <ComponentRef Id="FontLicenseComponent" />
+      <ComponentRef Id="NoticeComponent" />
       <ComponentRef Id="LibmpvNoticeComponent" />
       <ComponentRef Id="LibmpvLicensesComponent" />
       <ComponentRef Id="LibmpvCopyrightComponent" />
@@ -98,6 +102,14 @@
         <Component Id="LicenseComponent" Guid="*">
           <File Id="LicenseFile" Source="$(var.LicensePath)" Name="LICENSE.txt" KeyPath="yes" />
           <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        </Component>
+
+        <Component Id="FontLicenseComponent" Guid="*">
+          <File Id="FontLicenseFile" Source="$(var.FontLicensePath)" Name="OFL.txt" KeyPath="yes" />
+        </Component>
+
+        <Component Id="NoticeComponent" Guid="*">
+          <File Id="NoticeFile" Source="$(var.NoticePath)" Name="NOTICE" KeyPath="yes" />
         </Component>
 
         <Component Id="LibmpvNoticeComponent" Guid="*">

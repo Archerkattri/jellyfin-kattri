@@ -23,8 +23,11 @@ assets = [
     { source = "packaging/linux/share/kattri.desktop", dest = "/usr/share/applications/kattri.desktop", mode = "644" },
     { source = "packaging/linux/icons/kattri.svg", dest = "/usr/share/icons/hicolor/scalable/apps/kattri.svg", mode = "644" },
     { source = "target/kattri.1.gz", dest = "/usr/share/man/man1/kattri.1.gz", mode = "644", doc = true },
-    # Ship the project license, pinned archive notice/licenses, build record, and bundled JPEG notice.
+    # Ship the project license, embedded font license, third-party notice, pinned archive
+    # notice/licenses, build record, and bundled JPEG notice.
     { source = "LICENSE", dest = "/usr/share/licenses/kattri/LICENSE", mode = "644" },
+    { source = "assets/fonts/OFL.txt", dest = "/usr/share/licenses/kattri/OFL.txt", mode = "644" },
+    { source = "NOTICE", dest = "/usr/share/licenses/kattri/NOTICE", mode = "644" },
     { source = "packaging/libmpv/NOTICE.txt", dest = "/usr/share/licenses/kattri/libmpv-NOTICE.txt", mode = "644" },
     { source = "target/kattri-libmpv/BUILD-INFO.txt", dest = "/usr/share/licenses/kattri/libmpv-BUILD-INFO.txt", mode = "644" },
     { source = "target/kattri-libmpv/BUILD-INFO.libjpeg-turbo.txt", dest = "/usr/share/licenses/kattri/libjpeg-turbo-BUILD-INFO.txt", mode = "644" },

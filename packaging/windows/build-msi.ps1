@@ -57,6 +57,11 @@ $exeFull = (Resolve-Path -LiteralPath $ExePath).Path
 $licenseFull = (Resolve-Path -LiteralPath $LicensePath).Path
 $exeName = Split-Path -Leaf $exeFull
 
+# The embedded Inter font is OFL-licensed, and NOTICE lists the third-party crates; both are
+# installed next to the executable with the project license.
+$fontLicenseFull = (Resolve-Path -LiteralPath (Join-Path $repoRoot 'assets\fonts\OFL.txt')).Path
+$noticeFull = (Resolve-Path -LiteralPath (Join-Path $repoRoot 'NOTICE')).Path
+
 # Refuse a mismatched binary before WiX runs, so an x64 exe cannot become an arm64 MSI.
 Assert-PeMachine -Path $exeFull -Platform $Platform
 
@@ -87,6 +92,8 @@ $arch = $Platform
     -d "ExePath=$exeFull" `
     -d "ExeName=$exeName" `
     -d "LicensePath=$licenseFull" `
+    -d "FontLicensePath=$fontLicenseFull" `
+    -d "NoticePath=$noticeFull" `
     -d "LibmpvPath=$libmpvDll" `
     -d "LibmpvLicenseDirectory=$libmpvLicenseDirectory" `
     -d "LibmpvNoticePath=$libmpvNoticePath" `

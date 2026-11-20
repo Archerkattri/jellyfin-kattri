@@ -11,7 +11,8 @@
 #   -Platform     x64 or arm64. Defaults to x64.
 #   -OutputDir    Folder that receives the zip and checksum. Defaults to target/packaging/windows
 #                 under the repository root.
-#   -LicensePath  License files placed in the archive. Defaults to the repository LICENSE.
+#   -LicensePath  License files placed in the archive. Defaults to the repository LICENSE,
+#                 the Inter font license, and the third-party NOTICE.
 #
 # The zip also carries the libmpv DLL verified by packaging/libmpv/fetch.ps1 and its notice.
 # The pinned Windows archive has no license files, so the verified upstream source texts
@@ -48,7 +49,12 @@ if (-not $OutputDir) {
     $OutputDir = Join-Path $repoRoot 'target\packaging\windows'
 }
 if (-not $LicensePath) {
-    $LicensePath = @(Join-Path $repoRoot 'LICENSE')
+    $LicensePath = @(
+        (Join-Path $repoRoot 'LICENSE'),
+        # The embedded Inter font is OFL-licensed; NOTICE lists the third-party crates.
+        (Join-Path $repoRoot 'assets\fonts\OFL.txt'),
+        (Join-Path $repoRoot 'NOTICE')
+    )
 }
 
 . (Join-Path $PSScriptRoot 'pe-machine.ps1')

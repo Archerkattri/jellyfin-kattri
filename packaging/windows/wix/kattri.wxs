@@ -24,6 +24,8 @@
     ExePath      full path to the release executable for the target platform
     ExeName      file name of that executable, for example jellyfin-kattri.exe
     LicensePath  full path to the license file to install alongside the executable
+    FontLicensePath  full path to the SIL Open Font License of the embedded Inter font
+    NoticePath   full path to the third-party NOTICE installed alongside the executable
     LibmpvPath   full path to the verified libmpv-2.dll, installed next to the executable
     LibmpvLicenseDirectory  verified upstream license texts for the pinned Windows libmpv build
     LibmpvNoticePath  project notice describing the bundled libmpv build
@@ -48,6 +50,8 @@
     <Feature Id="MainFeature" Title="Jellyfin Kattri" Level="1">
       <ComponentRef Id="ExecutableComponent" />
       <ComponentRef Id="LicenseComponent" />
+      <ComponentRef Id="FontLicenseComponent" />
+      <ComponentRef Id="NoticeComponent" />
       <ComponentRef Id="LibmpvComponent" />
       <ComponentRef Id="LibmpvNoticeComponent" />
       <ComponentRef Id="LibmpvLicensesComponent" />
@@ -95,6 +99,14 @@
 
         <Component Id="LicenseComponent" Guid="*">
           <File Id="LicenseFile" Source="$(var.LicensePath)" Name="LICENSE.txt" KeyPath="yes" />
+        </Component>
+
+        <Component Id="FontLicenseComponent" Guid="*">
+          <File Id="FontLicenseFile" Source="$(var.FontLicensePath)" Name="OFL.txt" KeyPath="yes" />
+        </Component>
+
+        <Component Id="NoticeComponent" Guid="*">
+          <File Id="NoticeFile" Source="$(var.NoticePath)" Name="NOTICE" KeyPath="yes" />
         </Component>
 
         <!-- The quoted %1 expands as one URI argument; the host parser validates it before use. -->
