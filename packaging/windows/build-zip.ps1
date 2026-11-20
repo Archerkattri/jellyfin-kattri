@@ -137,10 +137,16 @@ try {
             }
         }
 
+        # Compress-Archive writes Windows separators into entry names, so match on a normalized form.
+        $entries = @{}
+        foreach ($entry in $package.Entries) {
+            $entries[$entry.FullName.Replace('\', '/')] = $entry
+        }
+
         $sha = [System.Security.Cryptography.SHA256]::Create()
         try {
             foreach ($expected in $expectedEntries) {
-                $entry = $package.GetEntry($expected.Entry)
+                $entry = $entries[$expected.Entry.Replace('\', '/')]
                 if ($null -eq $entry) {
                     throw "Portable zip is missing package file: $($expected.Entry)"
                 }
