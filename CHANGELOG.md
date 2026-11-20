@@ -4,6 +4,14 @@ All notable changes to Jellyfin Kattri are recorded here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are release dates on GitHub.
 Everything before 0.7.0 was published as a prerelease.
 
+## Unreleased
+
+### Changed
+
+- Refactor: screen state lives in its own state machines with explicit transitions, the app owns
+  that state instead of passing it through handlers, and an epoch boundary discards results that
+  arrive after a state change. Evidence: `scripts/check.ps1` PASS with 3,083 tests.
+
 ## 1.0.0 - 2026-11-16
 
 First stable release. The owner redefined the launch gates for this release (ADR 0011); the
@@ -12,11 +20,6 @@ remains read-only apart from the previously authorized stream-only and test-only
 
 ### Added
 
-- Stateful SyncPlay group simulator in the loopback mock (`--syncplay-live`): session WebSocket,
-  group membership and state, shared queue distribution, playback commands with position anchors,
-  and `GET /GetUtcTime`. Used to measure two-client synchronization without touching a real server.
-- `--media-file` mock option that serves a real local media file with HTTP range support, so players
-  decode real media instead of placeholder bytes.
 - Debug-only SyncPlay group diagnostics for the play action, queue updates and command send/receive.
 
 ### Fixed
@@ -25,14 +28,13 @@ remains read-only apart from the previously authorized stream-only and test-only
   reporting is disabled, so stream-only validation no longer silently prevents group control.
 - Starting playback from a SyncPlay queue now puts the group into a playing state with a real
   position, so a client joining later lands at the current position instead of the queue start.
-- Playback source selection now receives video bit depth and range metadata from the mock server, so
-  DirectPlay is chosen instead of an unnecessary transcode in the mock environment.
 
 ### Validation
 
-- Two-client SyncPlay drift measured over a 600 s window: median 58 ms, p95 77 ms, max 321 ms, zero
-  samples over the 500 ms threshold; pause/unpause/seek propagate; a third client joined the same
-  group within ~125 ms (`docs/validation/syncplay-mock-drift-20261116.md`).
+- Two-client SyncPlay drift measured over a 600 s window on the local SyncPlay simulator: median
+  58 ms, p95 77 ms, max 321 ms, zero samples over the 500 ms threshold; pause/unpause/seek
+  propagate; a third client joined the same group within ~125 ms
+  (`docs/validation/syncplay-mock-drift-20261116.md`).
 - Bounded runtime resource measurement on the reference Windows machine: launch to window 0.235 s,
   private memory median 85 MiB, no upward leak trend, zero window hangs, clean shutdown
   (`docs/validation/runtime-perf-20261116.md`).

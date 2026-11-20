@@ -93,19 +93,19 @@ Every download has a matching `.sha256` file. The release also publishes
 sudo apt install ./kattri_1.0.0-1_amd64.deb
 
 # Fedora (needs libmpv)
-sudo dnf install ./kattri-0.7.0-1.x86_64.rpm
+sudo dnf install ./kattri-1.0.0-1.x86_64.rpm
 
 # AppImage, no install needed
-chmod +x kattri-0.7.0-linux-x64.AppImage
-./kattri-0.7.0-linux-x64.AppImage
+chmod +x kattri-1.0.0-linux-x64.AppImage
+./kattri-1.0.0-linux-x64.AppImage
 
 # Flatpak
-flatpak install --user --bundle kattri-0.7.0-linux-x64.flatpak
+flatpak install --user --bundle kattri-1.0.0-linux-x64.flatpak
 ```
 
 Windows SmartScreen and macOS Gatekeeper will warn because the packages are not
 code-signed. The macOS app is ad-hoc signed and not notarized. Code signing needs an owner
-certificate and is not part of this prerelease.
+certificate and is not part of this release.
 
 ### System requirements
 
@@ -152,14 +152,14 @@ Every action can be rebound in Settings → Input. A gamepad can drive menus and
   upstream origin, refuses redirects and copies only allow-listed response headers.
 - JSON, image, manifest and stream inputs are bounded; logs and error messages are redacted.
 - Remote plain HTTP requires an explicit opt-in. No telemetry is collected.
-- A source security review for this release, including its accepted risks, is kept with the
-  project's private documentation.
+- A source security review for 0.7.0 (the newest one written), including its accepted risks, is
+  kept with the project's private documentation.
 
 ## Status and limitations
 
-Kattri is a prerelease, not a 1.0 release. The build and test workflows pass for the v0.7.0
-head on Windows x64/ARM64, macOS and Linux x64/ARM64; the default workspace suite runs more
-than 3,100 tests against local fixtures and an in-process mock Jellyfin server.
+Kattri 1.0.0 is the current release. The build and test workflows pass on Windows x64/ARM64,
+macOS and Linux x64/ARM64; the default workspace suite runs more than 3,000 tests against
+local fixtures and in-process test doubles, with no server required.
 
 Validated so far:
 
@@ -175,13 +175,14 @@ Validated so far:
   black, not white), pause and seek changed the player, and the app closed normally. Audible output
   was not asserted.
 - Release packages cover Windows x64/ARM64, macOS universal, and Linux x64. Clean-runner
-  install, launch and normal close pass for the macOS DMG and all four Linux formats.
+  install, launch and normal close are recorded for the 0.7.0 macOS DMG and all four Linux
+  formats; the 1.0.0 artifacts were built by the release workflows but have no separate
+  clean-machine run.
 
 Not yet validated: visible and audible playback on macOS and Linux, GPU decode across
-hardware, HDR passthrough, long HLS sessions, SyncPlay with two clients, physical
-controllers, and screen-reader walks on each platform. The Windows MSI clean-runner check
-proves install, window creation, normal close and clean uninstall, not OpenGL rendering,
-which the GPU-less runners cannot provide.
+hardware, HDR passthrough, long HLS sessions, physical controllers, and screen-reader walks
+on each platform. The Windows MSI clean-runner check proves install, window creation, normal
+close and clean uninstall, not OpenGL rendering, which the GPU-less runners cannot provide.
 
 Known gaps: in-app automatic updates (the signed fetch and apply path is built, but no
 update host is configured and the release keyring is empty, so updates are manual), code
@@ -189,10 +190,10 @@ signing and notarization, Microsoft Store and Flathub distribution, native macOS
 menus and Wayland refresh-rate switching. Synchronized lyrics and the new Linux deb/rpm
 runtime packaging have unit or static checks, with live visual and clean-install validation
 pending. Theme media plays on request from the item page rather than automatically as
-ambient audio. A two-client SyncPlay drift measurement still needs a per-client position-trace
-emitter in the client; the test-only server authorization for that run is recorded, but no measured
-drift result exists yet. A 1.0 release is held until the owner runs the remaining platform,
-hardware and accessibility acceptance checks.
+ambient audio. Two-client SyncPlay drift was measured and passing on 2026-11-16 on the local
+SyncPlay simulator: median 58 ms over a 600 s window, zero samples over the 500 ms threshold;
+a repeat against a real Jellyfin server remains optional. The owner's remaining platform,
+hardware and accessibility acceptance checks are listed above.
 
 ## Troubleshooting
 
@@ -201,7 +202,7 @@ hardware and accessibility acceptance checks.
   put it beside the executable or on `PATH`.
 - **A blank window or a GL error**: the client needs OpenGL 3.3 or newer. Update the GPU
   driver or switch off a remote-desktop session that lacks OpenGL.
-- **SmartScreen or Gatekeeper warning**: the packages are unsigned for this prerelease.
+- **SmartScreen or Gatekeeper warning**: the packages are unsigned for this release.
   Verify the `.sha256` file before running.
 - **Login fails on a private CA**: add the CA bundle in Settings → Server; client
   certificates are supported for mutual TLS.
