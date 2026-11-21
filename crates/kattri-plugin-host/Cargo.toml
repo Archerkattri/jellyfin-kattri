@@ -10,5 +10,5 @@ publish = false
 kattri-guard = { path = "../kattri-guard" }
 kattri-plugins = { path = "../kattri-plugins" }
 # 50.0.1 fixes RUSTSEC-2026-0422, -0423 and -0424; retain the exact security patch pin.
-wasmtime = { version = "=50.0.1", default-features = false, features = ["anyhow", "cranelift", "component-model", "runtime", "std", "wat"] }
+wasmtime = { version = "=50.0.3", default-features = false, features = ["anyhow", "cranelift", "component-model", "runtime", "std", "wat"] }
 thiserror = "2"
