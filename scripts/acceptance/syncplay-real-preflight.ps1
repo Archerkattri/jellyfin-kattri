@@ -1,6 +1,11 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+# Report the workspace version rather than a literal, so the probe cannot claim a stale client version.
+$versionLine = Select-String -Path (Join-Path $repoRoot 'Cargo.toml') -Pattern '^version = "([^"]+)"' |
+    Select-Object -First 1
+$clientVersion = if ($versionLine) { $versionLine.Matches[0].Groups[1].Value } else { '0.0.0' }
 $serverUrl = $env:JELLYFIN_TEST_URL
 if ([string]::IsNullOrWhiteSpace($serverUrl)) {
     throw 'JELLYFIN_TEST_URL is not set; set it to the authorized Jellyfin server base URL before running this probe.'
@@ -46,7 +51,7 @@ try {
     $password = $credential.GetNetworkCredential().Password
     $baseUrl = $serverUrl.TrimEnd('/')
     $headers = @{
-        'X-Emby-Authorization' = 'MediaBrowser Client="Kattri SyncPlay Acceptance", Device="Windows acceptance preflight", DeviceId="syncplay-preflight-readonly", Version="0.7.0"'
+        'X-Emby-Authorization' = 'MediaBrowser Client="Kattri SyncPlay Acceptance", Device="Windows acceptance preflight", DeviceId="syncplay-preflight-readonly", Version="$clientVersion"'
     }
 
     try {
