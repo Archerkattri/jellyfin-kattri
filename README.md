@@ -32,6 +32,27 @@ real desktop window, with a keyboard, a gamepad or a mouse.
 - **Made for a couch and a desk.** Hero artwork, poster rows and focus animation, driven by
   keyboard, gamepad or mouse, with Standard, Large and 10-foot interface sizes.
 
+## Performance vs Jellyfin Desktop
+
+A native client should feel lighter than a web-stack one. Here is Kattri next to the official
+Jellyfin Desktop, both driven against the **same Jellyfin server and the same episode** on
+Windows x64. The clip below uses real captures of both apps — no mock data, no rendered UI.
+
+![Kattri vs Jellyfin Desktop benchmark](assets/benchmark/kattri-vs-desktop.gif)
+
+[Watch the full-quality video (MP4)](assets/benchmark/kattri-vs-desktop.mp4)
+
+| Metric | Kattri | Jellyfin Desktop |
+| --- | --- | --- |
+| Time to ready (launch → signed in & browsing) | ~0.7 s | ~6.2 s |
+| Memory while playing (working set) | ~0.40 GB | ~0.93 GB |
+| Processes | 1 | 2 |
+
+Measured with a server-driven harness (launch → session visible → remote PlayNow), medians over
+repeated runs. Time-to-ready and memory are consistent wins; time from a play command to first
+frame is comparable between the two and is not claimed as a win. Numbers vary with server and
+network conditions; treat them as representative, not a guarantee.
+
 ## Screenshots
 
 | Movies and series | Item details |
