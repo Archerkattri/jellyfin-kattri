@@ -18,9 +18,10 @@ use glow::HasContext;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 static SHOT_REQUESTED: AtomicBool = AtomicBool::new(false);
+static RAW_FRAME: AtomicUsize = AtomicUsize::new(0);
 static QUEUE: Mutex<VecDeque<Vec<egui::Event>>> = Mutex::new(VecDeque::new());
 static TREE: Mutex<BTreeMap<u64, String>> = Mutex::new(BTreeMap::new());
 static LAST_VALUES: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
@@ -155,7 +156,7 @@ fn parse_command(line: &str, window: &winit::window::Window) {
 /// the next real input. While the harness is active the host wakes on this deadline instead.
 pub fn poll_deadline() -> Option<std::time::Instant> {
     debug_dir()?;
-    Some(std::time::Instant::now() + std::time::Duration::from_millis(150))
+    Some(std::time::Instant::now() + std::time::Duration::from_millis(60))
 }
 
 /// Reads `commands.txt` if present and adds one pending input batch to `input.events`.
@@ -236,6 +237,23 @@ pub fn capture_if_requested(
     video: Option<&super::video_target::VideoTarget>,
 ) {
     let Some(dir) = debug_dir() else { return };
+    // Raw frame dump for offline capture. Unlike any screen grab this reads the application's own
+    // framebuffer, so the frames are correct even when another window covers the application.
+    let raw_request = dir.join("raw.request");
+    if raw_request.exists() {
+        let _ = std::fs::remove_file(&raw_request);
+        let frame = if width > 0 && height > 0 {
+            read_rgba(gl, width, height)
+        } else {
+            None
+        };
+        if let Some(rgba) = frame {
+            let index = RAW_FRAME.fetch_add(1, Ordering::Relaxed);
+            let name = format!("raw-{index:05}.bin");
+            let _ = std::fs::write(dir.join(&name), rgba);
+            log(&format!("raw frame {index} {width}x{height} -> {name}"));
+        }
+    }
     let request = dir.join("screenshot.request");
     let wanted = SHOT_REQUESTED.swap(false, Ordering::Relaxed) || request.exists();
     if !wanted || width == 0 || height == 0 {
@@ -257,6 +275,34 @@ pub fn capture_if_requested(
     capture_framebuffer(gl, &dir, "screenshot.png", width, height);
 }
 
+/// Reads the current framebuffer as upright RGBA rows, without any encoding, for raw capture.
+fn read_rgba(gl: &glow::Context, width: u32, height: u32) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let stride = width as usize * 4;
+    let mut pixels = vec![0u8; stride * height as usize];
+    // SAFETY: the host's GL context is current while a frame is presented, and the buffer is
+    // exactly width * height * 4 bytes for an RGBA read.
+    unsafe {
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+        gl.read_pixels(
+            0,
+            0,
+            width as i32,
+            height as i32,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut pixels)),
+        );
+    }
+    // GL rows run bottom to top.
+    let mut upright = Vec::with_capacity(pixels.len());
+    for row in pixels.chunks_exact(stride).rev() {
+        upright.extend_from_slice(row);
+    }
+    Some(upright)
+}
 fn capture_framebuffer(
     gl: &glow::Context,
     dir: &std::path::Path,
