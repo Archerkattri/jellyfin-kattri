@@ -67,7 +67,7 @@
   </screenshots>
 
   <releases>
-    <release version="1.0.0" date="2026-11-18">
+    <release version="1.0.1" date="2026-11-21">
       <description>
         <p>First stable release. SyncPlay group pause, seek and unpause work while stream-only reporting is off, a queued start joins at the current position, and two-client drift measured p95 77 ms.</p>
       </description>

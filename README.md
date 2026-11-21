@@ -99,7 +99,7 @@ used.
 
 Download the installer for your platform from the
 [releases page](https://github.com/Archerkattri/jellyfin-kattri/releases). The current
-release is **v1.0.0**.
+release is **v1.0.1**.
 
 | Platform | Download | Notes |
 | --- | --- | --- |
@@ -182,7 +182,7 @@ Every action can be rebound in Settings → Input. A gamepad can drive menus and
 
 ## Status and limitations
 
-Kattri 1.0.0 is the current release. The build and test workflows pass on Windows x64/ARM64,
+Kattri 1.0.1 is the current release. The build and test workflows pass on Windows x64/ARM64,
 macOS and Linux x64/ARM64; the default workspace suite runs more than 3,000 tests against
 local fixtures and in-process test doubles, with no server required.
 
@@ -201,7 +201,7 @@ Validated so far:
   was not asserted.
 - Release packages cover Windows x64/ARM64, macOS universal, and Linux x64. Clean-runner
   install, launch and normal close are recorded for the 0.7.0 macOS DMG and all four Linux
-  formats; the 1.0.0 artifacts were built by the release workflows but have no separate
+  formats; the 1.0.1 artifacts were built by the release workflows but have no separate
   clean-machine run.
 
 Not yet validated: visible and audible playback on macOS and Linux, GPU decode across

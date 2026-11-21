@@ -12,6 +12,23 @@ Everything before 0.7.0 was published as a prerelease.
   that state instead of passing it through handlers, and an epoch boundary discards results that
   arrive after a state change. Evidence: `scripts/check.ps1` PASS with 3,083 tests.
 
+## 1.0.1 - 2026-11-21
+
+### Fixed
+
+- Security: bump `wasmtime` to 50.0.3, which clears RUSTSEC-2026-0566 through RUSTSEC-2026-0569:
+  unbounded host memory growth through empty writes to `AsyncWriteStream`, an abort in builds
+  without the `threads` feature, a stale GC heap base pointer that let a Wasm guest abort the host
+  process, and a panic in `Caller::get_module_export`. Evidence:
+  `cargo deny check advisories` reports `advisories ok`; `scripts/check.ps1` PASS.
+
+### Added
+
+- A code-rendered benchmark comparison against Jellyfin Desktop in the README, with a 4K video and
+  a 1080p GIF. The figures come from driving both clients against the same server and episode.
+- The debug harness can dump presented frames as raw RGBA, so a capture run records the application
+  correctly even when another window covers it. Debug-only, inert without `KATTRI_DEBUG_DIR`.
+
 ## 1.0.0 - 2026-11-16
 
 First stable release. The owner redefined the launch gates for this release (ADR 0011); the
