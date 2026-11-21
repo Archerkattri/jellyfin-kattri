@@ -33,11 +33,11 @@ dependencies = [
 
 [[package]]
 name = "kattri-guard"
-version = "1.0.0"
+version = "1.0.1"
 
 [[package]]
 name = "kattri-settings"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "kattri-guard",
  "serde",
