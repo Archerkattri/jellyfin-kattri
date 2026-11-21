@@ -41,7 +41,7 @@ invented UI.
 
 ![Kattri vs Jellyfin Desktop benchmark](assets/benchmark/kattri-vs-desktop.gif)
 
-[Watch the full 4K video (MP4, 31 MB, 30 s)](assets/benchmark/kattri-vs-desktop.mp4)
+[Watch the full 4K video (MP4, 22 MB, 28 s)](assets/benchmark/kattri-vs-desktop.mp4)
 
 The inline clip is a 1080p highlight loop; the linked video runs the whole sequence at 3840×2160 —
 the mark opening, the mark folding into the app's own header, browsing, playback with seeking, and
