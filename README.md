@@ -34,19 +34,17 @@ real desktop window, with a keyboard, a gamepad or a mouse.
 
 ## Performance vs Jellyfin Desktop
 
-A native client should feel lighter than a web-stack one. Here is Kattri next to the official
-Jellyfin Desktop, both driven against the **same Jellyfin server and the same episode** on
-Windows x64. Every frame below is real capture of the running applications — no mock data, no
-invented UI.
+A native client should feel lighter than a web-stack one. These figures come from driving Kattri
+and the official Jellyfin Desktop against the **same Jellyfin server and the same episode** on
+Windows x64.
 
 ![Kattri vs Jellyfin Desktop benchmark](assets/benchmark/kattri-vs-desktop.gif)
 
-[Watch the full 4K video (MP4, 22 MB, 28 s)](assets/benchmark/kattri-vs-desktop.mp4)
+[Watch the 4K version (MP4, 8 MB, 13 s)](assets/benchmark/kattri-vs-desktop.mp4)
 
-The inline clip is a 1080p highlight loop; the linked video runs the whole sequence at 3840×2160 —
-the mark opening, the mark folding into the app's own header, browsing, playback with seeking, and
-the measured comparison. Both are rendered from code (Remotion with Three.js and GSAP) over real
-screen captures of both clients.
+The clip is generated from code (Remotion with Three.js and GSAP): a single Jellyfin Kattri mark
+carries the whole sequence, moving from the opening to the corner of the comparison and back. The
+inline GIF is a 1080p loop; the linked file is 3840×2160.
 
 | Metric | Kattri | Jellyfin Desktop |
 | --- | --- | --- |
