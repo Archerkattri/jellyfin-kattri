@@ -13,7 +13,8 @@ mod trickplay;
 mod ui;
 mod worker;
 
-pub use app::{BurnInReplacementEnd, KattriApp, Page, PlaybackReportSubmitError};
+pub use app::{BurnInReplacementEnd, KattriApp, Page, PlaybackReportSubmitError, RuntimeAbout};
+
 pub use kattri_client_core::playback_reporting::PlaybackReportAction;
 pub use theme::{Palette, active_palette};
 pub use trickplay::SeekThumbnail;

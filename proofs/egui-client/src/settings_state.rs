@@ -25,6 +25,7 @@ use crate::ui::profile_picker::plan_launch;
 
 const PROFILES_DIR_NAME: &str = "profiles";
 const QUEUE_FILE_NAME: &str = "queue.json";
+const LOCAL_PLAYLIST_FILE_NAME: &str = "local-playlist.txt";
 
 /// Folder that holds the profile index and each profile's settings file, or `None` when
 /// no per-user config folder is known.
@@ -38,7 +39,6 @@ pub(crate) struct SettingsState {
     /// The profile this run reads and writes. It is the index's active profile unless
     /// `--profile` chose another one for this run only.
     profile: Option<String>,
-    offers_launch_picker: bool,
     launch_notice: Option<String>,
     writer: Option<SettingsWriter>,
     settings: Settings,
@@ -145,29 +145,6 @@ impl SettingsWriter {
         results
     }
 
-    /// Stop the writer after the queued snapshot is saved. Returns the latest save's outcome,
-    /// so a switch that restarts the app does not drop settings that failed to reach disk.
-    fn finish(mut self) -> Result<(), String> {
-        {
-            let (queue_lock, changed) = &*self.queue;
-            queue_lock
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .shutting_down = true;
-            changed.notify_one();
-        }
-        if let Some(worker) = self.thread.take()
-            && worker.join().is_err()
-        {
-            return Err("the settings writer stopped unexpectedly".to_owned());
-        }
-        self.drain_results();
-        match &self.latest {
-            Some((revision, Err(error))) if *revision == self.next_revision => Err(error.clone()),
-            _ => Ok(()),
-        }
-    }
-
     #[cfg(test)]
     fn receive_result(&self) -> Result<(u64, Result<(), String>), mpsc::RecvTimeoutError> {
         self.results.recv_timeout(std::time::Duration::from_secs(2))
@@ -217,7 +194,6 @@ impl SettingsState {
                     writer: None,
                     store: Some(store),
                     profile: Some(plan.profile),
-                    offers_launch_picker: plan.show_picker,
                     launch_notice: plan.notice,
                     settings: Settings::default(),
                     notice: None,
@@ -246,7 +222,6 @@ impl SettingsState {
         Self {
             store: None,
             profile: None,
-            offers_launch_picker: false,
             launch_notice: None,
             writer: None,
             settings: Settings::default(),
@@ -287,11 +262,6 @@ impl SettingsState {
         self.launch_notice.as_deref()
     }
 
-    /// Whether the launch picker should open for this run (several profiles, no `--profile`).
-    pub(crate) fn offers_launch_picker(&self) -> bool {
-        self.offers_launch_picker
-    }
-
     /// Name of the profile this run uses, or `None` when no profile store is open.
     pub(crate) fn running_name(&self) -> Option<&str> {
         self.profile.as_deref()
@@ -319,16 +289,42 @@ impl SettingsState {
             .map(|dir| dir.join(QUEUE_FILE_NAME))
     }
 
-    /// Wait until the queued settings snapshot is on disk, ahead of a switch that restarts the
-    /// app. The writer is started again afterwards, so later saves still work if the switch
-    /// is refused.
-    pub(crate) fn finish_pending_saves(&mut self) -> Result<(), String> {
-        let Some(writer) = self.writer.take() else {
-            return Err("settings are not being saved in this session".to_owned());
-        };
-        let outcome = writer.finish();
-        self.writer = self.spawn_writer();
-        outcome
+    /// Path to the running profile's persisted local playlist, or `None` when no profile store
+    /// is open. The record sits beside the queue so a profile owns both.
+    pub(crate) fn local_playlist_path(&self) -> Option<PathBuf> {
+        let store = self.store.as_ref()?;
+        let name = self.profile.as_deref()?;
+        store
+            .profile_dir(name)
+            .ok()
+            .map(|dir| dir.join(LOCAL_PLAYLIST_FILE_NAME))
+    }
+
+    /// Load the active profile's local playlist. `None` means there is no profile store; the
+    /// missing/moved-aside outcomes stay explicit in the returned store result.
+    pub(crate) fn load_local_playlist(
+        &self,
+    ) -> Option<
+        Result<
+            kattri_client_core::playlist_store::PlaylistLoadOutcome,
+            kattri_client_core::playlist_store::PlaylistStoreError,
+        >,
+    > {
+        let path = self.local_playlist_path()?;
+        Some(kattri_client_core::playlist_store::load_playlist(&path))
+    }
+
+    /// Save the local playlist for the active profile.
+    // Reached only through `KattriApp::persist_local_playlist` until the playlist UI slice lands.
+    #[allow(dead_code)]
+    pub(crate) fn save_local_playlist(
+        &self,
+        model: &kattri_client_core::playlist::PlaylistModel,
+    ) -> Option<Result<(), kattri_client_core::playlist_store::PlaylistStoreError>> {
+        let path = self.local_playlist_path()?;
+        Some(kattri_client_core::playlist_store::save_playlist(
+            &path, model,
+        ))
     }
 
     /// Load the active profile's queue snapshot. `None` means there is no profile store;
@@ -513,6 +509,70 @@ mod tests {
         queue.set_shuffle(true);
         queue.next_track();
         queue
+    }
+
+    #[test]
+    fn local_playlist_path_uses_the_default_active_profile() {
+        let (dir, state) = temp_profile_store("playlist-path");
+        assert_eq!(
+            state.local_playlist_path(),
+            Some(dir.join("default").join("local-playlist.txt"))
+        );
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn two_profiles_keep_separate_local_playlist_records() {
+        use kattri_client_core::playlist::{PlaylistEntry, PlaylistModel};
+
+        let dir = std::env::temp_dir().join(format!(
+            "kattri-settings-playlist-profiles-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut store = ProfileStore::open(&dir).expect("profile store opens");
+        store.create("kids").expect("kids profile creates");
+        drop(store);
+
+        let default_state = SettingsState::open(Some(&dir), Some("default"));
+        let kids_state = SettingsState::open(Some(&dir), Some("kids"));
+        let default_path = default_state.local_playlist_path().expect("default path");
+        let kids_path = kids_state.local_playlist_path().expect("kids path");
+        assert_ne!(default_path, kids_path, "each profile owns its own record");
+        assert!(default_path.ends_with("local-playlist.txt"));
+
+        let entry = |n: usize, item: &str| {
+            PlaylistEntry::new(&format!("{:032x}", 0x3000 + n), item).expect("valid entry")
+        };
+        let default_model =
+            PlaylistModel::from_entries(vec![entry(0, "0000000000000000000000000000aaaa")])
+                .expect("default model");
+        let kids_model =
+            PlaylistModel::from_entries(vec![entry(1, "0000000000000000000000000000bbbb")])
+                .expect("kids model");
+        default_state
+            .save_local_playlist(&default_model)
+            .expect("profile store")
+            .expect("default save");
+        kids_state
+            .save_local_playlist(&kids_model)
+            .expect("profile store")
+            .expect("kids save");
+
+        let reload = |state: &SettingsState| match state
+            .load_local_playlist()
+            .expect("profile store")
+            .expect("load")
+        {
+            kattri_client_core::playlist_store::PlaylistLoadOutcome::Loaded(model) => model,
+            other => panic!("expected a loaded record, got {other:?}"),
+        };
+        assert_eq!(reload(&default_state), default_model);
+        assert_eq!(reload(&kids_state), kids_model, "profiles stay isolated");
+
+        drop(default_state);
+        drop(kids_state);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -727,36 +787,6 @@ mod tests {
                 .launch_notice()
                 .is_some_and(|notice| notice.contains("`kids`"))
         );
-        drop(state);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn finish_pending_saves_writes_the_latest_change_and_keeps_saving() {
-        let dir =
-            std::env::temp_dir().join(format!("kattri-settings-finish-{}", uuid::Uuid::new_v4()));
-        let mut state = SettingsState::open(Some(&dir), None);
-        let before = state.settings().clone();
-        state.settings_mut().audio.gapless = !before.audio.gapless;
-        state.save_if_changed(&before);
-        assert!(state.finish_pending_saves().is_ok());
-        let (saved, _) = ProfileStore::open(&dir)
-            .expect("profile store reopens")
-            .load_settings("default")
-            .expect("saved settings load");
-        assert_eq!(saved.audio.gapless, !before.audio.gapless);
-
-        // The writer starts again after a finish, so a later change still reaches disk.
-        assert!(state.writer.is_some());
-        let before = state.settings().clone();
-        state.settings_mut().audio.gapless = !before.audio.gapless;
-        state.save_if_changed(&before);
-        assert!(state.finish_pending_saves().is_ok());
-        let (saved, _) = ProfileStore::open(&dir)
-            .expect("profile store reopens")
-            .load_settings("default")
-            .expect("saved settings load");
-        assert_eq!(saved.audio.gapless, !before.audio.gapless);
         drop(state);
         let _ = std::fs::remove_dir_all(&dir);
     }

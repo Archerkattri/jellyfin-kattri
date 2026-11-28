@@ -240,7 +240,7 @@ enum EpisodeRowAction {
 }
 
 /// Size of the still shown at the start of an episode row (16:9).
-const EPISODE_THUMBNAIL: egui::Vec2 = egui::vec2(96.0, 54.0);
+const EPISODE_THUMBNAIL: egui::Vec2 = egui::vec2(160.0, 90.0);
 
 fn episode_row(
     ui: &mut Ui,
@@ -252,78 +252,144 @@ fn episode_row(
         egui::Frame::new()
             .fill(colors.panel)
             .corner_radius(egui::CornerRadius::same(12))
-            .inner_margin(egui::Margin::symmetric(14, 10))
+            .inner_margin(egui::Margin::symmetric(12, 10))
             .show(ui, |ui| {
-                let action = ui
-                    .horizontal(|ui| {
-                        let (rect, _) =
-                            ui.allocate_exact_size(EPISODE_THUMBNAIL, egui::Sense::hover());
-                        match thumbnail {
-                            Some(texture) => {
-                                ui.painter().add(
-                                    egui::epaint::RectShape::filled(
-                                        rect,
-                                        egui::CornerRadius::same(6),
-                                        Color32::WHITE,
-                                    )
-                                    .with_texture(
-                                        texture.id(),
-                                        super::artwork::cover_uv(texture.size_vec2(), rect.size()),
-                                    ),
-                                );
-                            }
-                            None => {
-                                ui.painter().rect_filled(
+                let mut action = None;
+                ui.horizontal(|ui| {
+                    // The still is the play target, the way a media row reads at a glance.
+                    let (rect, response) =
+                        ui.allocate_exact_size(EPISODE_THUMBNAIL, egui::Sense::click());
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::Role::Button,
+                            true,
+                            ui_text(ids::SERIES_EPISODE_PLAY),
+                        )
+                    });
+                    match thumbnail {
+                        Some(texture) => {
+                            ui.painter().add(
+                                egui::epaint::RectShape::filled(
                                     rect,
-                                    egui::CornerRadius::same(6),
-                                    colors.raised,
+                                    egui::CornerRadius::same(8),
+                                    Color32::WHITE,
+                                )
+                                .with_texture(
+                                    texture.id(),
+                                    super::artwork::cover_uv(texture.size_vec2(), rect.size()),
+                                ),
+                            );
+                        }
+                        None => {
+                            ui.painter().rect_filled(
+                                rect,
+                                egui::CornerRadius::same(8),
+                                colors.raised,
+                            );
+                        }
+                    }
+                    if response.hovered() {
+                        ui.painter().rect_stroke(
+                            rect,
+                            egui::CornerRadius::same(8),
+                            egui::Stroke::new(1.5, colors.accent),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                    // A small play badge so the still reads as playable.
+                    let badge = egui::Rect::from_center_size(rect.center(), egui::vec2(34.0, 34.0));
+                    ui.painter().circle_filled(
+                        badge.center(),
+                        badge.width() / 2.0,
+                        Color32::from_black_alpha(168),
+                    );
+                    ui.painter().text(
+                        badge.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "▶",
+                        egui::FontId::proportional(15.0),
+                        Color32::WHITE,
+                    );
+                    if response.clicked() {
+                        action = Some(EpisodeRowAction::Play);
+                    }
+
+                    ui.add_space(4.0);
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            if let Some(index) = episode.index_number {
+                                ui.label(
+                                    RichText::new(format!("E{index}"))
+                                        .size(12.0)
+                                        .strong()
+                                        .color(colors.muted),
                                 );
                             }
-                        }
-                        let play = ui
-                            .add_sized(egui::vec2(42.0, 42.0), egui::Button::new("▶"))
-                            .on_hover_text(ui_text(ids::SERIES_EPISODE_PLAY));
-                        let open = ui.add_sized(
-                            egui::vec2((ui.available_width() - 190.0).max(140.0), 42.0),
-                            egui::Button::new(RichText::new(episode_label(episode)).strong()),
-                        );
-                        let action = if play.clicked() {
-                            Some(EpisodeRowAction::Play)
-                        } else if open.clicked() {
-                            Some(EpisodeRowAction::Open)
-                        } else {
-                            None
-                        };
-                        if let Some(runtime) = format_runtime(episode.run_time_ticks) {
-                            ui.label(RichText::new(runtime).color(colors.muted));
-                        }
-                        if let Some(progress) = progress_fraction(episode) {
+                            // The badge already shows the E-number, so the title drops the prefix
+                            // that the full label carries for other callers.
+                            let full_label = episode_label(episode);
+                            let title = match episode.index_number {
+                                Some(index) => full_label
+                                    .strip_prefix(&format!("E{index}  "))
+                                    .unwrap_or(&full_label)
+                                    .to_owned(),
+                                None => full_label.clone(),
+                            };
+                            let open = ui.add(
+                                egui::Label::new(
+                                    RichText::new(title).size(15.5).strong().color(colors.text),
+                                )
+                                .sense(egui::Sense::click())
+                                .truncate(),
+                            );
+                            open.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::Role::Button, true, &full_label)
+                            });
+                            if open.clicked() {
+                                action = Some(EpisodeRowAction::Open);
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if let Some(progress) = progress_fraction(episode) {
+                                        ui.add(
+                                            ProgressBar::new(progress)
+                                                .desired_width(96.0)
+                                                .desired_height(6.0)
+                                                .show_percentage(),
+                                        );
+                                    } else if is_played(episode) {
+                                        ui.label(
+                                            RichText::new(ui_text(ids::SERIES_EPISODE_WATCHED))
+                                                .size(12.0)
+                                                .color(Color32::from_rgb(0x8F, 0xD1, 0x9E)),
+                                        );
+                                    }
+                                    if let Some(runtime) = format_runtime(episode.run_time_ticks) {
+                                        ui.label(
+                                            RichText::new(runtime).size(12.0).color(colors.muted),
+                                        );
+                                    }
+                                },
+                            );
+                        });
+                        if let Some(overview) = episode
+                            .overview
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|overview| !overview.is_empty())
+                        {
                             ui.add(
-                                ProgressBar::new(progress)
-                                    .desired_width(ui.available_width().min(112.0))
-                                    .desired_height(7.0)
-                                    .show_percentage(),
-                            );
-                        } else if is_played(episode) {
-                            ui.label(
-                                RichText::new(ui_text(ids::SERIES_EPISODE_WATCHED))
-                                    .color(Color32::from_rgb(0x8F, 0xD1, 0x9E)),
+                                egui::Label::new(
+                                    RichText::new(overview)
+                                        .size(12.5)
+                                        .color(Color32::from_gray(176)),
+                                )
+                                .truncate(),
                             );
                         }
-                        action
-                    })
-                    .inner;
-                if let Some(overview) = episode
-                    .overview
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|overview| !overview.is_empty())
-                {
-                    ui.add(
-                        egui::Label::new(RichText::new(overview).color(Color32::from_gray(176)))
-                            .truncate(),
-                    );
-                }
+                    });
+                });
                 action
             })
             .inner
@@ -571,7 +637,9 @@ mod tests {
         );
         output.textures_delta.clear();
         let labels = text_shapes(&output);
-        assert!(labels.iter().any(|label| label == "E2  The Long Night"));
+        // The row shows the E-number as its own badge, so the title text is the bare name.
+        assert!(labels.iter().any(|label| label == "E2"));
+        assert!(labels.iter().any(|label| label == "The Long Night"));
         assert!(labels.iter().any(|label| label == "47m"));
         assert!(labels.iter().any(|label| label == "50%"));
     }

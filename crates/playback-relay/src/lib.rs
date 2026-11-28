@@ -32,7 +32,8 @@ use axum::{
 };
 use futures_util::{Stream, StreamExt, stream};
 use jellyfin_api::{PlaybackSourceHeader, PlaybackSourceRequest};
-use reqwest::{Client as HttpClient, redirect::Policy};
+pub use reqwest::Client as HttpClient;
+use reqwest::redirect::Policy;
 use thiserror::Error;
 use tokio::{
     runtime::Builder as RuntimeBuilder,
@@ -75,9 +76,40 @@ impl TimeoutPolicy {
 /// accepted only for loopback, private, and link-local hosts. The returned URL is
 /// intentionally usable by a local media engine; its `Debug` representation
 /// is redacted and its storage is zeroized on drop.
+pub fn build_relay_http_client() -> Result<HttpClient, RelayError> {
+    build_relay_http_client_with_timeout(TimeoutPolicy::DEFAULT.read_idle)
+}
+
+fn build_relay_http_client_with_timeout(read_idle: Duration) -> Result<HttpClient, RelayError> {
+    HttpClient::builder()
+        .redirect(Policy::none())
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(read_idle)
+        .build()
+        .map_err(|_| RelayError::ClientInitialization)
+}
+
+/// Start one isolated relay for a negotiated source.
+///
+/// `allowed_server_origin` must be an origin only, such as
+/// `https://media.example:8920/`. The source URL and every URI in every HLS
+/// manifest must resolve to that exact HTTP(S) origin. Plain HTTP origins are
+/// accepted only for loopback, private, and link-local hosts. The returned URL is
+/// intentionally usable by a local media engine; its `Debug` representation
+/// is redacted and its storage is zeroized on drop.
 pub fn start_relay(
     allowed_server_origin: &str,
     source_request: PlaybackSourceRequest,
+) -> Result<(RelayPlaybackUrl, RelayHandle), RelayError> {
+    start_relay_with_client(allowed_server_origin, source_request, None)
+}
+
+/// Start one isolated relay, optionally reusing a pre-built [`HttpClient`].
+pub fn start_relay_with_client(
+    allowed_server_origin: &str,
+    source_request: PlaybackSourceRequest,
+    http: Option<HttpClient>,
 ) -> Result<(RelayPlaybackUrl, RelayHandle), RelayError> {
     let allowed_origin = parse_allowed_origin(allowed_server_origin)?;
 
@@ -114,7 +146,12 @@ pub fn start_relay(
             .route("/r/{capability}/{resource_id}", any(relay_handler))
             .with_state(state)
     };
-    let handle = spawn_server_thread_with_policy(listener, TimeoutPolicy::DEFAULT, router_factory)?;
+    let handle = spawn_server_thread_with_policy_and_client(
+        listener,
+        TimeoutPolicy::DEFAULT,
+        http,
+        router_factory,
+    )?;
 
     let url = Zeroizing::new(format!(
         "http://127.0.0.1:{port}/r/{}/{initial_resource_id}",
@@ -126,6 +163,18 @@ pub fn start_relay(
 fn spawn_server_thread_with_policy<F>(
     listener: StdTcpListener,
     timeout_policy: TimeoutPolicy,
+    router_factory: F,
+) -> Result<RelayHandle, RelayError>
+where
+    F: FnOnce(HttpClient) -> Router + Send + 'static,
+{
+    spawn_server_thread_with_policy_and_client(listener, timeout_policy, None, router_factory)
+}
+
+fn spawn_server_thread_with_policy_and_client<F>(
+    listener: StdTcpListener,
+    timeout_policy: TimeoutPolicy,
+    http: Option<HttpClient>,
     router_factory: F,
 ) -> Result<RelayHandle, RelayError>
 where
@@ -155,18 +204,15 @@ where
                         return Err(RelayError::BindFailed);
                     }
                 };
-                let client = match HttpClient::builder()
-                    .redirect(Policy::none())
-                    .no_proxy()
-                    .connect_timeout(std::time::Duration::from_secs(10))
-                    .read_timeout(timeout_policy.read_idle)
-                    .build()
-                {
-                    Ok(client) => client,
-                    Err(_) => {
-                        let _ = ready_sender.send(Err(RelayError::ClientInitialization));
-                        return Err(RelayError::ClientInitialization);
-                    }
+                let client = match http {
+                    Some(client) => client,
+                    None => match build_relay_http_client_with_timeout(timeout_policy.read_idle) {
+                        Ok(client) => client,
+                        Err(_) => {
+                            let _ = ready_sender.send(Err(RelayError::ClientInitialization));
+                            return Err(RelayError::ClientInitialization);
+                        }
+                    },
                 };
                 let router = router_factory(client);
                 let server = axum::serve(
@@ -2523,5 +2569,35 @@ mod tests {
         assert!(constant_time_equal("0123456789abcdef", "0123456789abcdef"));
         assert!(!constant_time_equal("0123456789abcdef", "0123456789abcdeg"));
         assert!(!constant_time_equal("short", "longer"));
+    }
+
+    #[test]
+    fn build_relay_http_client_works_with_shared_relay_server() {
+        let client = build_relay_http_client().expect("build shared relay http client");
+        let (source, aliases) = initial_aliases("https://jellyfin.example/master.m3u8");
+        let _ = source;
+        let capability = random_hex(CAPABILITY_BYTES).expect("random test capability");
+        let listener = StdTcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .expect("bind relay listener");
+        let handle = spawn_server_thread_with_policy_and_client(
+            listener,
+            TimeoutPolicy::DEFAULT,
+            Some(client),
+            move |client| {
+                let state = Arc::new(RelayState {
+                    allowed_origin: origin(),
+                    capability,
+                    aliases: Mutex::new(aliases),
+                    source_headers: Vec::new(),
+                    client,
+                    timeout_policy: TimeoutPolicy::DEFAULT,
+                });
+                Router::new()
+                    .route("/r/{capability}/{resource_id}", any(relay_handler))
+                    .with_state(state)
+            },
+        )
+        .expect("start relay with shared client");
+        handle.shutdown().expect("relay should stop cleanly");
     }
 }

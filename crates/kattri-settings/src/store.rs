@@ -173,7 +173,6 @@ fn preserve_unknown_fields(table: &mut toml::Table) {
         (
             "general",
             &[
-                "high_contrast",
                 "reduce_motion",
                 "theme_preset",
                 "custom_theme_enabled",
@@ -490,7 +489,6 @@ mod tests {
 
     fn populated() -> Settings {
         let mut s = Settings::default();
-        s.general.high_contrast = true;
         s.general.reduce_motion = false;
         s.general.screensaver_idle_seconds = 300;
         s.playback.sync_mode = SyncMode::Audio;
@@ -665,8 +663,8 @@ mod tests {
     #[test]
     fn missing_appearance_keys_use_the_documented_defaults() {
         use crate::{LibraryArtworkSize, LibraryLayout, ThemePreset};
-        let loaded = load_from_str("[general]\nhigh_contrast = true\n").expect("load");
-        assert!(loaded.general.high_contrast);
+        let loaded = load_from_str("[general]\nreduce_motion = false\n").expect("load");
+        assert!(!loaded.general.reduce_motion);
         assert_eq!(loaded.general.theme_preset, ThemePreset::JellyfinDark);
         assert!(!loaded.general.custom_theme_enabled);
         assert_eq!(loaded.general.custom_accent, None);
@@ -841,10 +839,10 @@ mod tests {
     #[test]
     fn older_document_without_the_new_keys_loads_their_defaults() {
         let old = format!(
-            "schema_version = {CURRENT_SCHEMA_VERSION}\n[general]\nhigh_contrast = true\n[playback]\nskip_intro = true\n[subtitles]\nfont = \"Arial\"\n"
+            "schema_version = {CURRENT_SCHEMA_VERSION}\n[general]\nreduce_motion = false\n[playback]\nskip_intro = true\n[subtitles]\nfont = \"Arial\"\n"
         );
         let loaded = load_from_str(&old).expect("load document without new keys");
-        assert!(loaded.general.high_contrast);
+        assert!(!loaded.general.reduce_motion);
         assert!(loaded.playback.skip_intro);
         assert!(!loaded.subtitles.burn_in);
         assert!(loaded.subtitles.title_styles.is_empty());
@@ -1091,14 +1089,11 @@ bold = true
     #[test]
     fn dashboard_and_presence_switches_are_off_by_default_and_round_trip() {
         let defaults = Settings::default();
-        assert!(!defaults.admin.dashboard);
         assert!(!defaults.plugins.discord_presence);
 
         let mut on = Settings::default();
-        on.admin.dashboard = true;
         on.plugins.discord_presence = true;
         let loaded = load_from_str(&to_toml_string(&on).unwrap()).unwrap();
-        assert!(loaded.admin.dashboard);
         assert!(loaded.plugins.discord_presence);
         // A known key must stay out of the forward-compatibility table.
         assert!(loaded.admin.unknown.is_empty());
@@ -1307,6 +1302,25 @@ bold = true
         let reloaded = load_from_str(&saved).unwrap();
         assert_eq!(reloaded.unknown, s.unknown);
         assert_eq!(reloaded.playback.unknown, s.playback.unknown);
+    }
+
+    #[test]
+    fn the_removed_high_contrast_key_survives_a_round_trip() {
+        // The toggle is gone, so the key is no longer "known" and is carried in `_unknown`.
+        // That keeps the user's choice intact if they roll back to 1.0.1.
+        let s = load_from_str("[general]\nhigh_contrast = true\nreduce_motion = false\n").unwrap();
+        assert!(!s.general.reduce_motion);
+        assert_eq!(
+            s.general.unknown.get("high_contrast"),
+            Some(&toml::Value::Boolean(true))
+        );
+        let saved = to_toml_string(&s).unwrap();
+        assert!(saved.contains("high_contrast = true"), "{saved}");
+        let reloaded = load_from_str(&saved).unwrap();
+        assert_eq!(
+            reloaded.general.unknown.get("high_contrast"),
+            Some(&toml::Value::Boolean(true))
+        );
     }
 
     #[test]

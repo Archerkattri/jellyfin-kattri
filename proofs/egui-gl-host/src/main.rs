@@ -30,7 +30,7 @@ use glutin::display::{Display, DisplayApiPreference, GetGlDisplay, GlDisplay};
 use glutin::prelude::GlSurface;
 use glutin::surface::{SwapInterval, WindowSurface};
 use jellyfin_egui_client::BurnInReplacementEnd;
-use jellyfin_egui_client::KattriApp;
+use jellyfin_egui_client::{KattriApp, RuntimeAbout};
 use kattri_client_core::PlaybackPhase;
 use kattri_client_core::controls::{OsdVisibility, PlaybackSpeed};
 use kattri_client_core::deep_link::DeepLinkIntent;
@@ -42,11 +42,12 @@ use kattri_client_core::window_state::SavedWindow;
 use kattri_platform::{PowerGuard, PowerInhibitor, PowerStatus, default_power_inhibitor};
 use kattri_plugins::discord::{IpcTransport, PresenceBinding};
 use mpv_host::{
-    ItemLoadSettings, MpvHost, RelayLoadOptions, SYNC_MARKER_BUTTONS, SyncFeedbackTone,
-    TrackMemoryEvent, TrackMenuKind, VideoFrameSizeRequest, local_media_path,
+    ItemLoadSettings, MpvHost, RelayLoadOptions, TrackMemoryEvent, TrackMenuKind,
+    VideoFrameSizeRequest, local_media_path,
 };
 use mpv_render_proof::{
-    FboTarget, FrameDecision, MpvLibrary, MpvSession, PROVISIONAL_SCREENSHOT_MODE,
+    CalibrationMarker, FboTarget, FrameDecision, MpvLibrary, MpvSession,
+    PROVISIONAL_SCREENSHOT_MODE,
 };
 use std::path::{Path, PathBuf};
 use winit::application::ApplicationHandler;
@@ -56,6 +57,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
 
+mod blur;
 mod debug_validation;
 mod display_switch;
 mod gl_adapter;
@@ -105,16 +107,24 @@ impl From<egui_winit::accesskit_winit::Event> for HostEvent {
 struct GlHost<'session> {
     mpv: MpvHost<'session>,
     video_target: Option<VideoTarget>,
+    /// A requested video-FBO size waiting for the window to stop moving, so a fullscreen toggle
+    /// does not reallocate and clear the texture on every transition frame.
+    pending_video_target: Option<([u32; 2], Instant)>,
     painter: Option<egui_glow::Painter>,
     egui_winit: EguiWinitState,
     kattri_app: KattriApp,
     egui: egui::Context,
     gl: Arc<glow::Context>,
+    max_texture_size: u32,
     parts: Rc<ContextParts>,
     // The context and surface retain the native window handle, so the window
     // is declared last and explicitly kept alive through GL teardown.
     window: Window,
     video_texture_id: egui::TextureId,
+    blur_target: Option<blur::VideoBlurTarget>,
+    blur_texture_id: Option<egui::TextureId>,
+    blur_unavailable: bool,
+    blur_dirty: bool,
     screen_framebuffer: i32,
     physical_size: PhysicalSize<u32>,
     shutdown_error: Option<String>,
@@ -129,7 +139,6 @@ struct GlHost<'session> {
     /// top overlay appear and disappear together.
     chrome_opacity: f32,
     destroyed: bool,
-    show_player_details: bool,
     player_input_active: bool,
     focus_before_player: Option<egui::Id>,
     // The screenshot command goes to the same session the MpvHost renders from.
@@ -359,7 +368,11 @@ impl<'session> GlHost<'session> {
         let syncplay_status_opt_in = debug_syncplay_status_opt_in();
         let video_target = VideoTarget::new(&gl, [640, 360])?;
         let video_texture_id = painter.register_native_texture(video_target.texture());
+        let blur_target = None;
+        let blur_texture_id = None;
+        let blur_unavailable = false;
         let provider = HostGlContextProvider::new(Rc::clone(&parts), Arc::clone(&gl));
+        let max_texture_size = provider.capabilities().max_texture_size;
         let gpu_identity = unsafe {
             format!(
                 "{} / {}",
@@ -390,7 +403,6 @@ impl<'session> GlHost<'session> {
             // An external link uses the selected/active profile and requires explicit sign-in.
             kattri_app.apply_launch_intent(intent);
         } else {
-            kattri_app.offer_launch_picker();
             if resume_saved_sign_in {
                 kattri_app.resume_saved_sign_in();
             }
@@ -419,14 +431,20 @@ impl<'session> GlHost<'session> {
         Ok(Self {
             mpv,
             video_target: Some(video_target),
+            pending_video_target: None,
             painter: Some(painter),
             egui_winit,
             kattri_app,
             egui,
             gl,
+            max_texture_size,
             parts,
             window,
             video_texture_id,
+            blur_target,
+            blur_texture_id,
+            blur_unavailable,
+            blur_dirty: true,
             screen_framebuffer,
             physical_size,
             shutdown_error: None,
@@ -439,7 +457,6 @@ impl<'session> GlHost<'session> {
             osd_clock,
             chrome_opacity: 0.0,
             destroyed: false,
-            show_player_details: false,
             player_input_active: false,
             focus_before_player: None,
             session,
@@ -760,17 +777,15 @@ impl<'session> GlHost<'session> {
         }
         let renderer_available = self.mpv.has_renderer();
         let media_active = self.mpv.has_media();
+        let mpv_loading = self.mpv.is_loading();
+        let playback_preparing = self.kattri_app.playback_preparing();
+        if self.pip.is_pip() && !media_active && !playback_preparing && !mpv_loading {
+            self.toggle_pip(event_loop);
+        }
         let pip_active = self.pip.is_pip();
-        let player_surface_active = media_active && !pip_active;
-        let local_video_track =
-            self.local_stem.is_some() && self.mpv.has_video_track() == Some(true);
-        let theater = should_use_theater_view(
-            renderer_available,
-            player_surface_active,
-            self.show_player_details,
-            self.kattri_app.selected_is_video(),
-            local_video_track,
-        );
+        let player_surface_active =
+            player_surface_active(media_active, playback_preparing, mpv_loading, pip_active);
+        let theater = should_use_theater_view(renderer_available, player_surface_active);
         if player_surface_active && !self.player_input_active {
             self.focus_before_player = self.egui.memory(|memory| memory.focused());
             if let Some(focused) = self.focus_before_player {
@@ -805,9 +820,13 @@ impl<'session> GlHost<'session> {
         if user_activity {
             self.osd_visibility.on_input(self.osd_clock.elapsed());
         }
-        // Playback keys are ignored while a text field in the app has keyboard focus.
-        let typing = self.egui.egui_wants_keyboard_input();
-        if !typing {
+        // Playback shortcuts must not escape an egui popup or a text field, even if the popup does
+        // not currently request text input (for example, a ComboBox menu). Any other focused
+        // control, such as a button in the player details panel, keeps them working.
+        let typing = self.egui.text_edit_focused();
+        let popup_open = egui::Popup::is_any_open(&self.egui);
+        let shortcuts_enabled = playback_shortcuts_enabled(typing, popup_open);
+        if shortcuts_enabled {
             for action in mpv_host::playback_key_actions(&input.events) {
                 // The aspect cycle needs the settings store to persist the new mode, which lives
                 // on the app side; every other playback key is handled by the player alone.
@@ -818,12 +837,40 @@ impl<'session> GlHost<'session> {
                 }
             }
         }
-        let screenshot_requested = !typing && screenshot_key_pressed(&input.events);
-        let player_shortcut = (!typing)
+        let mut fullscreen_toggle_requested = false;
+        if !self.egui.egui_wants_keyboard_input()
+            && let Some(action) = host_shortcut_action(&input.events)
+        {
+            match action {
+                HostShortcutAction::ToggleFullscreen => fullscreen_toggle_requested = true,
+                HostShortcutAction::Minimize => self.window.set_minimized(true),
+                HostShortcutAction::ToggleAlwaysOnTop => {
+                    self.kattri_app.toggle_always_on_top();
+                    let enabled = self.kattri_app.window_settings().always_on_top;
+                    self.sync_window_level();
+                    self.set_shell_notice(if enabled {
+                        "Always on top: On".to_owned()
+                    } else {
+                        "Always on top: Off".to_owned()
+                    });
+                }
+                HostShortcutAction::ToggleTvMode => {
+                    let enabled = self.kattri_app.toggle_tv_mode();
+                    self.set_shell_notice(if enabled {
+                        "TV Mode: On".to_owned()
+                    } else {
+                        "TV Mode: Off".to_owned()
+                    });
+                }
+            }
+        }
+        let screenshot_requested = shortcuts_enabled && screenshot_key_pressed(&input.events);
+        let player_shortcut = shortcuts_enabled
             .then(|| player_controls::player_shortcut_action(&input.events))
             .flatten();
         let mut video_size_points = egui::vec2(640.0, 360.0);
         let video_texture_id = self.video_texture_id;
+        let blur_texture_id = self.blur_texture_id;
         let playback_status = self.mpv.status().to_owned();
         let capability_warning = self
             .mpv
@@ -834,8 +881,6 @@ impl<'session> GlHost<'session> {
             .mpv
             .report_handoff_feedback()
             .or_else(|| self.report_connection_notice.clone());
-        let audio_track_options = self.mpv.track_menu_options(TrackMenuKind::Audio);
-        let subtitle_track_options = self.mpv.track_menu_options(TrackMenuKind::Subtitle);
         let track_feedback = self.mpv.track_feedback().map(str::to_owned);
         let controls_snapshot = self.mpv.controls_snapshot();
         let playing_item_id = self.mpv.playing_item_id().map(str::to_owned);
@@ -868,23 +913,17 @@ impl<'session> GlHost<'session> {
                         self.kattri_app.episode_navigation(playing_id)
                     }
                 });
-        let controls_chapters = controls_snapshot
-            .chapters
-            .iter()
-            .map(|chapter| ChapterChoice {
-                index: chapter.index,
-                title: chapter.title.clone(),
-                time: chapter.time,
-            })
-            .collect::<Vec<_>>();
         self.osd_visibility
             .set_paused(controls_paused.unwrap_or(false));
         let osd_now = self.osd_clock.elapsed();
+        if theater_skeleton_visible(playback_preparing, mpv_loading) {
+            self.osd_visibility.on_input(osd_now);
+        }
         let local_stream_only_media = self.local_stem.is_some() && !self.mpv.reporting_enabled();
         let controls_visible = player_controls_visible(
             self.osd_visibility.is_visible_at(osd_now) || local_stream_only_media,
             self.egui.memory(|memory| memory.focused().is_some()),
-            egui::Popup::is_any_open(&self.egui),
+            egui::Popup::is_any_open(&self.egui) || self.mpv.media_info_open(),
         );
         // The chrome follows the existing OSD timer, but its opacity is stepped smoothly so the
         // bottom row and the top overlay appear and disappear as one surface. Reduced motion
@@ -901,18 +940,41 @@ impl<'session> GlHost<'session> {
         let chrome_opacity = self.chrome_opacity;
         let chrome_present = chrome_opacity > 0.001;
         let osd_hide_after = self.osd_visibility.time_until_hidden(osd_now);
-        let controls_feedback = self.mpv.controls_feedback().map(str::to_owned);
+        let controls_feedback = self.mpv.controls_feedback().cloned();
         self.kattri_app.set_media_playing(media_active);
-        let burn_in_subtitle_tracks = self.kattri_app.burn_in_subtitle_choices().map(|choices| {
-            choices
-                .into_iter()
-                .map(|(value, label, selected)| player_controls::TrackChoice {
-                    value,
-                    label,
-                    selected,
+        let audio_track_options = chrome_present
+            .then(|| self.mpv.track_menu_options(TrackMenuKind::Audio))
+            .flatten();
+        let subtitle_track_options = chrome_present
+            .then(|| self.mpv.track_menu_options(TrackMenuKind::Subtitle))
+            .flatten();
+        let controls_chapters = if chrome_present {
+            controls_snapshot
+                .chapters
+                .iter()
+                .map(|chapter| ChapterChoice {
+                    index: chapter.index,
+                    title: chapter.title.clone(),
+                    time: chapter.time,
                 })
                 .collect::<Vec<_>>()
-        });
+        } else {
+            Vec::new()
+        };
+        let burn_in_subtitle_tracks = chrome_present
+            .then(|| {
+                self.kattri_app.burn_in_subtitle_choices().map(|choices| {
+                    choices
+                        .into_iter()
+                        .map(|(value, label, selected)| player_controls::TrackChoice {
+                            value,
+                            label,
+                            selected,
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .flatten();
         let burn_in_subtitle_feedback = self
             .kattri_app
             .burn_in_subtitle_feedback()
@@ -921,13 +983,21 @@ impl<'session> GlHost<'session> {
             .kattri_app
             .playback_report_feedback()
             .map(str::to_owned);
+        let runtime_diagnostics = media_info_panel::RuntimeDiagnostics {
+            status: &playback_status,
+            capability_warning: capability_warning.as_deref(),
+            report_feedback: playback_report_feedback.as_deref(),
+        };
         // Off when no skip switch is on or the outro delay is invalid (M2-08).
         let skip_settings =
             player_controls::skip_settings(self.kattri_app.playback_settings()).ok();
         let media_info = self.mpv.media_info_view();
-        let secondary_choices = self.mpv.secondary_subtitle_choices();
+        let secondary_choices = if chrome_present {
+            self.mpv.secondary_subtitle_choices()
+        } else {
+            Vec::new()
+        };
         let secondary_selected = self.mpv.secondary_subtitle_selected();
-        let (ab_loop_a, ab_loop_b) = self.mpv.ab_loop_points();
         let playing_title = playing_item_id
             .as_deref()
             .and_then(|id| self.kattri_app.item_title(id))
@@ -935,17 +1005,21 @@ impl<'session> GlHost<'session> {
             .or_else(|| self.local_stem.clone());
         // The app exposes only an item title publicly, so the second title line uses the chapter
         // that contains the playhead, which is the useful context a viewer has here.
-        let playing_subtitle = controls_chapters
-            .iter()
-            .rev()
-            .find(|chapter| chapter.time <= controls_position)
-            .map(|chapter| {
-                if chapter.title.trim().is_empty() {
-                    format!("Chapter {}", chapter.index.saturating_add(1))
-                } else {
-                    chapter.title.clone()
-                }
-            });
+        let playing_subtitle = if chrome_present {
+            controls_chapters
+                .iter()
+                .rev()
+                .find(|chapter| chapter.time <= controls_position)
+                .map(|chapter| {
+                    if chapter.title.trim().is_empty() {
+                        format!("Chapter {}", chapter.index.saturating_add(1))
+                    } else {
+                        chapter.title.clone()
+                    }
+                })
+        } else {
+            None
+        };
         let volume_percent = controls_snapshot.volume_percent;
         let volume_max_percent = self.kattri_app.audio_settings().max_volume_percent;
         let muted = controls_snapshot.muted;
@@ -953,7 +1027,7 @@ impl<'session> GlHost<'session> {
         self.update_cursor_visibility(fullscreen, user_activity);
         // In fullscreen there is no scrollable page behind the video, so the wheel seeks.
         if fullscreen
-            && !typing
+            && shortcuts_enabled
             && let Some(seconds) = mpv_host::wheel_seek_seconds(&input.events)
         {
             self.mpv.seek_relative(seconds);
@@ -966,7 +1040,7 @@ impl<'session> GlHost<'session> {
         }
         let pip_available = renderer_available && media_active;
         let mut pip_toggle_requested = false;
-        let mut fullscreen_toggle_requested = false;
+        let mut up_next_visible = false;
         let shell_notice = self.shell_notice.as_ref().and_then(|(text, shown_at)| {
             let age = osd_now.saturating_sub(*shown_at);
             (age < SHELL_NOTICE_DURATION).then(|| (text.clone(), SHELL_NOTICE_DURATION - age))
@@ -1002,8 +1076,6 @@ impl<'session> GlHost<'session> {
             secondary_selected,
             pip_active,
             pip_available,
-            ab_loop_a,
-            ab_loop_b,
             title: playing_title.as_deref(),
             subtitle: playing_subtitle.as_deref(),
             volume_percent,
@@ -1012,20 +1084,19 @@ impl<'session> GlHost<'session> {
             fullscreen,
             opacity: chrome_opacity,
             skip_settings,
-            feedback: controls_feedback.as_deref(),
+            feedback: controls_feedback.as_ref(),
             audio_tracks: audio_track_options.as_deref(),
             subtitle_tracks: subtitle_track_options.as_deref(),
             burn_in_subtitle_tracks: burn_in_subtitle_tracks.as_deref(),
             burn_in_subtitle_feedback: burn_in_subtitle_feedback.as_deref(),
             track_feedback: track_feedback.as_deref(),
         };
-        // Theater view: while a video plays, the player fills the window. "Player details"
-        // brings the side panel and diagnostics back.
+        // Active media uses the theater surface. A compact Media info action opens diagnostics
+        // over the video instead of reserving a permanent side page.
         let activate_without_focus =
             append_gamepad_navigation_events(&mut input, &gamepad_actions, player_had_focus);
         let mpv = &mut self.mpv;
         let kattri_app = &mut self.kattri_app;
-        let show_player_details = &mut self.show_player_details;
         let mut output = self.egui.run_ui(input, |root| {
             if media_active && kattri_app.take_player_pause_shortcut(root.ctx()) {
                 if mpv.live_stream_active() {
@@ -1073,13 +1144,101 @@ impl<'session> GlHost<'session> {
                 kattri_app.update_background(root.ctx());
                 kattri_app.show_subtitle_search(root.ctx());
                 let typing = root.egui_wants_keyboard_input();
-                if !typing && root.input(|input| input.key_pressed(egui::Key::Escape)) {
-                    // Escape closes the media info panel before it leaves the video.
-                    if mpv.media_info_open() {
-                        mpv.close_media_info();
-                    } else {
-                        mpv.stop_playback();
+                let escape_pressed = root.input(|input| input.key_pressed(egui::Key::Escape));
+                match theater_escape_action(
+                    root.ctx(),
+                    escape_pressed,
+                    typing,
+                    kattri_app.subtitle_search_open(),
+                    mpv.media_info_open(),
+                ) {
+                    TheaterEscapeAction::ClosePopup => {}
+                    TheaterEscapeAction::CloseSubtitleSearch => {
+                        kattri_app.dismiss_subtitle_search();
                     }
+                    TheaterEscapeAction::CloseMediaInfo => mpv.close_media_info(),
+                    TheaterEscapeAction::StopPlayback => {
+                        if pip_active {
+                            pip_toggle_requested = true;
+                        } else {
+                            mpv.stop_playback();
+                            if playback_preparing {
+                                kattri_app.cancel_playback_preparation();
+                            }
+                        }
+                    }
+                    TheaterEscapeAction::None => {}
+                }
+                if theater_skeleton_visible(playback_preparing, mpv_loading) {
+                    root.request_repaint();
+                    let skeleton_title = kattri_app.preparing_item_title().map(str::to_owned);
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+                        .show(root, |ui| {
+                            let stage = ui.max_rect();
+                            video_size_points = fit_16_9(stage.size());
+                            let screen = ui.ctx().content_rect();
+                            if !pip_active {
+                                player_controls::paint_top_scrim(ui.painter(), stage, 1.0);
+                                player_controls::paint_bottom_scrim(ui.painter(), stage, 1.0);
+                                egui::Area::new(egui::Id::unique("theater_skeleton_top"))
+                                    .order(egui::Order::Foreground)
+                                    .fixed_pos(stage.left_top())
+                                    .show(ui.ctx(), |ui| {
+                                        ui.set_width(stage.width());
+                                        let top_outcome = player_controls::draw_top_chrome_outcome(
+                                            ui,
+                                            player_controls::TopChromeView {
+                                                title: Some(
+                                                    skeleton_title.as_deref().unwrap_or("Loading"),
+                                                ),
+                                                subtitle: None,
+                                                opacity: 1.0,
+                                                media_info_open: false,
+                                                show_media_info: false,
+                                            },
+                                        );
+                                        if top_outcome.action
+                                            == player_controls::TopChromeAction::Back
+                                        {
+                                            mpv.stop_playback();
+                                            kattri_app.cancel_playback_preparation();
+                                        }
+                                    });
+                            }
+                            egui::Area::new(egui::Id::unique("theater_skeleton_spinner"))
+                                .order(egui::Order::Foreground)
+                                .anchor(
+                                    egui::Align2::CENTER_CENTER,
+                                    stage.center() - screen.center(),
+                                )
+                                .show(ui.ctx(), |ui| {
+                                    ui.add(
+                                        egui::Spinner::new()
+                                            .size(36.0)
+                                            .color(egui::Color32::from_white_alpha(200)),
+                                    );
+                                });
+                            if pip_active {
+                                let pip_hovered = ui.rect_contains_pointer(stage);
+                                if pip_hovered || chrome_opacity > 0.01 {
+                                    let pip_opacity =
+                                        if pip_hovered { 1.0 } else { chrome_opacity };
+                                    if player_controls::draw_pip_overlay(
+                                        ui.ctx(),
+                                        stage,
+                                        osd.paused,
+                                        pip_opacity,
+                                    ) == player_controls::PipOverlayAction::ExitPip
+                                    {
+                                        pip_toggle_requested = true;
+                                    }
+                                }
+                            } else {
+                                draw_skeleton_bottom_bar(ui.ctx(), stage, screen);
+                            }
+                        });
+                    return;
                 }
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(egui::Color32::BLACK))
@@ -1095,21 +1254,79 @@ impl<'session> GlHost<'session> {
                             egui::Color32::WHITE,
                         );
                         let video_surface = ui.interact(
-                            video_rect,
+                            area,
                             ui.make_persistent_id("kattri-theater-video-surface"),
-                            egui::Sense::hover(),
+                            egui::Sense::CLICK,
                         );
                         label_video_surface(&video_surface, osd.title);
+                        if pip_active {
+                            if video_surface.clicked_by(egui::PointerButton::Primary) {
+                                if mpv.live_stream_active() {
+                                    mpv.stop_playback();
+                                } else {
+                                    mpv.toggle_paused();
+                                }
+                            }
+                            let pip_hovered = ui.rect_contains_pointer(area);
+                            if pip_hovered || chrome_opacity > 0.01 {
+                                let pip_opacity = if pip_hovered { 1.0 } else { chrome_opacity };
+                                match player_controls::draw_pip_overlay(
+                                    ui.ctx(),
+                                    area,
+                                    osd.paused,
+                                    pip_opacity,
+                                ) {
+                                    player_controls::PipOverlayAction::ExitPip => {
+                                        pip_toggle_requested = true;
+                                    }
+                                    player_controls::PipOverlayAction::TogglePaused => {
+                                        if mpv.live_stream_active() {
+                                            mpv.stop_playback();
+                                        } else {
+                                            mpv.toggle_paused();
+                                        }
+                                    }
+                                    player_controls::PipOverlayAction::None => {}
+                                }
+                            }
+                            return;
+                        }
+                        let center_play_clicked = if chrome_present {
+                            player_controls::draw_center_play(
+                                ui.ctx(),
+                                area,
+                                osd.paused,
+                                osd.media_active,
+                                chrome_opacity,
+                            )
+                        } else {
+                            false
+                        };
+                        let video_clicked = video_click_toggles(
+                            &video_surface,
+                            center_play_clicked,
+                            egui::Popup::is_any_open(ui.ctx()),
+                            mpv.media_info_open(),
+                            kattri_app.subtitle_search_open(),
+                        ) && mpv.has_video_track() == Some(true);
+                        if video_clicked || center_play_clicked {
+                            if mpv.live_stream_active() {
+                                mpv.stop_playback();
+                            } else {
+                                mpv.toggle_paused();
+                            }
+                        }
+                        let backdrop_blur = blur_texture_id.map(|texture_id| blur::BackdropBlur {
+                            texture_id,
+                            stage_rect: video_rect,
+                        });
+                        let mut top_media_info_hot = false;
                         if chrome_present {
                             // Keep the chrome inside the video area, not the whole window: a
                             // debug-only notice or any future top panel must not be covered.
                             let screen = ui.ctx().content_rect();
                             let stage = area;
-                            player_controls::paint_top_scrim(
-                                ui.painter(),
-                                stage,
-                                chrome_opacity,
-                            );
+                            player_controls::paint_top_scrim(ui.painter(), stage, chrome_opacity);
                             player_controls::paint_bottom_scrim(
                                 ui.painter(),
                                 stage,
@@ -1120,36 +1337,32 @@ impl<'session> GlHost<'session> {
                                 .fixed_pos(stage.left_top())
                                 .show(ui.ctx(), |ui| {
                                     ui.set_width(stage.width());
-                                    match player_controls::draw_top_chrome(
+                                    let top_outcome = player_controls::draw_top_chrome_outcome(
                                         ui,
                                         player_controls::TopChromeView {
                                             title: osd.title,
                                             subtitle: osd.subtitle,
                                             opacity: chrome_opacity,
+                                            media_info_open: mpv.media_info_open(),
+                                            show_media_info: true,
                                         },
-                                    ) {
+                                    );
+                                    top_media_info_hot = top_outcome.media_info_hot;
+                                    match top_outcome.action {
                                         player_controls::TopChromeAction::Back => {
                                             mpv.stop_playback();
+                                            if playback_preparing {
+                                                kattri_app.cancel_playback_preparation();
+                                            }
                                         }
-                                        player_controls::TopChromeAction::PlayerDetails => {
-                                            *show_player_details = true;
+                                        player_controls::TopChromeAction::MediaInfo => {
+                                            mpv.dispatch_playback_key(
+                                                mpv_host::PlaybackKeyAction::MediaInfo,
+                                            );
                                         }
                                         player_controls::TopChromeAction::None => {}
                                     }
                                 });
-                            if player_controls::draw_center_play(
-                                ui.ctx(),
-                                stage,
-                                osd.paused,
-                                osd.media_active,
-                                chrome_opacity,
-                            ) {
-                                if mpv.live_stream_active() {
-                                    mpv.stop_playback();
-                                } else {
-                                    mpv.toggle_paused();
-                                }
-                            }
                             egui::Area::new(egui::Id::unique("theater_controls"))
                                 .order(egui::Order::Foreground)
                                 .anchor(
@@ -1168,14 +1381,32 @@ impl<'session> GlHost<'session> {
                                         &osd,
                                         &mut pip_toggle_requested,
                                         &mut fullscreen_toggle_requested,
+                                        backdrop_blur,
                                     );
                                 });
                         }
-                        up_next_card(ui.ctx(), mpv, kattri_app, &osd);
-                        if let Some(info) = &media_info
-                            && media_info_panel::show(ui.ctx(), info).close
-                        {
-                            mpv.close_media_info();
+                        up_next_visible =
+                            up_next_card(ui.ctx(), mpv, kattri_app, &osd, backdrop_blur);
+                        let was_media_info_open = mpv.media_info_open();
+                        if let Some(info) = &media_info {
+                            let outcome = media_info_panel::show(
+                                ui.ctx(),
+                                info,
+                                runtime_diagnostics,
+                                backdrop_blur,
+                            );
+                            if outcome.close {
+                                mpv.close_media_info();
+                            } else {
+                                mpv.set_media_info_hover(
+                                    top_media_info_hot || outcome.hovered_or_focused,
+                                );
+                            }
+                        } else {
+                            mpv.set_media_info_hover(top_media_info_hot);
+                        }
+                        if was_media_info_open != mpv.media_info_open() {
+                            ui.ctx().request_repaint();
                         }
                     });
                 return;
@@ -1190,14 +1421,9 @@ impl<'session> GlHost<'session> {
                     }
                 });
             }
-            // The status bar appears only when it has something to say: a video is loaded, the
-            // player runtime is missing, a notice is showing, or the details panel is open.
-            if status_bar_visible(
-                media_active,
-                renderer_available,
-                shell_notice.is_some(),
-                *show_player_details,
-            ) {
+            // The status bar appears only when it has something to say: media is loaded, the
+            // player runtime is missing, or a notice is showing.
+            if status_bar_visible(media_active, renderer_available, shell_notice.is_some()) {
                 let chrome = jellyfin_egui_client::active_palette();
                 egui::Panel::bottom("player_status_bar")
                     .exact_size(34.0)
@@ -1213,7 +1439,8 @@ impl<'session> GlHost<'session> {
                                     egui::vec2(8.0, 8.0),
                                     egui::Sense::hover(),
                                 );
-                                ui.painter().circle_filled(dot.center(), 4.0, chrome.warning);
+                                ui.painter()
+                                    .circle_filled(dot.center(), 4.0, chrome.warning);
                                 ui.label(
                                     egui::RichText::new(
                                         "Video playback is unavailable on this computer",
@@ -1224,156 +1451,26 @@ impl<'session> GlHost<'session> {
                             if let Some((text, _)) = &shell_notice {
                                 ui.label(text);
                             }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.toggle_value(show_player_details, "Player details")
-                                        .on_hover_text(
-                                            "Show the video surface, track controls, subtitle sync and runtime diagnostics",
-                                        );
-                                },
-                            );
                         });
                     });
-            }
-            if playback_panel_visible(media_active, *show_player_details) {
-                let panel_width = (root.available_width() * 0.38).clamp(300.0, 480.0);
-                egui::containers::panel::Panel::right("mpv-video-panel")
-                .default_size(panel_width)
-                .resizable(true)
-                .show(root, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.heading("Playback");
-                    ui.separator();
-                    let available = ui.available_size_before_wrap();
-                    let width = available.x.max(1.0);
-                    let height = (width * 9.0 / 16.0).min(available.y.max(1.0));
-                    video_size_points = egui::vec2(width, height);
-                    let video_surface = ui.image((video_texture_id, video_size_points));
-                    label_video_surface(&video_surface, osd.title);
-                    if renderer_available && controls_visible {
-                        ui.add_space(6.0);
-                        osd_controls(
-                            ui,
-                            mpv,
-                            kattri_app,
-                            &osd,
-                            &mut pip_toggle_requested,
-                            &mut fullscreen_toggle_requested,
-                        );
-                    }
-                    ui.add_space(8.0);
-                    ui.label(&playback_status);
-                    if let Some(warning) = &capability_warning {
-                        ui.colored_label(egui::Color32::YELLOW, warning);
-                    }
-                    if let Some(feedback) = &playback_report_feedback {
-                        ui.colored_label(egui::Color32::LIGHT_RED, feedback);
-                    }
-                    if !renderer_available {
-                        ui.label("Install a matching libmpv runtime to enable the local video surface.");
-                    } else {
-                        ui.label(
-                            "Pass a local file as the first argument, or choose a stream from an item.",
-                        );
-                    }
-                    ui.label(
-                        "For Jellyfin playback, libmpv receives only a loopback URL; server credentials and upstream URLs stay in the Rust relay.",
-                    );
-                    ui.add_space(10.0);
-                    if renderer_available {
-                        // The combos sit under a collapsed header; the keyboard path to them is
-                        // tested in player_controls (M2-18).
-                        let (audio_pick, subtitle_pick) = player_controls::track_section(
-                            ui,
-                            audio_track_options.as_deref(),
-                            subtitle_track_options.as_deref(),
-                            track_feedback.as_deref(),
-                        );
-                        if let Some(selection) = audio_pick {
-                            mpv.select_audio_track(selection);
-                        }
-                        if let Some(selection) = subtitle_pick {
-                            mpv.select_subtitle_track(selection);
-                        }
-                        ui.add_space(10.0);
-                    }
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new("SYNC SUBTITLES TO SPEECH")
-                            .size(11.0)
-                            .strong()
-                            .color(egui::Color32::from_rgb(0x83, 0xD6, 0xC0)),
-                    );
-                    let subtitle_available = renderer_available && mpv.subtitle_track_selected();
-                    if subtitle_available {
-                        ui.label(
-                            "Press “I hear the spoken line” when it is spoken and “I see the subtitle” when its text appears. Press either one first; Kattri applies the correction after both times are captured.",
-                        );
-                        ui.add_space(6.0);
-                        for (marker, label) in SYNC_MARKER_BUTTONS {
-                            if player_controls::sync_marker_button_for(ui, marker, label, true, 1.0)
-                            {
-                                mpv.capture_sync_marker(marker);
-                            }
-                            ui.add_space(4.0);
-                        }
-                        ui.horizontal(|ui| {
-                            if ui.button("Reset subtitle delay").clicked() {
-                                mpv.reset_subtitle_delay();
-                            }
-                        });
-                        egui::CollapsingHeader::new("Fine adjustment (optional)")
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                ui.label(
-                                    "Move subtitles in small 50 ms steps if the automatic match needs a touch-up.",
-                                );
-                                ui.horizontal(|ui| {
-                                    if ui.button("Earlier by 50 ms").clicked() {
-                                        mpv.nudge_subtitle_delay(-0.05);
-                                    }
-                                    if ui.button("Later by 50 ms").clicked() {
-                                        mpv.nudge_subtitle_delay(0.05);
-                                    }
-                                });
-                            });
-                        if let Some(delay) = mpv.subtitle_delay_seconds() {
-                            ui.label(format!("Current subtitle delay: {delay:+.3} s"));
-                        } else {
-                            ui.label("Current subtitle delay: waiting for libmpv…");
-                        }
-                    } else {
-                        ui.label(
-                            "A ready player and selected subtitle track are required to enable sync controls.",
-                        );
-                    }
-                    let (message, tone) = mpv.sync_feedback().display();
-                    let feedback = format!("{}: {message}", tone.label());
-                    match tone {
-                        SyncFeedbackTone::Guidance => ui.label(feedback),
-                        SyncFeedbackTone::Pending => ui.colored_label(
-                            egui::Color32::from_rgb(0x83, 0xD6, 0xC0),
-                            feedback,
-                        ),
-                        SyncFeedbackTone::Success => {
-                            ui.colored_label(egui::Color32::LIGHT_GREEN, feedback)
-                        }
-                        SyncFeedbackTone::Error => {
-                            ui.colored_label(egui::Color32::LIGHT_RED, feedback)
-                        }
-                    };
-                    });
-                });
             }
             // No frame margin: the app draws its own edge-to-edge bars and page gutters.
             egui::CentralPanel::default()
                 .frame(egui::Frame::new())
                 .show(root, |ui| kattri_app.ui(ui));
-            if let Some(info) = &media_info
-                && media_info_panel::show(root, info).close
-            {
-                mpv.close_media_info();
+            let was_media_info_open = mpv.media_info_open();
+            if let Some(info) = &media_info {
+                let outcome = media_info_panel::show(root, info, runtime_diagnostics, None);
+                if outcome.close {
+                    mpv.close_media_info();
+                } else {
+                    mpv.set_media_info_hover(outcome.hovered_or_focused);
+                }
+            } else {
+                mpv.set_media_info_hover(false);
+            }
+            if was_media_info_open != mpv.media_info_open() {
+                root.request_repaint();
             }
         });
         if let Some(generation) = self.kattri_app.take_terminal_burn_in_replacement_failure() {
@@ -1395,9 +1492,8 @@ impl<'session> GlHost<'session> {
         }
         if fullscreen_toggle_requested {
             if self.pip.is_pip() {
-                // Fullscreen is meaningless for the small always-on-top PiP window and would
-                // leave the PiP controller's stored placement out of sync.
-                self.set_shell_notice("Leave picture-in-picture before going fullscreen.".into());
+                let _ = self.pip.set_fullscreen_requested(true);
+                self.toggle_pip(event_loop);
             } else {
                 // Borderless fullscreen on the current monitor, the same mode the saved
                 // placement restores, so leaving fullscreen returns to the stored window rect.
@@ -1554,8 +1650,12 @@ impl<'session> GlHost<'session> {
             self.egui.request_repaint();
         }
 
-        let target_size = physical_video_size(video_size_points, output.pixels_per_point, &self.gl);
-        if let Err(error) = self.resize_video_target(target_size) {
+        let target_size = physical_video_size(
+            video_size_points,
+            output.pixels_per_point,
+            self.max_texture_size,
+        );
+        if let Err(error) = self.apply_video_target_size(target_size) {
             report_warning(format!("could not resize the video FBO: {error}"));
         }
         let decision = if let Some(target) = self.video_target.as_ref() {
@@ -1569,7 +1669,12 @@ impl<'session> GlHost<'session> {
                 false,
             ) {
                 Ok(fbo) => match self.mpv.render_if_due(fbo) {
-                    Ok(decision) => decision,
+                    Ok(decision) => {
+                        if matches!(decision, FrameDecision::Rendered(_)) {
+                            self.mpv.mark_frame_rendered();
+                        }
+                        decision
+                    }
                     Err(error) => {
                         report_warning(format!("libmpv OpenGL render failed: {error}"));
                         FrameDecision::NoFrame
@@ -1583,6 +1688,61 @@ impl<'session> GlHost<'session> {
         } else {
             FrameDecision::NoFrame
         };
+        let blur_needed = theater
+            && !pip_active
+            && !theater_skeleton_visible(playback_preparing, mpv_loading)
+            && (media_info.is_some()
+                || up_next_visible
+                || (chrome_present && egui::Popup::is_any_open(&self.egui)));
+        if blur_needed {
+            if self.blur_target.is_none()
+                && !self.blur_unavailable
+                && let Some(target) = self.video_target.as_ref()
+            {
+                match blur::VideoBlurTarget::new(Arc::clone(&self.gl), target.size()) {
+                    Ok(mut blur) => {
+                        blur.detach_output_texture();
+                        if let Some(painter) = self.painter.as_mut() {
+                            self.blur_texture_id =
+                                Some(painter.register_native_texture(blur.output_texture()));
+                        }
+                        self.blur_target = Some(blur);
+                        self.blur_dirty = true;
+                    }
+                    Err(error) => {
+                        self.blur_unavailable = true;
+                        report_warning(format!("video backdrop blur unavailable: {error}"));
+                    }
+                }
+            }
+            if (matches!(decision, FrameDecision::Rendered(_)) || self.blur_dirty)
+                && let (Some(target), Some(blur)) =
+                    (self.video_target.as_ref(), self.blur_target.as_mut())
+            {
+                match blur.update(target.texture(), target.size()) {
+                    Ok(()) => self.blur_dirty = false,
+                    Err(error) => {
+                        report_warning(format!("video backdrop blur failed: {error}"));
+                        self.blur_target = None;
+                        if let (Some(painter), Some(id)) =
+                            (self.painter.as_mut(), self.blur_texture_id.take())
+                        {
+                            painter.free_texture(id);
+                        }
+                        self.blur_dirty = false;
+                    }
+                }
+            }
+        } else if !theater && self.blur_target.is_some() {
+            self.blur_target = None;
+            if let (Some(painter), Some(id)) = (self.painter.as_mut(), self.blur_texture_id.take())
+            {
+                painter.free_texture(id);
+            }
+            self.blur_dirty = false;
+        } else if matches!(decision, FrameDecision::Rendered(_)) {
+            self.blur_dirty = true;
+        }
 
         #[cfg(debug_assertions)]
         debug_harness::log_if_changed(
@@ -1757,7 +1917,7 @@ impl<'session> GlHost<'session> {
             return;
         }
         let mode = self.kattri_app.cycle_video_aspect();
-        self.mpv.apply_video_aspect(mode);
+        self.mpv.apply_video_aspect_mode(mode);
     }
 
     /// Ctrl+2: switch between normal and double speed. The current speed comes from mpv's own
@@ -2033,12 +2193,42 @@ impl<'session> GlHost<'session> {
         }
     }
 
+    /// Reallocate the video FBO only once the requested size has settled. A fullscreen toggle
+    /// changes the size on several consecutive frames; applying each one reallocated and cleared
+    /// the texture, which showed up as a flash of black or garbage during the transition.
+    fn apply_video_target_size(&mut self, size: [u32; 2]) -> Result<(), String> {
+        const SETTLE: Duration = Duration::from_millis(150);
+        let current = self.video_target.as_ref().map(VideoTarget::size);
+        if current == Some(size) {
+            self.pending_video_target = None;
+            return Ok(());
+        }
+        let now = Instant::now();
+        match self.pending_video_target {
+            Some((pending, since)) if pending == size && now.duration_since(since) >= SETTLE => {
+                self.pending_video_target = None;
+                self.resize_video_target(size)
+            }
+            _ => {
+                // Keep the previous frame on screen, stretched, until the size settles.
+                self.pending_video_target = Some((size, now));
+                self.egui.request_repaint_after(Duration::from_millis(40));
+                Ok(())
+            }
+        }
+    }
+
     fn resize_video_target(&mut self, size: [u32; 2]) -> Result<(), String> {
         if let Some(current) = self.video_target.as_mut() {
             // Reuse the registered texture and FBO. Allocating a new target per resize and
             // handing the old texture to egui_glow would queue one full-size texture for
             // every frame of a drag until shutdown.
-            return current.resize(&self.gl, size);
+            let changed = current.size() != size;
+            let result = current.resize(&self.gl, size);
+            if changed && result.is_ok() {
+                self.blur_dirty = true;
+            }
+            return result;
         }
         let next = VideoTarget::new(&self.gl, size)?;
         let painter = self
@@ -2047,6 +2237,7 @@ impl<'session> GlHost<'session> {
             .ok_or_else(|| "egui_glow painter has already been destroyed".to_owned())?;
         painter.replace_native_texture(self.video_texture_id, next.texture());
         self.video_target = Some(next);
+        self.blur_dirty = true;
         Ok(())
     }
 
@@ -2081,6 +2272,7 @@ impl<'session> GlHost<'session> {
         if let Some(target) = self.video_target.take() {
             target.destroy_framebuffer(&self.gl);
         }
+        self.blur_target.take();
         if let Some(painter) = self.painter.as_mut() {
             painter.destroy();
         }
@@ -2208,9 +2400,7 @@ impl<'session> GlHost<'session> {
     }
 }
 
-// Idle browsing must not reserve a permanent blank video/diagnostics column.
-/// Everything the on-screen controls need for one frame. The theater view and the Player
-/// details panel draw the same controls from the same state.
+/// Everything the on-screen controls need for one frame of the theater player.
 struct OsdState<'a> {
     position: Duration,
     duration: Option<Duration>,
@@ -2224,8 +2414,6 @@ struct OsdState<'a> {
     secondary_selected: Option<i64>,
     pip_active: bool,
     pip_available: bool,
-    ab_loop_a: Option<Duration>,
-    ab_loop_b: Option<Duration>,
     title: Option<&'a str>,
     subtitle: Option<&'a str>,
     opacity: f32,
@@ -2234,7 +2422,7 @@ struct OsdState<'a> {
     muted: Option<bool>,
     fullscreen: bool,
     skip_settings: Option<kattri_client_core::segments::SkipSettings>,
-    feedback: Option<&'a str>,
+    feedback: Option<&'a mpv_host::ControlsFeedback>,
     audio_tracks: Option<&'a [mpv_host::TrackMenuOption]>,
     subtitle_tracks: Option<&'a [mpv_host::TrackMenuOption]>,
     burn_in_subtitle_tracks: Option<&'a [player_controls::TrackChoice<Option<i32>>]>,
@@ -2257,53 +2445,51 @@ fn up_next_card(
     mpv: &mut MpvHost<'_>,
     kattri_app: &mut KattriApp,
     osd: &OsdState<'_>,
-) {
+    backdrop: Option<blur::BackdropBlur>,
+) -> bool {
     let (Some(duration), Some(playing)) = (osd.duration, mpv.playing_item_id().map(str::to_owned))
     else {
-        return;
+        return false;
     };
     if !up_next_due(osd.position, duration) {
-        return;
+        return false;
     }
     let Some(label) = kattri_app.up_next_label(&playing).map(str::to_owned) else {
-        return;
+        return false;
     };
     let remaining = duration.saturating_sub(osd.position).as_secs();
     egui::Area::new(egui::Id::unique("up_next_card"))
         .order(egui::Order::Foreground)
         .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-28.0, -150.0))
         .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(egui::Color32::from_black_alpha(200))
-                .corner_radius(egui::CornerRadius::same(14))
-                .inner_margin(egui::Margin::same(16))
-                .show(ui, |ui| {
-                    ui.set_max_width(340.0);
-                    ui.label(
-                        egui::RichText::new("Up next")
-                            .size(13.0)
-                            .color(egui::Color32::from_gray(190)),
-                    );
-                    ui.label(
-                        egui::RichText::new(&label)
-                            .size(17.0)
-                            .strong()
-                            .color(egui::Color32::WHITE),
-                    );
-                    ui.label(
-                        egui::RichText::new(format!("Starts in {remaining} s"))
-                            .color(egui::Color32::from_gray(190)),
-                    );
-                    ui.horizontal(|ui| {
-                        if ui.button("Play now").clicked() {
-                            kattri_app.on_episode_next(&playing);
-                        }
-                        if ui.button("Cancel").clicked() {
-                            kattri_app.cancel_up_next(&playing);
-                        }
-                    });
+            blur::show_frosted_glass_frame(ui, backdrop, 1.0, egui::Margin::same(16), |ui| {
+                ui.set_max_width(340.0);
+                ui.label(
+                    egui::RichText::new("Up next")
+                        .size(13.0)
+                        .color(egui::Color32::from_gray(190)),
+                );
+                ui.label(
+                    egui::RichText::new(&label)
+                        .size(17.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+                ui.label(
+                    egui::RichText::new(format!("Starts in {remaining} s"))
+                        .color(egui::Color32::from_gray(190)),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Play now").clicked() {
+                        kattri_app.on_episode_next(&playing);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        kattri_app.cancel_up_next(&playing);
+                    }
                 });
+            });
         });
+    true
 }
 
 /// Draws the playback controls and performs the actions they return.
@@ -2314,11 +2500,16 @@ fn osd_controls(
     osd: &OsdState<'_>,
     pip_toggle_requested: &mut bool,
     fullscreen_toggle_requested: &mut bool,
+    backdrop: Option<blur::BackdropBlur>,
 ) {
     let live_stream_active = mpv.live_stream_active();
-    // Both reads happen before the skipper takes a mutable borrow of the host for the draw.
+    // Reads happen before the skipper takes a mutable borrow of the host for the draw.
     let subtitle_selected = mpv.subtitle_track_selected();
-    let sync_feedback = mpv.sync_feedback().display().0.to_owned();
+    let subtitle_delay_seconds = mpv.subtitle_delay_seconds();
+    let (sync_feedback_text, sync_feedback_tone) = {
+        let (msg, tone) = mpv.sync_feedback().display();
+        (msg.to_owned(), tone)
+    };
     let playing_item_id = mpv.playing_item_id().map(str::to_owned);
     let skip = osd.skip_settings.map(|settings| SkipControls {
         skipper: mpv.segment_skipper_mut(),
@@ -2326,9 +2517,10 @@ fn osd_controls(
     });
     // The popover is built during the draw and the host performs the chosen actions afterwards:
     // the panel is drawn while the skipper still holds the host.
-    let mut sync_marker = None;
-    let mut reset_subtitle_delay = false;
     let mut search_subtitles = false;
+    let mut sync_marker = None;
+    let mut delay_nudge: Option<f64> = None;
+    let mut reset_delay = false;
     // Live TV has no item subtitles to search for.
     let subtitle_search_available =
         kattri_app.can_manage_subtitles() && playing_item_id.is_some() && !live_stream_active;
@@ -2350,8 +2542,6 @@ fn osd_controls(
             secondary_selected: osd.secondary_selected,
             pip_active: osd.pip_active,
             pip_available: osd.pip_available,
-            ab_loop_a: osd.ab_loop_a,
-            ab_loop_b: osd.ab_loop_b,
             volume_percent: osd.volume_percent,
             volume_max_percent: osd.volume_max_percent,
             muted: osd.muted,
@@ -2367,33 +2557,75 @@ fn osd_controls(
         skip,
         |ui| {
             ui.label(
-                egui::RichText::new("Subtitles")
+                egui::RichText::new("Subtitle sync")
                     .size(11.0)
                     .strong()
-                    .color(egui::Color32::from_gray(176)),
+                    .color(player_controls::OSD_MUTED),
             );
             if let Some(feedback) = osd.burn_in_subtitle_feedback.or(osd.track_feedback) {
                 ui.small(feedback);
             }
-            ui.label("Sync subtitles to speech");
-            for (marker, label) in SYNC_MARKER_BUTTONS {
-                if player_controls::sync_marker_button_for(
-                    ui,
-                    marker,
-                    label,
-                    subtitle_selected,
-                    osd.opacity,
-                ) {
-                    sync_marker = Some(marker);
+            let delay_text = subtitle_delay_seconds.map_or_else(
+                || "Delay: --".to_owned(),
+                |secs| format!("Delay: {secs:+.2}s"),
+            );
+            ui.label(
+                egui::RichText::new(delay_text)
+                    .size(12.0)
+                    .color(player_controls::OSD_MUTED),
+            );
+            let sync_color = match sync_feedback_tone {
+                mpv_host::SyncFeedbackTone::Error => egui::Color32::LIGHT_RED,
+                mpv_host::SyncFeedbackTone::Success => egui::Color32::from_rgb(130, 220, 150),
+                mpv_host::SyncFeedbackTone::Guidance | mpv_host::SyncFeedbackTone::Pending => {
+                    player_controls::OSD_MUTED
                 }
-                ui.add_space(4.0);
-            }
-            ui.add_enabled_ui(subtitle_selected, |ui| {
-                if ui.button("Reset subtitle delay").clicked() {
-                    reset_subtitle_delay = true;
+            };
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&sync_feedback_text)
+                        .size(11.5)
+                        .color(sync_color),
+                )
+                .wrap(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                for (marker, label) in [
+                    (CalibrationMarker::VoiceHeard, "Voice heard"),
+                    (CalibrationMarker::TextSeen, "Text seen"),
+                ] {
+                    if player_controls::sync_marker_button_for(
+                        ui,
+                        marker,
+                        label,
+                        subtitle_selected,
+                        osd.opacity,
+                        136.0,
+                    ) {
+                        sync_marker = Some(marker);
+                    }
                 }
             });
-            ui.label(&sync_feedback);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(subtitle_selected, egui::Button::new("-100ms"))
+                    .clicked()
+                {
+                    delay_nudge = Some(-0.1);
+                }
+                if ui
+                    .add_enabled(subtitle_selected, egui::Button::new("+100ms"))
+                    .clicked()
+                {
+                    delay_nudge = Some(0.1);
+                }
+                if ui
+                    .add_enabled(subtitle_selected, egui::Button::new("Reset"))
+                    .clicked()
+                {
+                    reset_delay = true;
+                }
+            });
             if subtitle_search_available
                 && ui
                     .button(jellyfin_egui_client::search_subtitles_label())
@@ -2408,15 +2640,19 @@ fn osd_controls(
                 .as_deref()
                 .and_then(|item_id| kattri_app.trickplay_thumbnail(item_id, time))
         },
+        backdrop,
     );
-    if search_subtitles && let Some(item_id) = playing_item_id.as_deref() {
-        kattri_app.open_subtitle_search(item_id, true);
-    }
     if let Some(marker) = sync_marker {
         mpv.capture_sync_marker(marker);
     }
-    if reset_subtitle_delay {
+    if let Some(delta) = delay_nudge {
+        mpv.nudge_subtitle_delay(delta);
+    }
+    if reset_delay {
         mpv.reset_subtitle_delay();
+    }
+    if search_subtitles && let Some(item_id) = playing_item_id.as_deref() {
+        kattri_app.open_subtitle_search(item_id, true);
     }
     if live_stream_active {
         ui.small("Live TV cannot pause; the Pause button stops the channel.");
@@ -2449,7 +2685,6 @@ fn osd_controls(
             }
             PlayerControlAction::Stop => mpv.stop_playback(),
             PlayerControlAction::SetSpeed(speed) => mpv.set_playback_speed(speed),
-            PlayerControlAction::SelectChapter(index) => mpv.select_chapter(index),
             PlayerControlAction::SelectSecondarySubtitle(track) => {
                 mpv.select_secondary_subtitle(track);
             }
@@ -2474,7 +2709,6 @@ fn osd_controls(
             PlayerControlAction::StepFrame { backward } => {
                 mpv.dispatch_playback_key(mpv_host::PlaybackKeyAction::FrameStep { backward });
             }
-            PlayerControlAction::CycleAbLoop => mpv.cycle_ab_loop(),
             PlayerControlAction::SetVolume(percent) => {
                 mpv.set_volume_percent(percent, osd.volume_max_percent);
             }
@@ -2483,7 +2717,17 @@ fn osd_controls(
             PlayerControlAction::ToggleFullscreen => *fullscreen_toggle_requested = true,
             PlayerControlAction::CycleAspect => {
                 let mode = kattri_app.cycle_video_aspect();
-                mpv.apply_video_aspect(mode);
+                mpv.apply_video_aspect_mode(mode);
+            }
+            PlayerControlAction::SetAspect(mode) => {
+                if kattri_app.video_settings().aspect != mode {
+                    for _ in 0..5 {
+                        if kattri_app.cycle_video_aspect() == mode {
+                            break;
+                        }
+                    }
+                }
+                mpv.apply_video_aspect_mode(mode);
             }
             // Ctrl shortcuts are handled before the OSD is drawn; the speed steps and reset reach
             // the player through apply_player_shortcut, not through the on-screen action loop.
@@ -2494,8 +2738,141 @@ fn osd_controls(
         }
     }
     if let Some(feedback) = osd.feedback {
-        ui.colored_label(egui::Color32::LIGHT_RED, feedback);
+        let color = if feedback.is_error {
+            egui::Color32::LIGHT_RED
+        } else {
+            player_controls::OSD_MUTED
+        };
+        ui.colored_label(color, &feedback.message);
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TheaterEscapeAction {
+    None,
+    ClosePopup,
+    CloseSubtitleSearch,
+    CloseMediaInfo,
+    StopPlayback,
+}
+
+fn theater_escape_action(
+    ctx: &egui::Context,
+    escape_pressed: bool,
+    typing: bool,
+    subtitle_search_open: bool,
+    media_info_open: bool,
+) -> TheaterEscapeAction {
+    if !escape_pressed {
+        return TheaterEscapeAction::None;
+    }
+    if egui::Popup::is_any_open(ctx) {
+        egui::Popup::close_all(ctx);
+        TheaterEscapeAction::ClosePopup
+    } else if subtitle_search_open {
+        TheaterEscapeAction::CloseSubtitleSearch
+    } else if typing {
+        TheaterEscapeAction::None
+    } else if media_info_open {
+        TheaterEscapeAction::CloseMediaInfo
+    } else {
+        TheaterEscapeAction::StopPlayback
+    }
+}
+
+fn playback_shortcuts_enabled(typing: bool, popup_open: bool) -> bool {
+    !typing && !popup_open
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostShortcutAction {
+    ToggleFullscreen,
+    Minimize,
+    ToggleAlwaysOnTop,
+    ToggleTvMode,
+}
+
+fn handle_winit_media_key(
+    host: &mut GlHost,
+    key_event: &winit::event::KeyEvent,
+    playing_item_id: &str,
+) -> bool {
+    use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
+
+    match (&key_event.logical_key, key_event.physical_key) {
+        (Key::Named(NamedKey::MediaPlayPause), _)
+        | (_, PhysicalKey::Code(KeyCode::MediaPlayPause)) => {
+            host.mpv.toggle_paused();
+            true
+        }
+        (Key::Named(NamedKey::MediaStop), _) | (_, PhysicalKey::Code(KeyCode::MediaStop)) => {
+            host.mpv.stop_playback();
+            true
+        }
+        (Key::Named(NamedKey::MediaTrackNext), _)
+        | (_, PhysicalKey::Code(KeyCode::MediaTrackNext)) => {
+            if host.kattri_app.music_queue_current_item_id() == Some(playing_item_id) {
+                host.kattri_app.on_music_next(playing_item_id);
+            } else {
+                host.kattri_app.on_episode_next(playing_item_id);
+            }
+            true
+        }
+        (Key::Named(NamedKey::MediaTrackPrevious), _)
+        | (_, PhysicalKey::Code(KeyCode::MediaTrackPrevious)) => {
+            if host.kattri_app.music_queue_current_item_id() == Some(playing_item_id) {
+                let position = host
+                    .mpv
+                    .controls_snapshot()
+                    .position_seconds
+                    .and_then(duration_from_seconds)
+                    .unwrap_or_default();
+                if host.kattri_app.on_music_previous(playing_item_id, position) {
+                    host.mpv.seek_absolute(Duration::ZERO);
+                }
+            } else {
+                host.kattri_app.on_episode_previous(playing_item_id);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn host_shortcut_action(events: &[egui::Event]) -> Option<HostShortcutAction> {
+    events.iter().find_map(|event| {
+        let egui::Event::Key {
+            key,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        if modifiers.mac_cmd {
+            return None;
+        }
+        match key {
+            egui::Key::F11 if !modifiers.ctrl && !modifiers.shift && !modifiers.alt => {
+                Some(HostShortcutAction::ToggleFullscreen)
+            }
+            egui::Key::Enter if modifiers.alt && !modifiers.ctrl && !modifiers.shift => {
+                Some(HostShortcutAction::ToggleFullscreen)
+            }
+            egui::Key::M if modifiers.ctrl && !modifiers.shift && !modifiers.alt => {
+                Some(HostShortcutAction::Minimize)
+            }
+            egui::Key::A if modifiers.ctrl && modifiers.shift && !modifiers.alt => {
+                Some(HostShortcutAction::ToggleAlwaysOnTop)
+            }
+            egui::Key::W if modifiers.ctrl && modifiers.shift && !modifiers.alt => {
+                Some(HostShortcutAction::ToggleTvMode)
+            }
+            _ => None,
+        }
+    })
 }
 
 /// Keep keyboard focus and open player menus visible beyond the pointer inactivity timer.
@@ -2605,31 +2982,117 @@ fn label_video_surface(response: &egui::Response, title: Option<&str>) {
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, label.clone()));
 }
 
+/// A bare video click toggles once. Overlay controls, an open popup, or the details surface own
+/// their clicks, and the center-play affordance is counted separately so it cannot toggle twice.
+fn video_click_toggles(
+    video_response: &egui::Response,
+    center_play_clicked: bool,
+    popup_open: bool,
+    media_info_open: bool,
+    subtitle_search_open: bool,
+) -> bool {
+    video_response.clicked_by(egui::PointerButton::Primary)
+        && !center_play_clicked
+        && !popup_open
+        && !media_info_open
+        && !subtitle_search_open
+}
+
 /// Whether the bottom status bar has anything to show.
-fn status_bar_visible(
+fn status_bar_visible(media_active: bool, renderer_available: bool, notice_showing: bool) -> bool {
+    media_active || !renderer_available || notice_showing
+}
+
+fn player_surface_active(
     media_active: bool,
-    renderer_available: bool,
-    notice_showing: bool,
-    details_open: bool,
+    playback_preparing: bool,
+    mpv_loading: bool,
+    pip_active: bool,
 ) -> bool {
-    media_active || !renderer_available || notice_showing || details_open
+    let _ = pip_active;
+    media_active || playback_preparing || mpv_loading
 }
 
-fn playback_panel_visible(media_active: bool, details_requested: bool) -> bool {
-    media_active || details_requested
+fn theater_skeleton_visible(playback_preparing: bool, mpv_loading: bool) -> bool {
+    playback_preparing || mpv_loading
 }
 
-fn should_use_theater_view(
-    renderer_available: bool,
-    player_surface_active: bool,
-    details_open: bool,
-    selected_is_video: bool,
-    local_video_track: bool,
-) -> bool {
-    renderer_available
-        && player_surface_active
-        && !details_open
-        && (selected_is_video || local_video_track)
+fn should_use_theater_view(renderer_available: bool, player_surface_active: bool) -> bool {
+    renderer_available && player_surface_active
+}
+
+/// Dim player-bar skeleton shown while stream negotiation is in flight so the theater frame
+/// reads immediately on Play press before libmpv opens the media.
+fn draw_skeleton_bottom_bar(ctx: &egui::Context, stage: egui::Rect, screen: egui::Rect) {
+    egui::Area::new(egui::Id::unique("theater_skeleton_bottom"))
+        .order(egui::Order::Foreground)
+        .anchor(
+            egui::Align2::LEFT_BOTTOM,
+            egui::vec2(
+                stage.left() - screen.left(),
+                stage.bottom() - screen.bottom(),
+            ),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(stage.width());
+            let margin = if stage.width() < 360.0 { 10 } else { 18 };
+            egui::Frame::new()
+                .inner_margin(egui::Margin {
+                    left: margin,
+                    right: margin,
+                    top: 6,
+                    bottom: 14,
+                })
+                .show(ui, |ui| {
+                    let rail_color = egui::Color32::from_white_alpha(26);
+                    let item_color = egui::Color32::from_white_alpha(22);
+                    let rail_width = ui.available_width().max(1.0);
+                    let (rail_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(rail_width, 26.0), egui::Sense::hover());
+                    let track = egui::Rect::from_center_size(
+                        rail_rect.center(),
+                        egui::vec2(rail_rect.width(), 3.0),
+                    );
+                    ui.painter()
+                        .rect_filled(track, egui::CornerRadius::same(2), rail_color);
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                        let (play_rect, _) =
+                            ui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::hover());
+                        ui.painter()
+                            .circle_filled(play_rect.center(), 22.0, item_color);
+                        if stage.width() >= 350.0 {
+                            for _ in 0..2 {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(32.0, 32.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(
+                                    rect,
+                                    egui::CornerRadius::same(8),
+                                    item_color,
+                                );
+                            }
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                            let right_count = if stage.width() >= 470.0 { 6 } else { 4 };
+                            for _ in 0..right_count {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(32.0, 32.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(
+                                    rect,
+                                    egui::CornerRadius::same(8),
+                                    item_color,
+                                );
+                            }
+                        });
+                    });
+                });
+        });
 }
 
 /// The folder for screenshots. An empty setting means the Pictures folder of the user profile.
@@ -2670,8 +3133,7 @@ mod shell_tests {
         assert!(super::player_controls_visible(false, false, true));
     }
     use super::{
-        double_speed_target, one_to_one_window_size, playback_panel_visible, screenshot_directory,
-        status_bar_visible,
+        double_speed_target, one_to_one_window_size, screenshot_directory, status_bar_visible,
     };
     use kattri_client_core::controls::PlaybackSpeed;
 
@@ -2695,19 +3157,10 @@ mod shell_tests {
 
     #[test]
     fn the_status_bar_hides_while_browsing_with_a_working_player() {
-        assert!(!status_bar_visible(false, true, false, false));
-        assert!(status_bar_visible(true, true, false, false));
-        assert!(status_bar_visible(false, false, false, false));
-        assert!(status_bar_visible(false, true, true, false));
-        assert!(status_bar_visible(false, true, false, true));
-    }
-
-    #[test]
-    fn browsing_uses_full_width_until_media_or_details_are_requested() {
-        assert!(!playback_panel_visible(false, false));
-        assert!(playback_panel_visible(false, true));
-        assert!(playback_panel_visible(true, false));
-        assert!(playback_panel_visible(true, true));
+        assert!(!status_bar_visible(false, true, false));
+        assert!(status_bar_visible(true, true, false));
+        assert!(status_bar_visible(false, false, false));
+        assert!(status_bar_visible(false, true, true));
     }
 
     #[test]
@@ -2737,13 +3190,14 @@ impl Drop for GlHost<'_> {
     }
 }
 
-fn physical_video_size(points: egui::Vec2, pixels_per_point: f32, gl: &glow::Context) -> [u32; 2] {
-    let max_size = unsafe { gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE).max(1) as u32 };
-    [points.x, points.y].map(|points| {
-        (points * pixels_per_point)
-            .round()
-            .clamp(1.0, max_size.min(i32::MAX as u32) as f32) as u32
-    })
+fn physical_video_size(
+    points: egui::Vec2,
+    pixels_per_point: f32,
+    max_texture_size: u32,
+) -> [u32; 2] {
+    let max_size = max_texture_size.max(1).min(i32::MAX as u32) as f32;
+    [points.x, points.y]
+        .map(|points| (points * pixels_per_point).round().clamp(1.0, max_size) as u32)
 }
 
 fn nonzero_size(size: PhysicalSize<u32>) -> (NonZeroU32, NonZeroU32) {
@@ -2898,6 +3352,21 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
                 host.window.request_redraw();
             }
             WindowEvent::Moved(_) => host.touch_window_geometry(),
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } => {
+                if key_event.state == winit::event::ElementState::Pressed
+                    && !key_event.repeat
+                    && let Some(playing_item_id) = host.mpv.playing_item_id().map(str::to_owned)
+                {
+                    let handled = handle_winit_media_key(host, &key_event, &playing_item_id);
+                    if handled || event_response.repaint {
+                        host.window.request_redraw();
+                    }
+                } else if event_response.repaint {
+                    host.window.request_redraw();
+                }
+            }
             WindowEvent::Focused(focused) => {
                 // A defocused window must never keep a hidden cursor.
                 host.window_focused = focused;
@@ -3009,6 +3478,17 @@ impl ApplicationHandler<HostEvent> for HostApp<'_> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(host) = self.host.as_mut()
+            && let Some(identity) = host.mpv.take_runtime_identity()
+        {
+            host.kattri_app.set_runtime_about(RuntimeAbout {
+                mpv_version: (!identity.mpv_version.trim().is_empty())
+                    .then(|| identity.mpv_version.clone()),
+                ffmpeg_version: identity.ffmpeg_version.clone(),
+                gpu: identity.gpu.clone(),
+                driver: identity.driver.clone(),
+            });
+        }
         if let Some(host) = self.host.as_mut() {
             host.update_sleep_inhibit();
             host.poll_screenshot_result();
@@ -3306,12 +3786,123 @@ fn should_resume_saved_sign_in(
 #[cfg(test)]
 mod tests {
     use super::{
-        CURSOR_HIDE_AFTER, append_gamepad_navigation_events, cursor_should_hide,
-        duration_from_seconds, has_user_activity, label_video_surface, should_resume_saved_sign_in,
-        should_use_theater_view,
+        CURSOR_HIDE_AFTER, HostShortcutAction, TheaterEscapeAction,
+        append_gamepad_navigation_events, cursor_should_hide, duration_from_seconds,
+        has_user_activity, host_shortcut_action, label_video_surface, playback_shortcuts_enabled,
+        player_surface_active, should_resume_saved_sign_in, should_use_theater_view,
+        theater_escape_action, theater_skeleton_visible, video_click_toggles,
     };
     use egui::{Event, Key, Modifiers};
     use std::time::Duration;
+
+    #[test]
+    fn theater_escape_closes_dialog_popup_then_dialog_before_player_popup() {
+        let context = egui::Context::default();
+        egui::Popup::open_id(&context, egui::Id::unique("subtitle-combobox"));
+
+        assert_eq!(
+            theater_escape_action(&context, true, true, true, true),
+            TheaterEscapeAction::ClosePopup
+        );
+        assert!(!egui::Popup::is_any_open(&context));
+        assert_eq!(
+            theater_escape_action(&context, true, true, true, true),
+            TheaterEscapeAction::CloseSubtitleSearch
+        );
+        egui::Popup::open_id(&context, egui::Id::unique("player-settings-popup"));
+        assert_eq!(
+            theater_escape_action(&context, true, false, false, true),
+            TheaterEscapeAction::ClosePopup
+        );
+        assert!(!egui::Popup::is_any_open(&context));
+        assert_eq!(
+            theater_escape_action(&context, true, false, false, true),
+            TheaterEscapeAction::CloseMediaInfo
+        );
+        assert_eq!(
+            theater_escape_action(&context, true, false, false, false),
+            TheaterEscapeAction::StopPlayback
+        );
+    }
+
+    #[test]
+    fn theater_escape_does_not_close_popup_while_typing_or_without_escape() {
+        let context = egui::Context::default();
+        egui::Popup::open_id(&context, egui::Id::unique("player-settings-popup"));
+
+        assert_eq!(
+            theater_escape_action(&context, false, false, false, false),
+            TheaterEscapeAction::None
+        );
+        assert_eq!(
+            theater_escape_action(&context, true, true, true, false),
+            TheaterEscapeAction::ClosePopup
+        );
+        assert!(!egui::Popup::is_any_open(&context));
+        assert_eq!(
+            theater_escape_action(&context, true, true, false, false),
+            TheaterEscapeAction::None
+        );
+    }
+
+    #[test]
+    fn theater_escape_does_not_interrupt_typing_outside_subtitle_dialog() {
+        let context = egui::Context::default();
+        assert_eq!(
+            theater_escape_action(&context, true, true, false, true),
+            TheaterEscapeAction::None
+        );
+    }
+
+    #[test]
+    fn playback_shortcuts_are_gated_by_typing_and_egui_popups() {
+        assert!(playback_shortcuts_enabled(false, false));
+        assert!(!playback_shortcuts_enabled(true, false));
+        assert!(!playback_shortcuts_enabled(false, true));
+        assert!(!playback_shortcuts_enabled(true, true));
+    }
+
+    #[test]
+    fn host_shortcuts_match_fullscreen_minimize_and_always_on_top() {
+        let key = |key, pressed, repeat, modifiers| Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat,
+            modifiers,
+        };
+        assert_eq!(
+            host_shortcut_action(&[key(Key::F11, true, false, egui::Modifiers::NONE)]),
+            Some(HostShortcutAction::ToggleFullscreen)
+        );
+        assert_eq!(
+            host_shortcut_action(&[key(Key::Enter, true, false, egui::Modifiers::ALT)]),
+            Some(HostShortcutAction::ToggleFullscreen)
+        );
+        assert_eq!(
+            host_shortcut_action(&[key(Key::M, true, false, egui::Modifiers::CTRL)]),
+            Some(HostShortcutAction::Minimize)
+        );
+        assert_eq!(
+            host_shortcut_action(&[key(
+                Key::A,
+                true,
+                false,
+                egui::Modifiers::CTRL | egui::Modifiers::SHIFT
+            )]),
+            Some(HostShortcutAction::ToggleAlwaysOnTop)
+        );
+        assert_eq!(
+            host_shortcut_action(&[key(Key::A, true, false, egui::Modifiers::CTRL)]),
+            None,
+            "Ctrl+A belongs to aspect cycle, not always-on-top"
+        );
+        assert_eq!(
+            host_shortcut_action(&[key(Key::F11, true, true, egui::Modifiers::NONE)]),
+            None,
+            "repeat"
+        );
+    }
 
     #[test]
     fn gamepad_navigation_uses_the_egui_focus_path() {
@@ -3378,7 +3969,7 @@ mod tests {
         let mut output = context.run_ui(egui::RawInput::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 let (_, response) =
-                    ui.allocate_exact_size(egui::vec2(320.0, 180.0), egui::Sense::hover());
+                    ui.allocate_exact_size(egui::vec2(320.0, 180.0), egui::Sense::CLICK);
                 label_video_surface(&response, Some("Sample film"));
             });
         });
@@ -3403,6 +3994,430 @@ mod tests {
     }
 
     #[test]
+    fn media_info_hover_opens_the_sanitized_details_surface() {
+        use super::media_info_panel::{self, MediaInfoState, RuntimeDiagnostics};
+        use super::player_controls::{TopChromeAction, TopChromeView, draw_top_chrome_outcome};
+        use kattri_client_core::media_info::{MediaInfo, MediaInput};
+
+        let context = egui::Context::default();
+        let chrome = TopChromeView {
+            title: Some("Sample film"),
+            subtitle: None,
+            opacity: 1.0,
+            media_info_open: false,
+            show_media_info: true,
+        };
+        let mut state = MediaInfoState::default();
+        let mut trigger = None;
+        let mut init_output = context.run_ui(egui::RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let top = draw_top_chrome_outcome(ui, chrome);
+                assert_eq!(top.action, TopChromeAction::None);
+                trigger = Some(top.media_info_rect);
+            });
+        });
+        init_output.textures_delta.clear();
+        let trigger_pos = trigger.expect("Media info trigger").center();
+
+        let info = MediaInfo::from_input(&MediaInput::default());
+        let runtime = RuntimeDiagnostics {
+            status: "Synthetic runtime status",
+            capability_warning: Some("Synthetic capability warning"),
+            report_feedback: None,
+        };
+
+        // Hovering the Media info trigger opens the panel and stays open across multiple frames.
+        let mut panel_rect = None;
+        for _ in 0..3 {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    events: vec![Event::PointerMoved(trigger_pos)],
+                    ..egui::RawInput::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        let open_chrome = TopChromeView {
+                            media_info_open: state.is_open(),
+                            ..chrome
+                        };
+                        let top = draw_top_chrome_outcome(ui, open_chrome);
+                        if top.action == TopChromeAction::MediaInfo {
+                            state.toggle();
+                        }
+                        let mut panel_hot = false;
+                        if state.is_open() {
+                            let outcome = media_info_panel::show(ui.ctx(), &info, runtime, None);
+                            panel_hot = outcome.hovered_or_focused;
+                            panel_rect = Some(outcome.rect);
+                        }
+                        state.set_hover(top.media_info_hot || panel_hot);
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            assert!(
+                state.is_open(),
+                "hover keeps media info open without flickering"
+            );
+        }
+
+        // Moving the pointer into the rendered Media info panel keeps it open across frames.
+        let panel_center = panel_rect.expect("media info panel rect").center();
+        for _ in 0..2 {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    events: vec![Event::PointerMoved(panel_center)],
+                    ..egui::RawInput::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        let open_chrome = TopChromeView {
+                            media_info_open: state.is_open(),
+                            ..chrome
+                        };
+                        let top = draw_top_chrome_outcome(ui, open_chrome);
+                        let outcome = media_info_panel::show(ui.ctx(), &info, runtime, None);
+                        assert!(outcome.hovered_or_focused);
+                        state.set_hover(top.media_info_hot || outcome.hovered_or_focused);
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            let painted = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for expected in [
+                "Media info",
+                "Copy diagnostics",
+                "Close",
+                "Container",
+                "Unavailable",
+                "Synthetic runtime status",
+                "Synthetic capability warning",
+            ] {
+                assert!(
+                    painted.iter().any(|text| text.contains(expected)),
+                    "hover-opened details show {expected:?}"
+                );
+            }
+            assert!(
+                state.is_open(),
+                "panel stays open while pointer is inside panel"
+            );
+        }
+
+        // Moving pointer away when unpinned closes the panel cleanly.
+        let mut output = context.run_ui(
+            egui::RawInput {
+                events: vec![Event::PointerMoved(egui::pos2(8.0, 8.0))],
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let open_chrome = TopChromeView {
+                        media_info_open: state.is_open(),
+                        ..chrome
+                    };
+                    let top = draw_top_chrome_outcome(ui, open_chrome);
+                    let outcome = media_info_panel::show(ui.ctx(), &info, runtime, None);
+                    state.set_hover(top.media_info_hot || outcome.hovered_or_focused);
+                });
+            },
+        );
+        output.textures_delta.clear();
+        assert!(
+            !state.is_open(),
+            "moving pointer away unpinned closes panel"
+        );
+    }
+
+    fn click_events(position: egui::Pos2) -> Vec<Event> {
+        vec![
+            Event::PointerMoved(position),
+            Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+            Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            },
+        ]
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum HitOverlay {
+        None,
+        CenterPlay,
+        Toolbar,
+        Seek,
+    }
+
+    struct HitFrame {
+        raw_video_clicked: bool,
+        video_clicked: bool,
+        overlay_clicked: bool,
+        seek_dragged: bool,
+        popup_click_blocked: bool,
+        media_info_click_blocked: bool,
+        subtitle_search_click_blocked: bool,
+        center_play_click_blocked: bool,
+    }
+
+    fn hit_frame(
+        context: &egui::Context,
+        mut input: egui::RawInput,
+        overlay: HitOverlay,
+    ) -> HitFrame {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 360.0));
+        input.screen_rect.get_or_insert(screen);
+        let mut result = HitFrame {
+            raw_video_clicked: false,
+            video_clicked: false,
+            overlay_clicked: false,
+            seek_dragged: false,
+            popup_click_blocked: false,
+            media_info_click_blocked: false,
+            subtitle_search_click_blocked: false,
+            center_play_click_blocked: false,
+        };
+        let mut output = context.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let video = ui.interact(
+                    screen,
+                    ui.make_persistent_id("test-video-surface"),
+                    egui::Sense::CLICK,
+                );
+                let center_play_clicked = if overlay == HitOverlay::CenterPlay {
+                    egui::Area::new(egui::Id::unique("test-center-play"))
+                        .order(egui::Order::Foreground)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                        .show(ui.ctx(), |ui| {
+                            let (_, response) = ui
+                                .allocate_exact_size(egui::vec2(84.0, 84.0), egui::Sense::click());
+                            response.clicked()
+                        })
+                        .inner
+                } else {
+                    false
+                };
+                let overlay_clicked = match overlay {
+                    HitOverlay::Toolbar => {
+                        egui::Area::new(egui::Id::unique("test-toolbar"))
+                            .order(egui::Order::Foreground)
+                            .anchor(egui::Align2::LEFT_TOP, egui::Vec2::ZERO)
+                            .show(ui.ctx(), |ui| ui.button("Toolbar").clicked())
+                            .inner
+                    }
+                    HitOverlay::Seek => {
+                        egui::Area::new(egui::Id::unique("test-seek"))
+                            .order(egui::Order::Foreground)
+                            .anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::ZERO)
+                            .show(ui.ctx(), |ui| {
+                                let (_, response) = ui.allocate_exact_size(
+                                    egui::vec2(640.0, 26.0),
+                                    egui::Sense::click_and_drag(),
+                                );
+                                result.seek_dragged = response.dragged();
+                                response.clicked()
+                            })
+                            .inner
+                    }
+                    HitOverlay::CenterPlay => center_play_clicked,
+                    HitOverlay::None => false,
+                };
+                result.raw_video_clicked = video.clicked_by(egui::PointerButton::Primary);
+                result.video_clicked = video_click_toggles(
+                    &video,
+                    center_play_clicked,
+                    egui::Popup::is_any_open(ui.ctx()),
+                    false,
+                    false,
+                );
+                result.popup_click_blocked =
+                    !video_click_toggles(&video, false, true, false, false);
+                result.media_info_click_blocked =
+                    !video_click_toggles(&video, false, false, true, false);
+                result.subtitle_search_click_blocked =
+                    !video_click_toggles(&video, false, false, false, true);
+                result.center_play_click_blocked =
+                    !video_click_toggles(&video, true, false, false, false);
+                result.overlay_clicked = overlay_clicked;
+            });
+        });
+        output.textures_delta.clear();
+        result
+    }
+
+    #[test]
+    fn one_video_click_toggles_once_and_overlay_clicks_do_not_propagate() {
+        let center = egui::pos2(320.0, 180.0);
+        let context = egui::Context::default();
+        hit_frame(&context, egui::RawInput::default(), HitOverlay::None);
+        let clicked = hit_frame(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 360.0),
+                )),
+                events: click_events(center),
+                ..egui::RawInput::default()
+            },
+            HitOverlay::None,
+        );
+        assert!(clicked.raw_video_clicked);
+        assert!(clicked.video_clicked);
+        assert_eq!(usize::from(clicked.video_clicked), 1);
+
+        for overlay in [HitOverlay::CenterPlay, HitOverlay::Toolbar] {
+            let context = egui::Context::default();
+            for _ in 0..2 {
+                hit_frame(
+                    &context,
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(640.0, 360.0),
+                        )),
+                        ..egui::RawInput::default()
+                    },
+                    overlay,
+                );
+            }
+            let position = if overlay == HitOverlay::CenterPlay {
+                center
+            } else {
+                egui::pos2(40.0, 20.0)
+            };
+            let mut events = vec![Event::PointerMoved(position)];
+            events.extend(click_events(position));
+            let frame = hit_frame(
+                &context,
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(640.0, 360.0),
+                    )),
+                    events,
+                    ..egui::RawInput::default()
+                },
+                overlay,
+            );
+            assert!(frame.overlay_clicked, "{overlay:?} owns the click");
+            assert!(!frame.video_clicked, "{overlay:?} must not toggle playback");
+        }
+    }
+
+    #[test]
+    fn seek_drag_and_popup_dismiss_click_do_not_toggle_playback() {
+        let context = egui::Context::default();
+        for _ in 0..2 {
+            hit_frame(
+                &context,
+                egui::RawInput {
+                    ..egui::RawInput::default()
+                },
+                HitOverlay::Seek,
+            );
+        }
+        hit_frame(
+            &context,
+            egui::RawInput {
+                events: vec![
+                    Event::PointerMoved(egui::pos2(320.0, 347.0)),
+                    Event::PointerButton {
+                        pos: egui::pos2(320.0, 347.0),
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+                ..egui::RawInput::default()
+            },
+            HitOverlay::Seek,
+        );
+        let dragged = hit_frame(
+            &context,
+            egui::RawInput {
+                events: vec![Event::PointerMoved(egui::pos2(420.0, 347.0))],
+                ..egui::RawInput::default()
+            },
+            HitOverlay::Seek,
+        );
+        assert!(dragged.seek_dragged);
+        assert!(!dragged.video_clicked);
+        hit_frame(
+            &context,
+            egui::RawInput {
+                events: vec![Event::PointerButton {
+                    pos: egui::pos2(420.0, 347.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                }],
+                ..egui::RawInput::default()
+            },
+            HitOverlay::Seek,
+        );
+
+        let context = egui::Context::default();
+        hit_frame(&context, egui::RawInput::default(), HitOverlay::None);
+        let popup_id = egui::Id::unique("test-player-popup");
+        egui::Popup::open_id(&context, popup_id);
+        let dismissed = hit_frame(
+            &context,
+            egui::RawInput {
+                events: click_events(egui::pos2(320.0, 180.0)),
+                ..egui::RawInput::default()
+            },
+            HitOverlay::None,
+        );
+        assert!(
+            dismissed.raw_video_clicked,
+            "the outside click reaches the video"
+        );
+        assert!(
+            dismissed.popup_click_blocked,
+            "the open-popup guard blocks playback"
+        );
+        assert!(!dismissed.video_clicked);
+    }
+
+    #[test]
+    fn popup_and_media_info_guards_suppress_a_raw_video_click() {
+        let context = egui::Context::default();
+        hit_frame(&context, egui::RawInput::default(), HitOverlay::None);
+        let raw = hit_frame(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 360.0),
+                )),
+                events: click_events(egui::pos2(320.0, 180.0)),
+                ..egui::RawInput::default()
+            },
+            HitOverlay::None,
+        );
+        assert!(raw.raw_video_clicked);
+        assert!(raw.video_clicked);
+        assert!(raw.popup_click_blocked);
+        assert!(raw.media_info_click_blocked);
+        assert!(raw.subtitle_search_click_blocked);
+        assert!(raw.center_play_click_blocked);
+    }
+
+    #[test]
     fn local_media_and_deep_link_launches_skip_saved_server_resume() {
         let local_file = Ok(Some("synthetic-video.mp4".to_owned()));
         let invalid_file = Err("local media is missing".to_owned());
@@ -3415,12 +4430,42 @@ mod tests {
     }
 
     #[test]
-    fn local_video_without_a_server_item_uses_the_theater_player_surface() {
-        assert!(should_use_theater_view(true, true, false, false, true));
-        assert!(!should_use_theater_view(true, true, false, false, false));
-        assert!(should_use_theater_view(true, true, false, true, false));
-        assert!(!should_use_theater_view(false, true, false, false, true));
-        assert!(!should_use_theater_view(true, true, true, false, true));
+    fn active_media_uses_the_theater_player_surface() {
+        assert!(should_use_theater_view(true, true));
+        assert!(!should_use_theater_view(true, false));
+        assert!(!should_use_theater_view(false, true));
+    }
+
+    #[test]
+    fn playback_preparation_activates_skeleton_theater_until_media_or_pip_takes_over() {
+        let surface = player_surface_active(false, true, false, false);
+        assert!(should_use_theater_view(true, surface));
+        assert!(!should_use_theater_view(false, surface));
+        assert!(theater_skeleton_visible(true, false));
+
+        // While libmpv is loading (StartFile -> FileLoaded -> first frame), theater and skeleton stay active.
+        assert!(should_use_theater_view(
+            true,
+            player_surface_active(true, false, true, false)
+        ));
+        assert!(theater_skeleton_visible(false, true));
+
+        // Once libmpv finishes loading and renders the first frame, the skeleton gives way to the live player.
+        assert!(should_use_theater_view(
+            true,
+            player_surface_active(true, false, false, false)
+        ));
+        assert!(!theater_skeleton_visible(false, false));
+
+        // PiP keeps the theater surface active so video continues rendering inside the PiP window.
+        assert!(should_use_theater_view(
+            true,
+            player_surface_active(true, false, false, true)
+        ));
+        assert!(should_use_theater_view(
+            true,
+            player_surface_active(false, true, false, true)
+        ));
     }
 
     #[test]

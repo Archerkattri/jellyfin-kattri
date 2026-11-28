@@ -278,6 +278,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
 
       - name: Download artifacts from the triggering build
@@ -293,44 +294,70 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p smoke-logs "$RUNNER_TEMP/dmg" "$RUNNER_TEMP/Applications"
+          trap 'status=$?; echo "FAIL: macOS smoke command failed (exit=$status line=${BASH_LINENO[0]}): ${BASH_COMMAND}" | tee -a smoke-logs/result.txt >&2; exit "$status"' ERR
           DMG="$(find artifacts -name '*.dmg' -print -quit)"
-          if [[ -z "$DMG" ]]; then echo 'No DMG was downloaded.' >&2; exit 1; fi
-          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$RUNNER_TEMP/dmg" | tee smoke-logs/mount.txt
+          if [[ -z "$DMG" ]]; then echo 'FAIL: no DMG artifact was downloaded from the triggering macOS release run.' | tee smoke-logs/result.txt >&2; exit 1; fi
+          echo "DMG: $DMG" | tee smoke-logs/artifact.txt
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$RUNNER_TEMP/dmg" 2>&1 | tee smoke-logs/mount.txt
           cleanup() { hdiutil detach "$RUNNER_TEMP/dmg" || true; }
           trap cleanup EXIT
-          cp -R "$RUNNER_TEMP/dmg/Jellyfin Kattri.app" "$RUNNER_TEMP/Applications/"
+          APP_SOURCE="$RUNNER_TEMP/dmg/Jellyfin Kattri.app"
+          if [[ ! -d "$APP_SOURCE" ]]; then echo "FAIL: expected app bundle missing from mounted DMG: $APP_SOURCE" | tee smoke-logs/result.txt >&2; exit 1; fi
+          cp -R "$APP_SOURCE" "$RUNNER_TEMP/Applications/"
           APP="$RUNNER_TEMP/Applications/Jellyfin Kattri.app"
-          test -s "$APP/Contents/Resources/LICENSE"
-          test -s "$APP/Contents/Resources/libmpv-NOTICE.txt"
+          require_payload() {
+            local path="$1" description="$2"
+            if [[ ! -s "$path" ]]; then
+              echo "FAIL: $description is missing or empty: $path" | tee -a smoke-logs/result.txt >&2
+              exit 1
+            fi
+            echo "PASS: $description: $path" | tee -a smoke-logs/payload-checks.txt
+          }
+          require_payload "$APP/Contents/Resources/LICENSE" 'project license payload'
+          require_payload "$APP/Contents/Resources/libmpv-NOTICE.txt" 'libmpv notice payload'
+          require_payload "$APP/Contents/Frameworks/libmpv.2.dylib" 'bundled libmpv dylib'
+          require_payload "$APP/Contents/MacOS/jellyfin-kattri" 'application executable'
           MPV_LICENSE_DIR="$APP/Contents/Resources/licenses/libmpv"
-          for file in BUILD-INFO.txt LICENSE; do
-            test -s "$MPV_LICENSE_DIR/$file"
-          done
-          for file in fribidi.LGPL ffmpeg.LGPL harfbuzz.MIT dav1d.BSD-2-Clause \
+          # These files are the actual pinned macOS libmpv archive payload. That archive
+          # does not contain a generic LICENSE file; asserting one here rejected the valid
+          # v1.0.1 bundle before codesign verification or launch.
+          for file in BUILD-INFO.txt fribidi.LGPL ffmpeg.LGPL harfbuzz.MIT dav1d.BSD-2-Clause \
             libass.ISC libplacebo.LGPL mpv.LGPL freetype.FTL; do
-            test -s "$MPV_LICENSE_DIR/$file"
+            require_payload "$MPV_LICENSE_DIR/$file" "libmpv license/build evidence ($file)"
           done
           codesign --verify --deep --strict "$APP" 2>&1 | tee smoke-logs/codesign.txt
           codesign -dv --verbose=4 "$APP" 2>&1 | tee -a smoke-logs/codesign.txt
-          open -a "$APP"
+          echo 'Starting mounted DMG app with Launch Services.' | tee smoke-logs/startup.txt
+          open -a "$APP" 2>&1 | tee -a smoke-logs/startup.txt
           APP_PID=""
           for _ in $(seq 1 60); do
             APP_PID="$(pgrep -f '^/.*/Jellyfin Kattri.app/Contents/MacOS/jellyfin-kattri$' | head -n 1 || true)"
             [[ -n "$APP_PID" ]] && break
             sleep 1
           done
-          if [[ -z "$APP_PID" ]]; then echo 'Application process did not start.' >&2; exit 1; fi
+          if [[ -z "$APP_PID" ]]; then
+            echo 'FAIL: app process was not observed within 60s after open -a; this is a launch/startup failure, not evidence of a crash. See startup.txt and macOS diagnostic attachments.' | tee -a smoke-logs/result.txt >&2
+            log show --last 3m --style compact --predicate 'process == "jellyfin-kattri"' > smoke-logs/unified-log.txt 2>&1 || true
+            exit 1
+          fi
+          echo "Observed app PID: $APP_PID" | tee -a smoke-logs/startup.txt
           sleep 10
-          kill -0 "$APP_PID"
-          osascript -e 'tell application "Jellyfin Kattri" to quit'
+          if ! kill -0 "$APP_PID" 2>/dev/null; then
+            echo "FAIL: app PID $APP_PID exited during the 10s startup observation; exit details are not inferred from process disappearance." | tee -a smoke-logs/result.txt >&2
+            log show --last 3m --style compact --predicate 'process == "jellyfin-kattri"' > smoke-logs/unified-log.txt 2>&1 || true
+            exit 1
+          fi
+          echo "App PID $APP_PID remained alive for 10s after launch." | tee -a smoke-logs/startup.txt
+          osascript -e 'tell application "Jellyfin Kattri" to quit' 2>&1 | tee -a smoke-logs/startup.txt
           for _ in $(seq 1 15); do
             if ! kill -0 "$APP_PID" 2>/dev/null; then
-              echo 'PASS: DMG app launched and quit normally.' | tee smoke-logs/result.txt
+              echo 'PASS: DMG app process started and quit after the normal AppleScript request (no playback/rendering claim).' | tee smoke-logs/result.txt
               exit 0
             fi
             sleep 1
           done
-          echo 'Application did not quit normally.' >&2
+          echo "FAIL: app PID $APP_PID remained alive 15s after the normal quit request." | tee -a smoke-logs/result.txt >&2
+          log show --last 3m --style compact --predicate 'process == "jellyfin-kattri"' > smoke-logs/unified-log.txt 2>&1 || true
           exit 1
 
       - name: Upload macOS startup logs
@@ -440,7 +467,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libfuse2 xvfb openbox wmctrl xdotool x11-utils libgl1-mesa-dri
+          sudo apt-get install -y libfuse2 xvfb openbox wmctrl xdotool x11-utils libgl1-mesa-dri libegl1
           chmod +x ./artifacts/kattri-*-linux-x64.AppImage
           APPIMAGE="$(find artifacts -name 'kattri-*-linux-x64.AppImage' -print -quit)"
           if [[ -z "$APPIMAGE" ]]; then echo 'No AppImage was downloaded.' >&2; exit 1; fi
@@ -504,18 +531,24 @@ jobs:
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user --noninteractive --bundle ./artifacts/kattri-*-linux-x64.flatpak
           flatpak run --command=sh org.kattri.JellyfinKattri -c '
+            set -eu
             test -s /app/share/licenses/org.kattri.JellyfinKattri/LICENSE
             test -s /app/share/licenses/libmpv/BUILD-INFO.txt
             for file in /app/share/licenses/libmpv/LICENSE.*; do test -s "$file"; done
             test -s /app/share/licenses/libass/COPYING
             test -s /app/share/licenses/uchardet/COPYING
+            test -s /app/lib/libjpeg.so.8
+            test -s /app/share/licenses/libjpeg-turbo/LICENSE.md
+            test -s /app/share/licenses/libjpeg-turbo/README.ijg || exit 1
+            deps=$(ldd /app/lib/libmpv.so.2) || exit 1
+            printf "%s\n" "$deps" | grep -Eq "libjpeg\.so\.8 => /app/lib/libjpeg\.so\.8[[:space:]]" || exit 1
+            if printf "%s\n" "$deps" | grep -q "not found"; then exit 1; fi
           '
       - name: Require a real application window and normal close
         run: |
           set -euo pipefail
           mkdir -p smoke-logs
-          KATTRI_SMOKE_EXPECT_LIBMPV_PATH='/app/lib/libmpv.so.2' \
-          KATTRI_SMOKE_TRACE_LOADER=0 \
+          KATTRI_SMOKE_EXPECT_SANDBOX_LIB_PATH='/app/lib/libmpv.so.2' \
           KATTRI_SMOKE_LOG="$PWD/smoke-logs/application.txt" \
             xvfb-run -a -s '-screen 0 1280x720x24' \
             packaging/linux/smoke-launch.sh flatpak run --env=LD_DEBUG=libs org.kattri.JellyfinKattri | tee smoke-logs/window.txt

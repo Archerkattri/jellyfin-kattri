@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use egui::{Align2, Color32, FontId, Rect, Vec2, load::SizedTexture};
+use kattri_client_core::focus::NavAction;
 use kattri_i18n::ids;
 
 use super::row::cover_uv;
@@ -56,6 +57,23 @@ pub(crate) fn event_resets_idle(event: &egui::Event) -> bool {
 /// True when this frame carried keyboard, pointer or focus activity.
 pub(crate) fn input_seen(ctx: &egui::Context) -> bool {
     ctx.input(|input| input.pointer.any_click() || input.events.iter().any(event_resets_idle))
+}
+
+/// Consume wake-causing key and pointer events so the same input cannot activate the obscured UI.
+pub(crate) fn consume_wake_input(ctx: &egui::Context) {
+    ctx.input_mut(|input| {
+        input.events.retain(|event| !event_resets_idle(event));
+    });
+}
+
+/// Consume gamepad actions only when they dismissed an active screensaver.
+pub(crate) fn consume_gamepad_wake_actions(
+    actions: &mut Vec<NavAction>,
+    screensaver_was_active: bool,
+) {
+    if screensaver_was_active {
+        actions.clear();
+    }
 }
 
 /// The idle clock and whether the overlay is visible.
@@ -136,8 +154,8 @@ impl Screensaver {
     }
 }
 
-/// Paint the overlay on the topmost layer. It draws only; it never allocates an interactive
-/// widget, so input continues to reach the screen underneath and dismissal is never trapped.
+/// Remove the keyboard and pointer event that dismissed an active screensaver. The state update
+/// runs before UI drawing, so these events must not also activate a control underneath.
 pub(crate) fn paint(
     ctx: &egui::Context,
     texture: Option<SizedTexture>,
@@ -268,6 +286,48 @@ mod tests {
         assert!(!screensaver.active());
         // When playback ends, a still-idle viewer sees the overlay again.
         assert!(screensaver.update(Duration::from_secs(60), false, CONFIGURED, false));
+    }
+
+    #[test]
+    fn gamepad_actions_are_consumed_only_when_they_wake_the_screensaver() {
+        use NavAction::Select;
+
+        let mut wake_actions = vec![Select];
+        consume_gamepad_wake_actions(&mut wake_actions, true);
+        assert!(wake_actions.is_empty());
+
+        let mut ordinary_actions = vec![Select];
+        consume_gamepad_wake_actions(&mut ordinary_actions, false);
+        assert_eq!(ordinary_actions, [Select]);
+    }
+
+    #[test]
+    fn wake_input_is_consumed_before_underlying_widgets_run() {
+        use egui::{Event, Key, Modifiers, Pos2, RawInput, Rect, Vec2, pos2};
+        let context = egui::Context::default();
+        let frame = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            events: vec![
+                Event::Key {
+                    key: Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                },
+                Event::PointerMoved(pos2(12.0, 24.0)),
+                Event::PointerGone,
+            ],
+            ..Default::default()
+        };
+        let mut output = context.run_ui(frame, |ctx| {
+            assert!(input_seen(ctx));
+            consume_wake_input(ctx);
+            ctx.input(|input| {
+                assert_eq!(input.events, [Event::PointerGone]);
+            });
+        });
+        output.textures_delta.clear();
     }
 
     #[test]

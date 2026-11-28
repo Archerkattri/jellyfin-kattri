@@ -228,6 +228,7 @@ fn folder_icon(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32
 
 /// How long the slideshow shows each photo once it has loaded.
 const SLIDESHOW_INTERVAL_SECS: f64 = 5.0;
+const SLIDESHOW_STATE_ID: &str = "kattri-photo-slideshow";
 
 /// Slideshow state kept in egui memory: running, and when the shown photo appeared.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -242,11 +243,22 @@ fn slideshow_due(shown_at: f64, now: f64) -> bool {
     now - shown_at >= SLIDESHOW_INTERVAL_SECS
 }
 
+/// Stop only the slideshow state owned by this photo viewer.
+pub(crate) fn stop_slideshow(ctx: &egui::Context) {
+    let id = egui::Id::NULL.with(SLIDESHOW_STATE_ID);
+    ctx.data_mut(|data| {
+        if let Some(mut slideshow) = data.get_temp::<Slideshow>(id) {
+            slideshow.running = false;
+            data.insert_temp(id, slideshow);
+        }
+    });
+}
+
 fn draw_full_size(ui: &mut Ui, view: &PhotosView<'_>, photo_id: &str) -> Option<PhotosAction> {
     let current_index = view.items.iter().position(|item| item.id == photo_id)?;
     let current = &view.items[current_index];
     ui.label(&current.name);
-    let slideshow_id = egui::Id::unique("kattri-photo-slideshow");
+    let slideshow_id = egui::Id::NULL.with(SLIDESHOW_STATE_ID);
     let now = ui.input(|input| input.time);
     let loaded = view.full_size_images.contains_key(photo_id);
     let mut slideshow: Slideshow = ui
@@ -425,8 +437,9 @@ fn item_action(item: &BaseItemDto) -> PhotosAction {
 #[cfg(test)]
 mod tests {
     use super::{
-        CARD_HEIGHT, MAX_COLUMNS, MAX_PAGE_ITEMS, PhotosAction, PhotosView, adjacent_photo_action,
-        draw, grid_columns, ids, item_action, normalized_page_size, page_request, ui_text_args,
+        CARD_HEIGHT, MAX_COLUMNS, MAX_PAGE_ITEMS, PhotosAction, PhotosView, SLIDESHOW_STATE_ID,
+        Slideshow, adjacent_photo_action, draw, grid_columns, ids, item_action,
+        normalized_page_size, page_request, stop_slideshow, ui_text_args,
     };
     use egui::{Context, RawInput};
     use jellyfin_api::BaseItemDto;
@@ -453,6 +466,102 @@ mod tests {
             let _ = draw(ui, view);
         });
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn leaving_photo_view_stops_the_running_slideshow_without_erasing_its_state() {
+        let context = Context::default();
+        let id = egui::Id::NULL.with(SLIDESHOW_STATE_ID);
+        context.data_mut(|data| {
+            data.insert_temp(
+                id,
+                Slideshow {
+                    running: true,
+                    photo_id: "photo-1".to_owned(),
+                    shown_at: 12.0,
+                },
+            );
+        });
+
+        stop_slideshow(&context);
+
+        let stopped = context.data(|data| data.get_temp::<Slideshow>(id).unwrap());
+        assert!(!stopped.running);
+        assert_eq!(stopped.photo_id, "photo-1");
+        assert_eq!(stopped.shown_at, 12.0);
+    }
+
+    #[test]
+    fn a_stopped_slideshow_does_not_advance_even_when_the_interval_elapsed() {
+        let context = Context::default();
+        let texture = context.load_texture(
+            "photo-1",
+            egui::ColorImage::from_rgba_unmultiplied([1, 1], &[255, 255, 255, 255]),
+            egui::TextureOptions::LINEAR,
+        );
+        let id = egui::Id::NULL.with(SLIDESHOW_STATE_ID);
+        let stop = |running: bool| {
+            context.data_mut(|data| {
+                data.insert_temp(
+                    id,
+                    Slideshow {
+                        running,
+                        photo_id: "photo-1".to_owned(),
+                        shown_at: 10.0,
+                    },
+                )
+            });
+        };
+        let items = vec![
+            item("photo-1", "One", "Photo"),
+            item("photo-2", "Two", "Photo"),
+        ];
+        let thumbnails = HashMap::new();
+        let mut full = HashMap::new();
+        full.insert("photo-1".to_owned(), texture);
+        let mut visible = Vec::new();
+        let mut draw_at = |running: bool| {
+            stop(running);
+            let mut action = None;
+            let mut output = context.run_ui(
+                RawInput {
+                    time: Some(20.0),
+                    ..Default::default()
+                },
+                |ui| {
+                    action = draw(
+                        ui,
+                        &mut PhotosView {
+                            folder_title: "Photos",
+                            items: &items,
+                            thumbnails: &thumbnails,
+                            full_size_images: &full,
+                            loading: false,
+                            error: None,
+                            page_start: 0,
+                            page_size: 100,
+                            total_count: Some(2),
+                            selected_photo_id: Some("photo-1"),
+                            full_size_error: false,
+                            visible_thumbnails: &mut visible,
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            action
+        };
+
+        // A running slideshow moves on once the interval from `shown_at` has elapsed.
+        assert_eq!(
+            draw_at(true),
+            Some(PhotosAction::NextPhoto("photo-2".to_owned()))
+        );
+        // A stopped one performs no slide work at all, even with the same elapsed time.
+        assert_eq!(draw_at(false), None);
+        let stopped = context.data(|data| data.get_temp::<Slideshow>(id).unwrap());
+        assert!(!stopped.running);
+        assert_eq!(stopped.shown_at, 10.0);
     }
 
     #[test]

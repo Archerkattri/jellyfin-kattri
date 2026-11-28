@@ -389,6 +389,54 @@ impl DiskSpace for WindowsDiskSpace {
     }
 }
 
+/// Unix implementation reporting blocks available to unprivileged callers.
+#[cfg(unix)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UnixDiskSpace;
+
+#[cfg(unix)]
+impl DiskSpace for UnixDiskSpace {
+    fn available_bytes(&self, path: &Path) -> Result<u64, PlatformError> {
+        use std::{ffi::CString, mem::MaybeUninit, os::unix::ffi::OsStrExt};
+        let path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| PlatformError::Failed("Disk-space path contains a NUL byte".into()))?;
+        let mut stats = MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: the path is NUL-terminated and the output buffer is correctly sized and aligned.
+        if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+            return Err(PlatformError::Failed(format!(
+                "statvfs failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: a successful statvfs initialized the output.
+        let stats = unsafe { stats.assume_init() };
+        let bytes = u128::from(stats.f_bavail) * u128::from(stats.f_frsize);
+        u64::try_from(bytes)
+            .map_err(|_| PlatformError::Failed("Disk-space value exceeds u64".into()))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_disk_tests {
+    use super::*;
+
+    #[test]
+    fn unix_checks_available_space_and_reports_invalid_paths() {
+        let dir = std::env::temp_dir();
+        assert!(
+            UnixDiskSpace
+                .available_bytes(&dir)
+                .expect("temp free space")
+                > 0
+        );
+        assert!(
+            UnixDiskSpace
+                .available_bytes(Path::new("bad\0path"))
+                .is_err()
+        );
+    }
+}
+
 #[cfg(all(test, windows))]
 mod disk_tests {
     use super::*;

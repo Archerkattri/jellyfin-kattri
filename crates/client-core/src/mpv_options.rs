@@ -87,6 +87,8 @@ pub enum ValueKind {
     /// The `audio-device` value: `auto`, or `<backend>/<id>` as mpv lists it (for example
     /// `wasapi/{GUID}` or `alsa/default`).
     AudioDevice,
+    /// The `start` value: `"none"`, or finite non-negative seconds formatted as `+{secs:.3}`.
+    StartTime,
 }
 
 /// Filters that [`ValueKind::AudioFilterChain`] accepts: the loudness normalizer, the dynamic
@@ -540,6 +542,13 @@ pub const ALLOWLIST: &[OptionSpec] = &[
         owner: "video.aspect",
         default: OptionValue::Text("-1"),
     },
+    // --- Resume position (pre-load start time) -------------------------------------------
+    OptionSpec {
+        name: "start",
+        kind: ValueKind::StartTime,
+        owner: "playback resume position",
+        default: OptionValue::Text("none"),
+    },
 ];
 
 /// One-shot writes. These are performed once on an explicit product action and are never
@@ -970,6 +979,19 @@ fn check_spec(
             }
             text.to_owned()
         }
+        (ValueKind::StartTime, OptionValue::Text(text)) => {
+            if text != "none" {
+                return Err(MpvOptionError::NotAllowedValue { name: spec.name });
+            }
+            text.to_owned()
+        }
+        (ValueKind::StartTime, OptionValue::Float(seconds)) => {
+            if !seconds.is_finite() || seconds < 0.0 {
+                return Err(MpvOptionError::OutOfRange { name: spec.name });
+            }
+            let normalized = if seconds == 0.0 { 0.0 } else { seconds };
+            format!("+{normalized:.3}")
+        }
         (kind, _) => {
             return Err(MpvOptionError::TypeMismatch {
                 name: spec.name,
@@ -1018,6 +1040,7 @@ const fn expected_label(kind: ValueKind) -> &'static str {
         ValueKind::AspectRatio => "aspect ratio",
         ValueKind::AudioFilterChain => "audio filter chain",
         ValueKind::AudioDevice => "audio device",
+        ValueKind::StartTime => "start time",
     }
 }
 
@@ -2177,6 +2200,52 @@ mod tests {
                 "sub-color accepted {value:?}"
             );
         }
+    }
+
+    #[test]
+    fn start_accepts_none_and_non_negative_finite_seconds() {
+        let none = validate("start", OptionValue::Text("none")).expect("start=none valid");
+        assert_eq!(none.name, "start");
+        assert_eq!(none.value, "none");
+
+        let zero = validate("start", OptionValue::Float(0.0)).expect("start=0.0 valid");
+        assert_eq!(zero.value, "+0.000");
+
+        let neg_zero = validate("start", OptionValue::Float(-0.0)).expect("start=-0.0 valid");
+        assert_eq!(neg_zero.value, "+0.000");
+
+        let resume = validate("start", OptionValue::Float(125.5)).expect("start=125.5 valid");
+        assert_eq!(resume.value, "+125.500");
+    }
+
+    #[test]
+    fn start_refuses_negative_non_finite_and_invalid_values() {
+        for bad in [-0.001, -10.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                matches!(
+                    validate("start", OptionValue::Float(bad)),
+                    Err(MpvOptionError::OutOfRange { name: "start" })
+                ),
+                "start accepted {bad}"
+            );
+        }
+        for bad in ["", "0", "+10", "auto", "no", "NONE"] {
+            assert!(
+                matches!(
+                    validate("start", OptionValue::Text(bad)),
+                    Err(MpvOptionError::NotAllowedValue { name: "start" })
+                ),
+                "start accepted {bad:?}"
+            );
+        }
+        assert!(matches!(
+            validate("start", OptionValue::Int(10)),
+            Err(MpvOptionError::TypeMismatch { name: "start", .. })
+        ));
+        assert!(matches!(
+            validate("start", OptionValue::Flag(false)),
+            Err(MpvOptionError::TypeMismatch { name: "start", .. })
+        ));
     }
 
     #[test]

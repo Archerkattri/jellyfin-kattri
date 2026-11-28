@@ -70,12 +70,20 @@ pub struct SavedWindow {
     pub fullscreen: bool,
 }
 
+/// A remembered window smaller than this on either side is not a real desktop window. A minimized
+/// or hidden window can report a 1x1 client area, and restoring that would leave an unusable window.
+pub const MIN_RESTORABLE_SIDE: u32 = 320;
+
 impl SavedWindow {
-    /// Returns `None` when a required value is missing or a size is not positive. The caller then
-    /// uses defaults.
+    /// Returns `None` when a required value is missing or a size is not a usable window. The caller
+    /// then uses defaults.
     pub fn from_record(record: &WindowRecord) -> Option<Self> {
-        let width = u32::try_from(record.width?).ok().filter(|&w| w > 0)?;
-        let height = u32::try_from(record.height?).ok().filter(|&h| h > 0)?;
+        let width = u32::try_from(record.width?)
+            .ok()
+            .filter(|&w| w >= MIN_RESTORABLE_SIDE)?;
+        let height = u32::try_from(record.height?)
+            .ok()
+            .filter(|&h| h >= MIN_RESTORABLE_SIDE)?;
         Some(Self {
             x: record.x?,
             y: record.y?,

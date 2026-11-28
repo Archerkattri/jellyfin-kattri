@@ -47,6 +47,8 @@ pub struct AdminUser {
     pub id: String,
     pub name: String,
     #[serde(default)]
+    pub last_activity_date: Option<String>,
+    #[serde(default)]
     pub policy: Option<AdminUserPolicy>,
 }
 
@@ -119,6 +121,14 @@ struct CreateUserBody<'a> {
     name: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     password: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct ResetPasswordBody<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_pw: Option<&'a str>,
+    reset_password: bool,
 }
 
 impl JellyfinClient {
@@ -248,6 +258,35 @@ impl JellyfinClient {
         self.send_admin(session, request).await
     }
 
+    /// Reset or set a user's password (`POST /Users/{userId}/Password`).
+    pub async fn reset_user_password(
+        &self,
+        session: &Session,
+        user_id: &str,
+        new_password: Zeroizing<String>,
+    ) -> Result<(), ApiError> {
+        crate::home::validate_id(user_id)?;
+        if new_password.len() > MAX_USER_PASSWORD_BYTES {
+            return Err(ApiError::InvalidConfiguration);
+        }
+        let body = if new_password.is_empty() {
+            ResetPasswordBody {
+                new_pw: None,
+                reset_password: true,
+            }
+        } else {
+            ResetPasswordBody {
+                new_pw: Some(new_password.as_str()),
+                reset_password: false,
+            }
+        };
+        let request = self
+            .http
+            .request(Method::POST, self.endpoint(&["Users", user_id, "Password"]))
+            .json(&body);
+        self.send_admin(session, request).await
+    }
+
     async fn get_admin_user(
         &self,
         session: &Session,
@@ -340,4 +379,66 @@ fn same_user_id(left: &str, right: &str) -> bool {
     }
     left.replace('-', "")
         .eq_ignore_ascii_case(&right.replace('-', ""))
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    use zeroize::Zeroizing;
+
+    use crate::{ClientConfig, JellyfinClient, Session, UserDto};
+
+    async fn serve_no_content() -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut buffer = [0; 2048];
+            loop {
+                let read = stream.read(&mut buffer).await.expect("read");
+                request.extend_from_slice(&buffer[..read]);
+                if read == 0 || request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let response =
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).await.expect("write");
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        (format!("http://{address}"), task)
+    }
+
+    #[tokio::test]
+    async fn reset_user_password_posts_to_user_password_endpoint() {
+        let (base, task) = serve_no_content().await;
+        let client = JellyfinClient::new(
+            ClientConfig::new(&base, "Kattri test", "device", "device-id", "1").expect("config"),
+        )
+        .expect("client");
+        let session = Session {
+            access_token: "token".into(),
+            user: UserDto {
+                policy: None,
+                id: "admin-1".into(),
+                name: "Admin".into(),
+                server_id: None,
+            },
+            server_id: None,
+            session_info: None,
+        };
+        client
+            .reset_user_password(&session, "user-1", Zeroizing::new("secret".to_owned()))
+            .await
+            .expect("password reset");
+        let request = task.await.expect("server");
+        assert!(
+            request.starts_with("POST /Users/user-1/Password "),
+            "{request}"
+        );
+    }
 }

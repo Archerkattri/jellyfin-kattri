@@ -186,7 +186,6 @@ impl Default for Settings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeneralSettings {
-    pub high_contrast: bool,
     pub reduce_motion: bool,
     /// UI color scheme. Missing keys in older settings documents use Jellyfin Dark.
     pub theme_preset: ThemePreset,
@@ -238,7 +237,6 @@ pub struct GeneralSettings {
 impl Default for GeneralSettings {
     fn default() -> Self {
         Self {
-            high_contrast: false,
             reduce_motion: true,
             theme_preset: ThemePreset::default(),
             custom_theme_enabled: false,
@@ -681,8 +679,8 @@ impl Default for PlaybackSettings {
             sync_mode: SyncMode::DisplayResample,
             frame_drop: true,
             default_speed: 1.0,
-            cache_mb: 75,
-            demuxer_backbuffer_mb: 50,
+            cache_mb: 32,
+            demuxer_backbuffer_mb: 16,
             demuxer_readahead_secs: 5,
             skip_intro: false,
             skip_outro: false,
@@ -1299,12 +1297,11 @@ pub enum LogDetail {
     Debug,
 }
 
-/// Admin-lite read-only dashboard (M4-22). Off by default. The server still decides who
-/// may read each call; this switch only shows the navigation entry.
+/// Admin-lite read-only dashboard (M4-22). The dashboard is shown to admin accounts; the server
+/// still decides who may read each call.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AdminSettings {
-    pub dashboard: bool,
     #[serde(rename = "_unknown", skip_serializing_if = "toml::Table::is_empty")]
     pub unknown: toml::Table,
 }

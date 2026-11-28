@@ -1,4 +1,4 @@
-//! M4-18 and M4-19 tests: pilot message coverage, the de-DE stub and its fallback chain, and the
+//! M4-18 and M4-19 tests: pilot message coverage, the partial de-DE catalog and its fallback chain, and the
 //! accessible-name table for interactive controls.
 
 use std::collections::HashSet;
@@ -117,9 +117,9 @@ fn german_stub_ids_all_exist_in_english() {
         Ok(catalog) => catalog,
         Err(err) => panic!("de-DE stub should parse: {err}"),
     };
-    // The German pilot set covers the connect/browse pilot plus the media-kind, accessible-name
-    // and refresh-switch strings; the rest of the catalog falls back to English.
-    assert_eq!(de.len(), 16);
+    // The German pilot set covers release notifications, connect/browse, media-kind,
+    // accessible-name and refresh-switch strings; all remaining catalog ids fall back to English.
+    assert_eq!(de.len(), 58);
     let en = en();
     for id in de.ids() {
         assert!(en.get(id).is_some(), "stub key {id} is not in en-US");

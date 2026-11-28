@@ -73,6 +73,9 @@ pub const fn transition_message(error: DownloadTransitionError) -> &'static str 
 pub fn failure_message(reason: &FailureReason) -> &'static str {
     match reason {
         FailureReason::Model(error) => transition_message(*error),
+        FailureReason::InsecureRemoteTransport => {
+            "The download was refused because plain HTTP is not allowed for this server."
+        }
         FailureReason::Http(_) => "The server returned an error. The download stopped.",
         FailureReason::DiskFull => "Not enough disk space.",
         FailureReason::Storage => "The partly downloaded file could not be written.",

@@ -9,6 +9,7 @@ pub mod hero;
 pub mod home;
 pub(crate) mod item_menu;
 pub mod live_tv;
+mod local_playlist;
 mod lyrics;
 mod media_source;
 pub(crate) mod metadata_editor;
@@ -50,7 +51,6 @@ use crate::worker::HomeRowKind;
 use egui::{self, Align, Align2, Color32, CornerRadius, FontId, RichText, Stroke};
 use jellyfin_api::{ItemFilter, ItemSortOrder};
 use kattri_client_core::focus::{FocusGraph, FocusId, FocusNode, NavAction};
-use kattri_client_core::playback_plan::PlaybackMethod;
 use kattri_i18n::ids;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -210,12 +210,18 @@ struct CatalogView<'a> {
     artwork_scale: f32,
     /// Ctrl/Space and Shift clicks update this model instead of opening a card.
     selection: &'a mut LibrarySelection,
+    show_play_actions: bool,
+    /// `Some(false)` for Play All, `Some(true)` for Shuffle.
+    play_all_request: Option<bool>,
 }
 
 pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
+    let photos_viewer_was_open = app.navigation.view == AppView::Library
+        && app.navigation.page == Page::Photos
+        && app.photo.selected_id.is_some();
     let ctx = root.ctx().clone();
     theme::set_current_preset(app.settings.settings().general.theme_preset);
-    let colors = theme::palette(app.high_contrast);
+    let colors = theme::palette();
     let mut gamepad_actions = if app.settings.settings().input.sdl_gamepad_enabled {
         crate::input::poll_gamepad(app.gamepad.as_mut()).unwrap_or_default()
     } else {
@@ -223,20 +229,52 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
     };
     if !gamepad_actions.is_empty() {
         app.cancel_network_retry_for_user_action();
-        app.note_gamepad_activity();
+        let woke_screensaver = app.note_gamepad_activity();
+        screensaver::consume_gamepad_wake_actions(&mut gamepad_actions, woke_screensaver);
     }
     // While a video fills the window the library page is hidden; the player takes the pad.
     if app.player_owns_input() {
         app.player_nav_actions.append(&mut gamepad_actions);
     }
 
+    app.request_custom_backdrop();
+    let show_ambient = app.navigation.view == AppView::Home
+        || (app.navigation.view == AppView::Library
+            && matches!(app.navigation.page, Page::Movies | Page::Series));
+    let bg_rect = root.content_rect();
+    {
+        let bg_painter = root.painter_at(bg_rect);
+        bg_painter.rect_filled(bg_rect, 0.0, colors.background);
+        if show_ambient {
+            let backdrop = app.ambient_texture();
+            app.ambient_backdrop.paint(root, bg_rect, backdrop, colors);
+            if app.navigation.view == AppView::Library && backdrop.is_some() {
+                bg_painter.rect_filled(bg_rect, 0.0, colors.background.gamma_multiply(0.68));
+            }
+        }
+    }
+
     let nav_focus = egui::Panel::top("topbar")
         .exact_size(64.0)
-        .frame(egui::Frame::new().fill(colors.background))
+        .frame(egui::Frame::new().fill(Color32::TRANSPARENT))
         .show(root, |ui| topbar(ui, app, colors))
         .inner;
 
-    if app.network_notice.is_some() {
+    let showing_catalog_error_banner = app.browse.catalog_error.is_some()
+        && (matches!(app.connection, ConnectionStatus::Connected)
+            || (matches!(app.connection, ConnectionStatus::LibraryError(_))
+                && app.server.is_some()))
+        && app.navigation.view != AppView::Home
+        && !matches!(
+            app.navigation.page,
+            Page::Settings
+                | Page::Downloads
+                | Page::LiveTv
+                | Page::Dashboard
+                | Page::SyncPlay
+                | Page::Photos
+        );
+    if app.network_notice.is_some() && !showing_catalog_error_banner {
         egui::Panel::top("network_status_banner")
             .exact_size(42.0)
             .frame(egui::Frame::new().fill(colors.panel))
@@ -244,29 +282,31 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
     }
 
     let enter_content = move_navigation_focus(&ctx, &nav_focus, app, &mut gamepad_actions);
+    let topbar = nav_focus
+        .responses
+        .get(active_topbar_index(app, &nav_focus));
     // Keep each destination's scroll position independent; opening details starts at its title.
+    // The sign-in page keeps its own scroll position: a browse page scrolled down would otherwise
+    // clip the connect heading under the top bar when the session ends.
+    let signed_in = matches!(
+        app.connection,
+        ConnectionStatus::LoadingItems | ConnectionStatus::Connected
+    );
     let content_scroll_id = egui::Id::unique((
         "library_content_scroll",
-        format!("{:?}:{:?}", app.navigation.view, app.navigation.page),
+        (app.navigation.view, app.navigation.page),
         app.browse.details.selected_item_id.as_deref(),
         app.navigation.library_tab,
+        signed_in,
     ));
 
     let (card_focus, visible_artwork, search_show_all_targets) = egui::CentralPanel::default()
-        .frame(egui::Frame::new().fill(colors.background))
+        .frame(egui::Frame::new().fill(Color32::TRANSPARENT))
         .show(root, |ui| {
             let mut entries = Vec::new();
             let mut search_show_all_targets = Vec::new();
             let mut visible_artwork = Vec::new();
-            app.request_custom_backdrop();
-            if app.navigation.view == AppView::Home
-                || (app.navigation.view == AppView::Library
-                    && matches!(app.navigation.page, Page::Movies | Page::Series))
-            {
-                let rect = ui.max_rect();
-                let backdrop = app.ambient_texture();
-                app.ambient_backdrop.paint(ui, rect, backdrop, colors);
-            }
+
             egui::ScrollArea::vertical()
                 .id_salt(content_scroll_id)
                 .auto_shrink([false, false])
@@ -274,7 +314,6 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
                     ui.add_space(22.0);
                     ui.horizontal(|ui| {
                         ui.add_space(24.0);
-                        let connection = app.connection.clone();
                         ui.vertical(|ui| {
                             // A right gutter that matches the left one.
                             ui.set_max_width((ui.available_width() - 24.0).max(240.0));
@@ -284,17 +323,20 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
                                 settings::show(ui, app, colors, &mut gamepad_actions);
                                 return;
                             }
-                            match connection {
+                            match &app.connection {
                                 ConnectionStatus::Disconnected { error } => {
+                                    let error = error.clone();
                                     sign_in_form(ui, app, colors, error.as_deref());
                                 }
                                 ConnectionStatus::Connecting { message }
                                     if app.quick_connect.is_some() =>
                                 {
+                                    let message = message.clone();
                                     sign_in_form(ui, app, colors, None);
                                     ui.label(RichText::new(message).color(colors.muted));
                                 }
                                 ConnectionStatus::Connecting { message } => {
+                                    let message = message.clone();
                                     connection_progress(ui, colors, &message);
                                 }
                                 ConnectionStatus::LoadingItems
@@ -307,7 +349,7 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
                                         &mut entries,
                                         &mut search_show_all_targets,
                                         &mut visible_artwork,
-                                        &mut gamepad_actions,
+                                        (&mut gamepad_actions, enter_content, topbar),
                                     );
                                 }
                                 ConnectionStatus::LoadingItems => {
@@ -325,7 +367,7 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
                                         &mut entries,
                                         &mut search_show_all_targets,
                                         &mut visible_artwork,
-                                        &mut gamepad_actions,
+                                        (&mut gamepad_actions, enter_content, topbar),
                                     );
                                 }
                                 ConnectionStatus::LibraryError(message) => {
@@ -337,9 +379,10 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
                                             &mut entries,
                                             &mut search_show_all_targets,
                                             &mut visible_artwork,
-                                            &mut gamepad_actions,
+                                            (&mut gamepad_actions, enter_content, topbar),
                                         );
                                     } else {
+                                        let message = message.clone();
                                         state_panel(
                                             ui,
                                             colors,
@@ -355,10 +398,13 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
                                 }
                             }
                         });
+
                         ui.add_space(24.0);
                     });
+
                     ui.add_space(32.0);
                 });
+
             (entries, visible_artwork, search_show_all_targets)
         })
         .inner;
@@ -427,6 +473,13 @@ pub fn draw(root: &mut egui::Ui, app: &mut KattriApp, window_width: f32) {
         app.catalog_selection.clear();
     }
     handle_shell_action(&ctx, app, &mut gamepad_actions);
+    if photos_viewer_was_open
+        && (app.navigation.view != AppView::Library
+            || app.navigation.page != Page::Photos
+            || app.photo.selected_id.is_none())
+    {
+        photos::stop_slideshow(&ctx);
+    }
     if app.screensaver_active() {
         let reduced_motion = root.style().animation_time <= 0.0;
         screensaver::paint(
@@ -574,7 +627,37 @@ fn topbar_tab(
 /// Apple TV style top bar: brand at the left, text tabs, search and profile at the right. The
 /// same bar, search included, shows on every page. Tabs that do not fit move into a More menu.
 /// Returns the strip's tabs in order (Home first) for keyboard and gamepad focus.
+pub(crate) fn profile_menu_shows_settings(view: AppView, page: Page) -> bool {
+    !(view == AppView::Library && page == Page::Settings)
+}
+
+pub(crate) fn profile_menu_shows_dashboard(
+    view: AppView,
+    page: Page,
+    dashboard_enabled: bool,
+) -> bool {
+    dashboard_enabled && !(view == AppView::Library && page == Page::Dashboard)
+}
+
 fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs {
+    let top_rect = ui.max_rect();
+    let top_color = Color32::from_rgba_unmultiplied(
+        colors.background.r(),
+        colors.background.g(),
+        colors.background.b(),
+        210,
+    );
+    let bottom_color = Color32::from_rgba_unmultiplied(
+        colors.background.r(),
+        colors.background.g(),
+        colors.background.b(),
+        0,
+    );
+    row::gradient_quad(
+        ui.painter(),
+        top_rect,
+        [top_color, top_color, bottom_color, bottom_color],
+    );
     let mut tabs_out = TopbarTabs {
         responses: Vec::new(),
         targets: Vec::new(),
@@ -586,20 +669,29 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs
     ui.horizontal_centered(|ui| {
         ui.add_space(20.0);
         app.ensure_brand_logo(ui.ctx());
-        if let Some(texture) = &app.brand_logo {
-            ui.add(
-                egui::Image::new(texture)
-                    .fit_to_exact_size(egui::vec2(26.0, 26.0))
-                    .corner_radius(6.0),
-            );
-            ui.add_space(8.0);
+        let brand = RichText::new(ui_text(ids::SHELL_BRAND_NAME))
+            .size(20.0)
+            .strong()
+            .color(colors.text);
+        let button = if let Some(texture) = &app.brand_logo {
+            egui::Button::image_and_text(
+                egui::Image::new(texture).fit_to_exact_size(egui::vec2(26.0, 26.0)),
+                brand,
+            )
+        } else {
+            egui::Button::new(brand)
+        };
+        let response = ui.add_enabled(connected, button.frame(false));
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, connected, ui_text(ids::SHELL_NAV_HOME))
+        });
+        if connected {
+            if response.clicked() {
+                app.set_view(AppView::Home);
+            }
+            tabs_out.responses.push(response);
+            tabs_out.targets.push(TopbarTarget::Home);
         }
-        ui.label(
-            RichText::new(ui_text(ids::SHELL_BRAND_NAME))
-                .size(20.0)
-                .strong()
-                .color(colors.text),
-        );
         let profile = app
             .user_name
             .clone()
@@ -634,8 +726,7 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs
             .x
             + 24.0;
         if connected {
-            let mut tabs: Vec<(String, TopbarTarget)> =
-                vec![(ui_text(ids::SHELL_NAV_HOME).to_owned(), TopbarTarget::Home)];
+            let mut tabs: Vec<(String, TopbarTarget)> = Vec::new();
             for page in navigation_pages(app) {
                 tabs.push((page.label().to_owned(), TopbarTarget::Page(page)));
             }
@@ -724,37 +815,71 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs
             if connected {
                 let server_name = app.server.as_ref().map(|server| server.name.clone());
                 ui.menu_button(RichText::new(profile_label).color(colors.text), |ui| {
+                    ui.set_min_width(210.0);
+                    ui.spacing_mut().item_spacing.y = 4.0;
                     if let Some(name) = server_name {
-                        ui.label(RichText::new(name).color(colors.muted));
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(10.0);
+                            ui.label(RichText::new(name).size(12.0).color(colors.muted));
+                        });
+                        item_menu::menu_separator(ui);
                     }
-                    // Every destination stays reachable here, whatever fits in the tab strip.
-                    for page in navigation_pages(app) {
-                        if ui.button(page.label()).clicked() {
-                            app.navigate_to(page);
-                            ui.close();
-                        }
+                    if item_menu::menu_row(ui, ui_text(ids::QUICK_CONNECT_APPROVAL_TITLE)).clicked()
+                    {
+                        app.quick_connect_authorizer_open = true;
+                        ui.close();
                     }
-                    ui.separator();
-                    if ui.button(ui_text(ids::OPEN_URL_MENU)).clicked() {
+                    if item_menu::menu_row(ui, ui_text(ids::ACCOUNT_TITLE)).clicked() {
+                        app.open_account_preferences(None);
+                        ui.close();
+                    }
+                    // No Settings entry while Settings is already open: it would only navigate to
+                    // the page the viewer is looking at.
+                    if profile_menu_shows_settings(app.navigation.view, app.navigation.page)
+                        && item_menu::menu_row(ui, Page::Settings.label()).clicked()
+                    {
+                        app.navigate_to(Page::Settings);
+                        ui.close();
+                    }
+                    // The manager's own window replaces this entry while it is open.
+                    if app.user_is_admin
+                        && !app.metadata_manager_open
+                        && item_menu::menu_row(ui, ui_text(ids::METADATA_MANAGER)).clicked()
+                    {
+                        app.load_metadata_manager("", 0);
+                        ui.close();
+                    }
+                    if profile_menu_shows_dashboard(
+                        app.navigation.view,
+                        app.navigation.page,
+                        app.dashboard_enabled(),
+                    ) && item_menu::menu_row(ui, Page::Dashboard.label()).clicked()
+                    {
+                        app.navigate_to(Page::Dashboard);
+                        ui.close();
+                    }
+                    item_menu::menu_separator(ui);
+                    let tv_label = if app.tv_mode {
+                        "Switch to Desktop Mode"
+                    } else {
+                        "Switch to TV Mode"
+                    };
+                    if item_menu::menu_row(ui, tv_label).clicked() {
+                        app.toggle_tv_mode();
+                        ui.close();
+                    }
+                    if item_menu::menu_row(ui, ui_text(ids::OPEN_URL_MENU)).clicked() {
                         app.open_stream_address_dialog();
                         ui.close();
                     }
-                    let high_contrast = ui.checkbox(
-                        &mut app.high_contrast,
-                        ui_text(ids::ACCESS_NAV_HIGH_CONTRAST),
-                    );
-                    if high_contrast.changed() {
-                        let before = app.settings.settings().clone();
-                        app.settings.settings_mut().general.high_contrast = app.high_contrast;
-                        app.commit_settings(&before);
-                    }
                     if app.navigation.view == AppView::Home
-                        && ui.button(ui_text(ids::HOME_BUTTON_REFRESH)).clicked()
+                        && item_menu::menu_row(ui, ui_text(ids::HOME_BUTTON_REFRESH)).clicked()
                     {
                         app.apply_home_action(home::HomeAction::Refresh);
                         ui.close();
                     }
-                    if ui.button(ui_text(ids::ACCESS_NAV_DISCONNECT)).clicked() {
+                    if item_menu::menu_row(ui, ui_text(ids::ACCESS_NAV_DISCONNECT)).clicked() {
                         app.disconnect();
                         ui.close();
                     }
@@ -797,6 +922,71 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs
             }
         });
     });
+    if connected && app.user_is_admin && app.metadata_manager_open {
+        metadata_manager_window(ui.ctx(), app);
+    }
+    if connected && app.account_preferences_open {
+        account_preferences_window(ui.ctx(), app);
+    }
+    if connected && app.quick_connect_authorizer_open {
+        let mut open = true;
+        egui::Window::new(ui_text(ids::QUICK_CONNECT_APPROVAL_TITLE))
+            .open(&mut open)
+            .collapsible(false)
+            .show(ui.ctx(), |ui| {
+                ui.label(ui_text(ids::QUICK_CONNECT_APPROVAL_HELP));
+                let pending = app
+                    .quick_connect_approval
+                    .is_some_and(|(_, result)| result.is_none());
+                ui.add_enabled(
+                    !pending,
+                    egui::TextEdit::singleline(&mut *app.quick_connect_approval_code)
+                        .char_limit(6)
+                        .hint_text(ui_text(ids::QUICK_CONNECT_APPROVAL_CODE)),
+                )
+                .widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::Role::TextInput,
+                        !pending,
+                        ui_text(ids::QUICK_CONNECT_APPROVAL_CODE),
+                    )
+                });
+                let valid = app.quick_connect_approval_code.len() == 6
+                    && app
+                        .quick_connect_approval_code
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit());
+                if ui
+                    .add_enabled(
+                        !pending && valid,
+                        egui::Button::new(ui_text(ids::QUICK_CONNECT_APPROVAL_SUBMIT)),
+                    )
+                    .clicked()
+                {
+                    let code = std::mem::take(&mut app.quick_connect_approval_code);
+                    app.approve_quick_connect(code);
+                }
+                match app.quick_connect_approval {
+                    Some((_, None)) => {
+                        ui.spinner();
+                    }
+                    Some((_, Some(Ok(true)))) => {
+                        ui.label(ui_text(ids::QUICK_CONNECT_APPROVAL_SUCCESS));
+                    }
+                    Some((_, Some(Ok(false)))) => {
+                        ui.label(ui_text(ids::QUICK_CONNECT_APPROVAL_FAILURE));
+                    }
+                    Some((_, Some(Err(error)))) => {
+                        ui.label(status::message(error));
+                    }
+                    None => {}
+                }
+            });
+        app.quick_connect_authorizer_open = open;
+        if !open {
+            app.quick_connect_approval_code = Default::default();
+        }
+    }
     let search_now = duration_from_egui_time(ui.ctx().input(|input| input.time));
     if clear_search {
         app.clear_search(search_now);
@@ -816,6 +1006,333 @@ fn topbar(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) -> TopbarTabs
             .request_repaint_after(std::time::Duration::from_millis(300));
     }
     tabs_out
+}
+
+/// One row's label. A bare name is ambiguous for seasons and episodes, so the label carries the
+/// series and the episode numbering when the server sends them.
+fn metadata_row_label(item: &jellyfin_api::BaseItemDto) -> String {
+    let name = item.name.trim();
+    let series = item
+        .series_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|series| !series.is_empty());
+    match (item.item_type.as_deref(), series) {
+        (Some("Episode"), Some(series)) => match (item.parent_index_number, item.index_number) {
+            (Some(season), Some(episode)) => {
+                format!("{series} · S{season:02}E{episode:02} · {name}")
+            }
+            _ => format!("{series} · {name}"),
+        },
+        (Some("Season"), Some(series)) => format!("{series} · {name}"),
+        _ => name.to_owned(),
+    }
+}
+
+fn metadata_manager_window(ctx: &egui::Context, app: &mut KattriApp) {
+    let colors = crate::theme::active_palette();
+    let id = egui::Id::unique("metadata-manager-search");
+    let (mut draft, mut submitted, mut requested_offset): (String, String, u32) =
+        ctx.data(|data| data.get_temp(id)).unwrap_or_default();
+    let mut open = true;
+    let mut load = None;
+    let mut edit = None;
+    egui::Window::new(ui_text(ids::METADATA_MANAGER))
+        .open(&mut open)
+        .collapsible(false)
+        .default_width(540.0)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut draft)
+                        .hint_text(ui_text(ids::METADATA_FIND))
+                        .char_limit(128),
+                );
+                field.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::Role::TextInput,
+                        true,
+                        ui_text(ids::METADATA_FIND),
+                    )
+                });
+                if ui.button(ui_text(ids::METADATA_SEARCH)).clicked()
+                    || (field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                {
+                    submitted.clone_from(&draft);
+                    load = Some(0);
+                }
+            });
+            // The kind filter is the difference between a usable list and a wall of "Season 1":
+            // it also re-runs the current search so the page and the filter never disagree.
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Show").color(colors.muted));
+                let mut kind = app.metadata_manager_kind;
+                egui::ComboBox::from_id_salt("metadata_kind")
+                    .width(150.0)
+                    .selected_text(kind.label())
+                    .show_ui(ui, |ui| {
+                        for option in crate::app::MetadataManagerKind::ALL {
+                            ui.selectable_value(&mut kind, option, option.label());
+                        }
+                    });
+                if kind != app.metadata_manager_kind {
+                    app.metadata_manager_kind = kind;
+                    load = Some(0);
+                }
+                if let Some(Ok(page)) = &app.metadata_manager_result
+                    && let Some(total) = page.total_record_count
+                {
+                    ui.weak(format!("{total} items"));
+                }
+            });
+            match &app.metadata_manager_result {
+                None => {
+                    ui.spinner();
+                }
+                Some(Err(error)) => {
+                    ui.label(status::message(*error));
+                    if ui.button(ui_text(ids::METADATA_RETRY)).clicked() {
+                        load = Some(requested_offset);
+                    }
+                }
+                Some(Ok(page)) => {
+                    if page.items.is_empty() {
+                        ui.label(ui_text(ids::METADATA_EMPTY));
+                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(380.0)
+                        .show(ui, |ui| {
+                            for item in &page.items {
+                                let label = metadata_row_label(item);
+                                ui.push_id(&item.id, |ui| {
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(RichText::new(&label).size(13.5))
+                                                    .frame(false),
+                                            )
+                                            .clicked()
+                                        {
+                                            edit = Some((item.id.clone(), item.name.clone()));
+                                        }
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if let Some(kind) = &item.item_type {
+                                                    ui.weak(kind);
+                                                }
+                                            },
+                                        );
+                                    });
+                                });
+                            }
+                        });
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                page.start_index > 0,
+                                egui::Button::new(ui_text(ids::METADATA_PREVIOUS)),
+                            )
+                            .clicked()
+                        {
+                            load = Some(page.start_index.saturating_sub(50));
+                        }
+                        let next = page.start_index.saturating_add(page.items.len() as u32);
+                        let more = !page.items.is_empty()
+                            && page
+                                .total_record_count
+                                .map_or(page.items.len() == 50, |total| next < total);
+                        if ui
+                            .add_enabled(more, egui::Button::new(ui_text(ids::METADATA_NEXT)))
+                            .clicked()
+                        {
+                            load = Some(next);
+                        }
+                    });
+                }
+            }
+        });
+    if let Some(offset) = load {
+        requested_offset = offset;
+        app.load_metadata_manager(&submitted, offset);
+    }
+    if let Some((id, title)) = edit {
+        app.edit_managed_metadata(id, title);
+        open = false;
+    }
+    app.metadata_manager_open = open;
+    ctx.data_mut(|data| {
+        if open {
+            data.insert_temp(id, (draft, submitted, requested_offset));
+        } else {
+            data.remove::<(String, String, u32)>(id);
+        }
+    });
+}
+
+/// Editable server-account preferences. Everything here lives on the Jellyfin user, so the form
+/// edits a local draft and Save patches only the changed fields through the API.
+fn account_preferences_window(ctx: &egui::Context, app: &mut KattriApp) {
+    let id = egui::Id::unique("account-preferences-draft");
+    let mut open = true;
+    let mut save = None;
+    egui::Window::new(ui_text(ids::ACCOUNT_TITLE))
+        .open(&mut open)
+        .collapsible(false)
+        .default_width(460.0)
+        .show(ctx, |ui| {
+            if let Some(name) = app.user_name.as_deref() {
+                ui.heading(name);
+            }
+            ui.label(ui_text(ids::ACCOUNT_HELP));
+            if app.account_preferences_saved {
+                ui.label(if matches!(app.account_preferences, Some(Err(_))) {
+                    ui_text(ids::ACCOUNT_SAVED_RELOAD_FAILED)
+                } else {
+                    ui_text(ids::ACCOUNT_SAVED)
+                });
+            }
+            match &app.account_preferences {
+                None => {
+                    ui.spinner();
+                }
+                Some(Err(error)) => {
+                    ui.label(status::message(*error));
+                }
+                Some(Ok(None)) => {
+                    ui.label(ui_text(ids::ACCOUNT_UNAVAILABLE));
+                }
+                Some(Ok(Some(prefs))) => {
+                    let mut draft = ctx
+                        .data(|data| data.get_temp::<AccountDraft>(id))
+                        .unwrap_or_else(|| AccountDraft::from(prefs));
+                    egui::Grid::new("server-account-preferences")
+                        .num_columns(2)
+                        .spacing([14.0, 10.0])
+                        .show(ui, |ui| {
+                            ui.label(ui_text(ids::ACCOUNT_AUDIO));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut draft.audio_language)
+                                    .hint_text("eng")
+                                    .desired_width(140.0)
+                                    .char_limit(16),
+                            );
+                            ui.end_row();
+                            ui.label(ui_text(ids::ACCOUNT_SUBTITLE));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut draft.subtitle_language)
+                                    .hint_text("eng")
+                                    .desired_width(140.0)
+                                    .char_limit(16),
+                            );
+                            ui.end_row();
+                            ui.label(ui_text(ids::ACCOUNT_MODE));
+                            egui::ComboBox::from_id_salt("account-subtitle-mode")
+                                .width(160.0)
+                                .selected_text(if draft.subtitle_mode.is_empty() {
+                                    ui_text(ids::ACCOUNT_UNSET).to_owned()
+                                } else {
+                                    draft.subtitle_mode.clone()
+                                })
+                                .show_ui(ui, |ui| {
+                                    for mode in SUBTITLE_MODES {
+                                        ui.selectable_value(
+                                            &mut draft.subtitle_mode,
+                                            mode.to_owned(),
+                                            mode,
+                                        );
+                                    }
+                                });
+                            ui.end_row();
+                            ui.label(ui_text(ids::ACCOUNT_DEFAULT_AUDIO));
+                            ui.checkbox(&mut draft.play_default_audio_track, "");
+                            ui.end_row();
+                            ui.label(ui_text(ids::ACCOUNT_HIDE_PLAYED));
+                            ui.checkbox(&mut draft.hide_played_in_latest, "");
+                            ui.end_row();
+                            ui.label(ui_text(ids::ACCOUNT_MISSING));
+                            ui.checkbox(&mut draft.display_missing_episodes, "");
+                            ui.end_row();
+                        });
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        let dirty = draft.differs_from(prefs);
+                        if ui
+                            .add_enabled(dirty, egui::Button::new(ui_text(ids::ACCOUNT_SAVE)))
+                            .on_hover_text(ui_text(ids::ACCOUNT_SAVE_HELP))
+                            .clicked()
+                        {
+                            save = Some(draft.to_preferences());
+                        }
+                        if !dirty {
+                            ui.weak("Nothing changed yet");
+                        }
+                    });
+                    ctx.data_mut(|data| data.insert_temp(id, draft));
+                }
+            }
+            if app.account_preferences.is_some()
+                && ui.button(ui_text(ids::ACCOUNT_RELOAD)).clicked()
+            {
+                ctx.data_mut(|data| data.remove::<AccountDraft>(id));
+                app.open_account_preferences(None);
+            }
+        });
+    if let Some(preferences) = save {
+        ctx.data_mut(|data| data.remove::<AccountDraft>(id));
+        app.open_account_preferences(Some(preferences));
+    }
+    app.account_preferences_open = open;
+}
+
+/// Jellyfin's `SubtitlePlaybackMode` values, in the order users expect to see them.
+const SUBTITLE_MODES: [&str; 5] = ["Default", "Always", "Smart", "OnlyForced", "None"];
+
+/// Editable copy of the account preferences, so typing never mutates the loaded snapshot.
+#[derive(Clone, PartialEq)]
+struct AccountDraft {
+    audio_language: String,
+    subtitle_language: String,
+    subtitle_mode: String,
+    play_default_audio_track: bool,
+    hide_played_in_latest: bool,
+    display_missing_episodes: bool,
+}
+
+impl AccountDraft {
+    fn from(prefs: &jellyfin_api::AccountPreferences) -> Self {
+        Self {
+            audio_language: prefs.audio_language_preference.clone().unwrap_or_default(),
+            subtitle_language: prefs
+                .subtitle_language_preference
+                .clone()
+                .unwrap_or_default(),
+            subtitle_mode: prefs.subtitle_mode.clone().unwrap_or_default(),
+            play_default_audio_track: prefs.play_default_audio_track.unwrap_or(true),
+            hide_played_in_latest: prefs.hide_played_in_latest.unwrap_or(false),
+            display_missing_episodes: prefs.display_missing_episodes.unwrap_or(false),
+        }
+    }
+
+    fn differs_from(&self, prefs: &jellyfin_api::AccountPreferences) -> bool {
+        self != &Self::from(prefs)
+    }
+
+    /// Only the fields on this form; the API patches them into the account's configuration.
+    fn to_preferences(&self) -> jellyfin_api::AccountPreferences {
+        let text = |value: &str| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        };
+        jellyfin_api::AccountPreferences {
+            audio_language_preference: text(&self.audio_language),
+            subtitle_language_preference: text(&self.subtitle_language),
+            subtitle_mode: text(&self.subtitle_mode),
+            play_default_audio_track: Some(self.play_default_audio_track),
+            hide_played_in_latest: Some(self.hide_played_in_latest),
+            display_missing_episodes: Some(self.display_missing_episodes),
+        }
+    }
 }
 
 /// Whether `page` draws search results in place of its own content.
@@ -1003,10 +1520,26 @@ mod navigation_icon_tests {
 }
 
 fn sign_in_form(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: Option<&str>) {
-    ui.set_max_width(650.0);
-    ui.add_space(48.0);
+    let width = ui.available_width().min(510.0);
+    ui.horizontal_top(|ui| {
+        ui.add_space(((ui.available_width() - width) * 0.5 - ui.spacing().item_spacing.x).max(0.0));
+        ui.vertical(|ui| {
+            ui.set_width(width);
+            draw_sign_in_card(ui, app, colors, error);
+        });
+    });
+}
+
+fn draw_sign_in_card(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: Option<&str>) {
+    ui.add_space(28.0);
     ui.label(
         RichText::new(ui_text(ids::BROWSE_HEADING))
+            .size(13.0)
+            .strong()
+            .color(colors.accent),
+    );
+    ui.label(
+        RichText::new(ui_text(ids::CONNECT_BUTTON_SUBMIT))
             .size(30.0)
             .strong()
             .color(colors.text),
@@ -1022,7 +1555,7 @@ fn sign_in_form(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: 
     egui::Frame::new()
         .fill(colors.panel)
         .stroke(Stroke::new(1.0, colors.divider))
-        .corner_radius(CornerRadius::same(12))
+        .corner_radius(CornerRadius::same(18))
         .inner_margin(egui::Margin::same(24))
         .show(ui, |ui| {
             ui.set_min_width(430.0_f32.min(ui.available_width()));
@@ -1273,7 +1806,14 @@ fn sign_in_form(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette, error: 
     }
 }
 
-fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
+fn live_tv_page(
+    ui: &mut egui::Ui,
+    app: &mut KattriApp,
+    colors: Palette,
+    pad: &mut Vec<NavAction>,
+    enter: bool,
+    topbar: Option<&egui::Response>,
+) {
     if !app.live_tv_loading && !app.live_tv_loaded {
         app.request_live_tv_channels(0);
     }
@@ -1287,6 +1827,7 @@ fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
         return;
     }
     if let Some(error) = app.live_tv_error {
+        ui.label(ui_text(ids::LIVE_TV_STATUS_CHANNELS_ERROR_RETRY));
         ui.label(RichText::new(crate::ui::status::message(error)).color(colors.danger));
         if ui
             .button(ui_text(ids::LIVE_TV_BUTTON_RETRY_CHANNELS))
@@ -1294,7 +1835,9 @@ fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
         {
             app.retry_live_tv_channels();
         }
-        return;
+        if app.live_tv_channels.is_empty() {
+            return;
+        }
     }
 
     let favorites = app
@@ -1327,7 +1870,18 @@ fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
             now,
         );
     }
-    let response = live_tv::show(
+    let pending_focus = app.live_tv_focus_target.take();
+    let navigation_available = !ui.ctx().text_edit_focused() && !egui::Popup::is_any_open(ui.ctx());
+    let target = if !navigation_available {
+        None
+    } else if enter {
+        live_tv::live_tv_focus_targets(&app.live_tv_channels, &favorites)
+            .into_iter()
+            .next()
+    } else {
+        pending_focus
+    };
+    let mut response = live_tv::show(
         ui,
         live_tv::LiveTvInput {
             channels: &app.live_tv_channels,
@@ -1339,8 +1893,67 @@ fn live_tv_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
             window,
             now_unix: now,
             selected_channel_id: app.live_tv_selected_channel_id.as_deref(),
+            scroll_to_row: None,
+            focus_target: target.as_ref(),
         },
     );
+    if navigation_available
+        && let Some(current) = response.focus_targets.iter().find(|target| {
+            response
+                .focus_responses
+                .iter()
+                .any(|(row, control, widget)| {
+                    *row == target.row && *control == target.control && widget.has_focus()
+                })
+        })
+    {
+        use live_tv::LiveTvFocusDirection as Direction;
+        let arrows = [
+            NavAction::Up,
+            NavAction::Down,
+            NavAction::Left,
+            NavAction::Right,
+        ];
+        let action =
+            crate::input::take_action(ui.ctx(), &arrows, app.settings.settings().input.key_repeat)
+                .or_else(|| {
+                    take_gamepad_action(
+                        pad,
+                        &[
+                            NavAction::Up,
+                            NavAction::Down,
+                            NavAction::Left,
+                            NavAction::Right,
+                            NavAction::Select,
+                        ],
+                    )
+                });
+        let direction = match action {
+            Some(NavAction::Up) if current.row == 0 => {
+                if let Some(tab) = topbar {
+                    tab.request_focus();
+                }
+                None
+            }
+            Some(NavAction::Up) => Some(Direction::Up),
+            Some(NavAction::Down) => Some(Direction::Down),
+            Some(NavAction::Left) => Some(Direction::Left),
+            Some(NavAction::Right) => Some(Direction::Right),
+            Some(NavAction::Select) => {
+                if response.actions.is_empty() {
+                    response.actions.push(current.action.clone());
+                }
+                None
+            }
+            _ => None,
+        };
+        if let Some(next) = direction.and_then(|direction| {
+            live_tv::navigate_live_tv_focus(&response.focus_targets, Some(current), direction)
+        }) {
+            app.live_tv_focus_target = Some(next);
+            ui.ctx().request_repaint();
+        }
+    }
     if let Some(error) = app.live_tv_guide_error {
         ui.horizontal(|ui| {
             ui.label(
@@ -1492,7 +2105,9 @@ fn downloads_page(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     if due {
         app.refresh_downloads();
     }
-    ui.ctx().request_repaint_after(DOWNLOADS_PAGE_REFRESH);
+    if app.downloads.has_running() || app.batch_downloads.is_active() {
+        ui.ctx().request_repaint_after(DOWNLOADS_PAGE_REFRESH);
+    }
     let intents = {
         let rows = app
             .downloads
@@ -1565,7 +2180,7 @@ fn photos_page(ui: &mut egui::Ui, app: &mut KattriApp) {
             app.request_photo_full_size(&item_id);
         }
         Some(photos::PhotosAction::ClosePhoto) => {
-            app.photo.selected_id = None;
+            app.close_photo_viewer();
         }
         None => {}
     }
@@ -1582,7 +2197,7 @@ fn home_view(
     visible_artwork: &mut Vec<(String, String)>,
 ) {
     if app.browse.details.selected_item_id.is_some() || app.person.selected.is_some() {
-        details_panel(ui, app, colors);
+        details_panel(ui, app, colors, visible_artwork);
         return;
     }
     let hero_id = app.home.hero_item_id();
@@ -1634,8 +2249,9 @@ fn render_connected(
     entries: &mut Vec<CardFocus>,
     search_show_all_targets: &mut Vec<(FocusId, search::SearchGroup)>,
     visible_artwork: &mut Vec<(String, String)>,
-    gamepad_actions: &mut Vec<NavAction>,
+    navigation: (&mut Vec<NavAction>, bool, Option<&egui::Response>),
 ) {
+    let (gamepad_actions, enter_content, topbar) = navigation;
     if app.navigation.view == AppView::Home {
         home_view(ui, app, colors, entries, visible_artwork);
         return;
@@ -1649,7 +2265,7 @@ fn render_connected(
         return;
     }
     if app.navigation.page == Page::LiveTv {
-        live_tv_page(ui, app, colors);
+        live_tv_page(ui, app, colors, gamepad_actions, enter_content, topbar);
         return;
     }
     if app.navigation.page == Page::Dashboard {
@@ -1683,8 +2299,30 @@ fn render_connected(
             app.submit_admin_users_actions(actions);
         } else {
             let view = admin::dashboard_view(app.dashboard_enabled(), &app.admin_load);
-            if admin::show(ui, &view, colors, app.can_manage_admin_users()) {
+            let action = admin::show(ui, &view, colors, app.can_manage_admin_users());
+            if action.manage_users {
                 app.open_admin_users();
+            }
+            if action.refresh_dashboard {
+                app.request_dashboard();
+            }
+            if action.scan_libraries {
+                app.refresh_all_libraries();
+            }
+            if let Some(task_id) = action.run_task_id {
+                app.start_scheduled_task(task_id);
+            }
+            if action.restart_server {
+                app.restart_server();
+            }
+            if action.shutdown_server {
+                app.shutdown_server();
+            }
+            if let Some((session_id, text)) = action.send_session_message {
+                app.send_session_message(session_id, text);
+            }
+            if let Some(device_id) = action.revoke_device_id {
+                app.revoke_device(device_id);
             }
         }
         return;
@@ -1738,7 +2376,7 @@ fn render_connected(
             app.return_to_search_results();
             return;
         }
-        details_panel(ui, app, colors);
+        details_panel(ui, app, colors, visible_artwork);
         let term = app.submitted_search.as_deref().unwrap_or_default();
         ui.heading(ui_text_args(
             ids::SEARCH_HEADING_MATCHING,
@@ -1768,16 +2406,24 @@ fn render_connected(
             }
             let loaded = app.live_tv_search_results.len() as u32;
             let total = app.live_tv_search_total;
-            let can_next = !app.live_tv_search_loading && total.is_some_and(|total| loaded < total);
+            let can_next = !app.live_tv_search_loading
+                && (app.live_tv_search_error
+                    || total.is_none_or(|total| app.live_tv_search_start_index < total));
             ui.horizontal(|ui| {
                 ui.label(catalog_count_label(loaded as usize, total));
+                let button = if app.live_tv_search_error {
+                    ui.label(
+                        RichText::new(ui_text(ids::LIVE_TV_SEARCH_STATUS_ERROR))
+                            .color(colors.danger),
+                    );
+                    ids::LIVE_TV_SEARCH_BUTTON_RETRY
+                } else {
+                    ids::LIVE_TV_SEARCH_BUTTON_NEXT_PAGE
+                };
                 if with_access_name(
-                    ui.add_enabled(
-                        can_next,
-                        egui::Button::new(ui_text(ids::BROWSE_BUTTON_NEXT_PAGE)),
-                    ),
+                    ui.add_enabled(can_next, egui::Button::new(ui_text(button))),
                     egui::Role::Button,
-                    ids::ACCESS_BROWSE_NEXT_PAGE,
+                    button,
                 )
                 .clicked()
                 {
@@ -1810,7 +2456,7 @@ fn render_connected(
     }
 
     if app.search.active || app.submitted_search.is_some() {
-        details_panel(ui, app, colors);
+        details_panel(ui, app, colors, visible_artwork);
         if app.search.stale {
             ui.label(RichText::new(ui_text(ids::SEARCH_NOTICE_STALE)).color(colors.muted));
         }
@@ -1828,6 +2474,7 @@ fn render_connected(
             if let Some(query) = query {
                 if !app.browse.catalog_loading
                     && !app.live_tv_search_loading
+                    && !app.live_tv_search_error
                     && app.browse.catalog_error.is_none()
                 {
                     state_panel(
@@ -1853,10 +2500,15 @@ fn render_connected(
             }
         } else {
             let mut show_all_responses = Vec::new();
-            let action = search::draw_with_focus_targets(
+            let action = search::draw_cards_with_focus_targets(
                 ui,
                 &grouped_results,
+                search::SearchCards {
+                    media: &app.search.media.0,
+                    colors,
+                },
                 app.live_tv_search_total,
+                visible_artwork,
                 |row, item, response| {
                     push_search_focus(entries, row, &item.id, response);
                 },
@@ -1876,6 +2528,14 @@ fn render_connected(
         }
         if app.live_tv_search_loading {
             ui.label(RichText::new(ui_text(ids::LIVE_TV_STATUS_SEARCHING)).color(colors.muted));
+        } else if app.live_tv_search_error {
+            ui.label(RichText::new(ui_text(ids::LIVE_TV_SEARCH_STATUS_ERROR)).color(colors.danger));
+            if ui
+                .button(ui_text(ids::LIVE_TV_SEARCH_BUTTON_RETRY))
+                .clicked()
+            {
+                app.retry_live_tv_search();
+            }
         }
         return;
     }
@@ -1888,11 +2548,13 @@ fn render_connected(
         // Sort and filter controls only describe the library's own catalog. Suggestions and
         // Upcoming are one fixed page, and Episodes has its own newest-first ordering.
         if app.navigation.library_tab == LibraryTab::Library {
-            catalog_controls(ui, app, colors);
+            egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(0, 4))
+                .show(ui, |ui| catalog_controls(ui, app, colors));
         }
         catalog_pagination(ui, app, colors);
     }
-    details_panel(ui, app, colors);
+    details_panel(ui, app, colors, visible_artwork);
     // An open item or person page replaces the browse grid: without this return the grid drew
     // below the details and reappeared when the viewer scrolled down past the details.
     if app.browse.details.selected_item_id.is_some() || app.person.selected.is_some() {
@@ -2139,19 +2801,26 @@ fn render_connected(
     // reloaded list drops ids that are no longer loaded.
     app.catalog_selection
         .bind_scope(&catalog_selection_scope(app));
-    app.catalog_selection.retain_loaded(
-        app.items
-            .iter()
-            .filter(|item| matches_item(item.kind))
-            .map(|item| item.id.as_str()),
-    );
+    let filtered_ids: Vec<String> = app
+        .items
+        .iter()
+        .filter(|item| matches_item(item.kind) && app.catalog_item_matches_local_filters(item))
+        .map(|item| item.id.clone())
+        .collect();
+    app.catalog_selection
+        .retain_loaded(filtered_ids.iter().map(String::as_str));
     catalog_selection_toolbar(ui, app, colors);
     let mut items = app
         .items
         .iter()
-        .filter(|item| matches_item(item.kind))
+        .filter(|item| matches_item(item.kind) && app.catalog_item_matches_local_filters(item))
         .peekable();
+    // A failed load already renders the error banner with its single contextual retry; a true
+    // empty (successful load, zero items) renders this distinct empty state instead.
     if items.peek().is_none() {
+        if app.browse.catalog_error.is_some() {
+            return;
+        }
         if matches!(
             app.navigation.library_tab,
             LibraryTab::Suggestions | LibraryTab::Upcoming | LibraryTab::Episodes
@@ -2228,6 +2897,10 @@ fn render_connected(
             .to_owned(),
         _ => app.navigation.page.label().to_owned(),
     };
+    let show_play_actions = matches!(
+        app.navigation.page,
+        Page::Movies | Page::Series | Page::Collections
+    );
     let mut catalog_view = CatalogView {
         colors,
         entries,
@@ -2236,14 +2909,21 @@ fn render_connected(
         list_layout,
         artwork_scale,
         selection: &mut app.catalog_selection,
+        show_play_actions,
+        play_all_request: None,
     };
-    if let Some(item_id) = poster_grid(ui, &grid_title, &items, &mut catalog_view) {
+    let clicked_item_id = poster_grid(ui, &grid_title, &items, &mut catalog_view);
+    let play_all_request = catalog_view.play_all_request;
+    if let Some(item_id) = clicked_item_id {
         if app.navigation.page == Page::Collections {
             // A collection opens as its own page of items.
             app.activate_catalog_item(item_id);
         } else {
             app.select_item(item_id);
         }
+    }
+    if let Some(shuffled) = play_all_request {
+        app.play_catalog_all(shuffled);
     }
 }
 
@@ -2286,6 +2966,21 @@ fn music_queue_panel(ui: &mut egui::Ui, app: &mut KattriApp, navigation: &[NavAc
 }
 
 fn playlists_page(ui: &mut egui::Ui, app: &mut KattriApp) {
+    // The local list is drawn first and regardless of server state: it belongs to this profile.
+    for intent in local_playlist::show(ui, app) {
+        match intent {
+            local_playlist::LocalPlaylistIntent::Remove(entry_id) => {
+                app.remove_local_playlist_entry(&entry_id);
+            }
+            local_playlist::LocalPlaylistIntent::MoveUp(entry_id) => {
+                app.move_local_playlist_entry(&entry_id, true);
+            }
+            local_playlist::LocalPlaylistIntent::MoveDown(entry_id) => {
+                app.move_local_playlist_entry(&entry_id, false);
+            }
+        }
+    }
+    ui.add_space(16.0);
     use playlists::{
         AddableMedia, OpenPlaylist, PlaylistCard, PlaylistEntry as UiPlaylistEntry, PlaylistInput,
     };
@@ -2460,8 +3155,8 @@ fn collection_summary_text(
 }
 
 fn catalog_pagination(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
-    // Everything is loaded: the page title already shows the count.
-    if app.browse.catalog_end_reached && !app.browse.catalog_loading {
+    // Everything is loaded (the page title already shows the count) or still loading.
+    if app.browse.catalog_loading || app.browse.catalog_end_reached {
         return;
     }
     let range_label = catalog_count_label(app.items.len(), app.total_record_count);
@@ -2679,10 +3374,29 @@ fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     let mut order = app.catalog_sort_order;
     let mut played_filter = app.catalog_played_filter;
     let mut favorites_only = app.catalog_favorites_only;
+    let mut genre = app.catalog_genre.clone();
+    let mut studio = app.catalog_studio.clone();
+    let mut year = app.catalog_year;
+    let mut official_rating = app.catalog_official_rating.clone();
+    let has_any_years = app
+        .items
+        .iter()
+        .any(|item| item.production_year.is_some_and(|y| y > 0));
+    let has_any_ratings = app.items.iter().any(|item| {
+        item.official_rating
+            .as_deref()
+            .is_some_and(|r| !r.trim().is_empty())
+    });
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(ui_text(ids::BROWSE_SORT_LABEL)).color(colors.muted));
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+        ui.spacing_mut().interact_size.y = 22.0;
         egui::ComboBox::from_id_salt("catalog_sort")
-            .selected_text(sort.label())
+            .width(124.0)
+            .selected_text(format!(
+                "{}: {}",
+                ui_text(ids::BROWSE_SORT_LABEL),
+                sort.label()
+            ))
             .show_ui(ui, |ui| {
                 for option in CatalogSort::ALL {
                     ui.selectable_value(&mut sort, option, option.label());
@@ -2700,6 +3414,7 @@ fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                 )
             });
         egui::ComboBox::from_id_salt("catalog_sort_order")
+            .width(110.0)
             .selected_text(match order {
                 ItemSortOrder::Ascending => ui_text(ids::BROWSE_SORT_ASCENDING),
                 ItemSortOrder::Descending => ui_text(ids::BROWSE_SORT_DESCENDING),
@@ -2725,6 +3440,7 @@ fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                 )
             });
         egui::ComboBox::from_id_salt("catalog_played_filter")
+            .width(116.0)
             .selected_text(played_filter.label())
             .show_ui(ui, |ui| {
                 for option in CatalogPlayedFilter::ALL
@@ -2735,6 +3451,9 @@ fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                         }
                         CatalogPlayedFilter::Unplayed => {
                             app.catalog_filter_supported(ItemFilter::IsUnplayed)
+                        }
+                        CatalogPlayedFilter::InProgress => {
+                            app.catalog_filter_supported(ItemFilter::IsResumable)
                         }
                         CatalogPlayedFilter::Any => true,
                     })
@@ -2753,10 +3472,120 @@ fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                     ),
                 )
             });
+        if !app.catalog_genres.is_empty() {
+            egui::ComboBox::from_id_salt("catalog_genre")
+                .width(120.0)
+                .selected_text(
+                    genre
+                        .clone()
+                        .unwrap_or_else(|| ui_text(ids::BROWSE_GENRE_ALL).to_owned()),
+                )
+                .height(360.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut genre, None, ui_text(ids::BROWSE_GENRE_ALL));
+                    for name in &app.catalog_genres {
+                        ui.selectable_value(&mut genre, Some(name.clone()), name);
+                    }
+                })
+                .response
+                .widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::Role::ComboBox,
+                        true,
+                        ui_text(ids::BROWSE_GENRE_LABEL),
+                    )
+                });
+        }
+        if !app.catalog_studios.is_empty() {
+            let selected = studio
+                .as_ref()
+                .and_then(|id| {
+                    app.catalog_studios
+                        .iter()
+                        .find(|(studio_id, _)| studio_id == id)
+                })
+                .map_or_else(
+                    || ui_text(ids::BROWSE_STUDIO_ALL).to_owned(),
+                    |(_, name)| name.clone(),
+                );
+            egui::ComboBox::from_id_salt("catalog_studio")
+                .width(120.0)
+                .selected_text(selected)
+                .height(360.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut studio, None, ui_text(ids::BROWSE_STUDIO_ALL));
+                    for (id, name) in &app.catalog_studios {
+                        ui.selectable_value(&mut studio, Some(id.clone()), name);
+                    }
+                })
+                .response
+                .widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::Role::ComboBox,
+                        true,
+                        ui_text(ids::BROWSE_STUDIO_LABEL),
+                    )
+                });
+        }
+        if has_any_years || year.is_some() {
+            let selected = year.map_or_else(|| "All Years".to_owned(), |y| y.to_string());
+            egui::ComboBox::from_id_salt("catalog_year")
+                .width(96.0)
+                .selected_text(selected)
+                .height(360.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut year, None, "All Years");
+                    let years: Vec<i32> = app
+                        .items
+                        .iter()
+                        .filter_map(|item| item.production_year.filter(|y| *y > 0))
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    for y in years {
+                        ui.selectable_value(&mut year, Some(y), y.to_string());
+                    }
+                })
+                .response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Year"));
+        }
+        if has_any_ratings || official_rating.is_some() {
+            let selected = official_rating
+                .clone()
+                .unwrap_or_else(|| "All Ratings".to_owned());
+            egui::ComboBox::from_id_salt("catalog_official_rating")
+                .width(104.0)
+                .selected_text(selected)
+                .height(360.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut official_rating, None, "All Ratings");
+                    let ratings: Vec<String> = app
+                        .items
+                        .iter()
+                        .filter_map(|item| {
+                            item.official_rating
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|r| !r.is_empty())
+                                .map(str::to_owned)
+                        })
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                    for rating in ratings {
+                        ui.selectable_value(&mut official_rating, Some(rating.clone()), rating);
+                    }
+                })
+                .response
+                .widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Parental Rating")
+                });
+        }
         if app.catalog_filter_supported(ItemFilter::IsFavorite) {
             ui.checkbox(
                 &mut favorites_only,
-                ui_text(ids::BROWSE_FILTER_FAVORITES_ONLY),
+                RichText::new(ui_text(ids::BROWSE_FILTER_FAVORITES_ONLY)).size(12.5),
             );
         }
     });
@@ -2774,55 +3603,12 @@ fn catalog_controls(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
         });
         app.set_music_view(view);
     }
-    let mut genre = app.catalog_genre.clone();
-    if !app.catalog_genres.is_empty() {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(ui_text(ids::BROWSE_GENRE_LABEL)).color(colors.muted));
-            egui::ComboBox::from_id_salt("catalog_genre")
-                .selected_text(
-                    genre
-                        .clone()
-                        .unwrap_or_else(|| ui_text(ids::BROWSE_GENRE_ALL).to_owned()),
-                )
-                .height(360.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut genre, None, ui_text(ids::BROWSE_GENRE_ALL));
-                    for name in &app.catalog_genres {
-                        ui.selectable_value(&mut genre, Some(name.clone()), name);
-                    }
-                });
-        });
-    }
-    let mut studio = app.catalog_studio.clone();
-    if !app.catalog_studios.is_empty() {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(ui_text(ids::BROWSE_STUDIO_LABEL)).color(colors.muted));
-            let selected = studio
-                .as_ref()
-                .and_then(|id| {
-                    app.catalog_studios
-                        .iter()
-                        .find(|(studio_id, _)| studio_id == id)
-                })
-                .map_or_else(
-                    || ui_text(ids::BROWSE_STUDIO_ALL).to_owned(),
-                    |(_, name)| name.clone(),
-                );
-            egui::ComboBox::from_id_salt("catalog_studio")
-                .selected_text(selected)
-                .height(360.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut studio, None, ui_text(ids::BROWSE_STUDIO_ALL));
-                    for (id, name) in &app.catalog_studios {
-                        ui.selectable_value(&mut studio, Some(id.clone()), name);
-                    }
-                });
-        });
-    }
     let mut name_prefix = app.catalog_name_prefix;
     alphabet_picker(ui, &mut name_prefix, colors);
     app.set_catalog_genre(genre);
     app.set_catalog_studio(studio);
+    app.set_catalog_year(year);
+    app.set_catalog_official_rating(official_rating);
     app.set_catalog_sort(sort);
     app.set_catalog_sort_order(order);
     app.set_catalog_played_filter(played_filter);
@@ -2841,7 +3627,8 @@ fn library_tab_strip(ui: &mut egui::Ui, app: &mut KattriApp, gamepad_actions: &m
     }
     let mut picked = None;
     let mut responses = Vec::with_capacity(tabs.len());
-    ui.horizontal(|ui| {
+    // Wrapped, like the filter rows: a narrow page must not push a tab past its right edge.
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         for tab in tabs {
             let enabled = app.library_tab_available(*tab);
@@ -2894,11 +3681,17 @@ const ALPHABET_PICKER_LETTERS: [char; 27] = [
 /// A row of letters that narrows the library to names starting with one of them.
 fn alphabet_picker(ui: &mut egui::Ui, prefix: &mut Option<char>, colors: Palette) {
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        let all = ui.add(egui::Button::selectable(
-            prefix.is_none(),
-            RichText::new(ui_text(ids::BROWSE_ALPHABET_ALL)).color(colors.text),
-        ));
+        ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
+        ui.spacing_mut().interact_size.y = 20.0;
+        let all = ui.add(
+            egui::Button::selectable(
+                prefix.is_none(),
+                RichText::new(ui_text(ids::BROWSE_ALPHABET_ALL))
+                    .size(12.0)
+                    .color(colors.text),
+            )
+            .min_size(egui::vec2(18.0, 20.0)),
+        );
         if all.clicked() {
             *prefix = None;
         }
@@ -2908,17 +3701,21 @@ fn alphabet_picker(ui: &mut egui::Ui, prefix: &mut Option<char>, colors: Palette
                 .add(
                     egui::Button::selectable(
                         selected,
-                        RichText::new(letter.to_string()).monospace(),
+                        RichText::new(letter.to_string()).monospace().size(12.0),
                     )
-                    .min_size(egui::vec2(22.0, 22.0)),
+                    .min_size(egui::vec2(18.0, 20.0)),
                 )
-                .on_hover_text(if letter == '#' {
-                    ui_text(ids::BROWSE_ALPHABET_SYMBOLS).to_owned()
-                } else {
-                    ui_text_args(
-                        ids::BROWSE_ALPHABET_LETTER,
-                        &[("letter", &letter.to_string())],
-                    )
+                .on_hover_ui(|ui| {
+                    if letter == '#' {
+                        ui.label(ui_text(ids::BROWSE_ALPHABET_SYMBOLS));
+                    } else {
+                        let mut buf = [0u8; 4];
+                        let letter_str = letter.encode_utf8(&mut buf);
+                        ui.label(ui_text_args(
+                            ids::BROWSE_ALPHABET_LETTER,
+                            &[("letter", letter_str)],
+                        ));
+                    }
                 });
             if response.clicked() {
                 *prefix = if selected { None } else { Some(letter) };
@@ -2961,7 +3758,12 @@ mod download_button_tests {
     }
 }
 
-fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
+fn details_panel(
+    ui: &mut egui::Ui,
+    app: &mut KattriApp,
+    colors: Palette,
+    visible_artwork: &mut Vec<(String, String)>,
+) {
     if app.person.selected.is_some() {
         person_page_panel(ui, app, colors);
         return;
@@ -2974,8 +3776,6 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     // viewer asked for the item's theme media.
     let mut play_requests = PlayButtonRequest::default();
     let mut detail_back = false;
-    let mut watched_clicked = false;
-    let mut favorite_clicked = false;
     let mut queue_audio_clicked = false;
     let mut play_next_clicked = false;
     let mut queue_album_clicked = false;
@@ -2992,6 +3792,7 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     let mut similar_item_to_open = None;
     let mut download_target: Option<(String, String)> = None;
     let mut save_subtitle_style_target: Option<(String, Option<String>)> = None;
+    let mut requested_chapter_ticks: Option<u64> = None;
     egui::Frame::new()
         .fill(colors.panel)
         .corner_radius(CornerRadius::same(16))
@@ -3026,8 +3827,124 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                                 );
                             });
                         detail_back |= header.back;
+                        requested_chapter_ticks = panel.take_requested_chapter_ticks();
                     }
                 });
+                if let Some(user_data) = item.user_data.as_ref() {
+                    let mut state = Vec::new();
+                    if user_data.is_favorite == Some(true) {
+                        state.push(ui_text(ids::DETAIL_STATE_FAVORITE).to_owned());
+                    }
+                    if user_data.played == Some(true) {
+                        state.push(ui_text(ids::DETAIL_STATE_PLAYED).to_owned());
+                    }
+                    if let Some(count) = user_data.play_count.filter(|count| *count > 0) {
+                        state.push(ui_text_args(
+                            ids::DETAIL_STATE_PLAYED_COUNT,
+                            &[("count", &count.to_string())],
+                        ));
+                    }
+                    if !state.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(state.join("  ·  "))
+                                .size(11.0)
+                                .color(colors.muted),
+                        );
+                    }
+                }
+                if let Some(message) = app.playback_error.as_deref() {
+                    ui.label(
+                        RichText::new(ui_text_args(
+                            ids::PLAYBACK_ERROR_NEGOTIATION,
+                            &[("message", message)],
+                        ))
+                        .size(12.0)
+                        .color(colors.danger),
+                    );
+                }
+                if let Some(info) = app.playback_info.as_ref() {
+                    if let Some(error_code) = info.error_code {
+                        let message = match error_code {
+                            jellyfin_api::PlaybackErrorCode::NotAllowed => {
+                                ui_text(ids::PLAYBACK_ERROR_NOT_ALLOWED)
+                            }
+                            jellyfin_api::PlaybackErrorCode::NoCompatibleStream => {
+                                ui_text(ids::PLAYBACK_ERROR_NO_STREAM)
+                            }
+                            jellyfin_api::PlaybackErrorCode::RateLimitExceeded => {
+                                ui_text(ids::PLAYBACK_ERROR_RATE_LIMITED)
+                            }
+                            jellyfin_api::PlaybackErrorCode::Unknown => {
+                                ui_text(ids::PLAYBACK_ERROR_UNKNOWN)
+                            }
+                        };
+                        ui.label(RichText::new(message).size(12.0).color(colors.danger));
+                    } else if info.media_sources.is_empty()
+                        || app.chosen_playback_selection(info).is_none()
+                    {
+                        ui.label(
+                            RichText::new(ui_text(ids::PLAYBACK_ERROR_NO_SOURCE))
+                                .size(12.0)
+                                .color(colors.muted),
+                        );
+                    }
+                }
+                if let Some(status) = app.playback_start_status.as_deref() {
+                    ui.label(RichText::new(status).size(11.0).color(colors.muted));
+                }
+                if let Some(message) = app.playback_start_error.as_deref() {
+                    ui.label(
+                        RichText::new(ui_text_args(
+                            ids::PLAYBACK_ERROR_SERVER_START,
+                            &[("message", message)],
+                        ))
+                        .size(12.0)
+                        .color(colors.danger),
+                    );
+                }
+                if let Some(info) = app.playback_info.as_ref()
+                    && info.error_code.is_none()
+                {
+                    let index = app
+                        .chosen_playback_selection(info)
+                        .map_or(0, |selection| selection.source_index);
+                    if info.media_sources.len() > 1 {
+                        let mut picked = index;
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(ui_text(ids::DETAIL_VERSION_LABEL))
+                                    .color(colors.muted),
+                            );
+                            egui::ComboBox::from_id_salt("detail_version")
+                                .selected_text(media_source::version_label(
+                                    &info.media_sources[index],
+                                    index,
+                                ))
+                                .show_ui(ui, |ui| {
+                                    for (option, source) in info.media_sources.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut picked,
+                                            option,
+                                            media_source::version_label(source, option),
+                                        );
+                                    }
+                                });
+                        });
+                        if picked != index {
+                            version_picked = Some(picked);
+                        }
+                    }
+                    if let Some(source) = info.media_sources.get(index) {
+                        egui::CollapsingHeader::new(ui_text(ids::DETAIL_MEDIA_INFO))
+                            .id_salt("detail_media_info")
+                            .show(ui, |ui| {
+                                for line in media_source::summary_lines(source) {
+                                    ui.label(RichText::new(line).size(12.0).color(colors.muted));
+                                }
+                            });
+                    }
+                }
                 if item.item_type.as_deref() == Some("Audio") {
                     ui.horizontal(|ui| {
                         if ui.button(ui_text(ids::MUSIC_QUEUE_ADD)).clicked() {
@@ -3205,6 +4122,62 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                         }
                     }
                 }
+                let directors = item
+                    .people
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|person| person.person_type.as_deref() == Some("Director"))
+                    .filter_map(|person| person.name.as_deref().map(str::trim))
+                    .filter(|name| !name.is_empty())
+                    .take(5)
+                    .collect::<Vec<_>>();
+                let writers = item
+                    .people
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|person| person.person_type.as_deref() == Some("Writer"))
+                    .filter_map(|person| person.name.as_deref().map(str::trim))
+                    .filter(|name| !name.is_empty())
+                    .take(5)
+                    .collect::<Vec<_>>();
+                let studios = item
+                    .studios
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|studio| studio.name.as_deref().map(str::trim))
+                    .filter(|name| !name.is_empty())
+                    .take(5)
+                    .collect::<Vec<_>>();
+                if !directors.is_empty() || !writers.is_empty() || !studios.is_empty() {
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 16.0;
+                        if !directors.is_empty() {
+                            ui.label(
+                                RichText::new(format!("Directors: {}", directors.join(", ")))
+                                    .size(13.0)
+                                    .color(colors.muted),
+                            );
+                        }
+                        if !writers.is_empty() {
+                            ui.label(
+                                RichText::new(format!("Writers: {}", writers.join(", ")))
+                                    .size(13.0)
+                                    .color(colors.muted),
+                            );
+                        }
+                        if !studios.is_empty() {
+                            ui.label(
+                                RichText::new(format!("Studios: {}", studios.join(", ")))
+                                    .size(13.0)
+                                    .color(colors.muted),
+                            );
+                        }
+                    });
+                }
                 let cast = item
                     .people
                     .as_deref()
@@ -3234,195 +4207,13 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
                     ui,
                     &cast,
                     &app.similar.items,
+                    &app.similar.media,
                     &item.id,
                     &app.person.artwork_textures,
+                    visible_artwork,
                 );
                 person_to_open = people_action.person_id;
                 similar_item_to_open = people_action.item_id;
-                if let Some(user_data) = item.user_data.as_ref() {
-                    let mut state = Vec::new();
-                    if user_data.is_favorite == Some(true) {
-                        state.push(ui_text(ids::DETAIL_STATE_FAVORITE).to_owned());
-                    }
-                    if user_data.played == Some(true) {
-                        state.push(ui_text(ids::DETAIL_STATE_PLAYED).to_owned());
-                    }
-                    if let Some(count) = user_data.play_count.filter(|count| *count > 0) {
-                        state.push(ui_text_args(
-                            ids::DETAIL_STATE_PLAYED_COUNT,
-                            &[("count", &count.to_string())],
-                        ));
-                    }
-                    if !state.is_empty() {
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new(state.join("  ·  "))
-                                .size(11.0)
-                                .color(colors.muted),
-                        );
-                    }
-                }
-                let watched = app.watched_view();
-                let favorite = app.favorite_view();
-                ui.horizontal(|ui| {
-                    let label = if favorite.favorite {
-                        ui_text(ids::DETAIL_BUTTON_REMOVE_FAVORITE)
-                    } else {
-                        ui_text(ids::DETAIL_BUTTON_ADD_FAVORITE)
-                    };
-                    if ui.button(label).clicked() {
-                        favorite_clicked = true;
-                    }
-                    if favorite.pending {
-                        ui.spinner();
-                    }
-                    let label = if watched.played {
-                        ui_text(ids::DETAIL_BUTTON_MARK_UNPLAYED)
-                    } else {
-                        ui_text(ids::DETAIL_BUTTON_MARK_PLAYED)
-                    };
-                    if ui
-                        .add_enabled(!watched.pending, egui::Button::new(label))
-                        .clicked()
-                    {
-                        watched_clicked = true;
-                    }
-                    if watched.pending {
-                        ui.spinner();
-                    }
-                });
-                if let Some(message) = watched.error.as_deref() {
-                    ui.label(RichText::new(message).size(12.0).color(colors.danger));
-                }
-                if let Some(message) = favorite.error.as_deref() {
-                    ui.label(RichText::new(message).size(12.0).color(colors.danger));
-                }
-                if let Some(message) = app.playback_error.as_deref() {
-                    ui.label(
-                        RichText::new(ui_text_args(
-                            ids::PLAYBACK_ERROR_NEGOTIATION,
-                            &[("message", message)],
-                        ))
-                        .size(12.0)
-                        .color(colors.danger),
-                    );
-                }
-                if let Some(info) = app.playback_info.as_ref() {
-                    if let Some(error_code) = info.error_code {
-                        let message = match error_code {
-                            jellyfin_api::PlaybackErrorCode::NotAllowed => {
-                                ui_text(ids::PLAYBACK_ERROR_NOT_ALLOWED)
-                            }
-                            jellyfin_api::PlaybackErrorCode::NoCompatibleStream => {
-                                ui_text(ids::PLAYBACK_ERROR_NO_STREAM)
-                            }
-                            jellyfin_api::PlaybackErrorCode::RateLimitExceeded => {
-                                ui_text(ids::PLAYBACK_ERROR_RATE_LIMITED)
-                            }
-                            jellyfin_api::PlaybackErrorCode::Unknown => {
-                                ui_text(ids::PLAYBACK_ERROR_UNKNOWN)
-                            }
-                        };
-                        ui.label(RichText::new(message).size(12.0).color(colors.danger));
-                    } else if info.media_sources.is_empty() {
-                        ui.label(
-                            RichText::new(ui_text(ids::PLAYBACK_ERROR_NO_SOURCE))
-                                .size(12.0)
-                                .color(colors.muted),
-                        );
-                    } else {
-                        if let Some(selection) = app.chosen_playback_selection(info) {
-                            let label = match selection.method {
-                                PlaybackMethod::DirectPlay => {
-                                    ui_text(ids::PLAYBACK_METHOD_DIRECT_PLAY)
-                                }
-                                PlaybackMethod::DirectStream => {
-                                    ui_text(ids::PLAYBACK_METHOD_DIRECT_STREAM)
-                                }
-                                PlaybackMethod::Transcode => {
-                                    ui_text(ids::PLAYBACK_METHOD_TRANSCODE)
-                                }
-                            };
-                            ui.label(
-                                RichText::new(ui_text_args(
-                                    ids::PLAYBACK_STATUS_READY_VIA,
-                                    &[("label", label)],
-                                ))
-                                .size(12.0)
-                                .color(colors.muted),
-                            );
-                        } else {
-                            ui.label(
-                                RichText::new(ui_text(ids::PLAYBACK_ERROR_NO_SOURCE))
-                                    .color(colors.muted),
-                            );
-                        }
-                    }
-                }
-                if let Some(info) = app.playback_info.as_ref()
-                    && info.error_code.is_none()
-                {
-                    let index = app
-                        .chosen_playback_selection(info)
-                        .map_or(0, |selection| selection.source_index);
-                    if info.media_sources.len() > 1 {
-                        let mut picked = index;
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(ui_text(ids::DETAIL_VERSION_LABEL))
-                                    .color(colors.muted),
-                            );
-                            egui::ComboBox::from_id_salt("detail_version")
-                                .selected_text(media_source::version_label(
-                                    &info.media_sources[index],
-                                    index,
-                                ))
-                                .show_ui(ui, |ui| {
-                                    for (option, source) in info.media_sources.iter().enumerate() {
-                                        ui.selectable_value(
-                                            &mut picked,
-                                            option,
-                                            media_source::version_label(source, option),
-                                        );
-                                    }
-                                });
-                        });
-                        if picked != index {
-                            version_picked = Some(picked);
-                        }
-                    }
-                    if let Some(source) = info.media_sources.get(index) {
-                        egui::CollapsingHeader::new(ui_text(ids::DETAIL_MEDIA_INFO))
-                            .id_salt("detail_media_info")
-                            .show(ui, |ui| {
-                                for line in media_source::summary_lines(source) {
-                                    ui.label(RichText::new(line).size(12.0).color(colors.muted));
-                                }
-                            });
-                    }
-                }
-                if app.playback_ui_phase() == PlaybackUiPhase::Starting {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(
-                            RichText::new(ui_text(ids::PLAYBACK_STATUS_PREPARING))
-                                .color(colors.muted),
-                        );
-                    });
-                }
-                if let Some(status) = app.playback_start_status.as_deref() {
-                    ui.label(RichText::new(status).size(11.0).color(colors.muted));
-                }
-                if let Some(message) = app.playback_start_error.as_deref() {
-                    ui.label(
-                        RichText::new(ui_text_args(
-                            ids::PLAYBACK_ERROR_SERVER_START,
-                            &[("message", message)],
-                        ))
-                        .size(12.0)
-                        .color(colors.danger),
-                    );
-                }
             } else if let Some(message) = app.browse.details.details_error.clone() {
                 detail_error_action = detail_error_panel(ui, &message, colors);
             } else if !app.browse.details.details_loading {
@@ -3438,6 +4229,8 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
         Some(DetailErrorAction::Retry) => app.retry_item_details(),
         None => {}
     }
+    let watched_clicked = play_requests.watched_clicked;
+    let favorite_clicked = play_requests.favorite_clicked;
     if watched_clicked {
         app.request_watched_toggle();
     }
@@ -3460,6 +4253,13 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     if let Some(episode_id) = episode_to_open {
         // The play button plays the episode, resuming where it was left.
         app.play_item(episode_id, false);
+        ui.ctx().request_repaint();
+    }
+    if let Some(ticks) = requested_chapter_ticks
+        && let Some(item_id) = app.browse.details.selected_item_id.clone()
+    {
+        let ticks = i64::try_from(ticks).unwrap_or(i64::MAX);
+        app.play_item_at(item_id, true, Some(ticks));
         ui.ctx().request_repaint();
     }
     if let Some(extra_id) = extra_to_play {
@@ -3494,6 +4294,10 @@ fn details_panel(ui: &mut egui::Ui, app: &mut KattriApp, colors: Palette) {
     }
     if let Some((item_id, series_id)) = save_subtitle_style_target {
         app.save_title_subtitle_style(&item_id, series_id.as_deref());
+    }
+    if let Some(trailer_id) = play_requests.trailer_id {
+        app.play_child_item(trailer_id);
+        ui.ctx().request_repaint();
     }
     if play_requests.theme {
         app.play_theme_media();
@@ -3634,7 +4438,17 @@ mod next_up_label_tests {
 #[derive(Default)]
 struct PlayButtonRequest {
     start_over: Option<bool>,
+    trailer_id: Option<String>,
     theme: bool,
+    favorite_clicked: bool,
+    watched_clicked: bool,
+}
+
+fn hero_secondary_button(label: &str, min_width: f32) -> egui::Button<'_> {
+    egui::Button::new(RichText::new(label).size(16.0))
+        .fill(Color32::from_white_alpha(46))
+        .corner_radius(CornerRadius::same(24))
+        .min_size(egui::vec2(min_width, 48.0))
 }
 
 fn detail_play_buttons(
@@ -3653,9 +4467,6 @@ fn detail_play_buttons(
         item.item_type.as_deref(),
         Some("Movie" | "Episode" | "Video")
     );
-    if !playable && !downloadable && !themed {
-        return;
-    }
     let resume_ticks = item.user_data.as_ref().and_then(|user_data| {
         resumable_position_ticks(
             user_data.playback_position_ticks,
@@ -3664,95 +4475,131 @@ fn detail_play_buttons(
         )
     });
     let busy = app.playback_busy();
-    if item.item_type.as_deref() == Some("Book") {
-        ui.label(RichText::new(ui_text(ids::DETAIL_BOOK_NOT_PLAYABLE)).color(colors.muted));
-        ui.add_space(6.0);
-    }
-    ui.horizontal(|ui| {
-        if playable {
-            let primary_label = match resume_ticks {
-                Some(ticks) => ui_text_args(
-                    ids::PLAYBACK_BUTTON_RESUME_AT,
-                    &[("position", &format_resume_position(ticks))],
-                ),
-                None => ui_text(ids::PLAYBACK_BUTTON_PLAY).to_owned(),
-            };
-            let primary = egui::Button::new(
-                RichText::new(primary_label)
-                    .size(17.0)
-                    .strong()
-                    .color(colors.background),
-            )
-            .fill(colors.accent)
-            .corner_radius(CornerRadius::same(24))
-            .min_size(egui::vec2(150.0, 48.0));
-            if ui.add_enabled(!busy, primary).clicked() {
-                play_requests.start_over = Some(false);
-            }
-            if resume_ticks.is_some()
-                && ui
-                    .add_enabled(
-                        !busy,
-                        egui::Button::new(
-                            RichText::new(ui_text(ids::PLAYBACK_BUTTON_START_OVER)).size(16.0),
+    let watched = app.watched_view();
+    let favorite = app.favorite_view();
+    ui.vertical(|ui| {
+        if item.item_type.as_deref() == Some("Book") {
+            ui.label(RichText::new(ui_text(ids::DETAIL_BOOK_NOT_PLAYABLE)).color(colors.muted));
+            ui.add_space(6.0);
+        }
+        ui.horizontal_wrapped(|ui| {
+            if playable {
+                let primary_label = match resume_ticks {
+                    Some(ticks) => ui_text_args(
+                        ids::PLAYBACK_BUTTON_RESUME_AT,
+                        &[("position", &format_resume_position(ticks))],
+                    ),
+                    None => ui_text(ids::PLAYBACK_BUTTON_PLAY).to_owned(),
+                };
+                let primary = egui::Button::new(
+                    RichText::new(primary_label)
+                        .size(17.0)
+                        .strong()
+                        .color(colors.background),
+                )
+                .fill(colors.accent)
+                .corner_radius(CornerRadius::same(24))
+                .min_size(egui::vec2(150.0, 48.0));
+                if ui.add_enabled(!busy, primary).clicked() {
+                    play_requests.start_over = Some(false);
+                }
+                if resume_ticks.is_some()
+                    && ui
+                        .add_enabled(
+                            !busy,
+                            hero_secondary_button(ui_text(ids::PLAYBACK_BUTTON_START_OVER), 130.0),
                         )
-                        .fill(Color32::from_white_alpha(46))
-                        .corner_radius(CornerRadius::same(24))
-                        .min_size(egui::vec2(130.0, 48.0)),
-                    )
+                        .clicked()
+                {
+                    play_requests.start_over = Some(true);
+                }
+            }
+            if let Some(trailer) = app.item_extras.iter().find(|extra| {
+                extra
+                    .item_type
+                    .as_deref()
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case("Trailer"))
+                    || extra.name.to_ascii_lowercase().contains("trailer")
+            }) && ui.add(hero_secondary_button("Trailer", 100.0)).clicked()
+            {
+                play_requests.trailer_id = Some(trailer.id.clone());
+            }
+            if themed
+                && ui
+                    .add(hero_secondary_button(
+                        ui_text(ids::DETAIL_BUTTON_THEME),
+                        110.0,
+                    ))
                     .clicked()
             {
-                play_requests.start_over = Some(true);
+                play_requests.theme = true;
             }
-        }
-        if themed
-            && ui
-                .add(
-                    egui::Button::new(RichText::new(ui_text(ids::DETAIL_BUTTON_THEME)).size(16.0))
-                        .fill(Color32::from_white_alpha(46))
-                        .corner_radius(CornerRadius::same(24))
-                        .min_size(egui::vec2(110.0, 48.0)),
-                )
-                .clicked()
-        {
-            play_requests.theme = true;
-        }
-        if downloadable
-            && ui
-                .add(
-                    egui::Button::new(
-                        RichText::new(ui_text(ids::DETAIL_BUTTON_DOWNLOAD)).size(16.0),
-                    )
-                    .fill(Color32::from_white_alpha(46))
-                    .corner_radius(CornerRadius::same(24))
-                    .min_size(egui::vec2(120.0, 48.0)),
-                )
-                .clicked()
-        {
-            *download_target = Some((item.id.clone(), item.name.clone()));
-        }
-        if subtitle_style_savable
-            && ui
-                .add(
-                    egui::Button::new(
-                        RichText::new(ui_text(ids::DETAIL_BUTTON_SAVE_SUBTITLE_STYLE)).size(16.0),
-                    )
-                    .fill(Color32::from_white_alpha(46))
-                    .corner_radius(CornerRadius::same(24))
-                    .min_size(egui::vec2(160.0, 48.0)),
-                )
-                .clicked()
-        {
-            *save_subtitle_style_target = Some((item.id.clone(), item.series_id.clone()));
-        }
-        if busy {
-            ui.spinner();
-            let status = if app.playback_ui_phase() == PlaybackUiPhase::Starting {
-                ui_text(ids::PLAYBACK_STATUS_PREPARING)
+            if downloadable
+                && ui
+                    .add(hero_secondary_button(
+                        ui_text(ids::DETAIL_BUTTON_DOWNLOAD),
+                        120.0,
+                    ))
+                    .clicked()
+            {
+                *download_target = Some((item.id.clone(), item.name.clone()));
+            }
+            if subtitle_style_savable
+                && ui
+                    .add(hero_secondary_button(
+                        ui_text(ids::DETAIL_BUTTON_SAVE_SUBTITLE_STYLE),
+                        160.0,
+                    ))
+                    .clicked()
+            {
+                *save_subtitle_style_target = Some((item.id.clone(), item.series_id.clone()));
+            }
+            let favorite_label = if favorite.favorite {
+                ui_text(ids::DETAIL_BUTTON_REMOVE_FAVORITE)
             } else {
-                ui_text(ids::PLAYBACK_STATUS_REQUESTING)
+                ui_text(ids::DETAIL_BUTTON_ADD_FAVORITE)
             };
-            ui.label(RichText::new(status).color(Color32::from_gray(210)));
+            if ui
+                .add(hero_secondary_button(favorite_label, 130.0))
+                .clicked()
+            {
+                play_requests.favorite_clicked = true;
+            }
+            if favorite.pending {
+                ui.spinner();
+            }
+            let watched_label = if watched.played {
+                ui_text(ids::DETAIL_BUTTON_MARK_UNPLAYED)
+            } else {
+                ui_text(ids::DETAIL_BUTTON_MARK_PLAYED)
+            };
+            if ui
+                .add_enabled(
+                    !watched.pending,
+                    hero_secondary_button(watched_label, 130.0),
+                )
+                .clicked()
+            {
+                play_requests.watched_clicked = true;
+            }
+            if watched.pending {
+                ui.spinner();
+            }
+            if busy {
+                ui.spinner();
+                let status = if app.playback_ui_phase() == PlaybackUiPhase::Starting {
+                    ui_text(ids::PLAYBACK_STATUS_PREPARING)
+                } else {
+                    ui_text(ids::PLAYBACK_STATUS_REQUESTING)
+                };
+                ui.label(RichText::new(status).color(Color32::from_gray(210)));
+            }
+        });
+        if let Some(message) = watched.error.as_deref() {
+            ui.label(RichText::new(message).size(12.0).color(colors.danger));
+        }
+        if let Some(message) = favorite.error.as_deref() {
+            ui.label(RichText::new(message).size(12.0).color(colors.danger));
         }
     });
 }
@@ -3900,7 +4747,7 @@ mod detail_error_panel_tests {
                 ..Default::default()
             },
             |ui| {
-                action = detail_error_panel(ui, NOT_AVAILABLE, crate::theme::palette(false));
+                action = detail_error_panel(ui, NOT_AVAILABLE, crate::theme::palette());
             },
         );
         output.textures_delta.clear();
@@ -3923,6 +4770,89 @@ mod detail_error_panel_tests {
             .shapes
             .iter()
             .find_map(|clipped| find(&clipped.shape, text))
+    }
+
+    #[test]
+    fn details_panel_places_actions_in_hero_and_media_info_above_similar_without_redundant_status()
+    {
+        use super::{KattriApp, details_panel, ids, ui_text};
+
+        let context = egui::Context::default();
+        let mut app = KattriApp::new(context.clone());
+        app.browse.details.selected_item_id = Some("movie-1".into());
+        app.browse.details.selected_details = Some(
+            serde_json::from_value(serde_json::json!({
+                "Id": "movie-1",
+                "Name": "Detail Layout Film",
+                "Type": "Movie",
+                "UserData": {
+                    "Played": true,
+                    "IsFavorite": true,
+                    "PlayCount": 2
+                }
+            }))
+            .expect("item fixture"),
+        );
+        app.playback_info = Some(
+            serde_json::from_value(serde_json::json!({
+                "MediaSources": [{
+                    "Container": "mkv",
+                    "SupportsDirectPlay": true,
+                    "MediaStreams": [
+                        {"Type": "Video", "Codec": "h264", "BitDepth": 8, "VideoRangeType": "SDR"},
+                        {"Type": "Audio", "Codec": "aac", "IsDefault": true, "Index": 1}
+                    ]
+                }]
+            }))
+            .expect("playback info fixture"),
+        );
+        let similar_dto: jellyfin_api::BaseItemDto = serde_json::from_value(serde_json::json!({
+            "Id": "movie-2",
+            "Name": "Similar Film",
+            "Type": "Movie"
+        }))
+        .expect("similar fixture");
+        app.similar.items = vec![similar_dto.clone()];
+        app.similar.media = vec![crate::catalog::MediaItem::from_api(similar_dto)];
+        let mut visible_artwork = Vec::new();
+        let mut output = context.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 1200.0))),
+                ..Default::default()
+            },
+            |ui| {
+                details_panel(ui, &mut app, crate::theme::palette(), &mut visible_artwork);
+            },
+        );
+        output.textures_delta.clear();
+
+        let fav_btn = text_shape(&output, ui_text(ids::DETAIL_BUTTON_REMOVE_FAVORITE))
+            .expect("favorite button in hero");
+        let watched_btn = text_shape(&output, ui_text(ids::DETAIL_BUTTON_MARK_UNPLAYED))
+            .expect("watched button in hero");
+        let media_info =
+            text_shape(&output, ui_text(ids::DETAIL_MEDIA_INFO)).expect("media info header");
+        let more_like_this =
+            text_shape(&output, ui_text(ids::DETAIL_HEADING_SIMILAR)).expect("similar heading");
+
+        assert!(
+            fav_btn.pos.y < media_info.pos.y && watched_btn.pos.y < media_info.pos.y,
+            "hero actions should sit above metadata/media info"
+        );
+        assert!(
+            media_info.pos.y < more_like_this.pos.y,
+            "media info ({}) should sit above More like this ({})",
+            media_info.pos.y,
+            more_like_this.pos.y
+        );
+        assert!(
+            text_shape(&output, "Ready to play via Direct Play.").is_none(),
+            "redundant ready_via status should be removed"
+        );
+        assert!(
+            text_shape(&output, ui_text(ids::PLAYBACK_STATUS_PREPARING)).is_none(),
+            "inline preparing spinner status should be removed"
+        );
     }
 }
 
@@ -4250,13 +5180,13 @@ fn catalog_card_response(
     visible_artwork: &mut Vec<(String, String)>,
     response: egui::Response,
 ) -> bool {
-    item_menu::attach(&response, item);
+    let handled = item_menu::card_actions(ui, &response, item);
     if ui.clip_rect().intersects(response.rect)
         && let Some(tag) = item.primary_image_tag.as_deref()
     {
         visible_artwork.push((item.artwork_id.clone(), tag.to_owned()));
     }
-    let clicked = response.clicked();
+    let clicked = response.clicked() && !handled;
     entries.push(CardFocus {
         row,
         id: FocusId::new(format!("catalog:{}", item.id)),
@@ -4359,6 +5289,16 @@ fn poster_grid(
                 .size(16.0)
                 .color(view.colors.muted),
         );
+        if view.show_play_actions && !items.is_empty() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Shuffle").clicked() {
+                    view.play_all_request = Some(true);
+                }
+                if ui.button("Play All").clicked() {
+                    view.play_all_request = Some(false);
+                }
+            });
+        }
     });
     ui.add_space(18.0);
     // Ctrl+A selects the items loaded for this grid. The shortcut is consumed here so it only
@@ -4604,23 +5544,24 @@ fn catalog_list_row(
             );
         }
     }
-    let accessible = format!("{}, {}", item.title, item.subtitle());
+    let is_selected =
+        view.selected_item_id == Some(item.id.as_str()) || view.selection.contains(&item.id);
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::Role::Button,
             true,
-            view.selected_item_id == Some(item.id.as_str()) || view.selection.contains(&item.id),
-            accessible.clone(),
+            is_selected,
+            format!("{}, {}", item.title, item.subtitle()),
         )
     });
-    item_menu::attach(&response, item);
+    let handled = item_menu::card_actions(ui, &response, item);
     if ui.clip_rect().intersects(rect)
         && let Some(tag) = item.primary_image_tag.as_deref()
     {
         view.visible_artwork
             .push((item.artwork_id.clone(), tag.to_owned()));
     }
-    let clicked = response.clicked();
+    let clicked = response.clicked() && !handled;
     view.entries.push(CardFocus {
         row,
         id: FocusId::new(format!("catalog:{}", item.id)),
@@ -4731,9 +5672,14 @@ fn move_navigation_focus(
         NavAction::Down,
         NavAction::Select,
     ];
-    let action = (!ctx.egui_wants_keyboard_input())
+    let keyboard_actions = [NavAction::Left, NavAction::Right, NavAction::Down];
+    let action = (!ctx.text_edit_focused() && !egui::Popup::is_any_open(ctx))
         .then(|| {
-            crate::input::take_action(ctx, &accepted, app.settings.settings().input.key_repeat)
+            crate::input::take_action(
+                ctx,
+                &keyboard_actions,
+                app.settings.settings().input.key_repeat,
+            )
         })
         .flatten()
         .or_else(|| take_gamepad_action(gamepad_actions, &accepted));
@@ -4958,18 +5904,22 @@ mod dashboard_gate_tests {
     use super::{Page, navigation_pages_for};
 
     #[test]
-    fn dashboard_entry_is_absent_until_the_gate_is_on() {
-        assert!(!navigation_pages_for(false, None).contains(&Page::Dashboard));
-        assert!(navigation_pages_for(false, None).contains(&Page::SyncPlay));
-        let enabled = navigation_pages_for(true, None);
-        assert!(enabled.contains(&Page::Dashboard));
-        assert_eq!(enabled.last(), Some(&Page::Settings));
+    fn primary_tabs_are_content_destinations_only() {
+        // Settings and the admin dashboard are menu destinations, never primary tabs, so the
+        // bar cannot duplicate the profile menu.
+        let tabs = navigation_pages_for(None);
+        assert!(!tabs.contains(&Page::Settings));
+        assert!(!tabs.contains(&Page::Dashboard));
+        assert!(tabs.contains(&Page::SyncPlay));
+        for page in [Page::Movies, Page::Series, Page::Music, Page::Photos] {
+            assert!(tabs.contains(&page), "{page:?}");
+        }
     }
 
     #[test]
     fn library_tabs_follow_the_users_views() {
         // Before the views arrive the long-standing tabs stay, and new library types wait.
-        let unknown = navigation_pages_for(false, None);
+        let unknown = navigation_pages_for(None);
         for page in [
             Page::Movies,
             Page::Series,
@@ -4988,31 +5938,26 @@ mod dashboard_gate_tests {
             assert!(!unknown.contains(&page), "{page:?}");
         }
 
-        let movies_only = navigation_pages_for(false, Some(&[Some("movies")]));
+        let movies_only = navigation_pages_for(Some(&[Some("movies")]));
         assert!(movies_only.contains(&Page::Movies));
         for page in [Page::Series, Page::Music, Page::Photos, Page::LiveTv] {
             assert!(!movies_only.contains(&page), "{page:?}");
         }
-        for page in [
-            Page::Home,
-            Page::Playlists,
-            Page::Downloads,
-            Page::SyncPlay,
-            Page::Settings,
-        ] {
+        assert!(
+            !movies_only.contains(&Page::Home),
+            "Home is reached through the brand button"
+        );
+        for page in [Page::Playlists, Page::Downloads, Page::SyncPlay] {
             assert!(movies_only.contains(&page), "{page:?}");
         }
 
-        let everything = navigation_pages_for(
-            false,
-            Some(&[
-                Some("boxsets"),
-                Some("books"),
-                Some("homevideos"),
-                Some("musicvideos"),
-                Some("livetv"),
-            ]),
-        );
+        let everything = navigation_pages_for(Some(&[
+            Some("boxsets"),
+            Some("books"),
+            Some("homevideos"),
+            Some("musicvideos"),
+            Some("livetv"),
+        ]));
         for page in [
             Page::Collections,
             Page::Books,
@@ -5027,7 +5972,7 @@ mod dashboard_gate_tests {
         assert!(!everything.contains(&Page::Movies));
 
         // A mixed library can hold movies and shows.
-        let mixed = navigation_pages_for(false, Some(&[None]));
+        let mixed = navigation_pages_for(Some(&[None]));
         assert!(mixed.contains(&Page::Movies) && mixed.contains(&Page::Series));
     }
 }
@@ -5042,18 +5987,19 @@ fn navigation_pages(app: &KattriApp) -> Vec<Page> {
             .map(|view| view.collection_type.as_deref())
             .collect()
     });
-    navigation_pages_for(app.dashboard_enabled(), collection_types.as_deref())
+    navigation_pages_for(collection_types.as_deref())
 }
 
 /// `collection_types` holds each user view's `CollectionType`, or `None` while the views are
 /// unknown; then the long-standing tabs show and the newer library types wait for the views.
-fn navigation_pages_for(
-    dashboard_enabled: bool,
-    collection_types: Option<&[Option<&str>]>,
-) -> Vec<Page> {
+///
+/// The primary bar holds content destinations only. Account, administration and Settings live
+/// in the profile menu, so they are never repeated as tabs.
+fn navigation_pages_for(collection_types: Option<&[Option<&str>]>) -> Vec<Page> {
     Page::ALL
         .into_iter()
-        .filter(|page| *page != Page::Dashboard || dashboard_enabled)
+        .filter(|page| *page != Page::Home)
+        .filter(|page| !matches!(page, Page::Settings | Page::Dashboard))
         .filter(|page| library_page_shown(*page, collection_types))
         .collect()
 }
@@ -5090,6 +6036,157 @@ fn library_page_shown(page: Page, collection_types: Option<&[Option<&str>]>) -> 
 }
 
 #[cfg(test)]
+mod narrow_layout_tests {
+    use super::*;
+    use egui::accesskit::Role;
+
+    /// Every node carrying `label`, with its bounds in page coordinates. A label can appear
+    /// more than once (the nav rail names a page the same way its library tab does).
+    fn nodes_for(update: &egui::accesskit::TreeUpdate, label: &str) -> Vec<(Role, egui::Rect)> {
+        update
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| {
+                if node.label() != Some(label) {
+                    return None;
+                }
+                let bounds = node.bounds()?;
+                Some((
+                    node.role(),
+                    egui::Rect::from_min_max(
+                        egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                        egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                    ),
+                ))
+            })
+            .collect()
+    }
+
+    fn series_page(width: f32) -> egui::accesskit::TreeUpdate {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut app = KattriApp::new(context.clone());
+        app.apply_connection_status(ConnectionStatus::Connected);
+        app.navigation.view = AppView::Library;
+        app.navigation.page = Page::Series;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 720.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                draw(ui, &mut app, width);
+            },
+        );
+        output.textures_delta.clear();
+        output.platform_output.accesskit_update.expect("page tree")
+    }
+
+    #[test]
+    fn series_tabs_stay_inside_a_narrow_page() {
+        // The native host sets no minimum inner size, so every width it can be resized to is
+        // reachable. 640 is the width this suite already treats as narrow.
+        for width in [360.0_f32, 480.0, 640.0] {
+            let update = series_page(width);
+            for tab in LibraryTab::SERIES_TABS {
+                let label = tab.label(Page::Series);
+                let nodes = nodes_for(&update, label);
+                assert!(!nodes.is_empty(), "{label} is missing at {width}");
+                for (role, rect) in nodes {
+                    assert!(
+                        rect.left() >= 0.0,
+                        "{label} ({role:?}) starts off the left edge at {width}: {rect:?}"
+                    );
+                    assert!(
+                        rect.width() > 0.0 && rect.height() > 0.0,
+                        "{label} ({role:?}) has no clickable area at {width}"
+                    );
+                    assert!(
+                        rect.right() <= width + 0.5,
+                        "{label} ({role:?}) is clipped: right edge {} exceeds {width}",
+                        rect.right()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn catalog_controls_and_music_views_stay_inside_a_narrow_panel() {
+        for width in [360.0_f32, 640.0] {
+            let context = egui::Context::default();
+            context.enable_accesskit();
+            let mut app = KattriApp::new(context.clone());
+            app.apply_connection_status(ConnectionStatus::Connected);
+            app.navigation.view = AppView::Library;
+            app.navigation.page = Page::Music;
+            app.catalog_genres = vec!["Drama".into()];
+            app.catalog_studios = vec![("studio-1".into(), "Studio One".into())];
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| catalog_controls(ui, &mut app, theme::palette()),
+            );
+            output.textures_delta.clear();
+            let update = output
+                .platform_output
+                .accesskit_update
+                .expect("controls tree");
+
+            let mut interactive = 0;
+            for (_, node) in &update.nodes {
+                if !matches!(node.role(), Role::ComboBox | Role::CheckBox | Role::Button) {
+                    continue;
+                }
+                let Some(bounds) = node.bounds() else {
+                    continue;
+                };
+                interactive += 1;
+                assert!(
+                    bounds.x1 as f32 <= width + 0.5,
+                    "{:?} {:?} is clipped at {width}: right edge {}",
+                    node.role(),
+                    node.label().unwrap_or_default(),
+                    bounds.x1
+                );
+            }
+            assert!(interactive >= 3, "only {interactive} controls at {width}");
+
+            for label in [
+                ui_text(ids::MUSIC_VIEW_ALL),
+                ui_text(ids::MUSIC_VIEW_ALBUMS),
+                ui_text(ids::MUSIC_VIEW_SONGS),
+            ] {
+                let nodes = nodes_for(&update, label);
+                assert!(
+                    !nodes.is_empty(),
+                    "music view {label:?} is missing at {width}"
+                );
+                for (role, rect) in nodes {
+                    assert!(
+                        rect.width() > 0.0 && rect.height() > 0.0,
+                        "music view {label:?} ({role:?}) has no clickable area at {width}"
+                    );
+                    assert!(
+                        rect.right() <= width + 0.5,
+                        "music view {label:?} is clipped at {width}: right edge {}",
+                        rect.right()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod accessible_name_tests {
     use super::*;
     use egui::accesskit::Role;
@@ -5111,7 +6208,7 @@ mod accessible_name_tests {
                     ..Default::default()
                 },
                 |ui| {
-                    topbar(ui, &mut app, theme::palette(false));
+                    topbar(ui, &mut app, theme::palette());
                 },
             );
             output.textures_delta.clear();
@@ -5164,7 +6261,7 @@ mod accessible_name_tests {
                 ..Default::default()
             },
             |ui| {
-                topbar(ui, &mut app, theme::palette(false));
+                topbar(ui, &mut app, theme::palette());
             },
         );
         output.textures_delta.clear();

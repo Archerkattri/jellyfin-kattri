@@ -42,7 +42,14 @@ assets = [
 # The pinned libmpv BUILD-INFO lists these direct shared dependencies. The RPM package
 # manager resolves providers on each supported RPM distribution; libjpeg.so.8 is bundled
 # privately because Fedora's libjpeg-turbo provides the incompatible libjpeg.so.62 ABI.
+# Disable ELF auto-requires: the generator treats private bundled libjpeg.so.8 as a
+# system requirement, which DNF cannot satisfy on Fedora. Keep explicit system requirements.
+auto-req = "no"
 [package.metadata.generate-rpm.requires]
+"libudev.so.1()(64bit)" = "*"
+"libgcc_s.so.1()(64bit)" = "*"
+"libc.so.6()(64bit)" = "*"
+"libm.so.6()(64bit)" = "*"
 "libass.so.9()(64bit)" = "*"
 "libz.so.1()(64bit)" = "*"
 "libva.so.2()(64bit)" = "*"

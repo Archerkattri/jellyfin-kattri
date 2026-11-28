@@ -5,18 +5,34 @@ if [[ $# -lt 1 || -z "${KATTRI_SMOKE_LOG:-}" ]]; then
   echo "usage: KATTRI_SMOKE_LOG=<path> $0 <application> [arguments...]" >&2
   exit 2
 fi
+for tool in xdotool xwininfo; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "Linux window smoke requires $tool" >&2
+    exit 2
+  fi
+done
+
 # Exact paths are used for installed packages. AppImage uses a separate mount-only check because
 # the runtime's FUSE mount path is unique per launch and must never match a host /usr/lib path.
 MPV_PATH="${KATTRI_SMOKE_EXPECT_LIBMPV_PATH:-}"
 JPEG_PATH="${KATTRI_SMOKE_EXPECT_LIBJPEG_PATH:-}"
+SANDBOX_LIB_PATH="${KATTRI_SMOKE_EXPECT_SANDBOX_LIB_PATH:-}"
 TRACE_LOADER="${KATTRI_SMOKE_TRACE_LOADER:-1}"
 APPIMAGE_MOUNT_CHECK="${KATTRI_SMOKE_EXPECT_APPIMAGE_MOUNT:-0}"
 if [[ "$APPIMAGE_MOUNT_CHECK" != "0" && "$APPIMAGE_MOUNT_CHECK" != "1" ]]; then
   echo "KATTRI_SMOKE_EXPECT_APPIMAGE_MOUNT must be 0 or 1" >&2
   exit 2
 fi
-if [[ "$APPIMAGE_MOUNT_CHECK" == "1" && ( -n "$MPV_PATH" || -n "$JPEG_PATH" ) ]]; then
+if [[ "$APPIMAGE_MOUNT_CHECK" == "1" && ( -n "$MPV_PATH" || -n "$JPEG_PATH" || -n "$SANDBOX_LIB_PATH" ) ]]; then
   echo "AppImage mount verification cannot be combined with exact library paths" >&2
+  exit 2
+fi
+if [[ -n "$SANDBOX_LIB_PATH" && ( -n "$MPV_PATH" || -n "$JPEG_PATH" ) ]]; then
+  echo "Flatpak sandbox verification cannot be combined with host library paths" >&2
+  exit 2
+fi
+if [[ -n "$SANDBOX_LIB_PATH" && "$SANDBOX_LIB_PATH" != /* ]]; then
+  echo "KATTRI_SMOKE_EXPECT_SANDBOX_LIB_PATH must be an absolute sandbox path" >&2
   exit 2
 fi
 if [[ "$APPIMAGE_MOUNT_CHECK" == "1" && "$TRACE_LOADER" != "1" ]]; then
@@ -99,12 +115,37 @@ for _ in $(seq 1 15); do
       wait "$WM_PID" 2>/dev/null || true
     fi
     for library_path in "$MPV_PATH" "$JPEG_PATH"; do
-      if [[ -n "$library_path" ]] && ! grep -Fq "calling init: $library_path" "$KATTRI_SMOKE_LOG"; then
+      if [[ -z "$library_path" ]]; then
+        continue
+      fi
+      expected_path="$(realpath -e -- "$library_path")"
+      initialized_path=""
+      while IFS= read -r loader_line; do
+        [[ "$loader_line" == *"calling init: "* ]] || continue
+        candidate_path="${loader_line#*calling init: }"
+        if [[ -e "$candidate_path" ]] && [[ "$(realpath -e -- "$candidate_path")" == "$expected_path" ]]; then
+          initialized_path="$candidate_path"
+          break
+        fi
+      done <"$KATTRI_SMOKE_LOG"
+      if [[ -z "$initialized_path" ]]; then
         echo "application did not initialize the expected bundled library: $library_path" >&2
         tail -n 80 "$KATTRI_SMOKE_LOG" >&2
         exit 1
       fi
     done
+    if [[ -n "$SANDBOX_LIB_PATH" ]]; then
+      # /app exists only in the Flatpak namespace, so never resolve it on the host.
+      if ! awk -v expected="$SANDBOX_LIB_PATH" '
+        { sub(/^[[:space:]]*([0-9]+:[[:space:]]*)?/, "") }
+        $0 == "calling init: " expected { found = 1 }
+        END { exit !found }
+      ' "$KATTRI_SMOKE_LOG"; then
+        echo "application did not initialize the exact Flatpak sandbox library: $SANDBOX_LIB_PATH" >&2
+        tail -n 80 "$KATTRI_SMOKE_LOG" >&2
+        exit 1
+      fi
+    fi
     if [[ -n "$MPV_PATH" ]]; then
       echo "application initialized bundled libmpv from $MPV_PATH"
     fi

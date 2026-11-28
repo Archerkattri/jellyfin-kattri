@@ -74,6 +74,48 @@ pub struct VirtualFolder {
     pub locations: Vec<String>,
 }
 
+/// One item currently playing in a Jellyfin session (`GET /Sessions`).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct SessionNowPlayingItem {
+    pub name: Option<String>,
+}
+
+/// Active session details from `GET /Sessions`.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct SessionInfo {
+    pub id: String,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub client: Option<String>,
+    pub application_version: Option<String>,
+    pub user_name: Option<String>,
+    pub last_activity_date: Option<String>,
+    pub now_playing_item: Option<SessionNowPlayingItem>,
+}
+
+/// One entry from `GET /System/ActivityLog/Entries`.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct ActivityLogEntry {
+    pub id: Option<i64>,
+    pub name: Option<String>,
+    pub overview: Option<String>,
+    pub short_overview: Option<String>,
+    #[serde(rename = "Type", default)]
+    pub entry_type: Option<String>,
+    pub date: Option<String>,
+    pub severity: Option<String>,
+    pub user_id: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+struct ActivityLogResponse {
+    items: Vec<ActivityLogEntry>,
+}
+
 /// One entry from `GET /Sessions`. Only the activity flag is modeled. The
 /// session record also carries user and device details and access tokens, and
 /// none of them are kept here, so they cannot leak through `Debug` or logs.
@@ -105,13 +147,27 @@ struct UserPolicyFlag {
     is_disabled: Option<bool>,
 }
 
+/// Library-wide item counts from `GET /Items/Counts`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "PascalCase")]
+pub struct ItemCounts {
+    pub movie_count: Option<u64>,
+    pub series_count: Option<u64>,
+    pub episode_count: Option<u64>,
+    pub box_set_count: Option<u64>,
+}
+
 /// One scheduled task from `GET /ScheduledTasks`, reduced to what the
 /// read-only dashboard shows.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct ScheduledTask {
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: Option<String>,
     pub state: Option<String>,
+    #[serde(default)]
+    pub current_progress_percentage: Option<f64>,
     pub last_status: Option<String>,
 }
 
@@ -119,8 +175,10 @@ pub struct ScheduledTask {
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
 struct ScheduledTaskEntry {
+    id: Option<String>,
     name: Option<String>,
     state: Option<String>,
+    current_progress_percentage: Option<f64>,
     last_execution_result: Option<TaskExecutionResult>,
 }
 
@@ -163,6 +221,37 @@ impl JellyfinClient {
             .count())
     }
 
+    /// List active sessions (`GET /Sessions`).
+    pub async fn active_sessions(&self, session: &Session) -> Result<Vec<SessionInfo>, ApiError> {
+        const MAX_ACTIVE_SESSIONS: usize = 100;
+        let mut sessions: Vec<SessionInfo> = self.get_admin_json(session, &["Sessions"]).await?;
+        sessions.truncate(MAX_ACTIVE_SESSIONS);
+        Ok(sessions)
+    }
+
+    /// Read recent server activity log entries (`GET /System/ActivityLog/Entries`).
+    pub async fn activity_log_entries(
+        &self,
+        session: &Session,
+        limit: u32,
+    ) -> Result<Vec<ActivityLogEntry>, ApiError> {
+        const MAX_ACTIVITY_LOG_ENTRIES: usize = 100;
+        let clamped_limit = limit.clamp(1, MAX_ACTIVITY_LOG_ENTRIES as u32);
+        let limit_text = clamped_limit.to_string();
+        let request = self
+            .http
+            .request(
+                Method::GET,
+                self.endpoint(&["System", "ActivityLog", "Entries"]),
+            )
+            .query(&[("startIndex", "0"), ("limit", limit_text.as_str())]);
+        let request = self.add_metadata(request, Some(session.access_token.as_str()));
+        let response = request.send().await.map_err(crate::transport_error)?;
+        let mut page: ActivityLogResponse = decode_response(response).await?;
+        page.items.truncate(MAX_ACTIVITY_LOG_ENTRIES);
+        Ok(page.items)
+    }
+
     /// Count the server's users and how many are disabled (`GET /Users`).
     /// Names and ids are dropped while decoding; see [`UserCounts`].
     pub async fn user_counts(&self, session: &Session) -> Result<UserCounts, ApiError> {
@@ -183,6 +272,11 @@ impl JellyfinClient {
         })
     }
 
+    /// Read server-wide item counts (`GET /Items/Counts`).
+    pub async fn item_counts(&self, session: &Session) -> Result<ItemCounts, ApiError> {
+        self.get_admin_json(session, &["Items", "Counts"]).await
+    }
+
     /// Read the scheduled tasks and their last execution status
     /// (`GET /ScheduledTasks`), capped at [`MAX_SCHEDULED_TASKS`].
     pub async fn scheduled_tasks(&self, session: &Session) -> Result<Vec<ScheduledTask>, ApiError> {
@@ -192,8 +286,10 @@ impl JellyfinClient {
             .into_iter()
             .take(MAX_SCHEDULED_TASKS)
             .map(|entry| ScheduledTask {
+                id: entry.id,
                 name: entry.name,
                 state: entry.state,
+                current_progress_percentage: entry.current_progress_percentage,
                 last_status: entry.last_execution_result.and_then(|result| result.status),
             })
             .collect())
@@ -247,4 +343,105 @@ fn is_library_id(value: &str) -> bool {
         && value
             .chars()
             .all(|character| character.is_ascii_hexdigit() || character == '-')
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    use crate::{ClientConfig, JellyfinClient, Session, UserDto};
+
+    async fn serve_json(body: &str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let body = body.to_owned();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut buffer = [0; 2048];
+            loop {
+                let read = stream.read(&mut buffer).await.expect("read");
+                request.extend_from_slice(&buffer[..read]);
+                if read == 0 || request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.expect("write");
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        (format!("http://{address}"), task)
+    }
+
+    fn client(base: &str) -> JellyfinClient {
+        JellyfinClient::new(
+            ClientConfig::new(base, "Kattri test", "device", "device-id", "1").expect("config"),
+        )
+        .expect("client")
+    }
+
+    fn session() -> Session {
+        Session {
+            access_token: "token".into(),
+            user: UserDto {
+                policy: None,
+                id: "user".into(),
+                name: "User".into(),
+                server_id: None,
+            },
+            server_id: None,
+            session_info: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn active_sessions_decodes_session_list() {
+        let payload = r#"[{"Id":"sess-1","DeviceId":"dev-1","DeviceName":"Living Room","Client":"Jellyfin Kattri","ApplicationVersion":"0.7.0","UserName":"Alice","LastActivityDate":"2026-10-15T12:00:00Z","NowPlayingItem":{"Name":"Movie"}}]"#;
+        let (base, task) = serve_json(payload).await;
+        let sessions = client(&base)
+            .active_sessions(&session())
+            .await
+            .expect("sessions");
+        let request = task.await.expect("server");
+        assert!(request.starts_with("GET /Sessions "), "{request}");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "sess-1");
+        assert_eq!(sessions[0].device_name.as_deref(), Some("Living Room"));
+        assert_eq!(
+            sessions[0]
+                .now_playing_item
+                .as_ref()
+                .and_then(|item| item.name.as_deref()),
+            Some("Movie")
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_log_entries_queries_limit_and_decodes_items() {
+        let payload = r#"{"Items":[{"Id":42,"Name":"User logged in","Overview":"Alice signed in","ShortOverview":"Alice","Type":"AuthenticationSucceeded","Date":"2026-10-15T12:00:00Z","Severity":"Information","UserId":"user-1"}]}"#;
+        let (base, task) = serve_json(payload).await;
+        let entries = client(&base)
+            .activity_log_entries(&session(), 25)
+            .await
+            .expect("activity log");
+        let request = task.await.expect("server");
+        assert!(
+            request.starts_with("GET /System/ActivityLog/Entries?startIndex=0&limit=25 "),
+            "{request}"
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, Some(42));
+        assert_eq!(
+            entries[0].entry_type.as_deref(),
+            Some("AuthenticationSucceeded")
+        );
+        assert_eq!(entries[0].user_id.as_deref(), Some("user-1"));
+    }
 }

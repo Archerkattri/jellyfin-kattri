@@ -177,9 +177,12 @@ pub(crate) fn saved_from_settings(window: &WindowSettings) -> Option<SavedWindow
 }
 
 /// Only a normal-size window is remembered. A maximized window reports the screen size, and the
-/// settings schema has no maximized key yet, so the last normal size is kept instead.
+/// settings schema has no maximized key yet, so the last normal size is kept instead. A hidden or
+/// minimized window can report a 1x1 client area, which must never become the next launch's size.
 pub(crate) fn is_storable(saved: &SavedWindow) -> bool {
     !saved.maximized
+        && saved.width >= kattri_client_core::window_state::MIN_RESTORABLE_SIDE
+        && saved.height >= kattri_client_core::window_state::MIN_RESTORABLE_SIDE
 }
 
 /// Place the window from the saved geometry before it is shown (M2-14). Without a saved value the
@@ -263,7 +266,7 @@ pub(crate) fn apply_transition(
             size,
             leave_fullscreen,
         } => {
-            if *leave_fullscreen {
+            if *leave_fullscreen || window.fullscreen().is_some() {
                 window.set_fullscreen(None);
             }
             window.set_maximized(false);
@@ -293,13 +296,14 @@ fn apply_placement(window: &Window, placement: &Placement) {
             ..
         } => {
             if *fullscreen {
+                window.set_maximized(*maximized);
                 window.set_fullscreen(Some(Fullscreen::Borderless(None)));
             } else {
                 window.set_fullscreen(None);
                 window.set_outer_position(PhysicalPosition::new(rect.x, rect.y));
                 let _ = window.request_inner_size(PhysicalSize::new(rect.width, rect.height));
+                window.set_maximized(*maximized);
             }
-            window.set_maximized(*maximized);
         }
         Placement::Unplaced {
             logical_width,

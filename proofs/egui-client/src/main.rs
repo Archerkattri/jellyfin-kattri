@@ -74,7 +74,6 @@ fn main() -> eframe::Result {
                 creation_context.egui_ctx.clone(),
                 requested.as_deref(),
             );
-            app.offer_launch_picker();
             app.resume_saved_sign_in();
             Ok(Box::new(EframeDemoApp(app)))
         }),

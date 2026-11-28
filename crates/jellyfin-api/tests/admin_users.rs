@@ -118,6 +118,142 @@ async fn session() -> Session {
     session
 }
 
+#[tokio::test]
+async fn signed_in_quick_connect_authorizes_only_a_valid_code() {
+    let session = session().await;
+    let (base, fixture) = serve(vec![
+        json_response(200, "true"),
+        json_response(200, "false"),
+    ])
+    .await;
+    let client = client(&base);
+    for bad in ["12345", "1234567", "12&345", "１２３４５６"] {
+        assert!(matches!(
+            client.authorize_quick_connect(&session, bad).await,
+            Err(ApiError::InvalidResponse)
+        ));
+    }
+    assert!(
+        client
+            .authorize_quick_connect(&session, " 012345 ")
+            .await
+            .expect("authorized")
+    );
+    assert!(
+        !client
+            .authorize_quick_connect(&session, "654321")
+            .await
+            .expect("not authorized")
+    );
+    let requests = fixture.await.expect("fixture exits");
+    for (request, code) in requests.iter().zip(["012345", "654321"]) {
+        assert_eq!(
+            request_line(request),
+            format!("POST /QuickConnect/Authorize?code={code} HTTP/1.1")
+        );
+        assert!(
+            request_header(request, "Authorization")
+                .is_some_and(|value| value.contains("loopback-test-token"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn quick_connect_authorization_preserves_failure_classes() {
+    let session = session().await;
+    let (base, fixture) = serve(vec![empty_response(401), empty_response(503)]).await;
+    let client = client(&base);
+    for expected in [
+        jellyfin_api::ErrorClass::AuthExpired,
+        jellyfin_api::ErrorClass::ServerUnavailable,
+    ] {
+        let error = client
+            .authorize_quick_connect(&session, "012345")
+            .await
+            .expect_err("authorization request failed");
+        assert_eq!(error.classify(), expected);
+    }
+    assert_eq!(fixture.await.expect("fixture exits").len(), 2);
+}
+
+#[tokio::test]
+async fn account_preferences_are_read_only_and_bound_to_the_current_account() {
+    let session = session().await;
+    let (base, fixture) = serve(vec![
+        json_response(200, r#"{"Id":"0000000000000000000000000000a001","Configuration":{"AudioLanguagePreference":"jpn","SubtitleMode":"OnlyForced","HidePlayedInLatest":true,"FutureField":1}}"#),
+        json_response(200, r#"{"Id":"another-account","Configuration":{}}"#),
+    ]).await;
+    let client = client(&base);
+    let prefs = client
+        .account_preferences(&session)
+        .await
+        .expect("load preferences")
+        .expect("server configuration");
+    assert_eq!(prefs.audio_language_preference.as_deref(), Some("jpn"));
+    assert_eq!(prefs.subtitle_mode.as_deref(), Some("OnlyForced"));
+    assert_eq!(prefs.hide_played_in_latest, Some(true));
+    assert_eq!(prefs.display_missing_episodes, None);
+    assert!(matches!(
+        client.account_preferences(&session).await,
+        Err(ApiError::InvalidResponse)
+    ));
+    for request in fixture.await.expect("fixture exits") {
+        assert_eq!(request_line(&request), "GET /Users/Me HTTP/1.1");
+    }
+}
+
+#[tokio::test]
+async fn updating_latest_preference_preserves_unrelated_fields() {
+    let session = session().await;
+    let (base, fixture) = serve(vec![
+        json_response(200, r#"{"Id":"0000000000000000000000000000a001","Configuration":{"HidePlayedInLatest":false,"FutureField":{"Keep":true}}}"#),
+        empty_response(204),
+    ]).await;
+    client(&base)
+        .set_account_preferences(
+            &session,
+            &jellyfin_api::AccountPreferences {
+                hide_played_in_latest: Some(true),
+                ..jellyfin_api::AccountPreferences::default()
+            },
+        )
+        .await
+        .expect("fixture update succeeds");
+    let requests = fixture.await.expect("fixture exits");
+    assert_eq!(request_line(&requests[0]), "GET /Users/Me HTTP/1.1");
+    assert_eq!(
+        request_line(&requests[1]),
+        "POST /Users/Configuration?userId=0000000000000000000000000000a001 HTTP/1.1"
+    );
+    assert_eq!(
+        request_json(&requests[1]),
+        json!({"HidePlayedInLatest":true,"FutureField":{"Keep":true}})
+    );
+}
+
+#[tokio::test]
+async fn unchanged_latest_preference_does_not_submit_a_write() {
+    let session = session().await;
+    let (base, fixture) = serve(vec![json_response(
+        200,
+        r#"{"Id":"0000000000000000000000000000a001","Configuration":{"HidePlayedInLatest":true}}"#,
+    )])
+    .await;
+    client(&base)
+        .set_account_preferences(
+            &session,
+            &jellyfin_api::AccountPreferences {
+                hide_played_in_latest: Some(true),
+                ..jellyfin_api::AccountPreferences::default()
+            },
+        )
+        .await
+        .expect("unchanged preference");
+    let requests = fixture.await.expect("fixture exits");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(request_line(&requests[0]), "GET /Users/Me HTTP/1.1");
+}
+
 fn request_line(request: &[u8]) -> &str {
     std::str::from_utf8(request)
         .expect("request bytes")

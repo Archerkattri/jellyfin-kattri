@@ -27,20 +27,10 @@ pub(crate) enum OsdIcon {
     Rewind,
     /// Seek forward: two triangles.
     Forward,
-    /// Step back one frame: one triangle against a bar.
-    FrameBack,
-    /// Step forward one frame: one triangle against a bar.
-    FrameForward,
-    /// Previous chapter: two chevrons.
-    ChapterPrevious,
-    /// Next chapter: two chevrons.
-    ChapterNext,
     /// Speaker with sound waves.
     Volume,
     /// Speaker with a cross.
     Muted,
-    /// A-B loop: two arrows chasing each other.
-    Loop,
     /// Picture-in-picture: a small inset frame in the corner.
     Pip,
     /// Entry to fullscreen: four corners pointing outward.
@@ -57,6 +47,14 @@ pub(crate) enum OsdIcon {
     SyncVoice,
     /// Subtitle sync, text seen: a caption box with two lines, marking when the subtitle is read.
     SyncText,
+    /// Audio track selector: a beamed pair of eighth notes.
+    Audio,
+    /// Subtitle track selector: a closed-caption frame with two horizontal lines.
+    Subtitles,
+    /// Video settings selector: a 16:9 display frame with a subtle stand.
+    Video,
+    /// Media info: a lowercase i inside a circle.
+    Info,
 }
 
 impl OsdIcon {
@@ -140,22 +138,6 @@ pub(crate) fn shapes(rect: Rect, icon: OsdIcon, color: Color32) -> Vec<Shape> {
             triangle((3.0, 5.0), (3.0, 19.0), (12.0, 12.0)),
             triangle((11.5, 5.0), (11.5, 19.0), (20.5, 12.0)),
         ],
-        OsdIcon::FrameBack => vec![
-            bar(8.0, 5.0, 10.0, 19.0),
-            triangle((20.0, 5.0), (20.0, 19.0), (11.0, 12.0)),
-        ],
-        OsdIcon::FrameForward => vec![
-            triangle((4.0, 5.0), (4.0, 19.0), (13.0, 12.0)),
-            bar(14.0, 5.0, 16.0, 19.0),
-        ],
-        OsdIcon::ChapterPrevious => vec![
-            polyline(&[(14.5, 6.0), (8.5, 12.0), (14.5, 18.0)], stroke),
-            polyline(&[(21.0, 6.0), (15.0, 12.0), (21.0, 18.0)], stroke),
-        ],
-        OsdIcon::ChapterNext => vec![
-            polyline(&[(9.5, 6.0), (15.5, 12.0), (9.5, 18.0)], stroke),
-            polyline(&[(3.0, 6.0), (9.0, 12.0), (3.0, 18.0)], stroke),
-        ],
         OsdIcon::Volume => vec![
             speaker(),
             polyline(&[(15.5, 9.0), (17.5, 12.0), (15.5, 15.0)], thin),
@@ -166,11 +148,73 @@ pub(crate) fn shapes(rect: Rect, icon: OsdIcon, color: Color32) -> Vec<Shape> {
             polyline(&[(16.0, 9.0), (21.0, 15.0)], thin),
             polyline(&[(21.0, 9.0), (16.0, 15.0)], thin),
         ],
-        OsdIcon::Loop => vec![
-            polyline(&[(14.5, 4.5), (18.5, 7.0), (14.5, 9.5)], stroke),
-            polyline(&[(5.0, 7.0), (18.0, 7.0)], stroke),
-            polyline(&[(9.5, 14.5), (5.5, 17.0), (9.5, 19.5)], stroke),
-            polyline(&[(19.0, 17.0), (6.0, 17.0)], stroke),
+        OsdIcon::SyncVoice => vec![
+            polyline(
+                &[
+                    (13.5, 3.5),
+                    (8.0, 3.5),
+                    (5.0, 7.0),
+                    (5.0, 13.0),
+                    (7.5, 16.0),
+                    (7.5, 19.0),
+                    (10.0, 20.5),
+                    (12.0, 19.0),
+                    (11.0, 16.5),
+                    (13.0, 14.0),
+                    (14.5, 11.0),
+                    (14.5, 7.0),
+                ],
+                stroke,
+            ),
+            polyline(&[(11.0, 7.0), (9.0, 8.5), (9.0, 11.0), (11.0, 12.0)], thin),
+            polyline(&[(16.5, 9.0), (18.5, 12.0), (16.5, 15.0)], thin),
+            polyline(&[(19.0, 6.5), (21.5, 12.0), (19.0, 17.5)], thin),
+        ],
+        OsdIcon::SyncText => vec![
+            Shape::rect_stroke(
+                Rect::from_min_max(point(3.0, 5.0), point(21.0, 19.0)),
+                2.0 * scale,
+                stroke,
+                egui::StrokeKind::Inside,
+            ),
+            bar(6.0, 9.0, 14.0, 10.6),
+            bar(6.0, 13.0, 18.0, 14.6),
+        ],
+        OsdIcon::Audio => vec![
+            Shape::circle_filled(point(6.5, 17.5), 2.5 * scale, color),
+            Shape::circle_filled(point(16.0, 15.5), 2.5 * scale, color),
+            polyline(&[(8.3, 17.5), (8.3, 6.0)], thin),
+            polyline(&[(17.8, 15.5), (17.8, 4.5)], thin),
+            Shape::convex_polygon(
+                vec![
+                    point(7.5, 5.5),
+                    point(18.6, 4.0),
+                    point(18.6, 6.8),
+                    point(7.5, 8.3),
+                ],
+                color,
+                Stroke::NONE,
+            ),
+        ],
+        OsdIcon::Subtitles => vec![
+            Shape::rect_stroke(
+                Rect::from_min_max(point(3.0, 5.0), point(21.0, 19.0)),
+                2.5 * scale,
+                stroke,
+                egui::StrokeKind::Inside,
+            ),
+            bar(6.0, 10.5, 14.0, 12.2),
+            bar(6.0, 14.0, 18.0, 15.7),
+        ],
+        OsdIcon::Video => vec![
+            Shape::rect_stroke(
+                Rect::from_min_max(point(3.0, 4.5), point(21.0, 15.0)),
+                2.0 * scale,
+                stroke,
+                egui::StrokeKind::Inside,
+            ),
+            bar(11.2, 14.8, 12.8, 18.0),
+            polyline(&[(7.5, 18.5), (16.5, 18.5)], stroke),
         ],
         OsdIcon::Pip => vec![
             Shape::rect_stroke(
@@ -204,40 +248,13 @@ pub(crate) fn shapes(rect: Rect, icon: OsdIcon, color: Color32) -> Vec<Shape> {
             Shape::circle_filled(point(7.5, 18.0), 2.1 * scale, color),
         ],
         OsdIcon::Check => vec![polyline(&[(4.5, 12.5), (9.5, 17.5), (19.5, 6.5)], stroke)],
+        OsdIcon::Info => vec![
+            Shape::circle_stroke(point(12.0, 12.0), 8.5 * scale, stroke),
+            Shape::circle_filled(point(12.0, 7.8), 1.25 * scale, color),
+            bar(11.0, 10.8, 13.0, 17.0),
+        ],
         // An ear outline with a small inner fold, then two sound waves: "I hear the spoken line".
-        OsdIcon::SyncVoice => vec![
-            polyline(
-                &[
-                    (13.5, 3.5),
-                    (8.0, 3.5),
-                    (5.0, 7.0),
-                    (5.0, 13.0),
-                    (7.5, 16.0),
-                    (7.5, 19.0),
-                    (10.0, 20.5),
-                    (12.0, 19.0),
-                    (11.0, 16.5),
-                    (13.0, 14.0),
-                    (14.5, 11.0),
-                    (14.5, 7.0),
-                ],
-                stroke,
-            ),
-            polyline(&[(11.0, 7.0), (9.0, 8.5), (9.0, 11.0), (11.0, 12.0)], thin),
-            polyline(&[(16.5, 9.0), (18.5, 12.0), (16.5, 15.0)], thin),
-            polyline(&[(19.0, 6.5), (21.5, 12.0), (19.0, 17.5)], thin),
-        ],
         // A caption box with two text lines: "I see the subtitle".
-        OsdIcon::SyncText => vec![
-            Shape::rect_stroke(
-                Rect::from_min_max(point(3.0, 5.0), point(21.0, 19.0)),
-                2.0 * scale,
-                stroke,
-                egui::StrokeKind::Inside,
-            ),
-            bar(6.0, 9.0, 14.0, 10.6),
-            bar(6.0, 13.0, 18.0, 14.6),
-        ],
     }
 }
 
@@ -259,20 +276,20 @@ mod tests {
         OsdIcon::NextItem,
         OsdIcon::Rewind,
         OsdIcon::Forward,
-        OsdIcon::FrameBack,
-        OsdIcon::FrameForward,
-        OsdIcon::ChapterPrevious,
-        OsdIcon::ChapterNext,
         OsdIcon::Volume,
         OsdIcon::Muted,
         OsdIcon::Pip,
+        OsdIcon::SyncVoice,
+        OsdIcon::SyncText,
+        OsdIcon::Audio,
+        OsdIcon::Subtitles,
+        OsdIcon::Video,
         OsdIcon::EnterFullscreen,
         OsdIcon::ExitFullscreen,
         OsdIcon::Back,
         OsdIcon::Settings,
         OsdIcon::Check,
-        OsdIcon::SyncVoice,
-        OsdIcon::SyncText,
+        OsdIcon::Info,
     ];
 
     #[test]

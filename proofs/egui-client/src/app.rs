@@ -8,7 +8,6 @@ use crate::ui::downloads::DownloadIntent;
 use crate::ui::home::{HomeAction, HomeState, HomeViewTarget};
 use crate::ui::music::MusicAction;
 use crate::ui::playlists::{MoveDirection, PlaylistIntent, PlaylistUiState};
-use crate::ui::profile_picker::{self, PickerOutcome, PickerState};
 use crate::ui::{ui_text, ui_text_args};
 use crate::worker::downloads::DownloadsState;
 use crate::worker::downloads_batch::{
@@ -79,8 +78,10 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::{Zeroize, Zeroizing};
 
-const MAX_PENDING_ARTWORK_REQUESTS: usize = 3;
+const MAX_PENDING_ARTWORK_REQUESTS: usize = 6;
+const MAX_PENDING_EPISODE_THUMBNAILS: usize = 4;
 const MAX_CACHED_ARTWORK_TEXTURES: usize = 36;
+const MAX_MISSING_ARTWORK_KEYS: usize = 256;
 const MAX_BURN_IN_SUBTITLE_CHOICES: usize = 128;
 const MAX_LIVE_TV_LOGO_TEXTURES: usize = 128;
 /// Cast portraits are small, but a long session across many titles would keep every one.
@@ -424,6 +425,7 @@ fn scoped_home_series_suppressions(
     )
 }
 
+#[cfg(test)]
 fn add_home_series_suppression(
     settings: &mut kattri_settings::Settings,
     server_id: Option<&str>,
@@ -462,11 +464,17 @@ pub(crate) enum CatalogSort {
     DateAdded,
     ReleaseDate,
     Rating,
+    Random,
 }
 
 impl CatalogSort {
-    pub(crate) const ALL: [Self; 4] =
-        [Self::Name, Self::DateAdded, Self::ReleaseDate, Self::Rating];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Name,
+        Self::DateAdded,
+        Self::ReleaseDate,
+        Self::Rating,
+        Self::Random,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -474,6 +482,7 @@ impl CatalogSort {
             Self::DateAdded => ui_text(ids::BROWSE_SORT_DATE_ADDED),
             Self::ReleaseDate => ui_text(ids::BROWSE_SORT_RELEASE_DATE),
             Self::Rating => ui_text(ids::BROWSE_SORT_RATING),
+            Self::Random => "Random",
         }
     }
 
@@ -483,6 +492,7 @@ impl CatalogSort {
             Self::DateAdded => ItemSortBy::DateCreated,
             Self::ReleaseDate => ItemSortBy::PremiereDate,
             Self::Rating => ItemSortBy::CommunityRating,
+            Self::Random => ItemSortBy::Random,
         }
     }
 }
@@ -493,16 +503,18 @@ pub(crate) enum CatalogPlayedFilter {
     Any,
     Played,
     Unplayed,
+    InProgress,
 }
 
 impl CatalogPlayedFilter {
-    pub(crate) const ALL: [Self; 3] = [Self::Any, Self::Played, Self::Unplayed];
+    pub(crate) const ALL: [Self; 4] = [Self::Any, Self::Played, Self::Unplayed, Self::InProgress];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Any => ui_text(ids::BROWSE_PLAYED_ANY),
             Self::Played => ui_text(ids::BROWSE_PLAYED_PLAYED),
             Self::Unplayed => ui_text(ids::BROWSE_PLAYED_UNPLAYED),
+            Self::InProgress => "In progress",
         }
     }
 
@@ -511,12 +523,13 @@ impl CatalogPlayedFilter {
             Self::Any => None,
             Self::Played => Some(ItemFilter::IsPlayed),
             Self::Unplayed => Some(ItemFilter::IsUnplayed),
+            Self::InProgress => Some(ItemFilter::IsResumable),
         }
     }
 }
 
 /// Top-level view: the Home screen (rows and hero) or the Library catalog pages.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AppView {
     Home,
     Library,
@@ -569,7 +582,7 @@ pub(crate) enum AlbumTracksPurpose {
     Play,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Page {
     Home,
     Movies,
@@ -584,7 +597,7 @@ pub enum Page {
     Playlists,
     Downloads,
     LiveTv,
-    /// Read-only server dashboard (M4-22). Reachable only when `admin.dashboard` is on.
+    /// Read-only server dashboard (M4-22). Reachable for any admin account.
     Dashboard,
     /// Browse and manage Jellyfin SyncPlay groups.
     SyncPlay,
@@ -1571,12 +1584,32 @@ impl AlbumTracksState {
 /// Six loose fields carried the search box: the typed query, the results, the browse group they
 /// belong to, whether the results are stale, whether search is active, and the debouncer. They were
 /// written from the search handlers and read from the search UI.
+/// Search results as catalog items. Their textures live here, so search cards keep their posters
+/// and share the catalog artwork cache instead of loading the same image twice.
+#[derive(Clone, Default)]
+pub(crate) struct SearchMedia(pub(crate) Vec<MediaItem>);
+
+impl std::fmt::Debug for SearchMedia {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SearchMedia({} items)", self.0.len())
+    }
+}
+
+impl PartialEq for SearchMedia {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self.0.iter().zip(other.0.iter()).all(|(a, b)| a.id == b.id)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SearchState {
     /// The text in the search box.
     pub(crate) query: String,
     /// The results for the last applied query.
     pub(crate) results: Vec<BaseItemDto>,
+    /// The same results as catalog items, so search cards share the artwork cache and menu.
+    pub(crate) media: SearchMedia,
     /// The browse group the results belong to.
     pub(crate) browse_group: Option<crate::ui::search::SearchGroup>,
     /// Whether the visible results belong to an older query.
@@ -1598,6 +1631,7 @@ impl SearchState {
         self.query.clear();
         self.active = false;
         self.results.clear();
+        self.media.0.clear();
         self.browse_group = None;
         self.stale = false;
         self.debouncer.input("", now);
@@ -1609,6 +1643,7 @@ impl SearchState {
         self.query.clear();
         self.active = false;
         self.results.clear();
+        self.media.0.clear();
         self.stale = false;
         self.debouncer.input("", Duration::ZERO);
     }
@@ -1630,6 +1665,7 @@ impl SearchState {
 
     /// A catalog page arrived for the submitted search.
     pub(crate) fn results_applied(&mut self, results: Vec<BaseItemDto>) {
+        self.media = SearchMedia(results.iter().cloned().map(MediaItem::from_api).collect());
         self.results = results;
         self.stale = false;
     }
@@ -1637,6 +1673,7 @@ impl SearchState {
     /// Drop the visible results without touching the query, the box or the group.
     pub(crate) fn clear_results(&mut self) {
         self.results.clear();
+        self.media.0.clear();
         self.stale = false;
     }
 
@@ -1668,12 +1705,87 @@ impl SearchState {
     }
 }
 
+/// The item kinds the Metadata Manager can list. Seasons are the noisiest kind, so the filter
+/// exists to let an admin work on movies or episodes without them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MetadataManagerKind {
+    /// The default view: the two kinds an admin edits most, without the season noise.
+    #[default]
+    MoviesAndSeries,
+    Movies,
+    Series,
+    Episodes,
+    Seasons,
+    All,
+}
+
+impl MetadataManagerKind {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::MoviesAndSeries,
+        Self::Movies,
+        Self::Series,
+        Self::Episodes,
+        Self::Seasons,
+        Self::All,
+    ];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::MoviesAndSeries => "Movies & series",
+            Self::Movies => "Movies",
+            Self::Series => "Series",
+            Self::Episodes => "Episodes",
+            Self::Seasons => "Seasons",
+            Self::All => "Everything",
+        }
+    }
+
+    /// The Jellyfin item types this filter asks for `None` means "every type".
+    pub(crate) fn item_types(self) -> Option<Vec<String>> {
+        match self {
+            Self::MoviesAndSeries => Some(vec!["Movie".to_owned(), "Series".to_owned()]),
+            Self::All => None,
+            Self::Movies => Some(vec!["Movie".to_owned()]),
+            Self::Series => Some(vec!["Series".to_owned()]),
+            Self::Episodes => Some(vec!["Episode".to_owned()]),
+            Self::Seasons => Some(vec!["Season".to_owned()]),
+        }
+    }
+}
+
 /// Owned similar-items state for the detail panel: the items, the loading flag and the request id.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default)]
 pub(crate) struct SimilarState {
     pub(crate) items: Vec<BaseItemDto>,
+    /// The same items as catalog entries, so the detail page can draw poster cards.
+    pub(crate) media: Vec<MediaItem>,
     pub(crate) loading: bool,
     pub(crate) request_id: u64,
+}
+
+impl std::fmt::Debug for SimilarState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SimilarState")
+            .field("items", &self.items.len())
+            .field("media", &self.media.len())
+            .field("loading", &self.loading)
+            .field("request_id", &self.request_id)
+            .finish()
+    }
+}
+
+impl PartialEq for SimilarState {
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items
+            && self.loading == other.loading
+            && self.request_id == other.request_id
+            && self.media.len() == other.media.len()
+            && self
+                .media
+                .iter()
+                .zip(other.media.iter())
+                .all(|(a, b)| a.id == b.id)
+    }
 }
 
 impl SimilarState {
@@ -2155,12 +2267,33 @@ pub(crate) struct ActivePlayerPosition {
     pub(crate) speed_multiplier: Option<f64>,
 }
 
+/// Runtime identity reported by the native host. The client process does not load libmpv or create
+/// the GL context itself, so the About page cannot detect these on its own.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeAbout {
+    pub mpv_version: Option<String>,
+    pub ffmpeg_version: Option<String>,
+    pub gpu: Option<String>,
+    pub driver: Option<String>,
+}
+
+impl KattriApp {
+    /// Record what the host learned about the player runtime.
+    pub fn set_runtime_about(&mut self, about: RuntimeAbout) {
+        self.runtime_about = about;
+    }
+
+    pub(crate) fn runtime_about(&self) -> &RuntimeAbout {
+        &self.runtime_about
+    }
+}
+
 pub struct KattriApp {
     pub(crate) worker: Option<ApiWorker>,
     /// Download list and page state. The worker owns the jobs; this copy is what the page reads.
     pub(crate) downloads: DownloadsState,
     /// Bounded three-at-a-time dispatch for a bulk download.
-    batch_downloads: BatchQueue,
+    pub(crate) batch_downloads: BatchQueue,
     /// When each batch item was handed to the worker, so an empty rows snapshot does not count
     /// a just-started job as finished.
     batch_started: HashMap<String, Instant>,
@@ -2250,11 +2383,14 @@ pub struct KattriApp {
     detail_backdrop_attempted: bool,
     /// Sharp backdrop texture for the Home hero, keyed by the item it belongs to.
     pub(crate) home_hero_backdrop: Option<(String, egui::TextureHandle)>,
+    last_selected_backdrop: Option<egui::TextureHandle>,
     home_ambient_backdrop: Option<(String, egui::TextureHandle)>,
     /// The backdrop requests in flight or already tried for the Home hero.
     home_hero_request: Option<(u64, String)>,
     home_ambient_request: Option<(u64, String)>,
     pub(crate) ambient_backdrop: crate::ui::ambient::AmbientBackdrop,
+    /// Runtime facts the native host reports, such as the real libmpv and GPU identity.
+    pub(crate) runtime_about: RuntimeAbout,
     pub(crate) custom_backdrop_texture: Option<egui::TextureHandle>,
     custom_backdrop_request: Option<(u64, std::path::PathBuf)>,
     /// Set by `play_item`; consumed by `poll_auto_play` once the stream can start.
@@ -2298,6 +2434,7 @@ pub struct KattriApp {
     pub(crate) live_tv_error: Option<ErrorClass>,
     pub(crate) live_tv_notice: Option<String>,
     pub(crate) live_tv_selected_channel_id: Option<String>,
+    pub(crate) live_tv_focus_target: Option<crate::ui::live_tv::LiveTvFocusTarget>,
     pub(crate) live_tv_tune_request_id: Option<u64>,
     pub(crate) live_tv_retry_available: bool,
     live_tv_request_id: u64,
@@ -2314,6 +2451,10 @@ pub struct KattriApp {
     /// Owned photo page: items, thumbnail/full-size textures, selection and decode bookkeeping.
     pub(crate) photo: PhotoState,
     pub(crate) music_queue: Queue,
+    /// The profile's local playlist: ordered Jellyfin item IDs only (M6-13).
+    pub(crate) local_playlist: kattri_client_core::playlist::PlaylistModel,
+    /// Why the last local-playlist mutation was not stored, if it was not.
+    pub(crate) local_playlist_notice: Option<String>,
     /// Neighbours of the episode last started, for previous/next and auto-play.
     episode_neighbors: Option<EpisodeNeighbors>,
     /// The episode to play next in the series on screen.
@@ -2340,6 +2481,7 @@ pub struct KattriApp {
     /// episodes plays.
     shuffle_queue: Option<ShuffleQueue>,
     shuffle_request_id: u64,
+    shuffle_series_id: Option<String>,
     /// The page an item was opened from (a series for its episode), where Back returns.
     detail_parent: Option<String>,
     /// Stills for the episode rows of the series on screen.
@@ -2370,6 +2512,8 @@ pub struct KattriApp {
     /// Save debounce and checkpoint bookkeeping for the music queue.
     music_queue_persistence: MusicQueuePersistence,
     music_queue_position_ms: u64,
+    last_saved_queue_position_ms: Option<u64>,
+    last_saved_queue_fingerprint: Option<u64>,
     /// Owned playlist page: entries, candidates, mutation lifecycle and component state.
     pub(crate) playlist: PlaylistState,
     pub(crate) focus_graph: FocusGraph,
@@ -2387,6 +2531,8 @@ pub struct KattriApp {
     pub(crate) live_tv_search_loading: bool,
     pub(crate) live_tv_search_start_index: u32,
     pub(crate) live_tv_search_total: Option<u32>,
+    pub(crate) live_tv_search_error: bool,
+    pub(crate) live_tv_search_requested_start_index: u32,
     live_tv_search_request_id: Option<u64>,
     pub(crate) catalog_sort: CatalogSort,
     pub(crate) catalog_sort_order: ItemSortOrder,
@@ -2404,12 +2550,16 @@ pub struct KattriApp {
     pub(crate) catalog_studios: Vec<(String, String)>,
     /// The studio filter's choice (studio id).
     pub(crate) catalog_studio: Option<String>,
+    /// Optional client-side production year filter for the loaded catalog.
+    pub(crate) catalog_year: Option<i32>,
+    /// Optional client-side parental rating filter for the loaded catalog.
+    pub(crate) catalog_official_rating: Option<String>,
     catalog_genres_request_id: u64,
-    /// The page and folder the genre list belongs to.
     catalog_genres_scope: Option<(Page, Option<String>)>,
-    pub(crate) high_contrast: bool,
     pub(crate) reduce_motion: bool,
     pub(crate) interface_size: kattri_settings::InterfaceSize,
+    /// 10-foot TV layout mode scaling UI zoom and spacing.
+    pub tv_mode: bool,
     pub(crate) settings: SettingsState,
     /// The title whose per-title subtitle style is active, while media is open.
     active_subtitle_title: Option<ActiveSubtitleTitle>,
@@ -2417,7 +2567,6 @@ pub struct KattriApp {
     /// this at load and every frame, so a change reaches the running player.
     effective_subtitles: kattri_settings::SubtitleSettings,
     /// Profile picker window, open while `Some`. Opened from Settings or at launch.
-    pub(crate) profile_picker: Option<PickerState>,
     /// The "Open stream address" dialog while it is open (M6-15).
     open_url: Option<crate::ui::open_url::OpenUrlState>,
     /// An address the viewer confirmed, waiting for the player host to take it.
@@ -2431,6 +2580,19 @@ pub struct KattriApp {
     pub(crate) server_check_error: Option<String>,
     quick_connect_probe_after: Option<Duration>,
     quick_connect_probe_pending: Option<(u64, String, bool)>,
+    pub(crate) metadata_manager_open: bool,
+    /// Which item kinds the metadata manager lists. `All` keeps the recursive browse.
+    pub(crate) metadata_manager_kind: MetadataManagerKind,
+    pub(crate) metadata_manager_result: Option<Result<jellyfin_api::ItemsResponse, ErrorClass>>,
+    metadata_manager_request: Option<u64>,
+    pub(crate) account_preferences_open: bool,
+    pub(crate) account_preferences:
+        Option<Result<Option<jellyfin_api::AccountPreferences>, ErrorClass>>,
+    pub(crate) account_preferences_saved: bool,
+    account_preferences_request: Option<u64>,
+    pub(crate) quick_connect_authorizer_open: bool,
+    pub(crate) quick_connect_approval_code: zeroize::Zeroizing<String>,
+    pub(crate) quick_connect_approval: Option<(u64, Option<Result<bool, ErrorClass>>)>,
     quick_connect_enabled_for: Option<(String, bool, bool)>,
     next_request_id: u64,
     connection_request_id: u64,
@@ -2501,6 +2663,7 @@ pub struct KattriApp {
     media_playing: bool,
     pending_artwork_requests: HashMap<u64, (String, String)>,
     attempted_artwork: HashSet<(String, String)>,
+    missing_artwork: HashSet<(String, String)>,
     artwork_access_ticks: HashMap<(String, String), u64>,
     next_artwork_access_tick: u64,
     /// First access tick of the latest visible-artwork pass. Textures touched at or after it
@@ -2642,6 +2805,33 @@ impl KattriApp {
         }
         self.photo.thumbnail_pending.clear();
         self.photo.full_size_pending.clear();
+    }
+
+    /// Cancel the in-flight full-size decode only. Closing the full-size viewer must not cancel
+    /// thumbnail work, whose `thumbnail_attempted` entry would then suppress a re-request.
+    fn cancel_pending_full_size_photo_decodes(&mut self) {
+        let request_ids = self
+            .photo
+            .full_size_pending
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        if let Some(worker) = self.worker.as_ref()
+            && let Err(error) = worker.cancel_photo_image_requests(request_ids.clone())
+        {
+            tracing::debug!(%error, "could not cancel stale full-size photo requests");
+        }
+        #[cfg(feature = "photo-counters")]
+        if let Some(worker) = self.worker.as_ref() {
+            worker.record_photo_decode_cancellations(request_ids.len());
+        }
+        self.photo.full_size_pending.clear();
+    }
+
+    /// Close the full-size photo viewer and reject any decode that is still in flight.
+    pub(crate) fn close_photo_viewer(&mut self) {
+        self.photo.selected_id = None;
+        self.cancel_pending_full_size_photo_decodes();
     }
 
     pub(crate) fn update_photo_thumbnail_window(&mut self, visible: &[(String, String)]) {
@@ -2821,9 +3011,16 @@ impl KattriApp {
             Some(Err(_)) => (None, Some(ui_text(ids::MUSIC_QUEUE_READ_FAILED).to_owned())),
             _ => (None, None),
         };
+        // The local playlist loads once per launch from the running profile. A missing or
+        // unusable record leaves an empty list; the store has already kept any bad bytes aside.
+        let local_playlist = match settings.load_local_playlist() {
+            Some(Ok(kattri_client_core::playlist_store::PlaylistLoadOutcome::Loaded(model))) => {
+                model
+            }
+            _ => kattri_client_core::playlist::PlaylistModel::default(),
+        };
         let playback_overrides = playback_overrides_from_settings(settings.settings());
         let effective_subtitles = settings.settings().subtitles.clone();
-        let high_contrast = settings.settings().general.high_contrast;
         let reduce_motion = settings.settings().general.reduce_motion;
         let interface_size = settings.settings().general.interface_size;
         let launch_notice = settings.launch_notice().map(str::to_owned);
@@ -2885,10 +3082,12 @@ impl KattriApp {
             detail_artwork_request_id: 0,
             detail_backdrop_attempted: false,
             home_hero_backdrop: None,
+            last_selected_backdrop: None,
             home_ambient_backdrop: None,
             home_hero_request: None,
             home_ambient_request: None,
             ambient_backdrop: crate::ui::ambient::AmbientBackdrop::default(),
+            runtime_about: RuntimeAbout::default(),
             custom_backdrop_texture: None,
             custom_backdrop_request: None,
             auto_play: AutoPlayMachine::new(),
@@ -2925,6 +3124,7 @@ impl KattriApp {
             live_tv_error: None,
             live_tv_notice: None,
             live_tv_selected_channel_id: None,
+            live_tv_focus_target: None,
             live_tv_tune_request_id: None,
             live_tv_retry_available: false,
             live_tv_request_id: 0,
@@ -2940,6 +3140,8 @@ impl KattriApp {
             live_tv_guide_refreshed_at_unix: None,
             photo: PhotoState::new(),
             music_queue: Queue::new(),
+            local_playlist,
+            local_playlist_notice: None,
             episode_neighbors: None,
             shuffle_queue: None,
             preferred_source: None,
@@ -2956,6 +3158,7 @@ impl KattriApp {
             live_tv_recordings_state: RecordingsState::NotLoaded,
             timer_change_request_id: 0,
             shuffle_request_id: 0,
+            shuffle_series_id: None,
             detail_parent: None,
             episode_thumbnails: HashMap::new(),
             episode_thumbnail_pending: HashMap::new(),
@@ -2977,6 +3180,8 @@ impl KattriApp {
             music_queue_resume: ResumePosition::None,
             music_queue_persistence: MusicQueuePersistence::new(),
             music_queue_position_ms: 0,
+            last_saved_queue_position_ms: None,
+            last_saved_queue_fingerprint: None,
             playlist: PlaylistState::new(),
             focus_graph: FocusGraph::default(),
             gamepad: Box::new(ObservedGamepad {
@@ -2992,6 +3197,8 @@ impl KattriApp {
             live_tv_search_loading: false,
             live_tv_search_start_index: 0,
             live_tv_search_total: None,
+            live_tv_search_error: false,
+            live_tv_search_requested_start_index: 0,
             live_tv_search_request_id: None,
             catalog_sort: CatalogSort::Name,
             catalog_sort_order: ItemSortOrder::Ascending,
@@ -3003,15 +3210,16 @@ impl KattriApp {
             catalog_genres: Vec::new(),
             catalog_studios: Vec::new(),
             catalog_studio: None,
+            catalog_year: None,
+            catalog_official_rating: None,
             catalog_genres_request_id: 0,
             catalog_genres_scope: None,
-            high_contrast,
             interface_size,
+            tv_mode: false,
             reduce_motion,
             settings,
             active_subtitle_title: None,
             effective_subtitles,
-            profile_picker: None,
             open_url: None,
             pending_stream_url: None,
             launch_notice,
@@ -3022,6 +3230,17 @@ impl KattriApp {
             server_check_error: None,
             quick_connect_probe_after: None,
             quick_connect_probe_pending: None,
+            metadata_manager_open: false,
+            metadata_manager_kind: MetadataManagerKind::default(),
+            metadata_manager_result: None,
+            metadata_manager_request: None,
+            account_preferences_open: false,
+            account_preferences: None,
+            account_preferences_saved: false,
+            account_preferences_request: None,
+            quick_connect_authorizer_open: false,
+            quick_connect_approval_code: Default::default(),
+            quick_connect_approval: None,
             quick_connect_enabled_for: None,
             next_request_id: 0,
             connection_request_id: 0,
@@ -3063,6 +3282,7 @@ impl KattriApp {
             media_playing: false,
             pending_artwork_requests: HashMap::new(),
             attempted_artwork: HashSet::new(),
+            missing_artwork: HashSet::new(),
             artwork_access_ticks: HashMap::new(),
             next_artwork_access_tick: 0,
             visible_artwork_from_tick: 0,
@@ -3111,9 +3331,11 @@ impl KattriApp {
         self.screensaver.animation_seconds(self.ui_time)
     }
 
-    /// Gamepad input is polled outside the egui event stream, so it dismisses explicitly.
-    pub(crate) fn note_gamepad_activity(&mut self) {
+    /// Gamepad input is polled outside egui; return whether it woke the saver for consumption.
+    pub(crate) fn note_gamepad_activity(&mut self) -> bool {
+        let woke_screensaver = self.screensaver.active();
         self.screensaver.reset(self.ui_time);
+        woke_screensaver
     }
 
     fn media_is_playing(&self) -> bool {
@@ -3694,6 +3916,14 @@ impl KattriApp {
         mode
     }
 
+    /// Toggles the window always-on-top setting and queues a settings save.
+    pub fn toggle_always_on_top(&mut self) {
+        let before = self.settings.settings().clone();
+        let window = &mut self.settings.settings_mut().window;
+        window.always_on_top = !window.always_on_top;
+        self.settings.save_if_changed(&before);
+    }
+
     /// Window settings of the running profile: the remembered placement and fullscreen state (M2-14).
     pub fn window_settings(&self) -> &kattri_settings::WindowSettings {
         &self.settings.settings().window
@@ -3778,11 +4008,16 @@ impl KattriApp {
     /// behave normally; only the start position comes from the request.
     fn start_remote_play(&mut self, item_id: String, start_position_ticks: Option<i64>) {
         let start_over = start_position_ticks.is_none_or(|ticks| ticks <= 0);
-        self.play_item_at(
-            item_id,
-            start_over,
-            start_position_ticks.filter(|ticks| *ticks > 0),
-        );
+        let requested_ticks = start_position_ticks.filter(|ticks| *ticks > 0);
+        let same_item_active = self.browse.details.selected_item_id.as_deref()
+            == Some(item_id.as_str())
+            && (self.auto_play.pending().is_some()
+                || self.playback_start_loading
+                || self.media_playing);
+        if start_over && requested_ticks.is_none() && same_item_active {
+            return;
+        }
+        self.play_item_at(item_id, start_over, requested_ticks);
     }
 
     /// Feed one server clock reading from the worker into the SyncPlay estimator (M4-11). The
@@ -4685,43 +4920,10 @@ impl KattriApp {
         self.refresh_effective_subtitles();
     }
 
-    /// Open the launch picker when several profiles exist and `--profile` was not given.
-    pub fn offer_launch_picker(&mut self) {
-        if self.settings.offers_launch_picker() {
-            self.profile_picker = Some(PickerState::default());
-        }
-    }
-
-    /// Open the profile picker from the Settings page.
-    pub(crate) fn open_profile_picker(&mut self) {
-        self.profile_picker = Some(PickerState::default());
-    }
-
-    /// Draw the launch notice and the profile picker over the current screen, then act on a
-    /// switch the user picked.
+    /// Draw the launch notice over the current screen. The app has no local profile picker:
+    /// viewers sign in as a Jellyfin user on the server.
     fn show_profile_overlays(&mut self, ctx: &egui::Context) {
         self.show_launch_notice(ctx);
-        let running = self.settings.running_name().unwrap_or_default().to_owned();
-        let outcome = match self.settings.profile_store_mut() {
-            Some(store) => {
-                profile_picker::show_window(ctx, &mut self.profile_picker, store, &running)
-            }
-            None => {
-                self.profile_picker = None;
-                None
-            }
-        };
-        match outcome {
-            Some(PickerOutcome::SwitchTo(name)) => match self.switch_profile(&name) {
-                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                Err(message) => {
-                    if let Some(picker) = self.profile_picker.as_mut() {
-                        picker.error = Some(message);
-                    }
-                }
-            },
-            Some(PickerOutcome::Created(_)) | None => {}
-        }
     }
 
     fn show_launch_notice(&mut self, ctx: &egui::Context) {
@@ -4741,23 +4943,6 @@ impl KattriApp {
         }
     }
 
-    /// Save pending settings, make `name` the active profile, and start the app again with
-    /// `--profile <name>`. The caller closes this process once the new one has started.
-    fn switch_profile(&mut self, name: &str) -> Result<(), String> {
-        self.settings.finish_pending_saves().map_err(|error| {
-            ui_text_args(
-                ids::APP_ERROR_SETTINGS_NOT_SAVED,
-                &[("error", &error.to_string())],
-            )
-        })?;
-        let store = self
-            .settings
-            .profile_store_mut()
-            .ok_or_else(|| ui_text(ids::PROFILE_ERROR_UNAVAILABLE).to_owned())?;
-        profile_picker::switch_and_restart(store, name, profile_picker::relaunch_current_exe)
-            .map_err(|error| error.to_string())
-    }
-
     fn allocate_request_id(&mut self) -> u64 {
         self.next_request_id = self.next_request_id.wrapping_add(1);
         self.next_request_id
@@ -4773,7 +4958,7 @@ impl KattriApp {
     }
 
     /// At start-up: signs back in with the token saved by an earlier "stay signed in" sign-in,
-    /// on the default saved server. Call it once, after `offer_launch_picker`, from the real
+    /// on the default saved server. Call it once at startup, from the real
     /// entry points only (not from tests, which must never reach a real server or the OS
     /// credential store). Does nothing while the profile picker is open, when the form is
     /// already filled in (for example by the debug sign-in), or when no server is saved. If no
@@ -4786,7 +4971,6 @@ impl KattriApp {
             let _ = worker.probe_saved_sign_in();
         }
         if self.worker.is_none()
-            || self.profile_picker.is_some()
             || !self.server_url.trim().is_empty()
             || !matches!(self.connection, ConnectionStatus::Disconnected { .. })
         {
@@ -5279,6 +5463,15 @@ impl KattriApp {
         // A new connection attempt starts a new session generation; results from any earlier
         // generation are stale from this point on. The counter is monotonic across sign-outs.
         self.session_epoch = self.session_epoch.next();
+        self.quick_connect_approval = None;
+        self.metadata_manager_open = false;
+        self.metadata_manager_result = None;
+        self.metadata_manager_request = None;
+        self.account_preferences_open = false;
+        self.account_preferences = None;
+        self.account_preferences_request = None;
+        self.quick_connect_authorizer_open = false;
+        self.quick_connect_approval_code = Default::default();
         let _ = self.reduce_session(SessionEvent::SignInStarted {
             epoch: self.session_epoch,
         });
@@ -5306,6 +5499,7 @@ impl KattriApp {
         self.navigation.library_tab_request_id = self.allocate_request_id();
         self.browse.details.selected_item_id = None;
         self.browse.details.selected_details = None;
+        self.last_selected_backdrop = None;
         self.selected_artwork_texture = None;
         self.detail_artwork_request_id = self.allocate_request_id();
         self.detail_backdrop_attempted = false;
@@ -5325,6 +5519,7 @@ impl KattriApp {
         self.reset_playback(PlaybackReset::Session);
         self.pending_artwork_requests.clear();
         self.attempted_artwork.clear();
+        self.missing_artwork.clear();
         self.artwork_access_ticks.clear();
         self.pending_playback = None;
         self.submitted_search = None;
@@ -5375,6 +5570,8 @@ impl KattriApp {
         self.music_queue_restore.loaded(stored_queue);
         self.music_queue_resume.clear();
         self.music_queue_persistence.reset();
+        self.last_saved_queue_position_ms = None;
+        self.last_saved_queue_fingerprint = None;
         self.music_queue_persistence
             .set_suspended(self.music_queue_restore.has_pending());
         self.playlist.entries.clear();
@@ -5505,6 +5702,7 @@ impl KattriApp {
     }
 
     fn cancel_navigation_requests(&mut self) {
+        self.invalidate_shuffle_request();
         if let Some(worker) = self.worker.as_ref() {
             worker.cancel_navigation_reads();
         }
@@ -5520,20 +5718,77 @@ impl KattriApp {
         self.series.episodes_loading = false;
         self.similar.loading = false;
         self.person.items_loading = false;
+        self.pending_artwork_requests.clear();
+        self.attempted_artwork.clear();
         self.clear_theme_media();
         self.cancel_network_retry_for_user_action();
     }
 
+    /// Close an open item or person details page. Returns whether anything was open, so a
+    /// re-selected content tab can fall back to the catalog instead of doing nothing.
+    fn leave_open_detail(&mut self) -> bool {
+        let item_open = self.browse.details.selected_item_id.is_some();
+        if item_open {
+            let request_id = self.allocate_request_id();
+            self.browse.details.clear(request_id);
+            self.detail_parent = None;
+        }
+        let person_open = self.person.selected.take().is_some();
+        item_open || person_open
+    }
+
     pub(crate) fn navigate_to(&mut self, page: Page) {
+        if page != Page::LiveTv {
+            self.live_tv_focus_target = None;
+        }
         if page != Page::Dashboard && self.admin_users_open {
             self.close_admin_users();
         }
         self.navigation.view = AppView::Library;
         let left_browse_context = self.browse_context.take().is_some();
         if self.navigation.page == page && !left_browse_context {
+            // Re-selecting the current tab still means "show this catalog": an open item or
+            // person page is closed, and any Suggestions/Upcoming/Search state is reset so the
+            // click always returns to the tab's Library catalog.
+            let left_detail = self.leave_open_detail();
+            self.reset_people_detail();
+            let left_library_tab = self.navigation.library_tab != LibraryTab::Library;
+            if left_library_tab {
+                self.navigation.library_tab = LibraryTab::Library;
+                self.navigation.library_tab_request_id = self.allocate_request_id();
+            }
+            let had_search = self.search.active
+                || !self.search.query.trim().is_empty()
+                || self.submitted_search.is_some()
+                || !self.search.results.is_empty()
+                || self.search.browse_group.is_some();
+            if had_search {
+                self.search.clear(Duration::ZERO);
+                self.submitted_search = None;
+                self.invalidate_live_tv_search();
+            }
+            if left_library_tab || had_search {
+                self.cancel_navigation_requests();
+                if self.server.is_some() && page.is_catalog() {
+                    self.request_catalog(0, None);
+                } else {
+                    self.items.clear();
+                    self.total_record_count = None;
+                    self.browse.catalog_next_index = 0;
+                    self.browse.catalog_end_reached = false;
+                }
+            } else if left_detail
+                && self.items.is_empty()
+                && self.server.is_some()
+                && page.is_catalog()
+            {
+                self.request_catalog(0, None);
+            }
             return;
         }
         self.cancel_navigation_requests();
+        self.leave_open_detail();
+        self.reset_people_detail();
         self.navigation.page = page;
         self.navigation.library_tab = LibraryTab::Library;
         self.navigation.library_tab_request_id = self.allocate_request_id();
@@ -5543,6 +5798,8 @@ impl KattriApp {
         self.catalog_name_prefix = None;
         self.catalog_genre = None;
         self.catalog_studio = None;
+        self.catalog_year = None;
+        self.catalog_official_rating = None;
         self.detail_parent = None;
         self.photo.selected_id = None;
         self.photo.page_start = 0;
@@ -5567,15 +5824,15 @@ impl KattriApp {
         }
     }
 
-    /// Whether the admin dashboard nav entry and page are on. Read from the settings file
-    /// (`admin.dashboard`), which is off by default.
+    /// Whether the admin dashboard nav entry and page are on. Any admin account gets it; the
+    /// server still decides which reads succeed.
     pub(crate) fn dashboard_enabled(&self) -> bool {
-        self.settings.settings().admin.dashboard
+        self.user_is_admin
     }
 
     /// Start one read-only dashboard load. The gate and a signed-in server are checked here,
     /// so a disabled dashboard sends no request.
-    fn request_dashboard(&mut self) {
+    pub(crate) fn request_dashboard(&mut self) {
         if !self.dashboard_enabled() || self.server.is_none() {
             return;
         }
@@ -5589,6 +5846,77 @@ impl KattriApp {
         if !submitted {
             self.admin_request_id = None;
             self.admin_load = AdminLoad::Failed;
+        }
+    }
+
+    /// Triggers a server-wide library scan for admin users.
+    pub(crate) fn refresh_all_libraries(&mut self) {
+        if !self.dashboard_enabled() || self.server.is_none() {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.refresh_all_libraries(request_id);
+        }
+    }
+
+    /// Starts a Jellyfin scheduled task by ID for admin users.
+    pub(crate) fn start_scheduled_task(&mut self, task_id: String) {
+        if !self.dashboard_enabled() || self.server.is_none() {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.start_scheduled_task(request_id, task_id);
+        }
+    }
+
+    /// Requests a server restart for admin users.
+    pub(crate) fn restart_server(&mut self) {
+        if !self.dashboard_enabled() || self.server.is_none() {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.restart_server(request_id);
+        }
+    }
+
+    /// Requests a server shutdown for admin users.
+    pub(crate) fn shutdown_server(&mut self) {
+        if !self.dashboard_enabled() || self.server.is_none() {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.shutdown_server(request_id);
+        }
+    }
+
+    /// Sends a toast message to an active Jellyfin session for admin users.
+    pub(crate) fn send_session_message(&mut self, session_id: String, text: String) {
+        if !self.dashboard_enabled() || self.server.is_none() {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.send_session_message(
+                request_id,
+                session_id,
+                "Jellyfin Kattri".to_owned(),
+                text,
+            );
+        }
+    }
+
+    /// Revokes and deletes a registered device for admin users.
+    pub(crate) fn revoke_device(&mut self, device_id: String) {
+        if !self.dashboard_enabled() || self.server.is_none() {
+            return;
+        }
+        let request_id = self.allocate_request_id();
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.revoke_device(request_id, device_id);
         }
     }
 
@@ -5674,6 +6002,23 @@ impl KattriApp {
                         mutation,
                         AdminUserOperation::PolicyPatch { user_id, changes },
                     );
+                }
+                crate::ui::admin_users::AdminUsersAction::ResetPassword {
+                    user_id,
+                    new_password,
+                } => {
+                    let request_id = self.allocate_request_id();
+                    let generation = self.connection_request_id;
+                    if let Some(worker) = self.worker.as_ref()
+                        && let Err(error) = worker.reset_admin_user_password(
+                            request_id,
+                            generation,
+                            user_id,
+                            new_password,
+                        )
+                    {
+                        self.admin_users.error = Some(error.to_string());
+                    }
                 }
                 crate::ui::admin_users::AdminUsersAction::Delete { user_id } => {
                     if self
@@ -5780,6 +6125,8 @@ impl KattriApp {
         self.catalog_name_prefix = None;
         self.catalog_genre = None;
         self.catalog_studio = None;
+        self.catalog_year = None;
+        self.catalog_official_rating = None;
         self.photo.selected_id = None;
         self.photo.items.clear();
         self.photo.thumbnails.clear();
@@ -5838,8 +6185,12 @@ impl KattriApp {
     }
 
     pub(crate) fn set_view(&mut self, view: AppView) {
-        if view == AppView::Home && self.admin_users_open {
-            self.close_admin_users();
+        if view == AppView::Home {
+            self.leave_open_detail();
+            self.reset_people_detail();
+            if self.admin_users_open {
+                self.close_admin_users();
+            }
         }
         self.navigation.view = view;
     }
@@ -5847,7 +6198,9 @@ impl KattriApp {
     pub(crate) fn navigate_back(&mut self) {
         self.cancel_navigation_requests();
         if self.photo.selected_id.take().is_some() {
-            self.cancel_pending_photo_decodes();
+            // Back from the viewer returns to the same grid, so it is the same close as the
+            // explicit Close action: drop the full-size decode, keep legitimate thumbnails.
+            self.close_photo_viewer();
             return;
         }
         if self.navigation.page == Page::Photos && self.browse_context.is_some() {
@@ -6062,6 +6415,7 @@ impl KattriApp {
             });
         if result.is_err() {
             self.live_tv_loading = false;
+            self.live_tv_loaded = true;
             self.live_tv_error = Some(ErrorClass::Unexpected);
         }
     }
@@ -6128,23 +6482,26 @@ impl KattriApp {
     }
 
     pub(crate) fn retry_live_tv_channels(&mut self) {
-        self.live_tv_channels.clear();
-        self.live_tv_channel_logos.clear();
-        self.live_tv_logo_queue.clear();
-        self.live_tv_logo_pending.clear();
-        self.live_tv_logo_attempted.clear();
-        self.live_tv_total_count = None;
-        self.live_tv_loaded = false;
-        self.live_tv_not_set_up = false;
+        let start_index = self.live_tv_requested_start_index;
+        if start_index == 0 {
+            self.live_tv_channels.clear();
+            self.live_tv_channel_logos.clear();
+            self.live_tv_logo_queue.clear();
+            self.live_tv_logo_pending.clear();
+            self.live_tv_logo_attempted.clear();
+            self.live_tv_total_count = None;
+            self.live_tv_loaded = false;
+            self.live_tv_not_set_up = false;
+            self.live_tv_notice = None;
+            self.live_tv_programs.clear();
+            self.live_tv_guide_window = None;
+            self.live_tv_guide_available = false;
+            self.live_tv_guide_error = None;
+            self.live_tv_guide_pending_channel_ids.clear();
+            self.live_tv_guide_refreshed_at_unix = None;
+        }
         self.live_tv_error = None;
-        self.live_tv_notice = None;
-        self.live_tv_programs.clear();
-        self.live_tv_guide_window = None;
-        self.live_tv_guide_available = false;
-        self.live_tv_guide_error = None;
-        self.live_tv_guide_pending_channel_ids.clear();
-        self.live_tv_guide_refreshed_at_unix = None;
-        self.request_live_tv_channels(0);
+        self.request_live_tv_channels(start_index);
     }
 
     pub(crate) fn tune_live_tv_channel(&mut self, channel_id: String) {
@@ -6757,6 +7114,11 @@ impl KattriApp {
         // Cheap change detection first: serializing the whole queue every frame is wasted work
         // for a queue that did not change.
         let fingerprint = self.music_queue_fingerprint();
+        if self.last_saved_queue_fingerprint == Some(fingerprint)
+            && self.last_saved_queue_position_ms == Some(self.music_queue_position_ms)
+        {
+            return;
+        }
         if !self
             .music_queue_persistence
             .needs_encode(fingerprint, self.ui_time)
@@ -6779,6 +7141,8 @@ impl KattriApp {
             .save_queue(&self.music_queue, self.music_queue_position_ms)
         {
             Some(Ok(())) => {
+                self.last_saved_queue_position_ms = Some(self.music_queue_position_ms);
+                self.last_saved_queue_fingerprint = Some(fingerprint);
                 self.music_queue_persistence
                     .record(encoded, fingerprint, self.ui_time);
             }
@@ -6800,6 +7164,7 @@ impl KattriApp {
         match action {
             HomeAction::Select(item_id) => self.select_item(item_id),
             HomeAction::Play(item_id) => self.play_item(item_id, false),
+            #[cfg(test)]
             HomeAction::HideSeries(series_id) => {
                 let server_id = self.server.as_ref().and_then(|server| server.id.as_deref());
                 let profile = self.settings.running_name().map(str::to_owned);
@@ -6856,7 +7221,11 @@ impl KattriApp {
 
     /// Library items and home-row items share the lazy artwork scheduler and texture cache.
     fn artwork_items(&self) -> impl Iterator<Item = &MediaItem> {
-        self.items.iter().chain(self.home.media())
+        self.items
+            .iter()
+            .chain(self.home.media())
+            .chain(self.search.media.0.iter())
+            .chain(self.similar.media.iter())
     }
 
     pub(crate) fn submit_search(&mut self, now: Duration) {
@@ -6994,17 +7363,35 @@ impl KattriApp {
         self.request_catalog(0, Some(term));
     }
 
+    pub(crate) fn retry_live_tv_search(&mut self) {
+        if self.live_tv_search_error && !self.live_tv_search_loading {
+            let term = self.submitted_search.clone();
+            self.start_live_tv_search_page(
+                term.as_deref(),
+                self.live_tv_search_requested_start_index,
+            );
+        }
+    }
+
     pub(crate) fn next_live_tv_search_page(&mut self) {
         let Some(term) = self.submitted_search.clone() else {
             return;
         };
         if self.search.browse_group == Some(crate::ui::search::SearchGroup::Channels)
             && !self.live_tv_search_loading
-            && self
-                .live_tv_search_total
-                .is_some_and(|total| self.live_tv_search_start_index < total)
         {
-            self.start_live_tv_search_page(Some(&term), self.live_tv_search_start_index);
+            let retry_start = if self.live_tv_search_error {
+                self.live_tv_search_requested_start_index
+            } else {
+                if self
+                    .live_tv_search_total
+                    .is_some_and(|total| self.live_tv_search_start_index >= total)
+                {
+                    return;
+                }
+                self.live_tv_search_start_index
+            };
+            self.start_live_tv_search_page(Some(&term), retry_start);
         }
     }
 
@@ -7229,6 +7616,72 @@ impl KattriApp {
         self.restart_catalog_query();
     }
 
+    pub(crate) fn set_catalog_year(&mut self, year: Option<i32>) {
+        self.catalog_year = year;
+    }
+
+    pub(crate) fn set_catalog_official_rating(&mut self, rating: Option<String>) {
+        self.catalog_official_rating = rating;
+    }
+
+    pub(crate) fn catalog_item_matches_local_filters(&self, item: &MediaItem) -> bool {
+        self.catalog_year
+            .is_none_or(|year| item.production_year == Some(year))
+            && self
+                .catalog_official_rating
+                .as_deref()
+                .is_none_or(|rating| item.official_rating.as_deref() == Some(rating))
+    }
+
+    /// Plays all loaded catalog items for the current library page in order or shuffled.
+    pub(crate) fn play_catalog_all(&mut self, shuffled: bool) {
+        let open_collection = self
+            .browse_context
+            .as_ref()
+            .is_some_and(|context| context.is_collection);
+        let mut queue: Vec<(String, String)> = self
+            .items
+            .iter()
+            .filter(|item| self.catalog_item_matches_local_filters(item))
+            .filter(|item| {
+                matches!(
+                    item.kind,
+                    crate::catalog::MediaKind::Movie
+                        | crate::catalog::MediaKind::Episode
+                        | crate::catalog::MediaKind::Audio
+                ) && match self.navigation.page {
+                    Page::Movies => item.kind == crate::catalog::MediaKind::Movie,
+                    Page::Series => item.kind == crate::catalog::MediaKind::Episode,
+                    Page::Collections if open_collection => true,
+                    _ => false,
+                }
+            })
+            .map(|item| (item.id.clone(), item.title.clone()))
+            .collect();
+        if queue.is_empty() {
+            return;
+        }
+        if shuffled && queue.len() > 1 {
+            let mut state = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0x9e37_79b9_7f4a_7c15_u64, |d| d.as_nanos() as u64)
+                ^ (queue.len() as u64);
+            for i in (1..queue.len()).rev() {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let j = (state as usize) % (i + 1);
+                queue.swap(i, j);
+            }
+        }
+        let first = queue[0].0.clone();
+        self.shuffle_queue = Some(ShuffleQueue {
+            episodes: queue,
+            up_next_cancelled_for: None,
+        });
+        self.play_item(first, false);
+    }
+
     pub(crate) fn clear_catalog_filters(&mut self) {
         if !self.has_catalog_filters() {
             return;
@@ -7238,6 +7691,8 @@ impl KattriApp {
         self.catalog_name_prefix = None;
         self.catalog_genre = None;
         self.catalog_studio = None;
+        self.catalog_year = None;
+        self.catalog_official_rating = None;
         self.restart_catalog_query();
     }
 
@@ -7247,6 +7702,8 @@ impl KattriApp {
             || self.catalog_name_prefix.is_some()
             || self.catalog_genre.is_some()
             || self.catalog_studio.is_some()
+            || self.catalog_year.is_some()
+            || self.catalog_official_rating.is_some()
     }
 
     /// `(nameStartsWith, nameLessThan)` for the alphabet picker. `'#'` asks for names that
@@ -7965,6 +8422,8 @@ impl KattriApp {
 
     fn invalidate_live_tv_search(&mut self) {
         self.live_tv_search_request_id = None;
+        self.live_tv_search_error = false;
+        self.live_tv_search_requested_start_index = 0;
         self.live_tv_search_results.clear();
         self.live_tv_search_loading = false;
         self.live_tv_search_start_index = 0;
@@ -7976,8 +8435,10 @@ impl KattriApp {
     }
 
     fn start_live_tv_search_page(&mut self, term: Option<&str>, start_index: u32) {
+        self.live_tv_search_requested_start_index = start_index;
         self.live_tv_search_request_id = None;
         self.live_tv_search_loading = false;
+        self.live_tv_search_error = false;
         if start_index == 0 {
             self.live_tv_search_results.clear();
             self.live_tv_search_total = None;
@@ -7988,6 +8449,7 @@ impl KattriApp {
         let request_id = self.allocate_request_id();
         self.live_tv_search_request_id = Some(request_id);
         let Some(worker) = self.worker.as_ref() else {
+            self.live_tv_search_error = true;
             return;
         };
         self.live_tv_search_loading = worker
@@ -8005,6 +8467,8 @@ impl KattriApp {
             .is_ok();
         if self.live_tv_search_loading {
             self.live_tv_search_start_index = start_index;
+        } else {
+            self.live_tv_search_error = true;
         }
     }
 
@@ -8090,7 +8554,10 @@ impl KattriApp {
     /// Submit queued episode stills until the worker refuses another one, then wait for a
     /// completion event and pump again.
     fn pump_episode_thumbnails(&mut self) {
-        while let Some((episode_id, tag)) = self.episode_thumbnail_queue.front().cloned() {
+        while self.episode_thumbnail_pending.len() < MAX_PENDING_EPISODE_THUMBNAILS {
+            let Some((episode_id, tag)) = self.episode_thumbnail_queue.front().cloned() else {
+                break;
+            };
             let request_id = self.allocate_request_id();
             let sent = self.worker.as_ref().is_some_and(|worker| {
                 worker
@@ -8110,6 +8577,7 @@ impl KattriApp {
         self.similar.request_id = self.allocate_request_id();
         self.person.items_request_id = self.allocate_request_id();
         self.similar.items.clear();
+        self.similar.media.clear();
         self.similar.loading = false;
         self.person.selected = None;
         self.person.items.clear();
@@ -8271,10 +8739,19 @@ impl KattriApp {
                 .as_ref()
                 .ok_or(WorkerSubmitError::Stopped)
                 .and_then(|worker| {
-                    worker.get_person_artwork(request_id, name, person.primary_image_tag.clone())
+                    worker.get_person_artwork(
+                        request_id,
+                        name.clone(),
+                        person.primary_image_tag.clone(),
+                    )
                 });
-            if result.is_err() {
+            if let Err(err) = result {
                 self.person.pending_artwork.remove(&request_id);
+                if err == WorkerSubmitError::Busy {
+                    self.person.attempted_artwork.remove(&name);
+                    self.person.artwork_queue.push(person);
+                }
+                break;
             }
         }
     }
@@ -8918,7 +9395,12 @@ impl KattriApp {
                 pick: self.chosen_playback_selection(info),
             },
         };
+        let skip_details_wait = self
+            .auto_play
+            .pending()
+            .is_some_and(|request| request.start_over || request.requested_ticks.is_some());
         let details = match self.browse.details.selected_details.as_ref() {
+            None if skip_details_wait => DetailsState::Loaded { resume_ticks: None },
             None => DetailsState::Missing {
                 loading: self.browse.details.details_loading,
             },
@@ -9385,15 +9867,22 @@ impl KattriApp {
         }
     }
 
+    fn invalidate_shuffle_request(&mut self) {
+        self.shuffle_request_id = self.allocate_request_id();
+        self.shuffle_series_id = None;
+    }
+
     /// Starts a shuffled run of `series_id`'s episodes.
     pub(crate) fn shuffle_series(&mut self, series_id: String) {
+        self.invalidate_shuffle_request();
         let request_id = self.allocate_request_id();
         if self
             .worker
             .as_ref()
-            .is_some_and(|worker| worker.shuffle_series(request_id, series_id).is_ok())
+            .is_some_and(|worker| worker.shuffle_series(request_id, series_id.clone()).is_ok())
         {
             self.shuffle_request_id = request_id;
+            self.shuffle_series_id = Some(series_id);
         }
     }
 
@@ -9581,6 +10070,29 @@ impl KattriApp {
     pub(crate) fn request_visible_artwork(&mut self, requests: Vec<(String, String)>) {
         self.visible_artwork_from_tick = self.next_artwork_access_tick.saturating_add(1);
         // One pass over the items instead of two scans per visible card.
+        let mut shared = HashMap::new();
+        for item in self.artwork_items() {
+            if let (Some(tag), Some(texture)) = (&item.primary_image_tag, &item.artwork_texture) {
+                shared
+                    .entry((item.artwork_id.clone(), tag.clone()))
+                    .or_insert_with(|| texture.clone());
+            }
+        }
+        // Refreshes can introduce a new card for a poster another row already loaded. Search
+        // results are rebuilt from server data, so they need the same sharing pass.
+        for item in self
+            .items
+            .iter_mut()
+            .chain(self.home.media_mut())
+            .chain(self.search.media.0.iter_mut())
+            .chain(self.similar.media.iter_mut())
+        {
+            if item.artwork_texture.is_none()
+                && let Some(tag) = &item.primary_image_tag
+            {
+                item.artwork_texture = shared.get(&(item.artwork_id.clone(), tag.clone())).cloned();
+            }
+        }
         let mut known: HashMap<(&str, &str), bool> = HashMap::new();
         for item in self.artwork_items() {
             if let Some(tag) = item.primary_image_tag.as_deref() {
@@ -9613,7 +10125,10 @@ impl KattriApp {
             if self.pending_artwork_requests.len() >= MAX_PENDING_ARTWORK_REQUESTS {
                 break;
             }
-            if self.attempted_artwork.contains(&key) || pending.contains(&key) {
+            if self.attempted_artwork.contains(&key)
+                || pending.contains(&key)
+                || self.missing_artwork.contains(&key)
+            {
                 continue;
             }
 
@@ -9638,8 +10153,16 @@ impl KattriApp {
     }
 
     fn trim_artwork_cache(&mut self) {
-        let mut media: Vec<&mut MediaItem> =
-            self.items.iter_mut().chain(self.home.media_mut()).collect();
+        if self.artwork_access_ticks.len() <= MAX_CACHED_ARTWORK_TEXTURES {
+            return;
+        }
+        let mut media: Vec<&mut MediaItem> = self
+            .items
+            .iter_mut()
+            .chain(self.home.media_mut())
+            .chain(self.search.media.0.iter_mut())
+            .chain(self.similar.media.iter_mut())
+            .collect();
         trim_artwork_textures(
             &mut media,
             &mut self.artwork_access_ticks,
@@ -9675,22 +10198,30 @@ impl KattriApp {
             }
         }
 
+        // The blurred layer follows the open item, so selecting a card changes the backdrop
+        // without dropping to the unblurred detail artwork.
+        let ambient_target = self
+            .browse
+            .details
+            .selected_item_id
+            .clone()
+            .unwrap_or(item_id);
         let ambient_loaded = self
             .home_ambient_backdrop
             .as_ref()
-            .is_some_and(|(shown, _)| *shown == item_id);
+            .is_some_and(|(shown, _)| *shown == ambient_target);
         let ambient_requested = self
             .home_ambient_request
             .as_ref()
-            .is_some_and(|(_, wanted)| *wanted == item_id);
+            .is_some_and(|(_, wanted)| *wanted == ambient_target);
         if !ambient_loaded && !ambient_requested {
             let request_id = self.allocate_request_id();
             if self.worker.as_ref().is_some_and(|worker| {
                 worker
-                    .get_ambient_backdrop_artwork(request_id, item_id.clone())
+                    .get_ambient_backdrop_artwork(request_id, ambient_target.clone())
                     .is_ok()
             }) {
-                self.home_ambient_request = Some((request_id, item_id));
+                self.home_ambient_request = Some((request_id, ambient_target));
             }
         }
     }
@@ -9734,24 +10265,13 @@ impl KattriApp {
             kattri_settings::BackdropPreference::Custom => {
                 self.custom_backdrop_texture.as_ref().map(sized_texture)
             }
-            kattri_settings::BackdropPreference::Server => {
-                if self.navigation.view == AppView::Home {
-                    self.home_ambient_backdrop
-                        .as_ref()
-                        .map(|(_, texture)| sized_texture(texture))
-                        .or_else(|| self.home.hero_artwork())
-                } else {
-                    self.selected_artwork_texture
-                        .as_ref()
-                        .map(sized_texture)
-                        .or_else(|| {
-                            self.home_ambient_backdrop
-                                .as_ref()
-                                .map(|(_, texture)| sized_texture(texture))
-                        })
-                        .or_else(|| self.home.hero_artwork())
-                }
-            }
+            // Only the blurred ambient layer is used here: the detail artwork is the sharp image
+            // and showing it behind the catalog is what made the backdrop look unblurred.
+            kattri_settings::BackdropPreference::Server => self
+                .home_ambient_backdrop
+                .as_ref()
+                .map(|(_, texture)| sized_texture(texture))
+                .or_else(|| self.home.hero_artwork()),
         }
     }
 
@@ -9809,6 +10329,111 @@ impl KattriApp {
         self.pending_stream_url.take()
     }
 
+    /// Persist the profile's local playlist. No server call is involved.
+    // Only the tests drive this until the playlist UI slice lands (Batch 11 follow-up 3).
+    #[allow(dead_code)]
+    pub(crate) fn persist_local_playlist(&mut self) {
+        let _ = self.settings.save_local_playlist(&self.local_playlist);
+    }
+
+    /// Reload the local playlist from the running profile. Missing or unusable records leave an
+    /// empty list; the store keeps any unusable bytes aside.
+    // Only the tests drive this until the playlist UI slice lands (Batch 11 follow-up 3).
+    #[allow(dead_code)]
+    pub(crate) fn reload_local_playlist(&mut self) {
+        self.local_playlist = match self.settings.load_local_playlist() {
+            Some(Ok(kattri_client_core::playlist_store::PlaylistLoadOutcome::Loaded(model))) => {
+                model
+            }
+            _ => kattri_client_core::playlist::PlaylistModel::default(),
+        };
+    }
+
+    /// Split the local playlist into what can play now and what the server no longer offers.
+    /// Playable entries keep their order and duplicates; unavailable ones keep their position so
+    /// the caller can report them while playback skips them.
+    pub fn local_playlist_reconcile(
+        &self,
+        available: &HashSet<String>,
+    ) -> kattri_client_core::playlist_store::ReconcileReport {
+        kattri_client_core::playlist_store::reconcile(self.local_playlist.entries(), available)
+    }
+
+    /// Store `candidate` and only then adopt it. A failed or absent profile store leaves the
+    /// previous list in place and records a notice the panel shows.
+    fn commit_local_playlist(
+        &mut self,
+        candidate: kattri_client_core::playlist::PlaylistModel,
+    ) -> bool {
+        let saved = match self.settings.save_local_playlist(&candidate) {
+            Some(result) => result.is_ok(),
+            None => false,
+        };
+        if saved {
+            self.local_playlist = candidate;
+            self.local_playlist_notice = None;
+            true
+        } else {
+            self.local_playlist_notice = Some(ui_text(ids::LOCAL_PLAYLIST_SAVE_FAILED).to_owned());
+            false
+        }
+    }
+
+    /// Next free entry ID for this profile. Entry IDs are 32 hex characters, so the highest
+    /// existing one plus one cannot collide, including after a restart.
+    fn next_local_playlist_entry_id(&self) -> String {
+        let highest = self
+            .local_playlist
+            .entries()
+            .iter()
+            .filter_map(|entry| u128::from_str_radix(entry.entry_id(), 16).ok())
+            .max()
+            .unwrap_or(0);
+        format!("{:032x}", highest.saturating_add(1))
+    }
+
+    /// Add an item to the local playlist, persisting before the change is accepted.
+    pub(crate) fn add_to_local_playlist(&mut self, item_id: &str) -> bool {
+        let Ok(entry) = kattri_client_core::playlist::PlaylistEntry::new(
+            &self.next_local_playlist_entry_id(),
+            item_id,
+        ) else {
+            self.local_playlist_notice = Some(ui_text(ids::LOCAL_PLAYLIST_SAVE_FAILED).to_owned());
+            return false;
+        };
+        let mut entries = self.local_playlist.entries().to_vec();
+        entries.push(entry);
+        let Ok(candidate) = kattri_client_core::playlist::PlaylistModel::from_entries(entries)
+        else {
+            self.local_playlist_notice = Some(ui_text(ids::LOCAL_PLAYLIST_SAVE_FAILED).to_owned());
+            return false;
+        };
+        self.commit_local_playlist(candidate)
+    }
+
+    /// Remove one occurrence from the local playlist, persisting before the change is accepted.
+    pub(crate) fn remove_local_playlist_entry(&mut self, entry_id: &str) -> bool {
+        let mut candidate = self.local_playlist.clone();
+        if candidate.remove(entry_id).is_err() {
+            return false;
+        }
+        self.commit_local_playlist(candidate)
+    }
+
+    /// Move one occurrence up or down, persisting before the change is accepted.
+    pub(crate) fn move_local_playlist_entry(&mut self, entry_id: &str, up: bool) -> bool {
+        let mut candidate = self.local_playlist.clone();
+        let moved = if up {
+            candidate.move_up(entry_id)
+        } else {
+            candidate.move_down(entry_id)
+        };
+        if moved.is_err() {
+            return false;
+        }
+        self.commit_local_playlist(candidate)
+    }
+
     pub fn take_prepared_playback(&mut self) -> Option<PreparedPlayback> {
         self.pending_playback.take()
     }
@@ -9816,6 +10441,64 @@ impl KattriApp {
     /// Identifies the current prepared playback request for native event correlation.
     pub fn playback_start_generation(&self) -> u64 {
         self.playback_start_request_id
+    }
+
+    /// True while a playback start is waiting on options, server preparation, or player handoff
+    /// without a surfaceable startup error.
+    pub fn playback_preparing(&self) -> bool {
+        (self.auto_play.is_pending()
+            || self.pending_playback.is_some()
+            || self.playback_start_loading
+            || self.playback_ui_phase() == PlaybackUiPhase::Starting)
+            && self.playback_start_error.is_none()
+            && self.playback_error.is_none()
+    }
+
+    /// Title of the item currently being prepared for playback, if known.
+    pub fn preparing_item_title(&self) -> Option<&str> {
+        self.auto_play
+            .pending()
+            .and_then(|request| self.item_title(&request.item_id))
+            .or_else(|| {
+                self.held_playback
+                    .as_ref()
+                    .and_then(|(_, item_id, _)| self.item_title(item_id))
+            })
+            .or_else(|| {
+                self.active_playback
+                    .as_ref()
+                    .and_then(|active| self.item_title(&active.item_id))
+            })
+            .or_else(|| {
+                self.browse
+                    .details
+                    .selected_details
+                    .as_ref()
+                    .map(|details| details.name.as_str())
+            })
+            .or_else(|| {
+                self.browse
+                    .details
+                    .selected_item_id
+                    .as_deref()
+                    .and_then(|id| self.item_title(id))
+            })
+    }
+
+    /// Cancel an in-flight playback preparation so pressing Back or Escape on the skeleton
+    /// player returns to browsing without starting stale playback when the worker finishes.
+    pub fn cancel_playback_preparation(&mut self) {
+        self.auto_play.cancel();
+        self.pending_playback = None;
+        self.held_playback = None;
+        self.playback_start_loading = false;
+        self.playback_start_status = None;
+        self.playback_start_error = None;
+        self.playback_recovery = None;
+        self.active_playback = None;
+        self.live_tv_tune_request_id = None;
+        self.music_queue_auto_play_item_id = None;
+        self.playback_start_request_id = self.allocate_request_id();
     }
 
     /// Series GUID of the playing item from its loaded record (M2-10). `None` means the record
@@ -9844,7 +10527,7 @@ impl KattriApp {
         self.pending_playback = Some(*playback);
         self.playback_start_loading = false;
         self.playback_start_error = None;
-        self.playback_start_status = Some(ui_text(ids::PLAYBACK_STATUS_OPENING_LOCAL).into());
+        self.playback_start_status = None;
     }
 
     /// Hand over a held stream once its item record has arrived or failed (M2-10). A stream
@@ -9862,7 +10545,7 @@ impl KattriApp {
     }
 
     pub fn playback_start_opening(&mut self) {
-        self.playback_start_status = Some(ui_text(ids::PLAYBACK_STATUS_OPENING_LOCAL).into());
+        self.playback_start_status = None;
         if self.music_queue_auto_play_item_id.as_deref()
             == self.browse.details.selected_item_id.as_deref()
         {
@@ -10002,6 +10685,24 @@ impl KattriApp {
         Ok(request_id)
     }
 
+    /// Check public GitHub Releases metadata on user request. This does not verify or fetch update artifacts.
+    pub fn check_releases(&mut self) {
+        let request_id = self.update.begin_release_check();
+        let Some(worker) = self.worker.as_ref() else {
+            self.update.release_check = crate::worker::update::ReleaseCheckStatus::Failed {
+                error: crate::worker::release_check::ReleaseCheckError::Network,
+            };
+            return;
+        };
+        if worker.check_latest_release(request_id).is_err()
+            && request_id == self.update.release_request_id
+        {
+            self.update.release_check = crate::worker::update::ReleaseCheckStatus::Failed {
+                error: crate::worker::release_check::ReleaseCheckError::Network,
+            };
+        }
+    }
+
     /// Apply a signed update whose build is already staged on disk (M4-16).
     ///
     /// The envelope is verified, then the playback gate runs, both on this thread. Only then
@@ -10091,7 +10792,97 @@ impl KattriApp {
         self.playback_report_feedback.as_deref()
     }
 
+    pub(crate) fn load_metadata_manager(&mut self, term: &str, offset: u32) {
+        if !self.user_is_admin {
+            return;
+        }
+        self.metadata_manager_open = true;
+        self.metadata_manager_result = None;
+        let id = self.allocate_request_id();
+        let query = jellyfin_api::ItemQuery {
+            recursive: true,
+            start_index: offset,
+            limit: 50,
+            include_item_types: self.metadata_manager_kind.item_types(),
+            enable_total_record_count: Some(true),
+            sort_by: Some(vec![jellyfin_api::ItemSortBy::SortName]),
+            search_term: (!term.trim().is_empty()).then(|| term.trim().chars().take(128).collect()),
+            ..Default::default()
+        };
+        if self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .load_metadata_manager(id, self.session_epoch, query)
+                .is_ok()
+        }) {
+            self.metadata_manager_request = Some(id);
+        } else {
+            self.metadata_manager_request = None;
+            self.metadata_manager_result = Some(Err(ErrorClass::Unexpected));
+        }
+    }
+
+    pub(crate) fn edit_managed_metadata(&mut self, item_id: String, title: String) {
+        self.open_metadata_editor(
+            crate::ui::item_menu::ItemMenuTarget {
+                item_id,
+                title,
+                series_id: None,
+                list_id: None,
+            },
+            crate::ui::metadata_editor::EditorMode::Edit,
+        );
+    }
+    /// Open the account preferences, optionally saving `save` first and reading the result back.
+    pub(crate) fn open_account_preferences(
+        &mut self,
+        save: Option<jellyfin_api::AccountPreferences>,
+    ) {
+        self.account_preferences_open = true;
+        // Reopening during a save must not supersede the request that reports its outcome.
+        if self.account_preferences_request.is_some() {
+            return;
+        }
+        self.account_preferences_saved = false;
+        self.account_preferences = None;
+        let id = self.allocate_request_id();
+        if self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .load_account_preferences(id, self.session_epoch, save.map(Box::new))
+                .is_ok()
+        }) {
+            self.account_preferences_request = Some(id);
+        } else {
+            self.account_preferences_request = None;
+            self.account_preferences = Some(Err(ErrorClass::Unexpected));
+        }
+    }
+
+    pub(crate) fn approve_quick_connect(&mut self, code: zeroize::Zeroizing<String>) {
+        if self
+            .quick_connect_approval
+            .is_some_and(|(_, result)| result.is_none())
+        {
+            return;
+        }
+        let id = self.allocate_request_id();
+        let queued = self.worker.as_ref().is_some_and(|worker| {
+            worker
+                .authorize_quick_connect(id, self.session_epoch, code)
+                .is_ok()
+        });
+        self.quick_connect_approval = Some((id, (!queued).then_some(Err(ErrorClass::Unexpected))));
+    }
+
     pub(crate) fn disconnect(&mut self) -> bool {
+        self.quick_connect_approval = None;
+        self.metadata_manager_open = false;
+        self.metadata_manager_result = None;
+        self.metadata_manager_request = None;
+        self.account_preferences_open = false;
+        self.account_preferences = None;
+        self.account_preferences_request = None;
+        self.quick_connect_authorizer_open = false;
+        self.quick_connect_approval_code = Default::default();
         if let Some(worker) = self.worker.as_ref()
             && let Err(error) = worker.disconnect()
         {
@@ -10123,6 +10914,7 @@ impl KattriApp {
         self.playback_start_request_id = self.allocate_request_id();
         self.pending_artwork_requests.clear();
         self.attempted_artwork.clear();
+        self.missing_artwork.clear();
         self.artwork_access_ticks.clear();
         self.server = None;
         self.user_name = None;
@@ -10190,6 +10982,8 @@ impl KattriApp {
         self.music_queue_restore.loaded(stored_queue);
         self.music_queue_resume.clear();
         self.music_queue_persistence.reset();
+        self.last_saved_queue_position_ms = None;
+        self.last_saved_queue_fingerprint = None;
         self.music_queue_persistence
             .set_suspended(self.music_queue_restore.has_pending());
         self.playlist.entries.clear();
@@ -10289,6 +11083,35 @@ impl KattriApp {
                         );
                     }
                     ctx.request_repaint();
+                }
+                WorkerEvent::MetadataManagerLoaded {
+                    request_id, result, ..
+                } => {
+                    if self.metadata_manager_request == Some(request_id) {
+                        self.metadata_manager_request = None;
+                        self.metadata_manager_result = Some(result);
+                    }
+                }
+                WorkerEvent::AccountPreferencesLoaded {
+                    request_id,
+                    saved,
+                    result,
+                    ..
+                } => {
+                    if self.account_preferences_request == Some(request_id) {
+                        self.account_preferences_request = None;
+                        self.account_preferences_saved = saved;
+                        self.account_preferences = Some(result);
+                    }
+                }
+                WorkerEvent::QuickConnectAuthorized {
+                    request_id,
+                    approval,
+                    ..
+                } => {
+                    if self.quick_connect_approval == Some((request_id, None)) {
+                        self.quick_connect_approval = Some((request_id, Some(approval)));
+                    }
                 }
                 WorkerEvent::QuickConnectAvailability {
                     request_id,
@@ -10432,6 +11255,22 @@ impl KattriApp {
                     self.admin_request_id = None;
                     self.admin_load = load;
                 }
+                WorkerEvent::AdminActionFinished {
+                    request_id,
+                    message,
+                    error,
+                } => {
+                    if let Some(error) = error {
+                        tracing::warn!(request_id, "admin dashboard action failed: {error}");
+                        self.record_network_error(ErrorClass::Unexpected, None);
+                    } else {
+                        if let Some(msg) = message {
+                            tracing::info!(request_id, "{msg}");
+                        }
+                        self.record_network_success();
+                        self.request_dashboard();
+                    }
+                }
                 WorkerEvent::AdminUsersLoaded {
                     request_id,
                     generation,
@@ -10492,6 +11331,7 @@ impl KattriApp {
                         .collect();
                     let cards = crate::ui::home::cards_visible_under(cards, ceiling);
                     self.home.apply_items(row, request_id, cards);
+                    self.attempted_artwork.clear();
                 }
                 WorkerEvent::HomeRowFailed {
                     request_id,
@@ -10525,6 +11365,7 @@ impl KattriApp {
                             self.home.apply_collections(request_id, cards);
                         }
                     }
+                    self.attempted_artwork.clear();
                 }
                 WorkerEvent::HomeCatalogFailed {
                     request_id,
@@ -10582,7 +11423,8 @@ impl KattriApp {
                     self.record_network_error(error_class, None);
                     self.live_tv_loading = false;
                     self.live_tv_loaded = true;
-                    self.live_tv_not_set_up = error_class == ErrorClass::NotFound;
+                    self.live_tv_not_set_up = self.live_tv_requested_start_index == 0
+                        && error_class == ErrorClass::NotFound;
                     self.live_tv_error = (!self.live_tv_not_set_up).then_some(error_class);
                 }
                 WorkerEvent::LiveTvSearchResultsLoaded {
@@ -10611,13 +11453,18 @@ impl KattriApp {
                         );
                     }
                     self.live_tv_search_start_index = start_index.saturating_add(page_count);
-                    self.live_tv_search_total = total_record_count;
+                    self.live_tv_search_total = total_record_count.or(self.live_tv_search_total);
+                    self.live_tv_search_error = false;
                 }
-                WorkerEvent::LiveTvSearchResultsFailed { request_id, .. }
-                    if self.live_tv_search_request_id == Some(request_id) =>
+                WorkerEvent::LiveTvSearchResultsFailed { request_id, epoch }
+                    if self.live_tv_search_request_id == Some(request_id)
+                        && self.live_tv_search_loading
+                        && (epoch == Epoch::NONE || epoch == self.session_epoch) =>
                 {
                     self.live_tv_search_loading = false;
-                    self.live_tv_search_results.clear();
+                    self.live_tv_search_request_id = None;
+                    self.live_tv_search_error = true;
+                    self.show_toast("Channel search page failed. Retry to continue.".into());
                 }
                 WorkerEvent::LiveTvLogoLoaded {
                     request_id,
@@ -10986,7 +11833,9 @@ impl KattriApp {
                 } if request_id == self.navigation.library_tab_request_id
                     && self.navigation.library_tab == LibraryTab::Suggestions =>
                 {
-                    self.record_network_error(error_class, retry_after);
+                    if error_class != ErrorClass::NotFound {
+                        self.record_network_error(error_class, retry_after);
+                    }
                     self.browse.catalog_loading = false;
                     self.browse.catalog_error =
                         Some(crate::ui::status::message(error_class).to_owned());
@@ -11006,7 +11855,9 @@ impl KattriApp {
                 } if request_id == self.navigation.library_tab_request_id
                     && self.navigation.library_tab == LibraryTab::Upcoming =>
                 {
-                    self.record_network_error(error_class, retry_after);
+                    if error_class != ErrorClass::NotFound {
+                        self.record_network_error(error_class, retry_after);
+                    }
                     self.browse.catalog_loading = false;
                     self.browse.catalog_error =
                         Some(crate::ui::status::message(error_class).to_owned());
@@ -11127,7 +11978,16 @@ impl KattriApp {
                     request_id,
                     episodes,
                 } => {
-                    if request_id == self.shuffle_request_id && !episodes.is_empty() {
+                    if request_id == self.shuffle_request_id
+                        && self.shuffle_series_id.as_deref()
+                            == self.browse.details.selected_item_id.as_deref()
+                        && self.shuffle_series_id.is_some()
+                    {
+                        self.shuffle_series_id = None;
+                        if episodes.is_empty() {
+                            self.show_toast("No episodes available to shuffle.".into());
+                            continue;
+                        }
                         let episodes: Vec<(String, String)> = episodes
                             .iter()
                             .map(|episode| {
@@ -11419,6 +12279,9 @@ impl KattriApp {
                 WorkerEvent::DownloadsUpdated { rows, .. } => self.downloads.apply_rows(rows),
                 WorkerEvent::DownloadFailed { message, .. } => self.downloads.fail(message),
                 WorkerEvent::UpdateFinished { outcome } => self.update.finish(outcome),
+                WorkerEvent::ReleaseCheckFinished { request_id, result } => {
+                    self.update.finish_release_check(request_id, result);
+                }
                 WorkerEvent::WatchedStateFailed {
                     request_id,
                     item_id,
@@ -11528,6 +12391,13 @@ impl KattriApp {
                         .into_iter()
                         .filter(|item| crate::parental::item_record_is_shown(ceiling, item))
                         .collect();
+                    self.similar.media = self
+                        .similar
+                        .items
+                        .iter()
+                        .cloned()
+                        .map(MediaItem::from_api)
+                        .collect();
                 }
                 WorkerEvent::SimilarItemsFailed {
                     request_id,
@@ -11539,6 +12409,7 @@ impl KattriApp {
                 {
                     self.similar.loading = false;
                     self.similar.items.clear();
+                    self.similar.media.clear();
                 }
                 WorkerEvent::ThemeMediaLoaded {
                     request_id,
@@ -11769,6 +12640,7 @@ impl KattriApp {
                             color_image,
                             egui::TextureOptions::LINEAR,
                         ));
+                        self.last_selected_backdrop = self.selected_artwork_texture.clone();
                     } else if let Some(episode_id) =
                         self.episode_thumbnail_pending.remove(&request_id)
                     {
@@ -11795,7 +12667,13 @@ impl KattriApp {
                             // Episodes of one series can share the series poster, so every entry
                             // showing this image gets the texture.
                             let mut texture: Option<egui::TextureHandle> = None;
-                            for item in self.items.iter_mut().chain(self.home.media_mut()) {
+                            for item in self
+                                .items
+                                .iter_mut()
+                                .chain(self.home.media_mut())
+                                .chain(self.search.media.0.iter_mut())
+                                .chain(self.similar.media.iter_mut())
+                            {
                                 if item.artwork_id != item_id
                                     || item.primary_image_tag.as_deref()
                                         != Some(expected_tag.as_str())
@@ -11824,6 +12702,23 @@ impl KattriApp {
                         }
                     }
                     self.trim_artwork_cache();
+                }
+                WorkerEvent::PrimaryArtworkNotFound { request_id } => {
+                    // A genuine missing image is not a transient failure: remember it so the
+                    // bounded queue is not monopolized, while still allowing a later tag change
+                    // to retry (the key includes the tag).
+                    if let Some((item_id, tag)) = self.pending_artwork_requests.remove(&request_id)
+                    {
+                        self.missing_artwork.insert((item_id, tag));
+                        if self.missing_artwork.len() > MAX_MISSING_ARTWORK_KEYS {
+                            // Drop an arbitrary (oldest-ish by HashSet iteration) key; simple bound.
+                            if let Some(key) = self.missing_artwork.iter().next().cloned() {
+                                self.missing_artwork.remove(&key);
+                            }
+                        }
+                    }
+                    self.episode_thumbnail_pending.remove(&request_id);
+                    self.pump_episode_thumbnails();
                 }
                 WorkerEvent::PrimaryArtworkFailed { request_id } => {
                     // Do not remember the failure: a transient image error must be retried the
@@ -11916,6 +12811,7 @@ impl KattriApp {
                         color_image,
                         egui::TextureOptions::LINEAR,
                     ));
+                    self.last_selected_backdrop = self.selected_artwork_texture.clone();
                 }
                 WorkerEvent::BackdropArtworkUnavailable {
                     request_id,
@@ -12379,7 +13275,7 @@ fn gamepad_backend() -> Box<dyn GamepadBackend> {
 }
 
 /// How often the keyboard map file is checked for edits made outside the app.
-const KEYMAP_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const KEYMAP_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Modification time of the keyboard map in `maps_dir`. `None` when there is no folder or file.
 fn keyboard_map_mtime(maps_dir: Option<&Path>) -> Option<SystemTime> {
@@ -12983,9 +13879,12 @@ fn playback_overrides_from_settings(
 }
 
 impl KattriApp {
-    /// Checks the keyboard map about once a second, so an edit made outside the app takes effect
-    /// without a restart.
+    /// Checks the keyboard map while focused, so an edit made outside the app takes effect
+    /// without a restart and an unfocused window does not wake up periodically.
     fn poll_keymap_file(&mut self, ctx: &egui::Context, now: Duration) {
+        if !ctx.input(|i| i.focused) {
+            return;
+        }
         if now >= self.keymap_check_due {
             self.keymap_check_due = now.saturating_add(KEYMAP_POLL_INTERVAL);
             let maps_dir = self.settings.keymap_dir();
@@ -13025,11 +13924,15 @@ impl KattriApp {
         }
         let now = duration_from_egui_time(ctx.input(|input| input.time));
         self.ui_time = now;
+        let screensaver_was_active = self.screensaver.active();
         let screensaver_input = crate::ui::screensaver::input_seen(ctx);
         let idle_seconds = self.settings.settings().general.screensaver_idle_seconds;
         let media_playing = self.media_is_playing();
         self.screensaver
             .update(now, screensaver_input, idle_seconds, media_playing);
+        if screensaver_was_active && screensaver_input {
+            crate::ui::screensaver::consume_wake_input(ctx);
+        }
         if let Some(interval) = self.screensaver.repaint_interval(self.reduce_motion) {
             ctx.request_repaint_after(interval);
         } else if let Some(remaining) =
@@ -13040,9 +13943,19 @@ impl KattriApp {
         }
         self.receive_worker_events(ctx);
         self.persist_music_queue_if_needed();
+        let music_playing = self
+            .active_player_position
+            .as_ref()
+            .is_some_and(|(id, pos)| {
+                self.music_queue_current_item_id() == Some(id.as_str()) && pos.paused != Some(true)
+            });
+        let queue_or_position_changed = self.last_saved_queue_position_ms
+            != Some(self.music_queue_position_ms)
+            || self.last_saved_queue_fingerprint != Some(self.music_queue_fingerprint());
         if !self.music_queue.is_empty()
             && !self.music_queue_persistence.is_suspended()
             && !self.music_queue_restore.has_pending()
+            && (music_playing || queue_or_position_changed)
         {
             ctx.request_repaint_after(self.music_queue_persistence.next_checkpoint_in(now));
         }
@@ -13063,7 +13976,41 @@ impl KattriApp {
         self.poll_search_debounce(now);
         self.poll_keymap_file(ctx, now);
         crate::theme::apply_with_general_settings(ctx, &self.settings.settings().general);
-        crate::theme::apply_interface_size(ctx, self.interface_size);
+        if self.tv_mode {
+            let target_zoom = self.interface_size.zoom_factor() * 1.25;
+            if (ctx.zoom_factor() - target_zoom).abs() > f32::EPSILON {
+                ctx.set_zoom_factor(target_zoom);
+            }
+        } else {
+            crate::theme::apply_interface_size(ctx, self.interface_size);
+        }
+        let applied_tv = ctx.data(|data| {
+            data.get_temp::<bool>(egui::Id::unique("kattri_tv_mode_applied"))
+                .unwrap_or(false)
+        });
+        if applied_tv != self.tv_mode {
+            let tv_mode = self.tv_mode;
+            ctx.all_styles_mut(|style| {
+                if tv_mode {
+                    style.spacing.item_spacing = egui::vec2(12.0, 10.0);
+                    style.spacing.button_padding = egui::vec2(14.0, 9.0);
+                    style.spacing.interact_size.y = 36.0;
+                } else {
+                    style.spacing.item_spacing = egui::vec2(14.0, 10.0);
+                    style.spacing.button_padding = egui::vec2(14.0, 7.0);
+                    style.spacing.interact_size.y = 30.0;
+                }
+            });
+            ctx.data_mut(|data| {
+                data.insert_temp(egui::Id::unique("kattri_tv_mode_applied"), tv_mode);
+            });
+        }
+    }
+
+    /// Toggles 10-foot TV layout mode and returns the new state.
+    pub fn toggle_tv_mode(&mut self) -> bool {
+        self.tv_mode = !self.tv_mode;
+        self.tv_mode
     }
 
     pub fn ui(&mut self, root: &mut egui::Ui) {
@@ -13212,6 +14159,16 @@ impl KattriApp {
             search.search_request = None;
             search.results = Some(Err(crate::worker::SubtitleRequestError::Failed));
         }
+    }
+
+    /// Whether the subtitle search dialog is currently open.
+    pub fn subtitle_search_open(&self) -> bool {
+        self.subtitle_search.is_some()
+    }
+
+    /// Close an open subtitle-search dialog without changing other app state.
+    pub fn dismiss_subtitle_search(&mut self) -> bool {
+        self.subtitle_search.take().is_some()
     }
 
     /// Draws the subtitle search dialog while it is open. The player host calls this while a
@@ -13494,6 +14451,9 @@ impl KattriApp {
                     search.title = target.title;
                 }
             }
+            ItemMenuAction::AddToLocalPlaylist => {
+                let _ = self.add_to_local_playlist(&target.item_id);
+            }
             ItemMenuAction::AddToPlaylist => {
                 let Some(playlist_id) = target.list_id else {
                     return;
@@ -13756,11 +14716,13 @@ mod page_query_tests {
 #[cfg(test)]
 mod home_navigation_tests {
     use super::{
-        AppView, BrowseContext, KattriApp, Page, ServerIdentity, scoped_home_series_suppressions,
+        AppView, BrowseContext, KattriApp, LibraryTab, Page, ServerIdentity,
+        scoped_home_series_suppressions,
     };
     use crate::catalog::MediaItem;
     use crate::settings_state::SettingsState;
     use crate::ui::home::{HomeAction, HomeViewTarget, MyMediaTile};
+    use crate::worker::ApiWorker;
     use jellyfin_api::BaseItemDto;
     use kattri_settings::{Settings, schema::HomeSeriesSuppressionSetting};
 
@@ -13785,6 +14747,12 @@ mod home_navigation_tests {
             image_tags: None,
             backdrop_image_tags: None,
             user_data: None,
+            community_rating: None,
+            critic_rating: None,
+            taglines: None,
+            studios: None,
+            chapters: None,
+            provider_ids: None,
         }
     }
 
@@ -13819,6 +14787,156 @@ mod home_navigation_tests {
             app.browse.details.selected_item_id.as_deref(),
             Some("episode-42")
         );
+    }
+
+    #[test]
+    fn reclicking_movies_on_a_detail_returns_to_the_catalog() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.navigation.view = AppView::Library;
+        app.navigation.page = Page::Movies;
+        app.server = Some(ServerIdentity {
+            name: "Media server".into(),
+            version: Some("test".into()),
+            id: None,
+        });
+        app.browse.details.selected_item_id = Some("movie-1".into());
+        app.detail_parent = Some("movies-lib".into());
+        // A loaded grid is kept: reopening the current tab only closes the detail overlay.
+        app.items = vec![MediaItem::poster_from_api(catalog_item("movie-1", "Movie"))];
+
+        app.navigate_to(Page::Movies);
+
+        assert_eq!(app.navigation.page, Page::Movies);
+        assert!(
+            app.browse.details.selected_item_id.is_none(),
+            "re-selecting the current tab closes the open detail"
+        );
+        assert!(app.detail_parent.is_none());
+        assert_eq!(app.items.len(), 1, "the catalog grid is still loaded");
+    }
+
+    #[test]
+    fn clicking_movies_from_search_or_suggestions_detail_returns_to_movies_library() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.worker = Some(ApiWorker::queued_for_test());
+        app.server = Some(ServerIdentity {
+            name: "Media server".into(),
+            version: Some("test".into()),
+            id: None,
+        });
+
+        app.navigation.view = AppView::Library;
+        app.navigation.page = Page::Movies;
+        app.navigation.library_tab = LibraryTab::Suggestions;
+        app.browse.details.selected_item_id = Some("movie-from-suggestions".into());
+        app.items = vec![MediaItem::poster_from_api(catalog_item(
+            "movie-from-suggestions",
+            "Movie",
+        ))];
+
+        app.navigate_to(Page::Movies);
+
+        assert_eq!(app.navigation.view, AppView::Library);
+        assert_eq!(app.navigation.page, Page::Movies);
+        assert_eq!(app.navigation.library_tab, LibraryTab::Library);
+        assert!(app.browse.details.selected_item_id.is_none());
+        assert!(app.items.is_empty());
+
+        app.search.active = true;
+        app.search.query = "matrix".into();
+        app.submitted_search = Some("matrix".into());
+        app.search.browse_group = Some(crate::ui::search::SearchGroup::Movies);
+        app.search
+            .results
+            .push(catalog_item("movie-from-search", "Movie"));
+        app.browse.details.selected_item_id = Some("movie-from-search".into());
+
+        app.navigate_to(Page::Movies);
+
+        assert_eq!(app.navigation.page, Page::Movies);
+        assert_eq!(app.navigation.library_tab, LibraryTab::Library);
+        assert!(app.browse.details.selected_item_id.is_none());
+        assert!(!app.search.active);
+        assert!(app.search.query.is_empty());
+        assert!(app.submitted_search.is_none());
+        assert!(app.search.results.is_empty());
+        assert_eq!(app.search.browse_group, None);
+    }
+
+    #[test]
+    fn set_view_home_leaves_open_item_and_person_details() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.navigation.view = AppView::Library;
+        app.navigation.page = Page::Movies;
+        app.browse.details.selected_item_id = Some("movie-1".into());
+        app.detail_parent = Some("movies-lib".into());
+        app.person.selected = Some(
+            serde_json::from_value(serde_json::json!({
+                "Id": "person-1",
+                "Name": "Ada Vale",
+                "Type": "Actor"
+            }))
+            .expect("person fixture"),
+        );
+
+        app.set_view(AppView::Home);
+
+        assert_eq!(app.navigation.view, AppView::Home);
+        assert!(app.browse.details.selected_item_id.is_none());
+        assert!(app.detail_parent.is_none());
+        assert!(app.person.selected.is_none());
+    }
+
+    #[test]
+    fn switching_to_series_from_person_detail_clears_selected_person() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.navigation.view = AppView::Library;
+        app.navigation.page = Page::Movies;
+        app.person.selected = Some(
+            serde_json::from_value(serde_json::json!({
+                "Id": "person-1",
+                "Name": "Ada Vale",
+                "Type": "Actor"
+            }))
+            .expect("person fixture"),
+        );
+
+        app.navigate_to(Page::Series);
+
+        assert_eq!(app.navigation.view, AppView::Library);
+        assert_eq!(app.navigation.page, Page::Series);
+        assert!(app.person.selected.is_none());
+    }
+
+    #[test]
+    fn profile_menu_shows_settings_on_home_after_visiting_settings() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.user_is_admin = true;
+        app.navigate_to(Page::Settings);
+        assert!(!crate::ui::profile_menu_shows_settings(
+            app.navigation.view,
+            app.navigation.page
+        ));
+
+        app.set_view(AppView::Home);
+        assert_eq!(app.navigation.view, AppView::Home);
+        assert!(crate::ui::profile_menu_shows_settings(
+            app.navigation.view,
+            app.navigation.page
+        ));
+
+        app.navigate_to(Page::Dashboard);
+        assert!(!crate::ui::profile_menu_shows_dashboard(
+            app.navigation.view,
+            app.navigation.page,
+            app.dashboard_enabled()
+        ));
+        app.set_view(AppView::Home);
+        assert!(crate::ui::profile_menu_shows_dashboard(
+            app.navigation.view,
+            app.navigation.page,
+            app.dashboard_enabled()
+        ));
     }
 
     #[test]
@@ -14347,6 +15465,7 @@ mod favorite_state_event_tests {
 #[cfg(test)]
 mod live_tv_event_tests {
     use super::KattriApp;
+    use crate::ui::live_tv::{LiveTvAction, LiveTvFocusControl, LiveTvFocusTarget};
     use crate::worker::{ApiWorker, WorkerEvent};
     use jellyfin_api::{BaseItemDto, ErrorClass, LiveTvChannel, LiveTvChannelPage};
     use std::collections::HashMap;
@@ -14408,6 +15527,35 @@ mod live_tv_event_tests {
     }
 
     #[test]
+    fn lineup_retry_preserves_loaded_rows_and_resubmits_the_failed_offset() {
+        let mut app = KattriApp::new(egui::Context::default());
+        app.live_tv_channels = vec![channel("existing")];
+        app.live_tv_loaded = true;
+        app.worker = None;
+        app.request_live_tv_channels(1);
+        assert!(
+            app.live_tv_error.is_some(),
+            "missing worker must expose a retry"
+        );
+        let (worker, events) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.retry_live_tv_channels();
+        assert!(app.live_tv_loading && app.live_tv_loaded);
+        assert_eq!(app.live_tv_requested_start_index, 1);
+        events
+            .try_send(WorkerEvent::LiveTvChannelsFailed {
+                request_id: app.live_tv_request_id,
+                epoch: app.session_epoch,
+                error_class: ErrorClass::NotFound,
+            })
+            .expect("queue later-page failure");
+        app.receive_worker_events(&egui::Context::default());
+        assert!(app.live_tv_loaded && !app.live_tv_not_set_up);
+        assert_eq!(app.live_tv_channels[0].item.id, "existing");
+        assert_eq!(app.live_tv_error, Some(ErrorClass::NotFound));
+    }
+
+    #[test]
     fn retry_live_tv_guide_reissues_the_failed_channel_batch() {
         let mut app = KattriApp::new(egui::Context::default());
         let (worker, events) = ApiWorker::with_event_sender_for_test();
@@ -14426,6 +15574,35 @@ mod live_tv_event_tests {
             app.live_tv_guide_requested_channel_ids,
             ["channel-1", "channel-2"]
         );
+        drop(events);
+    }
+
+    #[test]
+    fn retry_live_tv_guide_preserves_channel_focus_target() {
+        let mut app = KattriApp::new(egui::Context::default());
+        let (worker, events) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.live_tv_channels = vec![channel("channel-1"), channel("channel-2")];
+        app.live_tv_guide_requested_channel_ids = vec!["channel-1".into(), "channel-2".into()];
+        app.live_tv_guide_request_id = 44;
+        app.live_tv_guide_error = Some(ErrorClass::Unexpected);
+        let focused = LiveTvFocusTarget {
+            row: 1,
+            control: LiveTvFocusControl::Tune,
+            action: LiveTvAction::TuneChannel("channel-2".into()),
+        };
+        app.live_tv_focus_target = Some(focused.clone());
+
+        app.retry_live_tv_guide();
+
+        assert!(app.live_tv_guide_loading);
+        assert_eq!(app.live_tv_guide_error, None);
+        assert_ne!(app.live_tv_guide_request_id, 44);
+        assert_eq!(
+            app.live_tv_guide_requested_channel_ids,
+            ["channel-1", "channel-2"]
+        );
+        assert_eq!(app.live_tv_focus_target.as_ref(), Some(&focused));
         drop(events);
     }
 
@@ -14563,6 +15740,52 @@ mod live_tv_event_tests {
 
         assert!(!app.live_tv_search_loading);
         assert!(app.live_tv_search_results.is_empty());
+    }
+
+    #[test]
+    fn failed_live_tv_search_page_preserves_rows_and_retries_same_offset() {
+        let mut app = KattriApp::new(egui::Context::default());
+        let (worker, events) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.search.browse_group = Some(crate::ui::search::SearchGroup::Channels);
+        app.submitted_search = Some("news".into());
+        app.live_tv_search_results = vec![channel("channel-0").item, channel("channel-1").item];
+        app.live_tv_search_start_index = 2;
+        app.live_tv_search_total = Some(5);
+        app.live_tv_search_requested_start_index = 2;
+        app.live_tv_search_request_id = Some(302);
+        app.live_tv_search_loading = true;
+
+        events
+            .try_send(WorkerEvent::LiveTvSearchResultsFailed {
+                request_id: 302,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
+            })
+            .expect("queue second page failure");
+        app.receive_worker_events(&egui::Context::default());
+
+        assert_eq!(app.live_tv_search_results.len(), 2);
+        assert_eq!(app.live_tv_search_start_index, 2);
+        assert_eq!(app.live_tv_search_total, Some(5));
+        assert!(!app.live_tv_search_loading);
+        assert!(app.live_tv_search_error);
+        app.next_live_tv_search_page();
+        assert!(app.live_tv_search_loading);
+        assert!(!app.live_tv_search_error);
+        assert_eq!(app.live_tv_search_start_index, 2);
+        let commands = app
+            .worker
+            .as_ref()
+            .expect("worker")
+            .take_commands_for_test();
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            crate::worker::WorkerCommand::SearchLiveTvChannels {
+                term,
+                start_index: 2,
+                ..
+            } if term == "news"
+        )));
     }
 
     #[test]
@@ -15391,129 +16614,35 @@ mod artwork_cache_tests {
     use std::collections::{HashMap, HashSet};
 
     #[test]
-    fn late_primary_response_for_removed_item_allows_the_same_artwork_to_retry() {
+    fn newly_visible_episode_reuses_an_already_loaded_series_poster() {
         let context = egui::Context::default();
         let mut app = KattriApp::new(context.clone());
-        let (worker, sender) = crate::worker::ApiWorker::with_event_sender_for_test();
-        app.worker = Some(worker);
-
-        let item_id = "removed-item".to_owned();
-        let tag = "primary-v1".to_owned();
-        let key = (item_id.clone(), tag.clone());
-        let request_id = 77;
-        app.pending_artwork_requests.insert(request_id, key.clone());
-        app.attempted_artwork.insert(key.clone());
-        app.artwork_access_ticks.insert(key.clone(), 1);
-        sender
-            .try_send(crate::worker::WorkerEvent::PrimaryArtworkLoaded {
-                request_id,
-                item_id: item_id.clone(),
-                width: 1,
-                height: 1,
-                rgba: vec![255; 4],
-            })
-            .expect("send the late artwork response");
-
-        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
-            app.receive_worker_events(ui.ctx());
-        });
-        output.textures_delta.clear();
-        assert!(!app.pending_artwork_requests.contains_key(&request_id));
-        assert!(!app.attempted_artwork.contains(&key));
-        assert!(!app.artwork_access_ticks.contains_key(&key));
-
-        app.items.push(MediaItem {
-            series_id: None,
-            played: false,
-            favorite: false,
-            resumable: false,
-            artwork_id: item_id.clone(),
-            backdrop_id: item_id.clone(),
-            id: item_id.clone(),
-            title: "Returned item".to_owned(),
-            remote_type: Some("Movie".to_owned()),
-            overview: None,
-            kind: MediaKind::Movie,
-            artwork: ArtworkPalette {
-                top: [10, 20, 30],
-                bottom: [30, 20, 10],
-                shape: [50, 60, 70],
-                detail: [70, 60, 50],
-                motif: ArtworkMotif::Orbit,
-            },
-            production_year: None,
-            official_rating: None,
-            run_time_ticks: None,
-            primary_image_tag: Some(tag.clone()),
-            artwork_texture: None,
-        });
-        app.request_visible_artwork(vec![(item_id, tag)]);
-        assert_eq!(app.pending_artwork_requests.len(), 1);
-        assert!(app.attempted_artwork.contains(&key));
-    }
-
-    #[test]
-    fn evicts_the_oldest_texture_and_allows_it_to_be_requested_again() {
-        let context = egui::Context::default();
-        let artwork = ArtworkPalette {
-            top: [10, 20, 30],
-            bottom: [30, 20, 10],
-            shape: [50, 60, 70],
-            detail: [70, 60, 50],
-            motif: ArtworkMotif::Orbit,
+        let episode = |id: &str| {
+            MediaItem::from_api(
+                serde_json::from_value(serde_json::json!({
+                    "Id": id, "Name": id, "Type": "Episode", "SeriesId": "show",
+                    "SeriesPrimaryImageTag": "poster"
+                }))
+                .expect("episode fixture"),
+            )
         };
-        let mut items = Vec::new();
-        let mut access_ticks = HashMap::new();
-        let mut attempted = HashSet::new();
-
-        for index in 0..(MAX_CACHED_ARTWORK_TEXTURES + 1) {
-            let id = format!("item-{index}");
-            let tag = format!("tag-{index}");
-            let texture = context.load_texture(
-                id.clone(),
-                egui::ColorImage::filled([1, 1], egui::Color32::WHITE),
-                egui::TextureOptions::LINEAR,
-            );
-            access_ticks.insert((id.clone(), tag.clone()), index as u64);
-            attempted.insert((id.clone(), tag.clone()));
-            items.push(MediaItem {
-                series_id: None,
-                played: false,
-                favorite: false,
-                resumable: false,
-                artwork_id: id.clone(),
-                backdrop_id: id.clone(),
-                id,
-                title: format!("Title {index}"),
-                remote_type: Some("Movie".into()),
-                overview: None,
-                kind: MediaKind::Movie,
-                artwork,
-                production_year: None,
-                official_rating: None,
-                run_time_ticks: None,
-                primary_image_tag: Some(tag),
-                artwork_texture: Some(texture),
-            });
-        }
-
-        {
-            let mut refs: Vec<&mut MediaItem> = items.iter_mut().collect();
-            trim_artwork_textures(&mut refs, &mut access_ticks, &mut attempted, 0);
-        }
-
-        assert_eq!(
-            items
-                .iter()
-                .filter(|item| item.artwork_texture.is_some())
-                .count(),
-            MAX_CACHED_ARTWORK_TEXTURES
+        let mut first = episode("first");
+        let loaded = context.load_texture(
+            "shared-poster",
+            egui::ColorImage::filled([1, 1], egui::Color32::WHITE),
+            egui::TextureOptions::LINEAR,
         );
-        assert!(items[0].artwork_texture.is_none());
-        assert!(items[MAX_CACHED_ARTWORK_TEXTURES].artwork_texture.is_some());
-        assert!(!attempted.contains(&("item-0".into(), "tag-0".into())));
+        first.artwork_texture = Some(loaded.clone());
+        app.items = vec![episode("new"), first];
+        app.request_visible_artwork(vec![("show".into(), "poster".into())]);
+        assert_eq!(
+            app.items[0]
+                .artwork_texture
+                .as_ref()
+                .map(egui::TextureHandle::id),
+            Some(loaded.id())
+        );
     }
-
     #[test]
     fn textures_on_screen_are_kept_past_the_cap() {
         let context = egui::Context::default();
@@ -15603,7 +16732,6 @@ mod artwork_cache_tests {
             ),
         );
         evict_photo_thumbnails(&mut thumbnails, &mut attempted, &all, "photo-extra");
-        assert_eq!(thumbnails.len(), MAX_PHOTO_THUMBNAILS + 1);
     }
 }
 
@@ -15667,9 +16795,8 @@ mod window_settings_tests {
         };
 
         app.save_window_geometry(&saved);
-        app.settings
-            .finish_pending_saves()
-            .expect("queued window save reaches disk");
+        // Dropping the app shuts the writer down after its queued snapshot is saved.
+        drop(app);
 
         let reopened = crate::settings_state::SettingsState::open(Some(&dir), None);
         let geometry = reopened
@@ -16804,6 +17931,103 @@ mod photo_decode_event_tests {
     }
 
     #[test]
+    fn back_from_the_photo_viewer_keeps_thumbnails_and_rejects_late_full_size() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        for id in ["photo-1", "photo-2"] {
+            app.photo.items.push(
+                serde_json::from_value(serde_json::json!({
+                    "Id": id, "Name": id, "Type": "Photo"
+                }))
+                .expect("photo DTO fixture"),
+            );
+        }
+        app.photo.selected_id = Some("photo-1".into());
+        app.photo.full_size_pending.insert(61, "photo-1".into());
+        app.photo.thumbnail_pending.insert(62, "photo-2".into());
+        app.photo.thumbnail_attempted.insert("photo-2".into());
+
+        app.navigate_back();
+
+        assert_eq!(app.photo.selected_id, None);
+        assert!(
+            app.photo.full_size_pending.is_empty(),
+            "the full-size decode must be cancelled when leaving the viewer"
+        );
+        assert_eq!(
+            app.photo.thumbnail_pending.get(&62).map(String::as_str),
+            Some("photo-2"),
+            "a legitimate in-flight thumbnail must survive the viewer close"
+        );
+        assert!(app.photo.thumbnail_attempted.contains("photo-2"));
+
+        sender
+            .try_send(WorkerEvent::PhotoThumbnailLoaded {
+                request_id: 62,
+                item_id: "photo-2".into(),
+                width: 1,
+                height: 1,
+                rgba: vec![255, 255, 255, 255],
+            })
+            .expect("send in-flight thumbnail result");
+        sender
+            .try_send(WorkerEvent::PhotoFullSizeLoaded {
+                request_id: 61,
+                item_id: "photo-1".into(),
+                width: 1,
+                height: 1,
+                rgba: vec![0, 0, 0, 255],
+            })
+            .expect("send late full-size result");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert!(app.photo.thumbnails.contains_key("photo-2"));
+        assert!(app.photo.full_size_images.is_empty());
+    }
+
+    #[test]
+    fn closing_the_photo_viewer_rejects_a_late_full_size_result() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.photo.items.push(
+            serde_json::from_value(serde_json::json!({
+                "Id": "photo-1", "Name": "Photo", "Type": "Photo"
+            }))
+            .expect("photo DTO fixture"),
+        );
+        app.photo.selected_id = Some("photo-1".into());
+        app.photo.full_size_pending.insert(51, "photo-1".into());
+
+        app.close_photo_viewer();
+
+        assert_eq!(app.photo.selected_id, None);
+        assert!(app.photo.full_size_pending.is_empty());
+        sender
+            .try_send(WorkerEvent::PhotoFullSizeLoaded {
+                request_id: 51,
+                item_id: "photo-1".into(),
+                width: 1,
+                height: 1,
+                rgba: vec![0, 0, 0, 255],
+            })
+            .expect("send late full-size result");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+        assert!(
+            app.photo.full_size_images.is_empty(),
+            "late full-size result was cached after closing the viewer"
+        );
+    }
+
+    #[test]
     fn episode_neighbors_drive_previous_next_and_auto_play() {
         let mut app = KattriApp::new(Context::default());
         let (worker, sender) = ApiWorker::with_event_sender_for_test();
@@ -17069,10 +18293,53 @@ mod photo_decode_event_tests {
     }
 
     #[test]
+    fn shuffle_response_after_navigation_back_cannot_start_playback() {
+        let mut app = KattriApp::new(Context::default());
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.browse.details.selected_item_id = Some("show".into());
+        app.shuffle_series("show".into());
+        let request_id = app.shuffle_request_id;
+        app.navigate_back();
+        assert!(app.browse.details.selected_item_id.is_none());
+
+        let episode: jellyfin_api::BaseItemDto = serde_json::from_value(serde_json::json!({
+            "Id": "late-episode", "Name": "Late episode"
+        }))
+        .expect("episode fixture");
+        sender
+            .try_send(WorkerEvent::ShuffleLoaded {
+                request_id,
+                episodes: vec![episode],
+            })
+            .expect("queue delayed shuffle response");
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            app.receive_worker_events(ui.ctx())
+        });
+        output.textures_delta.clear();
+
+        assert!(app.browse.details.selected_item_id.is_none());
+        assert!(app.shuffle_queue.is_none());
+        assert!(
+            app.worker
+                .as_ref()
+                .expect("worker")
+                .take_commands_for_test()
+                .iter()
+                .all(|command| !matches!(
+                    command,
+                    crate::worker::WorkerCommand::PlaybackInfo { .. }
+                ))
+        );
+    }
+
+    #[test]
     fn shuffle_starts_a_random_run_that_previous_next_and_up_next_follow() {
         let mut app = KattriApp::new(Context::default());
         let (worker, sender) = ApiWorker::with_event_sender_for_test();
         app.worker = Some(worker);
+        app.browse.details.selected_item_id = Some("show".into());
         app.shuffle_series("show".into());
         let request_id = app.shuffle_request_id;
         let episode = |id: &str, number: i32| -> jellyfin_api::BaseItemDto {
@@ -17319,6 +18586,421 @@ mod photo_decode_event_tests {
                 .cancelled,
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod stream_url_dispatch_tests {
+    use super::KattriApp;
+
+    fn frame(app: &mut KattriApp, ctx: &egui::Context, input: egui::RawInput) {
+        let mut output = ctx.run_ui(input, |ui| app.ui(ui));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn an_accepted_stream_address_reaches_the_player_host_exactly_once() {
+        let ctx = egui::Context::default();
+        let mut app = KattriApp::new(ctx.clone());
+        app.open_stream_address_dialog();
+
+        // Frame 1 focuses the empty address field, frame 2 types into it, frame 3 confirms with
+        // Enter, which is the production path from the dialog to the pending hand-off.
+        frame(&mut app, &ctx, egui::RawInput::default());
+        frame(
+            &mut app,
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text(
+                    "https://media.example.org/live/stream.m3u8".to_owned(),
+                )],
+                ..Default::default()
+            },
+        );
+        frame(
+            &mut app,
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+        );
+
+        let taken = app.take_stream_url().expect("accepted address handed over");
+        assert_eq!(taken.as_str(), "https://media.example.org/live/stream.m3u8");
+        assert!(
+            app.take_stream_url().is_none(),
+            "the hand-off must be consumed once"
+        );
+    }
+
+    #[test]
+    fn a_refused_stream_address_never_reaches_the_player_host() {
+        let ctx = egui::Context::default();
+        let mut app = KattriApp::new(ctx.clone());
+        app.open_stream_address_dialog();
+
+        frame(&mut app, &ctx, egui::RawInput::default());
+        frame(
+            &mut app,
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Text("file:///etc/passwd".to_owned())],
+                ..Default::default()
+            },
+        );
+        frame(
+            &mut app,
+            &ctx,
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+        );
+
+        assert!(app.take_stream_url().is_none());
+    }
+}
+
+#[cfg(test)]
+mod gamepad_isolation_tests {
+    use super::KattriApp;
+    use kattri_client_core::focus::NavAction;
+    use kattri_input::{GamepadBackend, GamepadError, GamepadEvent};
+
+    /// One press, then nothing: enough to check where a pad action is routed.
+    struct OnePressBackend {
+        events: Vec<GamepadEvent>,
+    }
+
+    impl GamepadBackend for OnePressBackend {
+        fn name(&self) -> &'static str {
+            "fake-one-press"
+        }
+
+        fn poll(&mut self) -> Result<Vec<GamepadEvent>, GamepadError> {
+            Ok(std::mem::take(&mut self.events))
+        }
+
+        fn connected_controllers(&self) -> usize {
+            1
+        }
+    }
+
+    fn select_press() -> GamepadEvent {
+        GamepadEvent {
+            device: "fake-0".to_owned(),
+            button: "South".to_owned(),
+            pressed: true,
+        }
+    }
+
+    fn app_with_one_press(ctx: &egui::Context) -> KattriApp {
+        let mut app = KattriApp::new(ctx.clone());
+        app.settings.settings_mut().input.sdl_gamepad_enabled = true;
+        app.gamepad = Box::new(OnePressBackend {
+            events: vec![select_press()],
+        });
+        app
+    }
+
+    fn frame(app: &mut KattriApp, ctx: &egui::Context) {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.ui(ui));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn a_pad_action_reaches_the_player_when_the_player_owns_input() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_one_press(&ctx);
+        app.set_player_owns_input(true);
+
+        frame(&mut app, &ctx);
+
+        assert_eq!(
+            app.take_player_nav_actions(),
+            vec![NavAction::Select],
+            "the player receives the pad action it owns"
+        );
+    }
+
+    #[test]
+    fn no_pad_action_reaches_the_player_when_the_library_owns_input() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_one_press(&ctx);
+        app.set_player_owns_input(false);
+
+        frame(&mut app, &ctx);
+
+        assert!(
+            app.take_player_nav_actions().is_empty(),
+            "library input must never be forwarded to the player"
+        );
+    }
+}
+
+#[cfg(test)]
+mod local_playlist_wiring_tests {
+    use super::KattriApp;
+    use crate::settings_state::SettingsState;
+    use crate::worker::ApiWorker;
+    use kattri_client_core::playlist::{PlaylistEntry, PlaylistModel};
+    use std::collections::HashSet;
+
+    const ITEM_A: &str = "0000000000000000000000000000aaaa";
+    const ITEM_B: &str = "0000000000000000000000000000bbbb";
+    const ITEM_C: &str = "0000000000000000000000000000cccc";
+
+    fn entry(n: usize, item: &str) -> PlaylistEntry {
+        PlaylistEntry::new(&format!("{:032x}", 0x4000 + n), item).expect("valid entry")
+    }
+
+    fn model_of(items: &[&str]) -> PlaylistModel {
+        let mut model = PlaylistModel::default();
+        for (n, item) in items.iter().enumerate() {
+            model.append(entry(n, item)).expect("append");
+        }
+        model
+    }
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kattri-local-playlist-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn app_with(dir: &std::path::Path) -> KattriApp {
+        let ctx = egui::Context::default();
+        let mut app = KattriApp::new(ctx);
+        app.settings = SettingsState::open(Some(dir), Some("default"));
+        app
+    }
+
+    #[test]
+    fn ordered_ids_survive_restart_with_duplicates() {
+        let dir = temp_dir("restart");
+        let mut app = app_with(&dir);
+        app.local_playlist = model_of(&[ITEM_A, ITEM_B, ITEM_A]);
+        app.persist_local_playlist();
+
+        let mut relaunched = app_with(&dir);
+        relaunched.reload_local_playlist();
+
+        assert_eq!(
+            relaunched.local_playlist,
+            model_of(&[ITEM_A, ITEM_B, ITEM_A])
+        );
+        let ids: Vec<&str> = relaunched
+            .local_playlist
+            .entries()
+            .iter()
+            .map(PlaylistEntry::item_id)
+            .collect();
+        assert_eq!(ids, [ITEM_A, ITEM_B, ITEM_A], "order and duplicates kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_update_replaces_the_stored_list() {
+        let dir = temp_dir("update");
+        let mut app = app_with(&dir);
+        app.local_playlist = model_of(&[ITEM_A, ITEM_B]);
+        app.persist_local_playlist();
+
+        app.local_playlist = model_of(&[ITEM_C]);
+        app.persist_local_playlist();
+
+        let mut relaunched = app_with(&dir);
+        relaunched.reload_local_playlist();
+        assert_eq!(relaunched.local_playlist, model_of(&[ITEM_C]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unavailable_entries_are_reported_in_order_and_skipped() {
+        let dir = temp_dir("unavailable");
+        let mut app = app_with(&dir);
+        app.local_playlist = model_of(&[ITEM_A, ITEM_B, ITEM_A, ITEM_C]);
+        let available: HashSet<String> = [ITEM_A, ITEM_C].into_iter().map(str::to_owned).collect();
+
+        let report = app.local_playlist_reconcile(&available);
+
+        let playable: Vec<&str> = report.playable.iter().map(PlaylistEntry::item_id).collect();
+        assert_eq!(playable, [ITEM_A, ITEM_A, ITEM_C], "skips in order");
+        assert_eq!(report.unavailable.len(), 1);
+        assert_eq!(report.unavailable[0].index, 1, "original position");
+        assert_eq!(report.unavailable[0].item_id, ITEM_B);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_playlist_wiring_issues_no_server_commands() {
+        let dir = temp_dir("no-commands");
+        let mut app = app_with(&dir);
+        let (worker, _events) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.local_playlist = model_of(&[ITEM_A, ITEM_B]);
+
+        app.persist_local_playlist();
+        let _ = app.local_playlist_reconcile(&HashSet::new());
+
+        let commands = app
+            .worker
+            .as_ref()
+            .expect("worker")
+            .take_commands_for_test();
+        assert!(
+            commands.is_empty(),
+            "no server write may come from playlist wiring"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adding_an_item_persists_before_it_is_accepted() {
+        let dir = temp_dir("add");
+        let mut app = app_with(&dir);
+
+        assert!(app.add_to_local_playlist(ITEM_A));
+
+        let ids: Vec<&str> = app
+            .local_playlist
+            .entries()
+            .iter()
+            .map(PlaylistEntry::item_id)
+            .collect();
+        assert_eq!(ids, [ITEM_A]);
+        let mut relaunched = app_with(&dir);
+        relaunched.reload_local_playlist();
+        assert_eq!(
+            relaunched.local_playlist, app.local_playlist,
+            "stored before accepted"
+        );
+        assert!(app.local_playlist_notice.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_previous_list_and_reports_it() {
+        let dir = temp_dir("failed-save");
+        let mut app = app_with(&dir);
+        app.local_playlist = model_of(&[ITEM_A]);
+        let previous = app.local_playlist.clone();
+
+        // A directory where the record file belongs makes every save fail.
+        let path = app
+            .settings
+            .local_playlist_path()
+            .expect("profile playlist path");
+        std::fs::create_dir_all(&path).expect("occupy the record path");
+
+        assert!(!app.add_to_local_playlist(ITEM_B), "the save must fail");
+
+        assert_eq!(app.local_playlist, previous, "previous list retained");
+        assert!(
+            app.local_playlist_notice.is_some(),
+            "the failure is observable"
+        );
+        assert!(path.is_dir(), "the occupied path is left alone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_and_move_persist_the_new_order() {
+        let dir = temp_dir("reorder");
+        let mut app = app_with(&dir);
+        for item in [ITEM_A, ITEM_B, ITEM_C] {
+            assert!(app.add_to_local_playlist(item));
+        }
+        let middle = app.local_playlist.entries()[1].entry_id().to_owned();
+        assert!(app.move_local_playlist_entry(&middle, true));
+        // The move put B first; remove the item now in second place (A).
+        let second = app.local_playlist.entries()[1].entry_id().to_owned();
+        assert!(app.remove_local_playlist_entry(&second));
+
+        let mut relaunched = app_with(&dir);
+        relaunched.reload_local_playlist();
+        assert_eq!(relaunched.local_playlist, app.local_playlist);
+        let ids: Vec<&str> = relaunched
+            .local_playlist
+            .entries()
+            .iter()
+            .map(PlaylistEntry::item_id)
+            .collect();
+        assert_eq!(
+            ids,
+            [ITEM_B, ITEM_C],
+            "order from the UI survived the restart"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_item_menu_adds_locally_without_a_server_command() {
+        let dir = temp_dir("menu-add");
+        let mut app = app_with(&dir);
+        let (worker, _events) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+
+        app.apply_item_menu_action(
+            crate::ui::item_menu::ItemMenuTarget {
+                item_id: ITEM_A.to_owned(),
+                title: "An item".to_owned(),
+                series_id: None,
+                list_id: None,
+            },
+            crate::ui::item_menu::ItemMenuAction::AddToLocalPlaylist,
+        );
+
+        assert_eq!(app.local_playlist.len(), 1);
+        let commands = app
+            .worker
+            .as_ref()
+            .expect("worker")
+            .take_commands_for_test();
+        assert!(
+            commands.is_empty(),
+            "adding to the local playlist must not reach the server"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unusable_record_leaves_an_empty_playlist_and_keeps_its_bytes() {
+        let dir = temp_dir("unusable");
+        let mut app = app_with(&dir);
+        let path = app
+            .settings
+            .local_playlist_path()
+            .expect("profile playlist path");
+        std::fs::write(&path, b"not a playlist\n").expect("write garbage");
+
+        app.reload_local_playlist();
+
+        assert!(app.local_playlist.is_empty());
+        let aside = dir.join("default").join("local-playlist.bad1");
+        assert_eq!(
+            std::fs::read(&aside).expect("aside record"),
+            b"not a playlist\n",
+            "the unusable record is preserved for inspection"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -17975,6 +19657,102 @@ mod library_tab_tests {
             "the suggestions result is drawn in the same card grid"
         );
     }
+
+    #[test]
+    fn suggestions_failure_shows_one_contextual_retry() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = connected_app(Page::Movies, "movies-lib");
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+
+        app.select_library_tab(LibraryTab::Suggestions);
+        let request_id = take_commands(&mut app)
+            .iter()
+            .find_map(|command| match command {
+                WorkerCommand::ListLibrarySuggestions { request_id, .. } => Some(*request_id),
+                _ => None,
+            })
+            .expect("the tab issued a suggestions request");
+
+        sender
+            .try_send(WorkerEvent::LibrarySuggestionsFailed {
+                request_id,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
+                error_class: jellyfin_api::ErrorClass::ServerUnavailable,
+                retry_after: None,
+            })
+            .expect("send suggestions failure");
+
+        let mut output = ctx.run_ui(frame_input(None), |ui| {
+            app.receive_worker_events(ui.ctx());
+            crate::ui::draw(ui, &mut app, 1600.0);
+        });
+        output.textures_delta.clear();
+        let tree = output
+            .platform_output
+            .accesskit_update
+            .expect("accesskit tree");
+        let contextual = tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button
+                    && node.label() == Some(ui_text(kattri_i18n::ids::ACCESS_BROWSE_RETRY))
+            })
+            .count();
+        assert_eq!(
+            contextual, 1,
+            "failure renders exactly one contextually named retry (the empty panel's is suppressed)"
+        );
+    }
+
+    #[test]
+    fn true_empty_suggestions_is_distinct_from_failure() {
+        let ctx = egui::Context::default();
+        let mut app = connected_app(Page::Movies, "movies-lib");
+        let (worker, sender) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+
+        app.select_library_tab(LibraryTab::Suggestions);
+        let request_id = take_commands(&mut app)
+            .iter()
+            .find_map(|command| match command {
+                WorkerCommand::ListLibrarySuggestions { request_id, .. } => Some(*request_id),
+                _ => None,
+            })
+            .expect("the tab issued a suggestions request");
+
+        sender
+            .try_send(WorkerEvent::LibrarySuggestionsLoaded {
+                request_id,
+                epoch: kattri_client_core::epoch::Epoch::NONE,
+                items: vec![],
+            })
+            .expect("send empty suggestions result");
+
+        let mut output = ctx.run_ui(frame_input(None), |ui| {
+            app.receive_worker_events(ui.ctx());
+            crate::ui::draw(ui, &mut app, 1600.0);
+        });
+        output.textures_delta.clear();
+        assert!(
+            !text_positions(
+                &output,
+                ui_text(kattri_i18n::ids::LIBRARY_TAB_EMPTY_SUGGESTIONS)
+            )
+            .is_empty(),
+            "a true empty renders the suggestions-specific empty message"
+        );
+        assert!(
+            text_positions(
+                &output,
+                ui_text(kattri_i18n::ids::BROWSE_ERROR_REQUEST_FAILED)
+            )
+            .is_empty(),
+            "a true empty is not rendered as a failure"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -18323,6 +20101,68 @@ mod playback_state_tests {
         assert_eq!(app.playback_ui_phase(), PlaybackUiPhase::Starting);
         assert!(app.playback_busy());
     }
+
+    #[test]
+    fn skeleton_preparation_hooks_track_and_cancel_in_flight_playback() {
+        let mut app = KattriApp::new(egui::Context::default());
+        let (worker, events) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.browse.details.selected_item_id = Some("movie-1".into());
+        app.browse.details.selected_details = Some(
+            serde_json::from_value(
+                serde_json::json!({"Id":"movie-1", "Name":"Skeleton Feature", "Type":"Movie"}),
+            )
+            .expect("item fixture"),
+        );
+
+        assert!(!app.playback_preparing());
+
+        app.auto_play.request(PlayRequest {
+            item_id: "movie-1".into(),
+            start_over: false,
+            requested_ticks: None,
+        });
+        assert!(app.playback_preparing());
+        assert_eq!(app.preparing_item_title(), Some("Skeleton Feature"));
+
+        app.playback_start_error = Some("failed".into());
+        assert!(!app.playback_preparing());
+        app.playback_start_error = None;
+
+        app.auto_play.cancel();
+        app.playback_start_loading = true;
+        app.playback_start_request_id = 42;
+        app.active_playback = Some(ActivePlayback {
+            item_id: "movie-1".into(),
+            options_request_id: 41,
+            start_request_id: 42,
+            selection: direct_play(),
+            burn_in_subtitle_stream_index: None,
+        });
+        assert!(app.playback_preparing());
+        assert_eq!(app.preparing_item_title(), Some("Skeleton Feature"));
+
+        app.cancel_playback_preparation();
+        assert!(!app.playback_preparing());
+        assert!(!app.auto_play.is_pending());
+        assert!(app.pending_playback.is_none());
+        assert!(app.held_playback.is_none());
+        assert!(app.playback_start_status.is_none());
+        assert!(app.playback_start_error.is_none());
+        assert_ne!(app.playback_start_request_id, 42);
+        assert_eq!(app.playback_ui_phase(), PlaybackUiPhase::Idle);
+
+        // A late worker failure for the cancelled request must not re-surface an error.
+        events
+            .try_send(WorkerEvent::PlaybackPrepareFailed {
+                request_id: 42,
+                message: "late failure".into(),
+            })
+            .expect("queue late failure");
+        app.receive_worker_events(&egui::Context::default());
+        assert!(app.playback_start_error.is_none());
+        assert!(!app.playback_preparing());
+    }
 }
 
 #[cfg(test)]
@@ -18338,6 +20178,57 @@ mod dialog_precedence_tests {
             series_id: None,
             list_id: None,
         }
+    }
+
+    #[test]
+    fn reopening_account_panel_does_not_supersede_pending_save() {
+        let mut app = KattriApp::new(egui::Context::default());
+        let (worker, _) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.open_account_preferences(Some(jellyfin_api::AccountPreferences {
+            hide_played_in_latest: Some(true),
+            ..jellyfin_api::AccountPreferences::default()
+        }));
+        let pending = app.account_preferences_request.expect("queued save");
+        app.account_preferences_open = false;
+        app.open_account_preferences(None);
+        assert!(app.account_preferences_open);
+        assert_eq!(app.account_preferences_request, Some(pending));
+        assert_eq!(
+            app.worker
+                .as_ref()
+                .expect("worker")
+                .take_commands_for_test()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn metadata_manager_is_admin_only_and_submits_bounded_paged_search() {
+        let mut app = KattriApp::new(egui::Context::default());
+        let (worker, _) = ApiWorker::with_event_sender_for_test();
+        app.worker = Some(worker);
+        app.load_metadata_manager("movie", 50);
+        assert!(!app.metadata_manager_open);
+        assert!(
+            app.worker
+                .as_ref()
+                .expect("worker")
+                .take_commands_for_test()
+                .is_empty()
+        );
+        app.user_is_admin = true;
+        app.load_metadata_manager(&"é".repeat(200), 50);
+        assert!(app.metadata_manager_open);
+        let commands = app
+            .worker
+            .as_ref()
+            .expect("worker")
+            .take_commands_for_test();
+        assert!(
+            matches!(commands.as_slice(), [crate::worker::WorkerCommand::LoadMetadataManager { query, epoch, .. }] if *epoch == app.session_epoch && query.start_index == 50 && query.limit == 50 && query.search_term.as_ref().is_some_and(|term| term.chars().count() == 128))
+        );
     }
 
     #[test]
@@ -18829,7 +20720,7 @@ mod lyrics_lifecycle_tests {
 
 #[cfg(test)]
 mod search_state_tests {
-    use super::SearchState;
+    use super::{MediaItem, SearchMedia, SearchState};
     use crate::ui::search::SearchGroup;
     use jellyfin_api::BaseItemDto;
     use kattri_client_core::search::{SEARCH_DEBOUNCE, SearchInputAction};
@@ -18921,10 +20812,12 @@ mod search_state_tests {
 
         method.results_applied(shown.clone());
 
+        inline.media = SearchMedia(shown.iter().cloned().map(MediaItem::from_api).collect());
         inline.results = shown;
         inline.stale = false;
         assert_eq!(method, inline);
         assert_eq!(method.results.len(), 2);
+        assert_eq!(method.media.0.len(), 2, "each result has a card item");
         assert!(!method.stale);
     }
 

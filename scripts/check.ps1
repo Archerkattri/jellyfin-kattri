@@ -47,6 +47,11 @@ Write-Host '==> [acceptance-scripts] opt-in helper parse and contract checks'
 $results += [pscustomobject]@{ Name = 'acceptance-scripts'; Code = $LASTEXITCODE }
 
 Write-Host ''
+Write-Host '==> [package-smoke] window-smoke contract with stubbed window tools'
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'tests/package_smoke.ps1')
+$results += [pscustomobject]@{ Name = 'package-smoke'; Code = $LASTEXITCODE }
+
+Write-Host ''
 Write-Host '==> [qa-harness] offline click-through assertion checks'
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test_qa_clickthrough.ps1')
 $results += [pscustomobject]@{ Name = 'qa-harness'; Code = $LASTEXITCODE }

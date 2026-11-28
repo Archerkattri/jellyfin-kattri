@@ -290,12 +290,19 @@ async fn readonly_item_series_people() {
                     }
                 }
             }
-            if try_primary {
-                let tag = item
+            if try_primary
+                || movie
                     .image_tags
                     .as_ref()
                     .and_then(|tags| tags.get("Primary"))
-                    .and_then(Option::as_deref);
+                    .is_some_and(Option::is_some)
+            {
+                let tag = movie
+                    .image_tags
+                    .as_ref()
+                    .and_then(|tags| tags.get("Primary"))
+                    .and_then(Option::as_deref)
+                    .or_else(|| item.image_tags.as_ref()?.get("Primary")?.as_deref());
                 match client.get_primary_image(&session, &movie.id, tag).await {
                     Ok(_) => println!("M1-07 primary_image: PASS"),
                     Err(ApiError::HttpStatus(status)) if status.as_u16() == 404 => {

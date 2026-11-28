@@ -5,8 +5,8 @@
 use super::{ui_text, ui_text_args};
 use egui::{RichText, Ui};
 use jellyfin_api::{
-    AdminUser, AdminUserPolicyChanges, ErrorClass, ScheduledTask, ServerInfo, UserCounts,
-    VirtualFolder,
+    ActivityLogEntry, AdminUser, AdminUserPolicyChanges, ErrorClass, ScheduledTask, ServerInfo,
+    SessionInfo, UserCounts, VirtualFolder,
 };
 use kattri_i18n::ids;
 
@@ -257,7 +257,7 @@ fn admin_users_error(error: ErrorClass) -> &'static str {
 const MAX_TASK_DETAIL_ROWS: usize = 8;
 
 /// The result of the read-only calls for one load of the dashboard.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum AdminLoad {
     /// At least one read has not returned yet.
     Pending,
@@ -265,10 +265,10 @@ pub(crate) enum AdminLoad {
     Refused,
     /// A read failed for another reason, such as a network error.
     Failed,
-    Loaded(AdminSnapshot),
+    Loaded(Box<AdminSnapshot>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AdminSnapshot {
     pub(crate) server_name: Option<String>,
     pub(crate) server_product: Option<String>,
@@ -280,6 +280,9 @@ pub(crate) struct AdminSnapshot {
     pub(crate) active_sessions: usize,
     pub(crate) users: UserCounts,
     pub(crate) tasks: Vec<ScheduledTask>,
+    pub item_counts: Option<jellyfin_api::ItemCounts>,
+    pub active_sessions_list: Vec<SessionInfo>,
+    pub activity_entries: Vec<ActivityLogEntry>,
 }
 
 impl AdminSnapshot {
@@ -287,6 +290,7 @@ impl AdminSnapshot {
     /// name is still counted, so the count matches what the server returned.
     /// `library_item_counts` is read positionally; a missing entry means the
     /// count was not available for that library.
+    #[allow(clippy::too_many_arguments)] // Mirrors the independent dashboard reads without inventing a wrapper struct.
     pub(crate) fn from_reads(
         server: &ServerInfo,
         libraries: &[VirtualFolder],
@@ -294,6 +298,9 @@ impl AdminSnapshot {
         active_sessions: usize,
         users: UserCounts,
         tasks: &[ScheduledTask],
+        item_counts: Option<jellyfin_api::ItemCounts>,
+        active_sessions_list: Vec<SessionInfo>,
+        activity_entries: Vec<ActivityLogEntry>,
     ) -> Self {
         let library_names = libraries
             .iter()
@@ -340,6 +347,9 @@ impl AdminSnapshot {
                 .take(jellyfin_api::MAX_SCHEDULED_TASKS)
                 .cloned()
                 .collect(),
+            item_counts,
+            active_sessions_list,
+            activity_entries,
         }
     }
 }
@@ -351,22 +361,31 @@ fn nonempty(value: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum DashboardView {
     Hidden,
     Loading,
     Unavailable,
-    Rows(Vec<DashboardRow>),
+    Rows {
+        rows: Vec<DashboardRow>,
+        sessions: Vec<SessionInfo>,
+        activity: Vec<ActivityLogEntry>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DashboardRow {
     pub(crate) label: &'static str,
     pub(crate) value: String,
+    pub(crate) task_id: Option<String>,
 }
 
 fn row(label: &'static str, value: String) -> DashboardRow {
-    DashboardRow { label, value }
+    DashboardRow {
+        label,
+        value,
+        task_id: None,
+    }
 }
 
 fn value_for<'a>(rows: &'a [DashboardRow], label: &str) -> Option<&'a str> {
@@ -378,13 +397,161 @@ fn value_for<'a>(rows: &'a [DashboardRow], label: &str) -> Option<&'a str> {
 fn metric_card(ui: &mut Ui, label: &str, value: &str, colors: Palette) {
     egui::Frame::group(ui.style())
         .fill(colors.raised)
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(24)))
+        .inner_margin(egui::Margin::symmetric(18, 14))
         .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             ui.set_min_height(70.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new(value).size(25.0).strong().color(colors.text));
+                ui.label(RichText::new(value).size(28.0).strong().color(colors.text));
                 ui.label(RichText::new(label).size(12.0).color(colors.muted));
             });
         });
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServerPowerConfirm {
+    Restart,
+    Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ActivityFilter {
+    #[default]
+    All,
+    User,
+    System,
+}
+
+fn show_server_section(
+    ui: &mut Ui,
+    rows: &[DashboardRow],
+    colors: Palette,
+    action: &mut AdminAction,
+) {
+    let confirm_id = egui::Id::unique("admin_server_power_confirm");
+    let mut confirm = ui
+        .ctx()
+        .data(|data| data.get_temp::<ServerPowerConfirm>(confirm_id));
+    let prev_confirm = confirm;
+
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("SERVER")
+                .size(11.0)
+                .strong()
+                .color(colors.muted),
+        );
+        ui.with_layout(
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| match confirm {
+                Some(ServerPowerConfirm::Restart) => {
+                    if ui.button("Cancel").clicked() {
+                        confirm = None;
+                    }
+                    if ui
+                        .button(RichText::new("Confirm Restart").color(colors.danger))
+                        .clicked()
+                    {
+                        action.restart_server = true;
+                        confirm = None;
+                    }
+                }
+                Some(ServerPowerConfirm::Shutdown) => {
+                    if ui.button("Cancel").clicked() {
+                        confirm = None;
+                    }
+                    if ui
+                        .button(RichText::new("Confirm Shutdown").color(colors.danger))
+                        .clicked()
+                    {
+                        action.shutdown_server = true;
+                        confirm = None;
+                    }
+                }
+                None => {
+                    if ui.button("Shutdown").clicked() {
+                        confirm = Some(ServerPowerConfirm::Shutdown);
+                    }
+                    if ui.button("Restart").clicked() {
+                        confirm = Some(ServerPowerConfirm::Restart);
+                    }
+                }
+            },
+        );
+    });
+
+    if confirm != prev_confirm {
+        ui.ctx().data_mut(|data| match confirm {
+            Some(state) => {
+                data.insert_temp(confirm_id, state);
+            }
+            None => data.remove::<ServerPowerConfirm>(confirm_id),
+        });
+    }
+
+    egui::Frame::group(ui.style())
+        .fill(colors.panel)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            egui::Grid::new("admin_server_identity")
+                .num_columns(2)
+                .spacing([18.0, 6.0])
+                .show(ui, |ui| {
+                    for (label, fallback) in [
+                        ("Server name", ui_text(ids::ADMIN_VALUE_NOT_REPORTED)),
+                        ("Product", ui_text(ids::ADMIN_VALUE_NOT_REPORTED)),
+                        ("Operating system", ui_text(ids::ADMIN_VALUE_NOT_REPORTED)),
+                        (
+                            ui_text(ids::ADMIN_ROW_SERVER_VERSION),
+                            ui_text(ids::ADMIN_VALUE_NOT_REPORTED),
+                        ),
+                    ] {
+                        if let Some(value) = value_for(rows, label) {
+                            ui.label(RichText::new(label).color(colors.muted));
+                            ui.label(
+                                RichText::new(value)
+                                    .color(colors.text)
+                                    .text_style(egui::TextStyle::Body),
+                            );
+                        } else {
+                            ui.label(RichText::new(label).color(colors.muted));
+                            ui.label(RichText::new(fallback).color(colors.text));
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+fn show_libraries_section(ui: &mut Ui, libraries: &[&str], colors: Palette) {
+    ui.horizontal(|ui| {
+        ui.set_min_height(22.0);
+        ui.label(
+            RichText::new("LIBRARIES")
+                .size(11.0)
+                .strong()
+                .color(colors.muted),
+        );
+    });
+    if libraries.is_empty() {
+        egui::Frame::group(ui.style())
+            .fill(colors.panel)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(RichText::new("No libraries reported").color(colors.muted));
+            });
+    } else {
+        for name in libraries {
+            egui::Frame::group(ui.style())
+                .fill(colors.panel)
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(RichText::new(*name).color(colors.text));
+                });
+            ui.add_space(4.0);
+        }
+    }
 }
 
 fn task_text(value: Option<&str>) -> Option<&str> {
@@ -434,7 +601,13 @@ fn task_line(task: &ScheduledTask) -> String {
     let name = task_text(task.name.as_deref()).unwrap_or(ui_text(ids::ADMIN_VALUE_NOT_REPORTED));
     let state = task_text(task.state.as_deref()).unwrap_or(ui_text(ids::ADMIN_VALUE_NOT_REPORTED));
     let last = task_text(task.last_status.as_deref()).unwrap_or(ui_text(ids::ADMIN_TASK_NEVER_RUN));
-    format!("{name} · {state} · {last}")
+    if task_is_running(task)
+        && let Some(progress) = task.current_progress_percentage
+    {
+        format!("{name} · {state} ({progress:.0}%) · {last}")
+    } else {
+        format!("{name} · {state} · {last}")
+    }
 }
 
 /// Pure mapping from the load state to what the screen draws. The gate wins
@@ -503,6 +676,18 @@ pub(crate) fn dashboard_view(enabled: bool, load: &AdminLoad) -> DashboardView {
                 ui_text(ids::ADMIN_ROW_ACTIVE_SESSIONS),
                 snapshot.active_sessions.to_string(),
             ));
+            if let Some(counts) = snapshot.item_counts {
+                rows.push(row("Movies", counts.movie_count.unwrap_or(0).to_string()));
+                rows.push(row("Series", counts.series_count.unwrap_or(0).to_string()));
+                rows.push(row(
+                    "Episodes",
+                    counts.episode_count.unwrap_or(0).to_string(),
+                ));
+                rows.push(row(
+                    "Collections",
+                    counts.box_set_count.unwrap_or(0).to_string(),
+                ));
+            }
             rows.push(row(
                 ui_text(ids::ADMIN_ROW_SCHEDULED_TASKS),
                 scheduled_task_summary(snapshot),
@@ -516,7 +701,11 @@ pub(crate) fn dashboard_view(enabled: bool, load: &AdminLoad) -> DashboardView {
                 attention
                     .iter()
                     .take(MAX_TASK_DETAIL_ROWS)
-                    .map(|task| row(ui_text(ids::ADMIN_ROW_TASK), task_line(task))),
+                    .map(|task| DashboardRow {
+                        label: ui_text(ids::ADMIN_ROW_TASK),
+                        value: task_line(task),
+                        task_id: task.id.clone(),
+                    }),
             );
             if attention.len() > MAX_TASK_DETAIL_ROWS {
                 rows.push(row(
@@ -530,9 +719,39 @@ pub(crate) fn dashboard_view(enabled: bool, load: &AdminLoad) -> DashboardView {
                     ),
                 ));
             }
-            DashboardView::Rows(rows)
+            DashboardView::Rows {
+                rows,
+                sessions: snapshot.active_sessions_list.clone(),
+                activity: snapshot.activity_entries.clone(),
+            }
         }
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AdminAction {
+    pub manage_users: bool,
+    pub refresh_dashboard: bool,
+    pub scan_libraries: bool,
+    pub run_task_id: Option<String>,
+    pub restart_server: bool,
+    pub shutdown_server: bool,
+    pub send_session_message: Option<(String, String)>,
+    pub revoke_device_id: Option<String>,
+}
+
+fn show_header_actions(ui: &mut Ui, can_manage_users: bool, action: &mut AdminAction) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if can_manage_users && ui.button("Manage users").clicked() {
+            action.manage_users = true;
+        }
+        if ui.button("Scan All Libraries").clicked() {
+            action.scan_libraries = true;
+        }
+        if ui.button("Refresh").clicked() {
+            action.refresh_dashboard = true;
+        }
+    });
 }
 
 pub(crate) fn show(
@@ -540,39 +759,43 @@ pub(crate) fn show(
     view: &DashboardView,
     colors: Palette,
     can_manage_users: bool,
-) -> bool {
-    let mut manage_users = false;
-    if can_manage_users {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            manage_users = ui.button("Manage users").clicked();
-        });
-        ui.add_space(8.0);
-    }
+) -> AdminAction {
+    let mut action = AdminAction::default();
     match view {
         DashboardView::Hidden => {}
         DashboardView::Loading => {
             egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.label(RichText::new(ui_text(ids::ADMIN_STATUS_LOADING)).color(colors.muted));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(ui_text(ids::ADMIN_STATUS_LOADING)).color(colors.muted));
+                    show_header_actions(ui, can_manage_users, &mut action);
+                });
             });
         }
         DashboardView::Unavailable => {
             egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.label(RichText::new(ui_text(ids::ADMIN_ERROR_LOAD_FAILED)).color(colors.muted));
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(ui_text(ids::ADMIN_ERROR_LOAD_FAILED)).color(colors.muted),
+                    );
+                    show_header_actions(ui, can_manage_users, &mut action);
+                });
             });
         }
-        DashboardView::Rows(rows) => {
+        DashboardView::Rows {
+            rows,
+            sessions,
+            activity,
+        } => {
             egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.label(
-                    RichText::new(ui_text(ids::ADMIN_HEADING_TITLE))
-                        .size(22.0)
-                        .strong()
-                        .color(colors.text),
-                );
-                ui.label(
-                    RichText::new("Read-only overview of this Jellyfin server.")
-                        .size(13.0)
-                        .color(colors.muted),
-                );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(ui_text(ids::ADMIN_HEADING_TITLE))
+                            .size(22.0)
+                            .strong()
+                            .color(colors.text),
+                    );
+                    show_header_actions(ui, can_manage_users, &mut action);
+                });
                 ui.add_space(14.0);
 
                 let library_count_label = ui_text(ids::ADMIN_ROW_LIBRARIES);
@@ -597,74 +820,61 @@ pub(crate) fn show(
                     });
                 }
 
-                ui.add_space(14.0);
-                ui.label(
-                    RichText::new("SERVER")
-                        .size(11.0)
-                        .strong()
-                        .color(colors.muted),
-                );
-                egui::Frame::group(ui.style())
-                    .fill(colors.panel)
-                    .show(ui, |ui| {
-                        egui::Grid::new("admin_server_identity")
-                            .num_columns(2)
-                            .spacing([18.0, 6.0])
-                            .show(ui, |ui| {
-                                for (label, fallback) in [
-                                    ("Server name", ui_text(ids::ADMIN_VALUE_NOT_REPORTED)),
-                                    ("Product", ui_text(ids::ADMIN_VALUE_NOT_REPORTED)),
-                                    ("Operating system", ui_text(ids::ADMIN_VALUE_NOT_REPORTED)),
-                                    (
-                                        ui_text(ids::ADMIN_ROW_SERVER_VERSION),
-                                        ui_text(ids::ADMIN_VALUE_NOT_REPORTED),
-                                    ),
-                                ] {
-                                    if let Some(value) = value_for(rows, label) {
-                                        ui.label(RichText::new(label).color(colors.muted));
-                                        ui.label(
-                                            RichText::new(value)
-                                                .color(colors.text)
-                                                .text_style(egui::TextStyle::Body),
-                                        );
-                                    } else {
-                                        ui.label(RichText::new(label).color(colors.muted));
-                                        ui.label(RichText::new(fallback).color(colors.text));
-                                    }
-                                    ui.end_row();
-                                }
-                            });
-                    });
+                if let (Some(movies), Some(series), Some(episodes), Some(collections)) = (
+                    value_for(rows, "Movies"),
+                    value_for(rows, "Series"),
+                    value_for(rows, "Episodes"),
+                    value_for(rows, "Collections"),
+                ) {
+                    ui.add_space(8.0);
+                    let cards = [
+                        ("Movies", movies),
+                        ("Series", series),
+                        ("Episodes", episodes),
+                        ("Collections", collections),
+                    ];
+                    if ui.available_width() >= 620.0 {
+                        ui.columns(4, |columns| {
+                            for (index, (label, value)) in cards.iter().enumerate() {
+                                metric_card(&mut columns[index], label, value, colors);
+                            }
+                        });
+                    } else {
+                        ui.columns(2, |columns| {
+                            metric_card(&mut columns[0], cards[0].0, cards[0].1, colors);
+                            metric_card(&mut columns[1], cards[1].0, cards[1].1, colors);
+                        });
+                        ui.add_space(6.0);
+                        ui.columns(2, |columns| {
+                            metric_card(&mut columns[0], cards[2].0, cards[2].1, colors);
+                            metric_card(&mut columns[1], cards[3].0, cards[3].1, colors);
+                        });
+                    }
+                }
 
                 let libraries: Vec<&str> = rows
                     .iter()
                     .filter(|entry| entry.label == ui_text(ids::ADMIN_ROW_LIBRARY))
                     .map(|entry| entry.value.as_str())
                     .collect();
+
                 ui.add_space(14.0);
-                ui.label(
-                    RichText::new("LIBRARIES")
-                        .size(11.0)
-                        .strong()
-                        .color(colors.muted),
-                );
-                if libraries.is_empty() {
-                    ui.label(RichText::new("No libraries reported").color(colors.muted));
+                if ui.available_width() >= 720.0 {
+                    ui.columns(2, |columns| {
+                        show_server_section(&mut columns[0], rows, colors, &mut action);
+                        show_libraries_section(&mut columns[1], &libraries, colors);
+                    });
                 } else {
-                    for name in libraries {
-                        egui::Frame::group(ui.style())
-                            .fill(colors.panel)
-                            .show(ui, |ui| {
-                                ui.label(RichText::new(name).color(colors.text));
-                            });
-                        ui.add_space(4.0);
-                    }
+                    ui.vertical(|ui| {
+                        show_server_section(ui, rows, colors, &mut action);
+                        ui.add_space(14.0);
+                        show_libraries_section(ui, &libraries, colors);
+                    });
                 }
 
-                let task_lines: Vec<&str> = rows
+                let task_rows: Vec<&DashboardRow> = rows
                     .iter()
                     .filter(|entry| entry.label == ui_text(ids::ADMIN_ROW_TASK))
-                    .map(|entry| entry.value.as_str())
                     .collect();
                 let task_summary =
                     value_for(rows, ui_text(ids::ADMIN_ROW_SCHEDULED_TASKS)).unwrap_or("0");
@@ -678,15 +888,232 @@ pub(crate) fn show(
                 egui::Frame::group(ui.style())
                     .fill(colors.panel)
                     .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         ui.label(RichText::new(task_summary).color(colors.text));
-                        for line in task_lines {
-                            ui.label(RichText::new(line).color(colors.muted));
+                        for entry in task_rows {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&entry.value).color(colors.muted));
+                                if let Some(task_id) = entry.task_id.as_ref()
+                                    && ui.button("Run").clicked()
+                                {
+                                    action.run_task_id = Some(task_id.clone());
+                                }
+                            });
                         }
                     });
+
+                ui.add_space(14.0);
+                show_sessions_section(ui, sessions, colors, &mut action);
+
+                ui.add_space(14.0);
+                show_activity_section(ui, activity, colors);
             });
         }
     }
-    manage_users
+    action
+}
+
+fn show_sessions_section(
+    ui: &mut Ui,
+    sessions: &[SessionInfo],
+    colors: Palette,
+    action: &mut AdminAction,
+) {
+    ui.label(
+        RichText::new("DEVICES / ACTIVE SESSIONS")
+            .size(11.0)
+            .strong()
+            .color(colors.muted),
+    );
+    if sessions.is_empty() {
+        egui::Frame::group(ui.style())
+            .fill(colors.panel)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(RichText::new("No active sessions reported").color(colors.muted));
+            });
+        return;
+    }
+
+    for (index, session) in sessions.iter().enumerate() {
+        let device_name =
+            nonempty(session.device_name.as_deref()).unwrap_or_else(|| "Unknown device".to_owned());
+        let client_label = match (
+            nonempty(session.client.as_deref()),
+            nonempty(session.application_version.as_deref()),
+        ) {
+            (Some(client), Some(version)) => Some(format!("{client} · {version}")),
+            (Some(client), None) => Some(client),
+            (None, Some(version)) => Some(version),
+            (None, None) => None,
+        };
+        let user_name = nonempty(session.user_name.as_deref());
+        let now_playing = session
+            .now_playing_item
+            .as_ref()
+            .and_then(|item| nonempty(item.name.as_deref()))
+            .map(|name| format!("Playing: {name}"));
+        let last_activity = nonempty(session.last_activity_date.as_deref());
+
+        egui::Frame::group(ui.style())
+            .fill(colors.panel)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(device_name).strong().color(colors.text));
+                        let mut details = Vec::new();
+                        if let Some(client) = client_label {
+                            details.push(client);
+                        }
+                        if let Some(user) = user_name {
+                            details.push(user);
+                        }
+                        if let Some(activity) = last_activity {
+                            details.push(activity);
+                        }
+                        if !details.is_empty() {
+                            ui.label(
+                                RichText::new(details.join(" · "))
+                                    .small()
+                                    .color(colors.muted),
+                            );
+                        }
+                        if let Some(playing) = now_playing {
+                            ui.label(RichText::new(playing).small().color(colors.accent));
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(device_id) = nonempty(session.device_id.as_deref())
+                            && ui.button("Revoke").clicked()
+                        {
+                            action.revoke_device_id = Some(device_id);
+                        }
+                    });
+                });
+
+                if let Some(session_id) = nonempty(Some(session.id.as_str())) {
+                    ui.add_space(6.0);
+                    let draft_id = egui::Id::unique(("admin_session_msg", &session_id, index));
+                    let mut draft = ui
+                        .ctx()
+                        .data(|data| data.get_temp::<String>(draft_id))
+                        .unwrap_or_default();
+                    let mut sent = false;
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut draft)
+                                .desired_width(220.0)
+                                .hint_text("Send message to device"),
+                        );
+                        let trimmed = draft.trim();
+                        if ui
+                            .add_enabled(!trimmed.is_empty(), egui::Button::new("Send"))
+                            .clicked()
+                        {
+                            action.send_session_message =
+                                Some((session_id.clone(), trimmed.to_owned()));
+                            sent = true;
+                        }
+                    });
+                    ui.ctx().data_mut(|data| {
+                        if sent {
+                            data.remove::<String>(draft_id);
+                        } else {
+                            data.insert_temp(draft_id, draft);
+                        }
+                    });
+                }
+            });
+        ui.add_space(4.0);
+    }
+}
+
+fn show_activity_section(ui: &mut Ui, activity: &[ActivityLogEntry], colors: Palette) {
+    let filter_id = egui::Id::unique("admin_activity_filter");
+    let mut filter = ui
+        .ctx()
+        .data(|data| data.get_temp::<ActivityFilter>(filter_id))
+        .unwrap_or_default();
+
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("ACTIVITY")
+                .size(11.0)
+                .strong()
+                .color(colors.muted),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            for (tab, label) in [
+                (ActivityFilter::System, "System"),
+                (ActivityFilter::User, "User"),
+                (ActivityFilter::All, "All"),
+            ] {
+                if ui.selectable_label(filter == tab, label).clicked() {
+                    filter = tab;
+                }
+            }
+        });
+    });
+
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(filter_id, filter));
+
+    let filtered: Vec<&ActivityLogEntry> = activity
+        .iter()
+        .filter(|entry| {
+            let has_user = nonempty(entry.user_id.as_deref()).is_some();
+            match filter {
+                ActivityFilter::All => true,
+                ActivityFilter::User => has_user,
+                ActivityFilter::System => !has_user,
+            }
+        })
+        .collect();
+
+    egui::Frame::group(ui.style())
+        .fill(colors.panel)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            if filtered.is_empty() {
+                ui.label(RichText::new("No activity entries").color(colors.muted));
+                return;
+            }
+            for entry in filtered {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        let name = nonempty(entry.name.as_deref())
+                            .unwrap_or_else(|| "Activity".to_owned());
+                        ui.label(RichText::new(name).strong().color(colors.text));
+                        if let Some(overview) = nonempty(entry.short_overview.as_deref())
+                            .or_else(|| nonempty(entry.overview.as_deref()))
+                        {
+                            ui.label(RichText::new(overview).small().color(colors.muted));
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(date) = nonempty(entry.date.as_deref()) {
+                            ui.label(RichText::new(date).small().color(colors.muted));
+                        }
+                        if let Some(severity) = nonempty(entry.severity.as_deref()) {
+                            let severity_color = if severity.eq_ignore_ascii_case("Error")
+                                || severity.eq_ignore_ascii_case("Fatal")
+                            {
+                                colors.danger
+                            } else if severity.eq_ignore_ascii_case("Warn")
+                                || severity.eq_ignore_ascii_case("Warning")
+                            {
+                                colors.warning
+                            } else {
+                                colors.muted
+                            };
+                            ui.label(RichText::new(severity).small().color(severity_color));
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+            }
+        });
 }
 
 #[cfg(test)]
@@ -698,6 +1125,7 @@ mod tests {
             id: id.to_owned(),
             name: name.to_owned(),
             policy: Some(jellyfin_api::AdminUserPolicy::default()),
+            last_activity_date: None,
         }
     }
 
@@ -741,8 +1169,10 @@ mod tests {
 
     fn task(name: &str, state: &str, last: Option<&str>) -> ScheduledTask {
         ScheduledTask {
+            id: None,
             name: Some(name.to_owned()),
             state: Some(state.to_owned()),
+            current_progress_percentage: None,
             last_status: last.map(str::to_owned),
         }
     }
@@ -771,47 +1201,67 @@ mod tests {
             1,
             users,
             &tasks,
+            None,
+            Vec::new(),
+            Vec::new(),
         )
     }
 
     #[test]
     fn empty_library_list_shows_zero_libraries_and_no_name_rows() {
-        let snapshot =
-            AdminSnapshot::from_reads(&server_info(), &[], &[], 0, UserCounts::default(), &[]);
-        let view = dashboard_view(true, &AdminLoad::Loaded(snapshot));
+        let snapshot = AdminSnapshot::from_reads(
+            &server_info(),
+            &[],
+            &[],
+            0,
+            UserCounts::default(),
+            &[],
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        let view = dashboard_view(true, &AdminLoad::Loaded(Box::new(snapshot)));
         assert_eq!(
             view,
-            DashboardView::Rows(vec![
-                row("Server name", "Mock Jellyfin".to_owned()),
-                row("Product", "Jellyfin Server".to_owned()),
-                row("Operating system", "Linux".to_owned()),
-                row("Server version", "0.0.0-mock".to_owned()),
-                row("Libraries", "0".to_owned()),
-                row("Users", "0".to_owned()),
-                row("Active sessions", "0".to_owned()),
-                row("Scheduled tasks", "0".to_owned()),
-            ])
+            DashboardView::Rows {
+                rows: vec![
+                    row("Server name", "Mock Jellyfin".to_owned()),
+                    row("Product", "Jellyfin Server".to_owned()),
+                    row("Operating system", "Linux".to_owned()),
+                    row("Server version", "0.0.0-mock".to_owned()),
+                    row("Libraries", "0".to_owned()),
+                    row("Users", "0".to_owned()),
+                    row("Active sessions", "0".to_owned()),
+                    row("Scheduled tasks", "0".to_owned()),
+                ],
+                sessions: Vec::new(),
+                activity: Vec::new(),
+            }
         );
     }
 
     #[test]
     fn filled_data_lists_each_library_name_in_server_order() {
-        let view = dashboard_view(true, &AdminLoad::Loaded(mock_snapshot()));
+        let view = dashboard_view(true, &AdminLoad::Loaded(Box::new(mock_snapshot())));
         assert_eq!(
             view,
-            DashboardView::Rows(vec![
-                row("Server name", "Mock Jellyfin".to_owned()),
-                row("Product", "Jellyfin Server".to_owned()),
-                row("Operating system", "Linux".to_owned()),
-                row("Server version", "0.0.0-mock".to_owned()),
-                row("Libraries", "3".to_owned()),
-                row("Library", "Movies · 74 items".to_owned()),
-                row("Library", "Shows".to_owned()),
-                row("Library", "Music · 12 items".to_owned()),
-                row("Users", "3 · 1 disabled".to_owned()),
-                row("Active sessions", "1".to_owned()),
-                row("Scheduled tasks", "2".to_owned()),
-            ])
+            DashboardView::Rows {
+                rows: vec![
+                    row("Server name", "Mock Jellyfin".to_owned()),
+                    row("Product", "Jellyfin Server".to_owned()),
+                    row("Operating system", "Linux".to_owned()),
+                    row("Server version", "0.0.0-mock".to_owned()),
+                    row("Libraries", "3".to_owned()),
+                    row("Library", "Movies · 74 items".to_owned()),
+                    row("Library", "Shows".to_owned()),
+                    row("Library", "Music · 12 items".to_owned()),
+                    row("Users", "3 · 1 disabled".to_owned()),
+                    row("Active sessions", "1".to_owned()),
+                    row("Scheduled tasks", "2".to_owned()),
+                ],
+                sessions: Vec::new(),
+                activity: Vec::new(),
+            }
         );
     }
 
@@ -825,9 +1275,14 @@ mod tests {
             0,
             UserCounts::default(),
             &[],
+            None,
+            Vec::new(),
+            Vec::new(),
         );
         assert_eq!(snapshot.library_item_counts, vec![Some(74), None]);
-        let DashboardView::Rows(rows) = dashboard_view(true, &AdminLoad::Loaded(snapshot)) else {
+        let DashboardView::Rows { rows, .. } =
+            dashboard_view(true, &AdminLoad::Loaded(Box::new(snapshot)))
+        else {
             panic!("expected rows");
         };
         assert_eq!(rows[5], row("Library", "Movies · 74 items".to_owned()));
@@ -847,8 +1302,13 @@ mod tests {
                 disabled: 0,
             },
             &[],
+            None,
+            Vec::new(),
+            Vec::new(),
         );
-        let DashboardView::Rows(rows) = dashboard_view(true, &AdminLoad::Loaded(snapshot)) else {
+        let DashboardView::Rows { rows, .. } =
+            dashboard_view(true, &AdminLoad::Loaded(Box::new(snapshot)))
+        else {
             panic!("expected rows");
         };
         assert_eq!(rows[5], row("Users", "3".to_owned()));
@@ -863,9 +1323,20 @@ mod tests {
             task("Metadata refresh", "Idle", Some("Failed")),
             task("Cancelled job", "Idle", Some("Aborted")),
         ];
-        let snapshot =
-            AdminSnapshot::from_reads(&server_info(), &[], &[], 0, UserCounts::default(), &tasks);
-        let DashboardView::Rows(rows) = dashboard_view(true, &AdminLoad::Loaded(snapshot)) else {
+        let snapshot = AdminSnapshot::from_reads(
+            &server_info(),
+            &[],
+            &[],
+            0,
+            UserCounts::default(),
+            &tasks,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        let DashboardView::Rows { rows, .. } =
+            dashboard_view(true, &AdminLoad::Loaded(Box::new(snapshot)))
+        else {
             panic!("expected rows");
         };
         assert_eq!(
@@ -891,9 +1362,20 @@ mod tests {
         let tasks: Vec<ScheduledTask> = (0..MAX_TASK_DETAIL_ROWS + 2)
             .map(|index| task(&format!("Job {index}"), "Running", Some("Completed")))
             .collect();
-        let snapshot =
-            AdminSnapshot::from_reads(&server_info(), &[], &[], 0, UserCounts::default(), &tasks);
-        let DashboardView::Rows(rows) = dashboard_view(true, &AdminLoad::Loaded(snapshot)) else {
+        let snapshot = AdminSnapshot::from_reads(
+            &server_info(),
+            &[],
+            &[],
+            0,
+            UserCounts::default(),
+            &tasks,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        let DashboardView::Rows { rows, .. } =
+            dashboard_view(true, &AdminLoad::Loaded(Box::new(snapshot)))
+        else {
             panic!("expected rows");
         };
         assert_eq!(
@@ -912,19 +1394,34 @@ mod tests {
     fn task_lines_fall_back_for_missing_fields() {
         let tasks = [
             ScheduledTask {
+                id: None,
                 name: Some("  ".to_owned()),
                 state: None,
+                current_progress_percentage: None,
                 last_status: Some("Failed".to_owned()),
             },
             ScheduledTask {
+                id: None,
                 name: Some("Never ran".to_owned()),
                 state: Some("Idle".to_owned()),
+                current_progress_percentage: None,
                 last_status: None,
             },
         ];
-        let snapshot =
-            AdminSnapshot::from_reads(&server_info(), &[], &[], 0, UserCounts::default(), &tasks);
-        let DashboardView::Rows(rows) = dashboard_view(true, &AdminLoad::Loaded(snapshot)) else {
+        let snapshot = AdminSnapshot::from_reads(
+            &server_info(),
+            &[],
+            &[],
+            0,
+            UserCounts::default(),
+            &tasks,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        let DashboardView::Rows { rows, .. } =
+            dashboard_view(true, &AdminLoad::Loaded(Box::new(snapshot)))
+        else {
             panic!("expected rows");
         };
         let not_reported = ui_text(ids::ADMIN_VALUE_NOT_REPORTED);
@@ -949,6 +1446,9 @@ mod tests {
             2,
             UserCounts::default(),
             &[],
+            None,
+            Vec::new(),
+            Vec::new(),
         );
         assert_eq!(
             snapshot.library_names,
@@ -974,6 +1474,9 @@ mod tests {
             0,
             UserCounts::default(),
             &[],
+            None,
+            Vec::new(),
+            Vec::new(),
         );
         assert_eq!(
             snapshot.library_names,
@@ -990,9 +1493,12 @@ mod tests {
             0,
             UserCounts::default(),
             &[],
+            None,
+            Vec::new(),
+            Vec::new(),
         );
-        let view = dashboard_view(true, &AdminLoad::Loaded(snapshot));
-        let DashboardView::Rows(rows) = view else {
+        let view = dashboard_view(true, &AdminLoad::Loaded(Box::new(snapshot)));
+        let DashboardView::Rows { rows, .. } = view else {
             panic!("expected rows");
         };
         assert_eq!(
@@ -1008,16 +1514,19 @@ mod tests {
     fn missing_server_identity_fields_use_the_not_reported_fallback() {
         let view = dashboard_view(
             true,
-            &AdminLoad::Loaded(AdminSnapshot::from_reads(
+            &AdminLoad::Loaded(Box::new(AdminSnapshot::from_reads(
                 &ServerInfo::default(),
                 &[],
                 &[],
                 0,
                 UserCounts::default(),
                 &[],
-            )),
+                None,
+                Vec::new(),
+                Vec::new(),
+            ))),
         );
-        let DashboardView::Rows(rows) = view else {
+        let DashboardView::Rows { rows, .. } = view else {
             panic!("expected rows");
         };
         let fallback = ui_text(ids::ADMIN_VALUE_NOT_REPORTED).to_owned();
@@ -1036,16 +1545,19 @@ mod tests {
         };
         let view = dashboard_view(
             true,
-            &AdminLoad::Loaded(AdminSnapshot::from_reads(
+            &AdminLoad::Loaded(Box::new(AdminSnapshot::from_reads(
                 &server,
                 &[],
                 &[],
                 0,
                 UserCounts::default(),
                 &[],
-            )),
+                None,
+                Vec::new(),
+                Vec::new(),
+            ))),
         );
-        let DashboardView::Rows(rows) = view else {
+        let DashboardView::Rows { rows, .. } = view else {
             panic!("expected rows");
         };
         assert_eq!(
@@ -1067,7 +1579,7 @@ mod tests {
 
     #[test]
     fn gate_off_by_default_hides_the_section_even_with_data() {
-        let view = dashboard_view(false, &AdminLoad::Loaded(mock_snapshot()));
+        let view = dashboard_view(false, &AdminLoad::Loaded(Box::new(mock_snapshot())));
         assert_eq!(view, DashboardView::Hidden);
         assert_eq!(
             dashboard_view(false, &AdminLoad::Pending),
@@ -1146,5 +1658,260 @@ mod tests {
         assert!(state.error.is_none());
         assert!(!state.is_loading());
         assert!(!state.finish_list(30, 4, Ok(vec![account("u1", "Stale")])));
+    }
+
+    fn collect_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(f32, String)> {
+        fn visit(shape: &egui::epaint::Shape, out: &mut Vec<(f32, String)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    out.push((text.pos.y, text.galley.job.text.clone()));
+                }
+                egui::epaint::Shape::Vec(nested) => {
+                    for child in nested {
+                        visit(child, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            visit(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    fn find_text_y(texts: &[(f32, String)], needle: &str) -> Option<f32> {
+        texts
+            .iter()
+            .find(|(_, text)| text.contains(needle))
+            .map(|(y, _)| *y)
+    }
+
+    #[test]
+    fn dashboard_renders_wide_and_narrow_without_subtitle() {
+        let view = dashboard_view(true, &AdminLoad::Loaded(Box::new(mock_snapshot())));
+        let colors = crate::theme::palette();
+        for width in [600.0_f32, 960.0] {
+            let context = egui::Context::default();
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 1200.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let _ = show(ui, &view, colors, false);
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            let texts = collect_texts(&output.shapes);
+            assert!(
+                find_text_y(&texts, "Read-only overview of this Jellyfin server.").is_none(),
+                "subtitle should be removed at {width}: {texts:?}"
+            );
+            let server_y = find_text_y(&texts, "SERVER")
+                .unwrap_or_else(|| panic!("SERVER heading missing at {width}: {texts:?}"));
+            let libraries_y = find_text_y(&texts, "LIBRARIES")
+                .unwrap_or_else(|| panic!("LIBRARIES heading missing at {width}: {texts:?}"));
+            let tasks_y = find_text_y(&texts, "SCHEDULED TASKS")
+                .unwrap_or_else(|| panic!("SCHEDULED TASKS heading missing at {width}: {texts:?}"));
+            if width >= 720.0 {
+                assert!(
+                    (server_y - libraries_y).abs() < 2.0,
+                    "SERVER ({server_y}) and LIBRARIES ({libraries_y}) should align side-by-side at {width}"
+                );
+            } else {
+                assert!(
+                    libraries_y > server_y,
+                    "LIBRARIES ({libraries_y}) should stack below SERVER ({server_y}) at {width}"
+                );
+            }
+            assert!(
+                tasks_y > libraries_y,
+                "SCHEDULED TASKS ({tasks_y}) should render below LIBRARIES ({libraries_y})"
+            );
+        }
+    }
+
+    #[test]
+    fn manage_users_button_aligns_with_dashboard_heading_inside_card() {
+        let view = dashboard_view(true, &AdminLoad::Loaded(Box::new(mock_snapshot())));
+        let colors = crate::theme::palette();
+        let context = egui::Context::default();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let _ = show(ui, &view, colors, true);
+            },
+        );
+        output.textures_delta.clear();
+        let texts = collect_texts(&output.shapes);
+        let heading_y = find_text_y(&texts, ui_text(ids::ADMIN_HEADING_TITLE))
+            .expect("dashboard heading missing");
+        let manage_y = find_text_y(&texts, "Manage users").expect("Manage users button missing");
+        assert!(
+            (heading_y - manage_y).abs() < 10.0,
+            "Manage users ({manage_y}) should align on the Server dashboard heading row ({heading_y})"
+        );
+    }
+
+    #[test]
+    fn item_counts_render_four_cards_and_running_task_shows_progress() {
+        let snapshot = AdminSnapshot::from_reads(
+            &server_info(),
+            &[],
+            &[],
+            0,
+            UserCounts::default(),
+            &[ScheduledTask {
+                id: Some("task-scan".to_owned()),
+                name: Some("Scan".to_owned()),
+                state: Some("Running".to_owned()),
+                current_progress_percentage: Some(42.0),
+                last_status: Some("Completed".to_owned()),
+            }],
+            Some(jellyfin_api::ItemCounts {
+                movie_count: Some(10),
+                series_count: Some(5),
+                episode_count: Some(120),
+                box_set_count: Some(3),
+            }),
+            Vec::new(),
+            Vec::new(),
+        );
+        let view = dashboard_view(true, &AdminLoad::Loaded(Box::new(snapshot)));
+        let colors = crate::theme::palette();
+        let context = egui::Context::default();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let _ = show(ui, &view, colors, true);
+            },
+        );
+        output.textures_delta.clear();
+        let texts = collect_texts(&output.shapes);
+        assert!(find_text_y(&texts, "Movies").is_some());
+        assert!(find_text_y(&texts, "Series").is_some());
+        assert!(find_text_y(&texts, "Episodes").is_some());
+        assert!(find_text_y(&texts, "Collections").is_some());
+        assert!(find_text_y(&texts, "Scan · Running (42%) · Completed").is_some());
+        assert!(find_text_y(&texts, "Run").is_some());
+        assert!(find_text_y(&texts, "Refresh").is_some());
+        assert!(find_text_y(&texts, "Scan All Libraries").is_some());
+    }
+
+    #[test]
+    fn sessions_and_activity_sections_render_and_revoke_emits_device_id() {
+        let snapshot = AdminSnapshot::from_reads(
+            &server_info(),
+            &[],
+            &[],
+            1,
+            UserCounts::default(),
+            &[],
+            None,
+            vec![SessionInfo {
+                id: "sess-1".to_owned(),
+                device_id: Some("dev-1".to_owned()),
+                device_name: Some("Living Room TV".to_owned()),
+                client: Some("Jellyfin Kattri".to_owned()),
+                application_version: Some("0.7.0".to_owned()),
+                user_name: Some("Ada".to_owned()),
+                last_activity_date: Some("2026-11-27T12:00:00Z".to_owned()),
+                now_playing_item: Some(jellyfin_api::SessionNowPlayingItem {
+                    name: Some("The Matrix".to_owned()),
+                }),
+            }],
+            vec![
+                ActivityLogEntry {
+                    id: Some(1),
+                    name: Some("User signed in".to_owned()),
+                    short_overview: Some("Ada signed in".to_owned()),
+                    overview: None,
+                    entry_type: None,
+                    date: Some("2026-11-27T12:00:00Z".to_owned()),
+                    severity: Some("Information".to_owned()),
+                    user_id: Some("u1".to_owned()),
+                },
+                ActivityLogEntry {
+                    id: Some(2),
+                    name: Some("Plugin updated".to_owned()),
+                    short_overview: None,
+                    overview: Some("Updated metadata plugin".to_owned()),
+                    entry_type: None,
+                    date: Some("2026-11-27T11:00:00Z".to_owned()),
+                    severity: Some("Warn".to_owned()),
+                    user_id: None,
+                },
+            ],
+        );
+        let view = dashboard_view(true, &AdminLoad::Loaded(Box::new(snapshot)));
+        let colors = crate::theme::palette();
+        let context = egui::Context::default();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 1400.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let _ = show(ui, &view, colors, true);
+            },
+        );
+        output.textures_delta.clear();
+        let texts = collect_texts(&output.shapes);
+        assert!(find_text_y(&texts, "DEVICES / ACTIVE SESSIONS").is_some());
+        assert!(find_text_y(&texts, "Living Room TV").is_some());
+        assert!(find_text_y(&texts, "Playing: The Matrix").is_some());
+        assert!(find_text_y(&texts, "Revoke").is_some());
+        assert!(find_text_y(&texts, "ACTIVITY").is_some());
+        assert!(find_text_y(&texts, "User signed in").is_some());
+        assert!(find_text_y(&texts, "Plugin updated").is_some());
+    }
+
+    #[test]
+    fn server_power_buttons_require_two_clicks_to_confirm() {
+        let view = dashboard_view(true, &AdminLoad::Loaded(Box::new(mock_snapshot())));
+        let colors = crate::theme::palette();
+        let context = egui::Context::default();
+
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 1200.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let action = show(ui, &view, colors, false);
+                assert!(!action.restart_server);
+                assert!(!action.shutdown_server);
+            },
+        );
+        output.textures_delta.clear();
+        let texts = collect_texts(&output.shapes);
+        let restart_y = find_text_y(&texts, "Restart").expect("Restart button missing");
+        assert!(find_text_y(&texts, "Confirm Restart").is_none());
+        let _ = restart_y;
     }
 }

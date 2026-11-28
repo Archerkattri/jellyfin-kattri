@@ -25,7 +25,6 @@ use kattri_settings::{
 #[allow(clippy::field_reassign_with_default)] // field-by-field build is the point of this fixture
 fn populated() -> Settings {
     let mut s = Settings::default();
-    s.general.high_contrast = true;
     s.general.reduce_motion = false;
     s.general.screensaver_idle_seconds = 120;
     s.playback = PlaybackSettings {

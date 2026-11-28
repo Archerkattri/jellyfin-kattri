@@ -16,7 +16,7 @@ use kattri_updater::{Channel, Keyring};
 
 use crate::app::KattriApp;
 use crate::theme::Palette;
-use crate::worker::update::{ApplyRequest, UpdateStatus};
+use crate::worker::update::{ApplyRequest, ReleaseCheckStatus, UpdateStatus};
 
 const INSTALL_FORM_ID: &str = "kattri_update_install_form";
 
@@ -83,6 +83,56 @@ pub(crate) fn status_line(status: &UpdateStatus) -> Option<String> {
 
 /// Draw the last update result and, after an apply, the rollback button.
 pub(crate) fn show(ui: &mut Ui, app: &mut KattriApp) {
+    if ui.button(ui_text(ids::RELEASE_CHECK_BUTTON)).clicked() {
+        app.check_releases();
+    }
+    ui.label(ui_text(ids::RELEASE_CHECK_HELP));
+    match &app.update.release_check {
+        ReleaseCheckStatus::Idle => {}
+        ReleaseCheckStatus::Checking => {
+            ui.label(ui_text(ids::RELEASE_CHECK_CHECKING));
+        }
+        ReleaseCheckStatus::Current { version } => {
+            ui.label(ui_text_args(
+                ids::RELEASE_CHECK_CURRENT,
+                &[("version", version)],
+            ));
+            ui.hyperlink_to(
+                ui_text(ids::RELEASE_CHECK_OFFICIAL_LINK),
+                crate::worker::release_check::RELEASE_PAGE_URL,
+            );
+        }
+        ReleaseCheckStatus::Newer { version } => {
+            ui.label(ui_text_args(
+                ids::RELEASE_CHECK_NEWER,
+                &[("version", version)],
+            ));
+            ui.hyperlink_to(
+                ui_text(ids::RELEASE_CHECK_OFFICIAL_LINK),
+                crate::worker::release_check::RELEASE_PAGE_URL,
+            );
+        }
+        ReleaseCheckStatus::Failed { error } => {
+            let reason = match error {
+                crate::worker::release_check::ReleaseCheckError::Network => {
+                    ui_text(ids::RELEASE_CHECK_ERROR_NETWORK)
+                }
+                crate::worker::release_check::ReleaseCheckError::HttpStatus => {
+                    ui_text(ids::RELEASE_CHECK_ERROR_HTTP)
+                }
+                crate::worker::release_check::ReleaseCheckError::TooLarge => {
+                    ui_text(ids::RELEASE_CHECK_ERROR_TOO_LARGE)
+                }
+                crate::worker::release_check::ReleaseCheckError::InvalidResponse => {
+                    ui_text(ids::RELEASE_CHECK_ERROR_INVALID)
+                }
+            };
+            ui.label(ui_text_args(
+                ids::RELEASE_CHECK_ERROR,
+                &[("reason", reason)],
+            ));
+        }
+    }
     let Some(line) = status_line(&app.update.status) else {
         return;
     };
@@ -105,6 +155,11 @@ pub(crate) fn show_install(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             .strong()
             .color(colors.text),
     );
+    if !Keyring::release().is_ok_and(|keyring| !keyring.is_empty()) {
+        ui.label(ui_text(ids::UPDATE_INSTALL_UNAVAILABLE));
+        show(ui, app);
+        return;
+    }
     ui.label(
         RichText::new(ui_text(ids::UPDATE_HELP_NO_DOWNLOAD))
             .size(12.0)

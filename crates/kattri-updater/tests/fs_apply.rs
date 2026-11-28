@@ -216,8 +216,8 @@ fn rollback_only_needs_one_atomic_slot_replace() {
 fn failed_swap_leaves_the_installed_build_unchanged_and_apply_can_retry() {
     let root = TempDir::new("failed-swap");
     let mut store = store_with_old_build(root.path());
-    // A folder where the temp file for previous.slot must go makes the first write of the swap fail.
-    let blocker = root.path().join("previous.slot.tmp");
+    // A directory at the previous-slot destination makes its atomic replacement fail.
+    let blocker = root.path().join("previous.slot");
     fs::create_dir(&blocker).expect("block the swap");
 
     let result = apply_verified(
@@ -235,11 +235,15 @@ fn failed_swap_leaves_the_installed_build_unchanged_and_apply_can_retry() {
         reopened.installed().expect("read"),
         Some(slot(OLD_VERSION, OLD_BYTES))
     );
-    assert_eq!(reopened.previous().expect("read"), None);
+    assert!(reopened.previous().is_err());
     assert_eq!(reopened.staged().expect("read"), None);
-    assert_eq!(reopened.journal().expect("journal").pending, None);
+    assert!(reopened.journal().expect("journal").pending.is_some());
 
-    // Once the obstruction is gone, the same verified update applies normally.
+    // Reconcile the interrupted attempt while the old build is still running.
+    assert!(matches!(
+        on_launch(&mut reopened, OLD_VERSION).expect("reconcile abandoned attempt"),
+        LaunchOutcome::AbandonedUpdate { .. }
+    ));
     fs::remove_dir(&blocker).expect("unblock");
     apply_verified(
         &mut reopened,

@@ -34,6 +34,10 @@ pub struct LiveTvInput<'a> {
     pub window: EpgWindow,
     pub now_unix: i64,
     pub selected_channel_id: Option<&'a str>,
+    /// Optional sorted channel row to reveal before constructing virtualized rows.
+    pub scroll_to_row: Option<usize>,
+    /// Logical destination requested by the parent, if any.
+    pub focus_target: Option<&'a LiveTvFocusTarget>,
 }
 
 /// Intent emitted by a user interaction. No network or playback work occurs here.
@@ -45,9 +49,148 @@ pub enum LiveTvAction {
     RecordProgram(String),
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum LiveTvFocusControl {
+    Channel,
+    Tune,
+    Record,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveTvFocusTarget {
+    /// Index in the sorted channel list rendered by `show`.
+    pub row: usize,
+    pub control: LiveTvFocusControl,
+    /// The same intent emitted by clicking this control.
+    pub action: LiveTvAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LiveTvFocusDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct LiveTvResponse {
     pub actions: Vec<LiveTvAction>,
+    /// Focusable channel controls in visual order, including virtualized rows.
+    pub focus_targets: Vec<LiveTvFocusTarget>,
+    /// Responses for controls constructed in this frame, keyed by sorted row and control.
+    pub focus_responses: Vec<(usize, LiveTvFocusControl, egui::Response)>,
+    /// Logical destination requested by the parent for keyboard/gamepad focus.
+    pub focused_target: Option<LiveTvFocusTarget>,
+}
+
+/// Move through focus targets without depending on egui's currently visible widgets.
+/// Horizontal movement follows controls in a row; vertical movement keeps the
+/// current control where possible and clamps to controls available on that row.
+pub fn navigate_live_tv_focus(
+    targets: &[LiveTvFocusTarget],
+    current: Option<&LiveTvFocusTarget>,
+    direction: LiveTvFocusDirection,
+) -> Option<LiveTvFocusTarget> {
+    if targets.is_empty() {
+        return None;
+    }
+    let Some(current_index) = current.and_then(|current| {
+        targets
+            .iter()
+            .position(|target| target.control == current.control && target.action == current.action)
+    }) else {
+        return match direction {
+            LiveTvFocusDirection::Left | LiveTvFocusDirection::Up => targets.last().cloned(),
+            LiveTvFocusDirection::Right | LiveTvFocusDirection::Down => targets.first().cloned(),
+        };
+    };
+
+    let current = &targets[current_index];
+    match direction {
+        LiveTvFocusDirection::Left => current_index
+            .checked_sub(1)
+            .and_then(|index| targets.get(index))
+            .cloned()
+            .or_else(|| Some(current.clone())),
+        LiveTvFocusDirection::Right => Some(
+            targets
+                .get(current_index + 1)
+                .cloned()
+                .unwrap_or_else(|| current.clone()),
+        ),
+        LiveTvFocusDirection::Up | LiveTvFocusDirection::Down => {
+            let Some(destination_row) = (match direction {
+                LiveTvFocusDirection::Up => current.row.checked_sub(1),
+                LiveTvFocusDirection::Down => Some(current.row.saturating_add(1)),
+                _ => None,
+            }) else {
+                return Some(current.clone());
+            };
+            let destination = targets
+                .iter()
+                .filter(|target| target.row == destination_row)
+                .collect::<Vec<_>>();
+            if destination.is_empty() {
+                return Some(current.clone());
+            }
+            let desired = control_order(current.control);
+            destination
+                .iter()
+                .min_by_key(|target| control_order(target.control).abs_diff(desired))
+                .map(|target| (*target).clone())
+                .or_else(|| Some(current.clone()))
+        }
+    }
+}
+
+/// Top-of-row scroll position for a focus target. The caller should apply this
+/// to the channel-list ScrollArea before asking egui to focus its widget; this
+/// makes logical traversal work even when `show_rows` has not built that row.
+pub fn live_tv_focus_scroll_offset(target: &LiveTvFocusTarget, item_spacing_y: f32) -> f32 {
+    target.row as f32 * (ROW_HEIGHT + item_spacing_y)
+}
+
+fn control_order(control: LiveTvFocusControl) -> usize {
+    match control {
+        LiveTvFocusControl::Channel => 0,
+        LiveTvFocusControl::Tune => 1,
+        LiveTvFocusControl::Record => 2,
+    }
+}
+
+pub(crate) fn live_tv_focus_targets(
+    channels: &[LiveTvChannel],
+    favorite_channel_ids: &HashSet<String>,
+) -> Vec<LiveTvFocusTarget> {
+    let mut sorted = channels.to_vec();
+    sort_channels(&mut sorted, favorite_channel_ids);
+    build_focus_targets(&sorted)
+}
+
+fn build_focus_targets(channels: &[LiveTvChannel]) -> Vec<LiveTvFocusTarget> {
+    let mut targets = Vec::with_capacity(channels.len() * 3);
+    for (row, channel) in channels.iter().enumerate() {
+        let id = channel.item.id.clone();
+        targets.push(LiveTvFocusTarget {
+            row,
+            control: LiveTvFocusControl::Channel,
+            action: LiveTvAction::SelectChannel(id.clone()),
+        });
+        targets.push(LiveTvFocusTarget {
+            row,
+            control: LiveTvFocusControl::Tune,
+            action: LiveTvAction::TuneChannel(id),
+        });
+        if let Some(program) = channel.current_program.as_ref() {
+            targets.push(LiveTvFocusTarget {
+                row,
+                control: LiveTvFocusControl::Record,
+                action: LiveTvAction::RecordProgram(program.item.id.clone()),
+            });
+        }
+    }
+    targets
 }
 
 /// Draw channels and a fixed 24-hour guide using the caller-provided UTC model.
@@ -70,20 +213,43 @@ pub fn show(ui: &mut egui::Ui, input: LiveTvInput<'_>) -> LiveTvResponse {
 
     let mut channels = input.channels.to_vec();
     sort_channels(&mut channels, input.favorite_channel_ids);
+    output.focus_targets = build_focus_targets(&channels);
+    let resolved_focus_target = input.focus_target.and_then(|requested| {
+        output
+            .focus_targets
+            .iter()
+            .find(|target| target.control == requested.control && target.action == requested.action)
+            .cloned()
+    });
+    // The requested row may be stale after sorting; the resolved identity wins.
+    let scroll_to_row = resolved_focus_target
+        .as_ref()
+        .map(|target| target.row)
+        .or(input.scroll_to_row);
+    let row_pitch = ROW_HEIGHT + ui.spacing().item_spacing.y;
     ui.label(
         RichText::new(ui_text(ids::LIVE_TV_HEADING_CHANNELS))
             .strong()
             .size(18.0),
     );
-    egui::ScrollArea::vertical()
-        .id_salt("live_tv_channel_list")
-        .show_rows(ui, ROW_HEIGHT, channels.len(), |ui, row_range| {
-            for row in row_range {
-                if let Some(channel) = channels.get(row) {
-                    channel_row(ui, channel, input, &mut output);
-                }
+    let mut channel_scroll = egui::ScrollArea::vertical().id_salt("live_tv_channel_list");
+    if let Some(row) = scroll_to_row.filter(|row| *row < channels.len()) {
+        channel_scroll = channel_scroll.vertical_scroll_offset(row as f32 * row_pitch);
+    }
+    channel_scroll.show_rows(ui, ROW_HEIGHT, channels.len(), |ui, row_range| {
+        for row in row_range {
+            if let Some(channel) = channels.get(row) {
+                channel_row(
+                    ui,
+                    row,
+                    channel,
+                    input,
+                    resolved_focus_target.as_ref(),
+                    &mut output,
+                );
             }
-        });
+        }
+    });
 
     ui.add_space(16.0);
     if !input.guide_available {
@@ -102,8 +268,10 @@ pub fn show(ui: &mut egui::Ui, input: LiveTvInput<'_>) -> LiveTvResponse {
 
 fn channel_row(
     ui: &mut egui::Ui,
+    row: usize,
     channel: &LiveTvChannel,
     input: LiveTvInput<'_>,
+    focus_target: Option<&LiveTvFocusTarget>,
     output: &mut LiveTvResponse,
 ) {
     let id = channel.item.id.clone();
@@ -185,6 +353,15 @@ fn channel_row(
         response.widget_info(|| {
             egui::WidgetInfo::selected(Role::Button, true, selected, label.clone())
         });
+        output
+            .focus_responses
+            .push((row, LiveTvFocusControl::Channel, response.clone()));
+        if focus_target.is_some_and(|target| {
+            target.row == row && target.control == LiveTvFocusControl::Channel
+        }) {
+            output.focused_target = focus_target.cloned();
+            response.request_focus();
+        }
         if response.clicked() {
             output.actions.push(LiveTvAction::SelectChannel(id.clone()));
         }
@@ -200,6 +377,15 @@ fn channel_row(
             )
             .on_hover_text(&tune_label);
         tune.widget_info(|| egui::WidgetInfo::labeled(Role::Button, true, tune_label.clone()));
+        output
+            .focus_responses
+            .push((row, LiveTvFocusControl::Tune, tune.clone()));
+        if focus_target
+            .is_some_and(|target| target.row == row && target.control == LiveTvFocusControl::Tune)
+        {
+            output.focused_target = focus_target.cloned();
+            tune.request_focus();
+        }
         if tune.clicked() {
             output.actions.push(LiveTvAction::TuneChannel(id));
         }
@@ -217,6 +403,15 @@ fn channel_row(
             record.widget_info(|| {
                 egui::WidgetInfo::labeled(Role::Button, true, record_label.clone())
             });
+            output
+                .focus_responses
+                .push((row, LiveTvFocusControl::Record, record.clone()));
+            if focus_target.is_some_and(|target| {
+                target.row == row && target.control == LiveTvFocusControl::Record
+            }) {
+                output.focused_target = focus_target.cloned();
+                record.request_focus();
+            }
             if record.clicked() {
                 output
                     .actions
@@ -536,7 +731,11 @@ fn fixture_local_label(unix_seconds: i64, offset_seconds: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LiveTvAction, LiveTvInput, fixture_local_label, format_time, show};
+    use super::{
+        LiveTvAction, LiveTvFocusControl, LiveTvFocusDirection, LiveTvFocusTarget, LiveTvInput,
+        fixture_local_label, format_time, live_tv_focus_scroll_offset, navigate_live_tv_focus,
+        show,
+    };
     use egui::{FullOutput, Pos2, RawInput, Rect, Shape, TextureOptions, Vec2};
     use jellyfin_api::LiveTvChannel;
     use kattri_client_core::epg::{EPG_SLOT_SECONDS, EpgProgram, EpgWindow};
@@ -555,6 +754,163 @@ mod tests {
 
     fn window() -> EpgWindow {
         EpgWindow::new(0, 24 * 60 * 60).expect("valid 24-hour window")
+    }
+
+    fn focus_target(row: usize, control: LiveTvFocusControl) -> LiveTvFocusTarget {
+        let action = match control {
+            LiveTvFocusControl::Channel => LiveTvAction::SelectChannel(format!("channel-{row}")),
+            LiveTvFocusControl::Tune => LiveTvAction::TuneChannel(format!("channel-{row}")),
+            LiveTvFocusControl::Record => LiveTvAction::RecordProgram(format!("program-{row}")),
+        };
+        LiveTvFocusTarget {
+            row,
+            control,
+            action,
+        }
+    }
+
+    #[test]
+    fn focus_navigation_traverses_channel_tune_and_record_controls() {
+        let targets = [
+            focus_target(0, LiveTvFocusControl::Channel),
+            focus_target(0, LiveTvFocusControl::Tune),
+            focus_target(0, LiveTvFocusControl::Record),
+            focus_target(1, LiveTvFocusControl::Channel),
+            focus_target(1, LiveTvFocusControl::Tune),
+        ];
+        assert_eq!(
+            targets[2].action,
+            LiveTvAction::RecordProgram("program-0".into())
+        );
+        let focus = |target, direction| navigate_live_tv_focus(&targets, Some(target), direction);
+        assert_eq!(
+            focus(&targets[0], LiveTvFocusDirection::Right),
+            Some(targets[1].clone())
+        );
+        assert_eq!(
+            focus(&targets[1], LiveTvFocusDirection::Right),
+            Some(targets[2].clone())
+        );
+        assert_eq!(
+            focus(&targets[2], LiveTvFocusDirection::Right),
+            Some(targets[3].clone())
+        );
+        assert_eq!(
+            focus(&targets[3], LiveTvFocusDirection::Down),
+            Some(targets[3].clone())
+        );
+        assert_eq!(
+            focus(&targets[4], LiveTvFocusDirection::Up),
+            Some(targets[1].clone())
+        );
+        assert_eq!(
+            focus(&targets[2], LiveTvFocusDirection::Left),
+            Some(targets[1].clone())
+        );
+    }
+
+    #[test]
+    fn focus_navigation_clamps_edges_and_initializes_directionally() {
+        let targets = [
+            focus_target(0, LiveTvFocusControl::Channel),
+            focus_target(0, LiveTvFocusControl::Tune),
+            focus_target(1, LiveTvFocusControl::Channel),
+        ];
+        assert_eq!(
+            navigate_live_tv_focus(&targets, Some(&targets[0]), LiveTvFocusDirection::Left),
+            Some(targets[0].clone())
+        );
+        assert_eq!(
+            navigate_live_tv_focus(&targets, Some(&targets[2]), LiveTvFocusDirection::Down),
+            Some(targets[2].clone())
+        );
+        assert_eq!(
+            navigate_live_tv_focus(&targets, None, LiveTvFocusDirection::Right),
+            Some(targets[0].clone())
+        );
+        assert_eq!(
+            navigate_live_tv_focus(&targets, None, LiveTvFocusDirection::Left),
+            Some(targets[2].clone())
+        );
+        assert_eq!(
+            navigate_live_tv_focus(&[], None, LiveTvFocusDirection::Down),
+            None
+        );
+    }
+
+    #[test]
+    fn focus_target_for_offscreen_row_has_scroll_offset_without_widget_construction() {
+        let target = focus_target(99, LiveTvFocusControl::Tune);
+        assert_eq!(live_tv_focus_scroll_offset(&target, 8.0), 99.0 * 60.0);
+    }
+
+    #[test]
+    fn focus_navigation_resolves_reordered_channel_by_identity_not_old_row() {
+        let targets = [
+            LiveTvFocusTarget {
+                row: 0,
+                control: LiveTvFocusControl::Channel,
+                action: LiveTvAction::SelectChannel("channel-a".into()),
+            },
+            LiveTvFocusTarget {
+                row: 0,
+                control: LiveTvFocusControl::Tune,
+                action: LiveTvAction::TuneChannel("channel-a".into()),
+            },
+            LiveTvFocusTarget {
+                row: 1,
+                control: LiveTvFocusControl::Channel,
+                action: LiveTvAction::SelectChannel("channel-b".into()),
+            },
+            LiveTvFocusTarget {
+                row: 1,
+                control: LiveTvFocusControl::Tune,
+                action: LiveTvAction::TuneChannel("channel-b".into()),
+            },
+        ];
+        let old_focus = LiveTvFocusTarget {
+            row: 0,
+            control: LiveTvFocusControl::Channel,
+            action: LiveTvAction::SelectChannel("channel-b".into()),
+        };
+
+        assert_eq!(
+            navigate_live_tv_focus(&targets, Some(&old_focus), LiveTvFocusDirection::Right),
+            Some(targets[3].clone())
+        );
+    }
+
+    #[test]
+    fn stale_record_focus_does_not_alias_a_different_rows_record_control() {
+        let targets = [
+            focus_target(0, LiveTvFocusControl::Channel),
+            focus_target(0, LiveTvFocusControl::Tune),
+            LiveTvFocusTarget {
+                row: 1,
+                control: LiveTvFocusControl::Channel,
+                action: LiveTvAction::SelectChannel("other-channel".into()),
+            },
+            LiveTvFocusTarget {
+                row: 1,
+                control: LiveTvFocusControl::Tune,
+                action: LiveTvAction::TuneChannel("other-channel".into()),
+            },
+            LiveTvFocusTarget {
+                row: 1,
+                control: LiveTvFocusControl::Record,
+                action: LiveTvAction::RecordProgram("other-program".into()),
+            },
+        ];
+        let stale_record = LiveTvFocusTarget {
+            row: 0,
+            control: LiveTvFocusControl::Record,
+            action: LiveTvAction::RecordProgram("removed-program".into()),
+        };
+
+        assert_eq!(
+            navigate_live_tv_focus(&targets, Some(&stale_record), LiveTvFocusDirection::Right),
+            Some(targets[0].clone())
+        );
     }
 
     fn frame(
@@ -635,13 +991,20 @@ mod tests {
     }
 
     #[test]
-    fn channel_buttons_return_select_and_tune_intents_without_side_effects() {
-        let channels = [channel("abc", "News", Some("7"))];
+    fn show_resolves_focus_by_channel_identity_and_requests_actual_widget_focus() {
+        let channels = [
+            channel("channel-a", "Alpha", Some("1")),
+            channel("channel-b", "Beta", Some("2")),
+        ];
         let favorites = HashSet::new();
         let programs = [];
         let context = egui::Context::default();
-        // The first channel row follows the heading and the Channels section label.
-        let (mut initial, _) = frame(
+        let stale_row_focus = LiveTvFocusTarget {
+            row: 0,
+            control: LiveTvFocusControl::Tune,
+            action: LiveTvAction::TuneChannel("channel-b".into()),
+        };
+        let (_, response) = frame(
             &context,
             LiveTvInput {
                 channels: &channels,
@@ -653,8 +1016,133 @@ mod tests {
                 window: window(),
                 now_unix: 0,
                 selected_channel_id: None,
+                scroll_to_row: Some(0),
+                focus_target: Some(&stale_row_focus),
             },
             None,
+        );
+
+        assert_eq!(
+            response.focused_target.as_ref().map(|target| target.row),
+            Some(1)
+        );
+        assert_eq!(
+            response
+                .focused_target
+                .as_ref()
+                .map(|target| &target.action),
+            Some(&LiveTvAction::TuneChannel("channel-b".into()))
+        );
+        assert!(
+            response
+                .focus_responses
+                .iter()
+                .find(|(row, control, _)| *row == 1 && *control == LiveTvFocusControl::Tune)
+                .is_some_and(|(_, _, response)| response.has_focus())
+        );
+    }
+
+    #[test]
+    fn show_scrolls_offscreen_focus_target_into_constructed_rows() {
+        let channels = (0..12)
+            .map(|index| {
+                channel(
+                    &format!("channel-{index}"),
+                    "Channel",
+                    Some(&index.to_string()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let favorites = HashSet::new();
+        let programs = [];
+        let context = egui::Context::default();
+        let target = LiveTvFocusTarget {
+            row: 10,
+            control: LiveTvFocusControl::Tune,
+            action: LiveTvAction::TuneChannel("channel-10".into()),
+        };
+        let mut response = super::LiveTvResponse::default();
+        let mut output = context.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 240.0))),
+                ..Default::default()
+            },
+            |ui| {
+                response = show(
+                    ui,
+                    LiveTvInput {
+                        channels: &channels,
+                        channel_logos: &std::collections::HashMap::new(),
+                        favorite_channel_ids: &favorites,
+                        endpoint_available: true,
+                        guide_available: false,
+                        programs: &programs,
+                        window: window(),
+                        now_unix: 0,
+                        selected_channel_id: None,
+                        scroll_to_row: Some(target.row),
+                        focus_target: Some(&target),
+                    },
+                );
+            },
+        );
+        output.textures_delta.clear();
+
+        assert_eq!(response.focused_target, Some(target));
+        assert!(
+            response
+                .focus_responses
+                .iter()
+                .any(|(row, control, widget)| *row == 10
+                    && *control == LiveTvFocusControl::Tune
+                    && widget.has_focus())
+        );
+    }
+
+    #[test]
+    fn channel_buttons_return_select_and_tune_intents_without_side_effects() {
+        let channels = [channel("abc", "News", Some("7"))];
+        let favorites = HashSet::new();
+        let programs = [];
+        let context = egui::Context::default();
+        // The first channel row follows the heading and the Channels section label.
+        let (mut initial, focus_response) = frame(
+            &context,
+            LiveTvInput {
+                channels: &channels,
+                channel_logos: &std::collections::HashMap::new(),
+                favorite_channel_ids: &favorites,
+                endpoint_available: true,
+                guide_available: false,
+                programs: &programs,
+                window: window(),
+                now_unix: 0,
+                selected_channel_id: None,
+                scroll_to_row: None,
+                focus_target: None,
+            },
+            None,
+        );
+        assert_eq!(focus_response.focus_targets.len(), 2);
+        assert_eq!(focus_response.focus_responses.len(), 2);
+        assert_eq!(focus_response.focus_responses[0].0, 0);
+        assert_eq!(
+            focus_response.focus_responses[0].1,
+            LiveTvFocusControl::Channel
+        );
+        assert_eq!(
+            focus_response.focus_responses[1].1,
+            LiveTvFocusControl::Tune
+        );
+        assert_eq!(focus_response.focused_target, None);
+        assert_eq!(focus_response.focus_targets[0].row, 0);
+        assert_eq!(
+            focus_response.focus_targets[0].control,
+            LiveTvFocusControl::Channel
+        );
+        assert_eq!(
+            focus_response.focus_targets[1].control,
+            LiveTvFocusControl::Tune
         );
         let select_position = text_center(&initial, "7  News");
         initial.textures_delta.clear();
@@ -670,6 +1158,8 @@ mod tests {
                 window: window(),
                 now_unix: 0,
                 selected_channel_id: None,
+                scroll_to_row: None,
+                focus_target: None,
             },
             Some(select_position),
         );
@@ -692,6 +1182,8 @@ mod tests {
                 window: window(),
                 now_unix: 0,
                 selected_channel_id: None,
+                scroll_to_row: None,
+                focus_target: None,
             },
             None,
         );
@@ -709,6 +1201,8 @@ mod tests {
                 window: window(),
                 now_unix: 0,
                 selected_channel_id: None,
+                scroll_to_row: None,
+                focus_target: None,
             },
             Some(tune_position),
         );
@@ -735,6 +1229,8 @@ mod tests {
                     window: window(),
                     now_unix: 0,
                     selected_channel_id: None,
+                    scroll_to_row: None,
+                    focus_target: None,
                 },
                 None,
             );
@@ -767,6 +1263,8 @@ mod tests {
                 window: window(),
                 now_unix: 60,
                 selected_channel_id: None,
+                scroll_to_row: None,
+                focus_target: None,
             },
             None,
         );
@@ -877,6 +1375,8 @@ mod tests {
                 window: window(),
                 now_unix: 0,
                 selected_channel_id: None,
+                scroll_to_row: None,
+                focus_target: None,
             },
             None,
         );
@@ -907,6 +1407,8 @@ mod tests {
                 window: window(),
                 now_unix: 0,
                 selected_channel_id: None,
+                scroll_to_row: None,
+                focus_target: None,
             },
             None,
         );

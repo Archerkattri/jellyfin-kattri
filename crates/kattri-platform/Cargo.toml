@@ -11,6 +11,9 @@ keyring-core = "=1.0.1"
 thiserror = "2"
 zeroize = "1"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = "=1.1.0"
 

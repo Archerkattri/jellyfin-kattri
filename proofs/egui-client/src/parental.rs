@@ -91,34 +91,6 @@ pub(crate) fn running_profile_ceiling(
     )
 }
 
-/// What the PIN gate does after an unlock attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GateStep {
-    /// The PIN matched and the lock state was written. The switch may go ahead.
-    Switch,
-    /// Stay on the picker and show this message. It never contains the PIN.
-    Stay(String),
-}
-
-/// Decides the gate from the unlock outcome and the result of writing the attempt file. A switch
-/// needs both a matching PIN and a saved lock state. Otherwise a failed write would let guesses
-/// go without the delay.
-pub(crate) fn gate_step(outcome: Result<Unlock, PinError>, saved: Result<(), String>) -> GateStep {
-    match (outcome, saved) {
-        (Ok(Unlock::Unlocked), Ok(())) => GateStep::Switch,
-        (Ok(Unlock::Unlocked), Err(error)) => GateStep::Stay(format!(
-            "The PIN matched, but the lock state was not written: {error}"
-        )),
-        (outcome, saved) => {
-            let mut message = unlock_message(outcome);
-            if let Err(error) = saved {
-                message.push_str(&format!(" The lock state was not written: {error}"));
-            }
-            GateStep::Stay(message)
-        }
-    }
-}
-
 /// The message for an unlock outcome. It never includes the PIN.
 pub(crate) fn unlock_message(outcome: Result<Unlock, PinError>) -> String {
     match outcome {
@@ -226,48 +198,6 @@ mod tests {
             .collect();
         assert_eq!(shown, ["kids", "pg13"]);
         assert_eq!(shown_items(&page, None).len(), page.len());
-    }
-
-    #[test]
-    fn a_correct_pin_with_a_saved_state_lets_the_switch_go_ahead() {
-        assert_eq!(gate_step(Ok(Unlock::Unlocked), Ok(())), GateStep::Switch);
-    }
-
-    #[test]
-    fn a_failed_write_after_a_correct_pin_still_refuses_the_switch() {
-        let step = gate_step(Ok(Unlock::Unlocked), Err("disk full".to_owned()));
-        assert_eq!(
-            step,
-            GateStep::Stay(
-                "The PIN matched, but the lock state was not written: disk full".to_owned()
-            )
-        );
-    }
-
-    #[test]
-    fn wrong_or_waiting_pins_never_allow_the_switch() {
-        let wrong = gate_step(
-            Ok(Unlock::WrongPin {
-                failures: 1,
-                retry_after_secs: 0,
-            }),
-            Ok(()),
-        );
-        assert_eq!(wrong, GateStep::Stay("Wrong PIN.".to_owned()));
-        let waiting = gate_step(
-            Ok(Unlock::LockedOut {
-                retry_after_secs: 4,
-            }),
-            Ok(()),
-        );
-        assert_eq!(
-            waiting,
-            GateStep::Stay("Wait 4 seconds before the next attempt.".to_owned())
-        );
-        assert_eq!(
-            gate_step(Ok(Unlock::NotProtected), Ok(())),
-            GateStep::Stay("No PIN is set.".to_owned())
-        );
     }
 
     #[test]

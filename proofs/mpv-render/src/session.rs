@@ -22,9 +22,7 @@ use crate::{
         MPV_FORMAT_NODE_ARRAY, MPV_FORMAT_NODE_MAP, MPV_FORMAT_NONE, MPV_FORMAT_STRING,
         MpvEventEndFile, MpvEventProperty, MpvEventStartFile, MpvHandle, MpvNode,
     },
-    playback_policy::{
-        AB_LOOP_CYCLE_ARGUMENTS, ChapterStep, chapter_step_arguments, frame_step_command,
-    },
+    playback_policy::{ChapterStep, chapter_step_arguments, frame_step_command},
     render::{CallbackGate, wakeup_callback},
     track::{
         MAX_TRACK_COUNT, RawTrack, TrackInventory, TrackInventoryError, TrackKind, TrackSelection,
@@ -709,11 +707,6 @@ impl MpvSession {
     /// libmpv; the command reply reports whether the jump happened.
     pub fn step_chapter(&self, step: ChapterStep) -> Result<CommandId, MpvError> {
         self.command(&chapter_step_arguments(step))
-    }
-
-    /// Queue one press of mpv's A-B loop cycle, which sets A, then B, then clears both.
-    pub fn cycle_ab_loop(&self) -> Result<CommandId, MpvError> {
-        self.command(&AB_LOOP_CYCLE_ARGUMENTS)
     }
 
     /// Request a fresh `time-pos` sample from libmpv. The request is queued on

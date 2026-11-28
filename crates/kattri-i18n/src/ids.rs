@@ -54,7 +54,6 @@ pub const ACCESS_BROWSE_PLAYED_FILTER: &str = "access.browse.played_filter";
 pub const ACCESS_BROWSE_CLEAR_FILTERS: &str = "access.browse.clear_filters";
 pub const ACCESS_BROWSE_NEXT_PAGE: &str = "access.browse.next_page";
 pub const ACCESS_BROWSE_RETRY: &str = "access.browse.retry";
-pub const ACCESS_NAV_HIGH_CONTRAST: &str = "access.nav.high_contrast";
 pub const ACCESS_NAV_DISCONNECT: &str = "access.nav.disconnect";
 pub const PARENTAL_PIN_LIMITATION: &str = "parental.pin.limitation";
 pub const SHELL_NAV_HOME: &str = "shell.nav.home";
@@ -65,6 +64,34 @@ pub const CONNECT_HINT_SERVER_ADDRESS: &str = "connect.hint.server_address";
 pub const SHELL_SERVER_VERSION_UNKNOWN: &str = "shell.server.version_unknown";
 pub const CONNECT_BUTTON_CHECK_SERVER: &str = "connect.button.check_server";
 pub const CONNECT_BUTTON_CANCEL_QUICK_CONNECT: &str = "connect.button.cancel_quick_connect";
+pub const QUICK_CONNECT_APPROVAL_TITLE: &str = "quick_connect.approval.title";
+pub const QUICK_CONNECT_APPROVAL_HELP: &str = "quick_connect.approval.help";
+pub const QUICK_CONNECT_APPROVAL_CODE: &str = "quick_connect.approval.code";
+pub const QUICK_CONNECT_APPROVAL_SUBMIT: &str = "quick_connect.approval.submit";
+pub const QUICK_CONNECT_APPROVAL_SUCCESS: &str = "quick_connect.approval.success";
+pub const METADATA_MANAGER: &str = "parity.metadata_manager";
+pub const METADATA_FIND: &str = "parity.metadata_find";
+pub const METADATA_RETRY: &str = "parity.metadata_retry";
+pub const METADATA_EMPTY: &str = "parity.metadata_empty";
+pub const METADATA_PREVIOUS: &str = "parity.metadata_previous";
+pub const METADATA_NEXT: &str = "parity.metadata_next";
+pub const ACCOUNT_TITLE: &str = "parity.account_title";
+pub const ACCOUNT_HELP: &str = "parity.account_help";
+pub const ACCOUNT_SAVED_RELOAD_FAILED: &str = "parity.account_saved_reload_failed";
+pub const ACCOUNT_SAVED: &str = "parity.account_saved";
+pub const ACCOUNT_UNAVAILABLE: &str = "parity.account_unavailable";
+pub const ACCOUNT_UNSET: &str = "parity.account_unset";
+pub const ACCOUNT_AUDIO: &str = "parity.account_audio";
+pub const ACCOUNT_SUBTITLE: &str = "parity.account_subtitle";
+pub const ACCOUNT_MODE: &str = "parity.account_mode";
+pub const ACCOUNT_DEFAULT_AUDIO: &str = "parity.account_default_audio";
+pub const ACCOUNT_HIDE_PLAYED: &str = "parity.account_hide_played";
+pub const ACCOUNT_MISSING: &str = "parity.account_missing";
+pub const ACCOUNT_SAVE_HELP: &str = "parity.account_save_help";
+pub const ACCOUNT_RELOAD: &str = "parity.account_reload";
+/// Save button of the server account preferences form.
+pub const ACCOUNT_SAVE: &str = "parity.account_save";
+pub const QUICK_CONNECT_APPROVAL_FAILURE: &str = "quick_connect.approval.failure";
 pub const CONNECT_BUTTON_USE_QUICK_CONNECT: &str = "connect.button.use_quick_connect";
 pub const CONNECT_STATUS_CHECKING_QUICK_CONNECT: &str = "connect.status.checking_quick_connect";
 pub const LIVE_TV_STATUS_LOADING_CHANNELS: &str = "live_tv.status.loading_channels";
@@ -73,6 +100,10 @@ pub const LIVE_TV_BUTTON_RETRY_GUIDE: &str = "live_tv.button.retry_guide";
 pub const LIVE_TV_BUTTON_RETRY_CHANNEL: &str = "live_tv.button.retry_channel";
 pub const LIVE_TV_STATUS_LOADING_MORE: &str = "live_tv.status.loading_more";
 pub const LIVE_TV_BUTTON_LOAD_MORE: &str = "live_tv.button.load_more";
+pub const LIVE_TV_SEARCH_STATUS_ERROR: &str = "live_tv.search.status.error";
+pub const LIVE_TV_SEARCH_BUTTON_RETRY: &str = "live_tv.search.button.retry";
+pub const LIVE_TV_SEARCH_BUTTON_NEXT_PAGE: &str = "live_tv.search.button.next_page";
+pub const LIVE_TV_STATUS_CHANNELS_ERROR_RETRY: &str = "live_tv.status.channels_error_retry";
 pub const PHOTOS_TITLE_DEFAULT: &str = "photos.title.default";
 pub const CONNECT_EYEBROW: &str = "connect.eyebrow";
 pub const BROWSE_STATUS_SEARCHING: &str = "browse.status.searching";
@@ -108,6 +139,13 @@ pub const PLAYLISTS_ERROR_NOT_FOUND: &str = "playlists.error.not_found";
 pub const PLAYLISTS_ERROR_FORBIDDEN: &str = "playlists.error.forbidden";
 pub const PLAYLISTS_STATUS_LOADING: &str = "playlists.status.loading";
 pub const PLAYLISTS_STATUS_SAVING: &str = "playlists.status.saving";
+pub const LOCAL_PLAYLIST_TITLE: &str = "local_playlist.title";
+pub const LOCAL_PLAYLIST_HELP: &str = "local_playlist.help";
+pub const LOCAL_PLAYLIST_EMPTY: &str = "local_playlist.empty";
+pub const LOCAL_PLAYLIST_MOVE_UP: &str = "local_playlist.move_up";
+pub const LOCAL_PLAYLIST_MOVE_DOWN: &str = "local_playlist.move_down";
+pub const LOCAL_PLAYLIST_REMOVE: &str = "local_playlist.remove";
+pub const LOCAL_PLAYLIST_SAVE_FAILED: &str = "local_playlist.save_failed";
 pub const BROWSE_COLLECTION_EMPTY_TITLE: &str = "browse.collection.empty_title";
 pub const BROWSE_COLLECTION_EMPTY_HINT: &str = "browse.collection.empty_hint";
 pub const SHELL_COUNT_ITEM: &str = "shell.count.item";
@@ -164,9 +202,6 @@ pub const PLAYBACK_ERROR_NO_STREAM: &str = "playback.error.no_stream";
 pub const PLAYBACK_ERROR_RATE_LIMITED: &str = "playback.error.rate_limited";
 pub const PLAYBACK_ERROR_UNKNOWN: &str = "playback.error.unknown";
 pub const PLAYBACK_ERROR_NO_SOURCE: &str = "playback.error.no_source";
-pub const PLAYBACK_METHOD_DIRECT_PLAY: &str = "playback.method.direct_play";
-pub const PLAYBACK_METHOD_DIRECT_STREAM: &str = "playback.method.direct_stream";
-pub const PLAYBACK_METHOD_TRANSCODE: &str = "playback.method.transcode";
 pub const PLAYBACK_BUTTON_START_OVER: &str = "playback.button.start_over";
 pub const PLAYBACK_STATUS_PREPARING: &str = "playback.status.preparing";
 pub const DETAIL_EMPTY_DETAILS: &str = "detail.empty.details";
@@ -196,7 +231,6 @@ pub const SERIES_ERROR_LOAD_SEASONS: &str = "series.error.load_seasons";
 pub const SERIES_ERROR_LOAD_SEASON: &str = "series.error.load_season";
 pub const DETAIL_STATE_PLAYED_COUNT: &str = "detail.state.played_count";
 pub const PLAYBACK_ERROR_NEGOTIATION: &str = "playback.error.negotiation";
-pub const PLAYBACK_STATUS_READY_VIA: &str = "playback.status.ready_via";
 pub const PLAYBACK_BUTTON_RESUME_AT: &str = "playback.button.resume_at";
 pub const PLAYBACK_ERROR_SERVER_START: &str = "playback.error.server_start";
 pub const PERSON_ERROR_LOAD: &str = "person.error.load";
@@ -292,30 +326,12 @@ pub const SEARCH_CATEGORY_PLAYLISTS: &str = "search.category.playlists";
 pub const SEARCH_CATEGORY_PHOTOS: &str = "search.category.photos";
 pub const SEARCH_CATEGORY_PEOPLE: &str = "search.category.people";
 pub const SEARCH_CATEGORY_CHANNELS: &str = "search.category.channels";
-pub const PROFILE_HEADING_PROFILES: &str = "profile.heading.profiles";
-pub const PROFILE_BUTTON_SWITCH: &str = "profile.button.switch";
-pub const PROFILE_LABEL_NEW: &str = "profile.label.new";
-pub const PROFILE_BUTTON_CREATE: &str = "profile.button.create";
-pub const PROFILE_LABEL_PIN: &str = "profile.label.pin";
-pub const PROFILE_BUTTON_UNLOCK: &str = "profile.button.unlock";
-pub const PROFILE_BUTTON_CANCEL: &str = "profile.button.cancel";
 pub const HOME_STATUS_LOADING_TITLE: &str = "home.status.loading_title";
 pub const HOME_BUTTON_RETRY_TITLE: &str = "home.button.retry_title";
 pub const HOME_ERROR_LOAD_TITLE: &str = "home.error.load_title";
 pub const SEARCH_BUTTON_SHOW_ALL: &str = "search.button.show_all";
-pub const PROFILE_ERROR_DUPLICATE: &str = "profile.error.duplicate";
 pub const PROFILE_NOTICE_MISSING: &str = "profile.notice.missing";
 pub const PROFILE_NOTICE_NO_FOLDER: &str = "profile.notice.no_folder";
-pub const PROFILE_ERROR_SWITCH: &str = "profile.error.switch";
-pub const PROFILE_ERROR_RELAUNCH: &str = "profile.error.relaunch";
-pub const PROFILE_ERROR_READ: &str = "profile.error.read";
-pub const PROFILE_ERROR_PIN_DAMAGED: &str = "profile.error.pin_damaged";
-pub const PROFILE_ERROR_NO_FOLDER: &str = "profile.error.no_folder";
-pub const PROFILE_ERROR_LOCK_STATE: &str = "profile.error.lock_state";
-pub const PROFILE_STATE_ACTIVE: &str = "profile.state.active";
-pub const PROFILE_STATE_DEFAULT: &str = "profile.state.default";
-pub const PROFILE_BUTTON_SWITCH_TO: &str = "profile.button.switch_to";
-pub const PROFILE_PIN_PROMPT: &str = "profile.pin.prompt";
 pub const LIVE_TV_HEADING_TITLE: &str = "live_tv.heading.title";
 pub const LIVE_TV_EMPTY_NOT_SET_UP: &str = "live_tv.empty.not_set_up";
 pub const LIVE_TV_HEADING_CHANNELS: &str = "live_tv.heading.channels";
@@ -425,8 +441,20 @@ pub const PLAYLISTS_A11Y_MOVE_DOWN: &str = "playlists.a11y.move_down";
 pub const PLAYLISTS_A11Y_REMOVE: &str = "playlists.a11y.remove";
 pub const PLAYLISTS_LIMIT_OMITTED: &str = "playlists.limit.omitted";
 pub const UPDATE_BUTTON_ROLL_BACK: &str = "update.button.roll_back";
+pub const RELEASE_CHECK_BUTTON: &str = "release_check.button.check";
+pub const RELEASE_CHECK_OFFICIAL_LINK: &str = "release_check.link.official";
+pub const RELEASE_CHECK_HELP: &str = "release_check.help.informational";
+pub const RELEASE_CHECK_CURRENT: &str = "release_check.status.current";
+pub const RELEASE_CHECK_NEWER: &str = "release_check.status.newer";
+pub const RELEASE_CHECK_ERROR: &str = "release_check.status.error";
+pub const RELEASE_CHECK_CHECKING: &str = "release_check.status.checking";
+pub const RELEASE_CHECK_ERROR_NETWORK: &str = "release_check.error.network";
+pub const RELEASE_CHECK_ERROR_HTTP: &str = "release_check.error.http";
+pub const RELEASE_CHECK_ERROR_TOO_LARGE: &str = "release_check.error.too_large";
+pub const RELEASE_CHECK_ERROR_INVALID: &str = "release_check.error.invalid";
 pub const UPDATE_HEADING_TITLE: &str = "update.heading.title";
 pub const UPDATE_HELP_NO_DOWNLOAD: &str = "update.help.no_download";
+pub const UPDATE_INSTALL_UNAVAILABLE: &str = "update.install.unavailable";
 pub const UPDATE_FIELD_ENVELOPE: &str = "update.field.envelope";
 pub const UPDATE_FIELD_STAGED: &str = "update.field.staged";
 pub const UPDATE_FIELD_STORE_DIR: &str = "update.field.store_dir";
@@ -466,20 +494,19 @@ pub const SETTINGS_ABOUT_APP_VERSION: &str = "settings.about.app_version";
 pub const SETTINGS_ABOUT_BUILD_TARGET: &str = "settings.about.build_target";
 pub const SETTINGS_ABOUT_LIBMPV: &str = "settings.about.libmpv";
 pub const SETTINGS_ABOUT_LIBMPV_NOT_LOADED: &str = "settings.about.libmpv_not_loaded";
+pub const SETTINGS_ABOUT_FFMPEG: &str = "settings.about.ffmpeg";
 pub const SETTINGS_ABOUT_GPU: &str = "settings.about.gpu";
 pub const SETTINGS_VALUE_NOT_AVAILABLE: &str = "settings.value.not_available";
 pub const SETTINGS_ABOUT_DEVICE_ID_FILE: &str = "settings.about.device_id_file";
 pub const SETTINGS_ABOUT_LOG_FOLDER: &str = "settings.about.log_folder";
 pub const SETTINGS_VALUE_ADDRESS_UNAVAILABLE: &str = "settings.value.address_unavailable";
 pub const SETTINGS_HEADING_TITLE: &str = "settings.heading.title";
-pub const SETTINGS_BUTTON_SWITCH_PROFILE: &str = "settings.button.switch_profile";
 pub const SETTINGS_HELP_CHOOSE_CATEGORY: &str = "settings.help.choose_category";
 pub const SETTINGS_BUTTON_BACK_TO_PLAYBACK: &str = "settings.button.back_to_playback";
 pub const SETTINGS_BUTTON_BACK_TO_SETTINGS: &str = "settings.button.back_to_settings";
 pub const SETTINGS_MEMORY_HEADING: &str = "settings.memory.heading";
 pub const SETTINGS_VALUE_UNKNOWN: &str = "settings.value.unknown";
 pub const SETTINGS_HEADING_DISPLAY: &str = "settings.heading.display";
-pub const SETTINGS_GENERAL_HIGH_CONTRAST: &str = "settings.general.high_contrast";
 pub const SETTINGS_GENERAL_REDUCE_MOTION: &str = "settings.general.reduce_motion";
 pub const SETTINGS_GENERAL_SCREENSAVER: &str = "settings.general.screensaver";
 pub const SETTINGS_GENERAL_SCREENSAVER_UNIT: &str = "settings.general.screensaver.unit";
@@ -525,9 +552,6 @@ pub const SETTINGS_DIAGNOSTICS_LOG_WARN: &str = "settings.diagnostics.log_warn";
 pub const SETTINGS_DIAGNOSTICS_LOG_INFO: &str = "settings.diagnostics.log_info";
 pub const SETTINGS_DIAGNOSTICS_LOG_DEBUG: &str = "settings.diagnostics.log_debug";
 pub const SETTINGS_DIAGNOSTICS_LOG_HELP: &str = "settings.diagnostics.log_help";
-pub const SETTINGS_HEADING_ADMIN: &str = "settings.heading.admin";
-pub const SETTINGS_ADMIN_SHOW_DASHBOARD: &str = "settings.admin.show_dashboard";
-pub const SETTINGS_ADMIN_HELP: &str = "settings.admin.help";
 pub const SETTINGS_BUTTON_SIGN_OUT: &str = "settings.button.sign_out";
 pub const SETTINGS_VALUE_NOT_SIGNED_IN: &str = "settings.value.not_signed_in";
 pub const SETTINGS_BUTTON_RETURN_TO_SIGN_IN: &str = "settings.button.return_to_sign_in";
@@ -560,7 +584,6 @@ pub const PARENTAL_RATING_HIGHEST: &str = "parental.rating.highest";
 pub const PARENTAL_RATING_HELP: &str = "parental.rating.help";
 pub const PARENTAL_ERROR_FOLDER: &str = "parental.error.folder";
 pub const SETTINGS_SCOPE_TEXT: &str = "settings.scope.text";
-pub const SETTINGS_LABEL_ACTIVE_PROFILE: &str = "settings.label.active_profile";
 pub const SETTINGS_LABEL_ADDRESS: &str = "settings.label.address";
 pub const SETTINGS_SERVER_TLS_HEADING: &str = "settings.server.tls_heading";
 pub const SETTINGS_SERVER_CUSTOM_CA: &str = "settings.server.custom_ca";
@@ -748,7 +771,6 @@ pub const SETTINGS_MEDIA_VIDEO_TRANSCODE_ALL: &str = "settings.media.video.trans
 pub const SETTINGS_MEDIA_UNIT_MS: &str = "settings.media.unit.ms";
 pub const APP_ERROR_DOWNLOAD_QUEUE: &str = "app.error.download_queue";
 pub const APP_PLAYBACK_PROGRESS_STOPPED: &str = "app.playback.progress_stopped";
-pub const APP_ERROR_SETTINGS_NOT_SAVED: &str = "app.error.settings_not_saved";
 pub const MUSIC_NOUN_TRACK: &str = "music.noun.track";
 pub const MUSIC_NOUN_TRACKS: &str = "music.noun.tracks";
 pub const MUSIC_VERB_WAS: &str = "music.verb.was";
@@ -786,7 +808,6 @@ pub const MUSIC_QUEUE_INVALID_MOVED: &str = "music.queue.invalid_moved";
 pub const MUSIC_QUEUE_READ_FAILED: &str = "music.queue.read_failed";
 pub const PROFILE_NOTICE_TITLE: &str = "profile.notice.title";
 pub const APP_BUTTON_OK: &str = "app.button.ok";
-pub const PROFILE_ERROR_UNAVAILABLE: &str = "profile.error.unavailable";
 pub const CONNECT_ERROR_SERVER_REQUIRED: &str = "connect.error.server_required";
 pub const CONNECT_ERROR_USERNAME_REQUIRED: &str = "connect.error.username_required";
 pub const APP_ERROR_QUEUE_NETWORK: &str = "app.error.queue_network";
@@ -813,7 +834,6 @@ pub const PLAYLISTS_STATUS_PREPARING: &str = "playlists.status.preparing";
 pub const DOWNLOADS_ERROR_NO_PROFILE: &str = "downloads.error.no_profile";
 pub const PLAYBACK_ERROR_NO_COMPATIBLE_SOURCE: &str = "playback.error.no_compatible_source";
 pub const PLAYBACK_STATUS_PREPARING_LOCAL: &str = "playback.status.preparing_local";
-pub const PLAYBACK_STATUS_OPENING_LOCAL: &str = "playback.status.opening_local";
 pub const APP_ERROR_NETWORK_WORKER_UNAVAILABLE: &str = "app.error.network_worker_unavailable";
 pub const MUSIC_QUEUE_REFRESH_RECONNECT: &str = "music.queue.refresh_reconnect";
 pub const PLAYLISTS_NOTICE_CREATED: &str = "playlists.notice.created";
@@ -861,6 +881,7 @@ pub const BROWSE_ALPHABET_LETTER: &str = "browse.alphabet.letter";
 pub const ITEM_MENU_ADD_TO_QUEUE: &str = "item_menu.add_to_queue";
 pub const ITEM_MENU_PLAY_NEXT: &str = "item_menu.play_next";
 pub const ITEM_MENU_ADD_TO_PLAYLIST: &str = "item_menu.add_to_playlist";
+pub const ITEM_MENU_ADD_TO_LOCAL_PLAYLIST: &str = "item_menu.add_to_local_playlist";
 pub const ITEM_MENU_REFRESH_METADATA: &str = "item_menu.refresh_metadata";
 pub const ITEM_MENU_DELETE: &str = "item_menu.delete";
 pub const DETAIL_MORE_FROM_SEASON: &str = "detail.more_from_season";
@@ -1036,7 +1057,6 @@ pub const ALL: &[&str] = &[
     ACCESS_BROWSE_CLEAR_FILTERS,
     ACCESS_BROWSE_NEXT_PAGE,
     ACCESS_BROWSE_RETRY,
-    ACCESS_NAV_HIGH_CONTRAST,
     ACCESS_NAV_DISCONNECT,
     PARENTAL_PIN_LIMITATION,
     SHELL_NAV_HOME,
@@ -1047,6 +1067,33 @@ pub const ALL: &[&str] = &[
     SHELL_SERVER_VERSION_UNKNOWN,
     CONNECT_BUTTON_CHECK_SERVER,
     CONNECT_BUTTON_CANCEL_QUICK_CONNECT,
+    QUICK_CONNECT_APPROVAL_TITLE,
+    QUICK_CONNECT_APPROVAL_HELP,
+    QUICK_CONNECT_APPROVAL_CODE,
+    QUICK_CONNECT_APPROVAL_SUBMIT,
+    QUICK_CONNECT_APPROVAL_SUCCESS,
+    METADATA_MANAGER,
+    METADATA_FIND,
+    METADATA_RETRY,
+    METADATA_EMPTY,
+    METADATA_PREVIOUS,
+    METADATA_NEXT,
+    ACCOUNT_TITLE,
+    ACCOUNT_HELP,
+    ACCOUNT_SAVED_RELOAD_FAILED,
+    ACCOUNT_SAVED,
+    ACCOUNT_UNAVAILABLE,
+    ACCOUNT_UNSET,
+    ACCOUNT_AUDIO,
+    ACCOUNT_SUBTITLE,
+    ACCOUNT_MODE,
+    ACCOUNT_DEFAULT_AUDIO,
+    ACCOUNT_HIDE_PLAYED,
+    ACCOUNT_MISSING,
+    ACCOUNT_SAVE_HELP,
+    ACCOUNT_RELOAD,
+    ACCOUNT_SAVE,
+    QUICK_CONNECT_APPROVAL_FAILURE,
     CONNECT_BUTTON_USE_QUICK_CONNECT,
     CONNECT_STATUS_CHECKING_QUICK_CONNECT,
     LIVE_TV_STATUS_LOADING_CHANNELS,
@@ -1055,6 +1102,10 @@ pub const ALL: &[&str] = &[
     LIVE_TV_BUTTON_RETRY_CHANNEL,
     LIVE_TV_STATUS_LOADING_MORE,
     LIVE_TV_BUTTON_LOAD_MORE,
+    LIVE_TV_SEARCH_STATUS_ERROR,
+    LIVE_TV_SEARCH_BUTTON_RETRY,
+    LIVE_TV_SEARCH_BUTTON_NEXT_PAGE,
+    LIVE_TV_STATUS_CHANNELS_ERROR_RETRY,
     PHOTOS_TITLE_DEFAULT,
     CONNECT_EYEBROW,
     BROWSE_STATUS_SEARCHING,
@@ -1090,6 +1141,13 @@ pub const ALL: &[&str] = &[
     PLAYLISTS_ERROR_FORBIDDEN,
     PLAYLISTS_STATUS_LOADING,
     PLAYLISTS_STATUS_SAVING,
+    LOCAL_PLAYLIST_TITLE,
+    LOCAL_PLAYLIST_HELP,
+    LOCAL_PLAYLIST_EMPTY,
+    LOCAL_PLAYLIST_MOVE_UP,
+    LOCAL_PLAYLIST_MOVE_DOWN,
+    LOCAL_PLAYLIST_REMOVE,
+    LOCAL_PLAYLIST_SAVE_FAILED,
     BROWSE_COLLECTION_EMPTY_TITLE,
     BROWSE_COLLECTION_EMPTY_HINT,
     SHELL_COUNT_ITEM,
@@ -1153,6 +1211,7 @@ pub const ALL: &[&str] = &[
     ITEM_MENU_ADD_TO_QUEUE,
     ITEM_MENU_PLAY_NEXT,
     ITEM_MENU_ADD_TO_PLAYLIST,
+    ITEM_MENU_ADD_TO_LOCAL_PLAYLIST,
     ITEM_MENU_REFRESH_METADATA,
     ITEM_MENU_DELETE,
     DETAIL_MORE_FROM_SEASON,
@@ -1232,9 +1291,6 @@ pub const ALL: &[&str] = &[
     PLAYBACK_ERROR_RATE_LIMITED,
     PLAYBACK_ERROR_UNKNOWN,
     PLAYBACK_ERROR_NO_SOURCE,
-    PLAYBACK_METHOD_DIRECT_PLAY,
-    PLAYBACK_METHOD_DIRECT_STREAM,
-    PLAYBACK_METHOD_TRANSCODE,
     PLAYBACK_BUTTON_START_OVER,
     PLAYBACK_STATUS_PREPARING,
     DETAIL_EMPTY_DETAILS,
@@ -1263,7 +1319,6 @@ pub const ALL: &[&str] = &[
     SERIES_ERROR_LOAD_SEASON,
     DETAIL_STATE_PLAYED_COUNT,
     PLAYBACK_ERROR_NEGOTIATION,
-    PLAYBACK_STATUS_READY_VIA,
     PLAYBACK_BUTTON_RESUME_AT,
     PLAYBACK_ERROR_SERVER_START,
     PERSON_ERROR_LOAD,
@@ -1347,30 +1402,12 @@ pub const ALL: &[&str] = &[
     SEARCH_CATEGORY_PHOTOS,
     SEARCH_CATEGORY_PEOPLE,
     SEARCH_CATEGORY_CHANNELS,
-    PROFILE_HEADING_PROFILES,
-    PROFILE_BUTTON_SWITCH,
-    PROFILE_LABEL_NEW,
-    PROFILE_BUTTON_CREATE,
-    PROFILE_LABEL_PIN,
-    PROFILE_BUTTON_UNLOCK,
-    PROFILE_BUTTON_CANCEL,
     HOME_STATUS_LOADING_TITLE,
     HOME_BUTTON_RETRY_TITLE,
     HOME_ERROR_LOAD_TITLE,
     SEARCH_BUTTON_SHOW_ALL,
-    PROFILE_ERROR_DUPLICATE,
     PROFILE_NOTICE_MISSING,
     PROFILE_NOTICE_NO_FOLDER,
-    PROFILE_ERROR_SWITCH,
-    PROFILE_ERROR_RELAUNCH,
-    PROFILE_ERROR_READ,
-    PROFILE_ERROR_PIN_DAMAGED,
-    PROFILE_ERROR_NO_FOLDER,
-    PROFILE_ERROR_LOCK_STATE,
-    PROFILE_STATE_ACTIVE,
-    PROFILE_STATE_DEFAULT,
-    PROFILE_BUTTON_SWITCH_TO,
-    PROFILE_PIN_PROMPT,
     LIVE_TV_HEADING_TITLE,
     LIVE_TV_EMPTY_NOT_SET_UP,
     LIVE_TV_HEADING_CHANNELS,
@@ -1480,8 +1517,20 @@ pub const ALL: &[&str] = &[
     PLAYLISTS_A11Y_REMOVE,
     PLAYLISTS_LIMIT_OMITTED,
     UPDATE_BUTTON_ROLL_BACK,
+    RELEASE_CHECK_BUTTON,
+    RELEASE_CHECK_OFFICIAL_LINK,
+    RELEASE_CHECK_HELP,
+    RELEASE_CHECK_CURRENT,
+    RELEASE_CHECK_NEWER,
+    RELEASE_CHECK_ERROR,
+    RELEASE_CHECK_CHECKING,
+    RELEASE_CHECK_ERROR_NETWORK,
+    RELEASE_CHECK_ERROR_HTTP,
+    RELEASE_CHECK_ERROR_TOO_LARGE,
+    RELEASE_CHECK_ERROR_INVALID,
     UPDATE_HEADING_TITLE,
     UPDATE_HELP_NO_DOWNLOAD,
+    UPDATE_INSTALL_UNAVAILABLE,
     UPDATE_FIELD_ENVELOPE,
     UPDATE_FIELD_STAGED,
     UPDATE_FIELD_STORE_DIR,
@@ -1521,20 +1570,19 @@ pub const ALL: &[&str] = &[
     SETTINGS_ABOUT_BUILD_TARGET,
     SETTINGS_ABOUT_LIBMPV,
     SETTINGS_ABOUT_LIBMPV_NOT_LOADED,
+    SETTINGS_ABOUT_FFMPEG,
     SETTINGS_ABOUT_GPU,
     SETTINGS_VALUE_NOT_AVAILABLE,
     SETTINGS_ABOUT_DEVICE_ID_FILE,
     SETTINGS_ABOUT_LOG_FOLDER,
     SETTINGS_VALUE_ADDRESS_UNAVAILABLE,
     SETTINGS_HEADING_TITLE,
-    SETTINGS_BUTTON_SWITCH_PROFILE,
     SETTINGS_HELP_CHOOSE_CATEGORY,
     SETTINGS_BUTTON_BACK_TO_PLAYBACK,
     SETTINGS_BUTTON_BACK_TO_SETTINGS,
     SETTINGS_MEMORY_HEADING,
     SETTINGS_VALUE_UNKNOWN,
     SETTINGS_HEADING_DISPLAY,
-    SETTINGS_GENERAL_HIGH_CONTRAST,
     SETTINGS_GENERAL_REDUCE_MOTION,
     SETTINGS_GENERAL_SCREENSAVER,
     SETTINGS_GENERAL_SCREENSAVER_UNIT,
@@ -1578,9 +1626,6 @@ pub const ALL: &[&str] = &[
     SETTINGS_DIAGNOSTICS_LOG_INFO,
     SETTINGS_DIAGNOSTICS_LOG_DEBUG,
     SETTINGS_DIAGNOSTICS_LOG_HELP,
-    SETTINGS_HEADING_ADMIN,
-    SETTINGS_ADMIN_SHOW_DASHBOARD,
-    SETTINGS_ADMIN_HELP,
     SETTINGS_BUTTON_SIGN_OUT,
     SETTINGS_VALUE_NOT_SIGNED_IN,
     SETTINGS_BUTTON_RETURN_TO_SIGN_IN,
@@ -1613,7 +1658,6 @@ pub const ALL: &[&str] = &[
     PARENTAL_RATING_HELP,
     PARENTAL_ERROR_FOLDER,
     SETTINGS_SCOPE_TEXT,
-    SETTINGS_LABEL_ACTIVE_PROFILE,
     SETTINGS_LABEL_ADDRESS,
     SETTINGS_SERVER_TLS_HEADING,
     SETTINGS_SERVER_CUSTOM_CA,
@@ -1793,7 +1837,6 @@ pub const ALL: &[&str] = &[
     SETTINGS_MEDIA_UNIT_MS,
     APP_ERROR_DOWNLOAD_QUEUE,
     APP_PLAYBACK_PROGRESS_STOPPED,
-    APP_ERROR_SETTINGS_NOT_SAVED,
     MUSIC_NOUN_TRACK,
     MUSIC_NOUN_TRACKS,
     MUSIC_VERB_WAS,
@@ -1831,7 +1874,6 @@ pub const ALL: &[&str] = &[
     MUSIC_QUEUE_READ_FAILED,
     PROFILE_NOTICE_TITLE,
     APP_BUTTON_OK,
-    PROFILE_ERROR_UNAVAILABLE,
     CONNECT_ERROR_SERVER_REQUIRED,
     CONNECT_ERROR_USERNAME_REQUIRED,
     APP_ERROR_QUEUE_NETWORK,
@@ -1858,7 +1900,6 @@ pub const ALL: &[&str] = &[
     DOWNLOADS_ERROR_NO_PROFILE,
     PLAYBACK_ERROR_NO_COMPATIBLE_SOURCE,
     PLAYBACK_STATUS_PREPARING_LOCAL,
-    PLAYBACK_STATUS_OPENING_LOCAL,
     APP_ERROR_NETWORK_WORKER_UNAVAILABLE,
     MUSIC_QUEUE_REFRESH_RECONNECT,
     PLAYLISTS_NOTICE_CREATED,

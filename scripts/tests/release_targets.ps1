@@ -129,7 +129,13 @@ try {
         $debMetadata -notmatch 'libxkbcommon-x11-0') {
         throw 'Deb metadata must bundle libmpv privately, ship its notices, and declare native runtime dependencies.'
     }
-    if ($rpmMetadata -notmatch 'target/kattri-libmpv/libmpv\.so\.2.*?/usr/lib/kattri/libmpv\.so\.2' -or
+    if (-not $rpmMetadata.Contains('auto-req = "no"') -or
+        $rpmMetadata.Contains('"libjpeg.so.8()(64bit)"') -or
+        -not $rpmMetadata.Contains('"libudev.so.1()(64bit)"') -or
+        -not $rpmMetadata.Contains('"libgcc_s.so.1()(64bit)"') -or
+        -not $rpmMetadata.Contains('"libc.so.6()(64bit)"') -or
+        -not $rpmMetadata.Contains('"libm.so.6()(64bit)"') -or
+        $rpmMetadata -notmatch 'target/kattri-libmpv/libmpv\.so\.2.*?/usr/lib/kattri/libmpv\.so\.2' -or
         $rpmMetadata -notmatch 'target/kattri-libmpv/libjpeg\.so\.8.*?/usr/lib/kattri/libjpeg\.so\.8' -or
         $rpmMetadata -notmatch 'target/kattri-libmpv/LICENSE\.mpv\.LGPL' -or
         $rpmMetadata -notmatch 'target/kattri-libmpv/BUILD-INFO\.txt' -or
@@ -137,6 +143,20 @@ try {
         $rpmMetadata -notmatch '"libva\.so\.2\(\)\(64bit\)"' -or
         $rpmMetadata -notmatch '"libxkbcommon-x11\.so\.0\(\)\(64bit\)"') {
         throw 'RPM metadata must bundle libmpv privately, ship its notices, and declare native runtime dependencies.'
+    }
+    # auto-req is disabled to avoid generating a system requirement for the private
+    # libjpeg.so.8. Assert the complete direct ELF closure recorded by the pinned
+    # libmpv build metadata, plus the native library needs of the application.
+    foreach ($rpmElfDependency in @(
+        'libudev.so.1', 'libgcc_s.so.1', 'libc.so.6', 'libm.so.6',
+        'libass.so.9', 'libz.so.1', 'libva.so.2', 'libva-drm.so.2',
+        'libuchardet.so.0', 'libstdc++.so.6', 'libXfixes.so.3', 'libX11.so.6',
+        'libasound.so.2', 'libpulse.so.0', 'libdrm.so.2', 'libgbm.so.1',
+        'libEGL.so.1', 'libxkbcommon-x11.so.0'
+    )) {
+        if ($rpmMetadata -notmatch ('"' + [regex]::Escape($rpmElfDependency) + '\(\)\(64bit\)"\s*=\s*"\*"')) {
+            throw "RPM explicit ELF dependency closure is missing $rpmElfDependency."
+        }
     }
     $mpvLibrarySource = Get-Content 'proofs/mpv-render/src/library.rs' -Raw
     if ($mpvLibrarySource -notmatch 'exe_dir\.join\("\.\./lib/kattri/libmpv\.so\.2"\)' -or
@@ -183,13 +203,54 @@ try {
         throw 'AppImage packaging must bundle its dynamic XKB library and pinned libmpv notices.'
     }
     $installWorkflow = Get-Content '.github/workflows/installation-smoke.yml' -Raw
+    $flatpakManifest = Get-Content 'packaging/flatpak/org.kattri.JellyfinKattri.yml' -Raw
+    $flatpakSmokeStart = $installWorkflow.IndexOf('  linux-flatpak:')
+    $flatpakSmokeEnd = $installWorkflow.Length
+    if ($flatpakSmokeStart -lt 0) {
+        throw 'Could not isolate Flatpak installation-smoke job.'
+    }
+    $flatpakSmokeJob = $installWorkflow.Substring($flatpakSmokeStart, $flatpakSmokeEnd - $flatpakSmokeStart)
+    if ($flatpakSmokeJob -notmatch [regex]::Escape("KATTRI_SMOKE_EXPECT_SANDBOX_LIB_PATH='/app/lib/libmpv.so.2'") -or
+        $flatpakSmokeJob -notmatch 'flatpak run --env=LD_DEBUG=libs org\.kattri\.JellyfinKattri' -or
+        $flatpakSmokeJob -match 'KATTRI_SMOKE_TRACE_LOADER=0') {
+        throw 'Flatpak installation smoke must trace and assert the exact sandbox /app/lib libmpv payload.'
+    }
+    $linuxSmoke = Get-Content 'packaging/linux/smoke-launch.sh' -Raw
+    if ($linuxSmoke -notmatch 'KATTRI_SMOKE_EXPECT_SANDBOX_LIB_PATH' -or
+        -not $linuxSmoke.Contains('awk -v expected="$SANDBOX_LIB_PATH"') -or
+        -not $linuxSmoke.Contains('$0 == "calling init: " expected') -or
+        $linuxSmoke -notmatch 'Flatpak namespace.*never resolve it on the host' -or
+        $linuxSmoke -notmatch 'realpath -e -- "\$library_path"' -or
+        $linuxSmoke -notmatch 'realpath -e -- "\$candidate_path"') {
+        throw 'Flatpak smoke must match its exact sandbox loader path without weakening host realpath checks.'
+    }
+    if ($flatpakManifest -notmatch '(?m)^\s*- --env=LD_LIBRARY_PATH=/app/lib\s*$' -or
+        $flatpakManifest -notmatch 'install -Dm755 libmpv\.so\.2 /app/lib/libmpv\.so\.2' -or
+        $flatpakManifest -match '(?m)^\s*- patchelf\b') {
+        throw 'Flatpak must install libmpv in its configured /app/lib search path without depending on patchelf in the SDK.'
+    }
+    if ($flatpakManifest -notmatch 'WITH_JPEG8=ON' -or
+        $flatpakSmokeJob -notmatch 'test -s /app/lib/libjpeg\.so\.8' -or
+        $flatpakSmokeJob -notmatch 'test -s /app/share/licenses/libjpeg-turbo/LICENSE\.md' -or
+        $flatpakSmokeJob -notmatch 'test -s /app/share/licenses/libjpeg-turbo/README\.ijg' -or
+        -not $flatpakSmokeJob.Contains('ldd /app/lib/libmpv.so.2') -or
+        -not $flatpakSmokeJob.Contains('libjpeg\.so\.8 => /app/lib/libjpeg\.so\.8') -or
+        -not $flatpakSmokeJob.Contains('grep -q "not found"; then exit 1')) {
+        throw 'Flatpak must verify its bundled JPEG 8 ABI, notices, and libmpv dependency resolution.'
+    }
+    $flatpakRelease = (Get-Content '.github/workflows/release-linux.yml' -Raw).Split(@('  flatpak:'), 2, [StringSplitOptions]::None)[-1]
+    $jpegPin = [regex]::Match($flatpakManifest, '(?m)^\s+url: (https://github\.com/libjpeg-turbo/[^\r\n]+)\r?\n\s+sha256: ([a-f0-9]{64})\s*$')
+    if (-not $jpegPin.Success -or
+        -not $flatpakRelease.Contains($jpegPin.Groups[1].Value) -or
+        -not $flatpakRelease.Contains($jpegPin.Groups[2].Value)) {
+        throw 'Flatpak JPEG source URL and digest must match its release evidence.'
+    }
     $appImageSmokeLine = @($installWorkflow -split "`n" | Where-Object {
         $_ -match 'apt-get install.*libfuse2' -and $_ -match 'xvfb'
     })
     if ($appImageSmokeLine.Count -ne 1 -or $appImageSmokeLine[0] -match 'libxkbcommon-x11') {
         throw 'AppImage smoke must not install libxkbcommon-x11 on the host; the bundle must provide it.'
     }
-    $flatpakManifest = Get-Content 'packaging/flatpak/org.kattri.JellyfinKattri.yml' -Raw
     if ($flatpakManifest -notmatch 'packaging/linux/icons/kattri\.svg' -or
         $flatpakManifest -notmatch 'hicolor/scalable/apps/org\.kattri\.JellyfinKattri\.svg' -or
         $flatpakManifest -notmatch 'cargo --offline build --release --locked -p egui-gl-host-proof --bin jellyfin-kattri' -or
@@ -258,6 +319,50 @@ try {
         throw 'macOS releases without Developer ID credentials must use and label ad-hoc app signing.'
     }
 
+    # The clean-runner smoke checks the exact app-bundle payload and preserves
+    # startup diagnostics; verify the complete contract here without running macOS jobs.
+    $macosSmokeStart = $installWorkflow.IndexOf('  macos:')
+    if ($macosSmokeStart -lt 0) {
+        $macosSmokeStart = $installWorkflow.IndexOf('  macos-dmg:')
+    }
+    $macosSmokeEnd = $installWorkflow.IndexOf('  linux-deb:', $macosSmokeStart)
+    if ($macosSmokeStart -lt 0 -or $macosSmokeEnd -le $macosSmokeStart) {
+        throw 'Could not isolate macOS installation-smoke job.'
+    }
+    $macosSmokeJob = $installWorkflow.Substring($macosSmokeStart, $macosSmokeEnd - $macosSmokeStart)
+    foreach ($macosPayload in @(
+        '$APP/Contents/Resources/LICENSE',
+        '$APP/Contents/Resources/libmpv-NOTICE.txt',
+        '$APP/Contents/Frameworks/libmpv.2.dylib',
+        '$APP/Contents/MacOS/jellyfin-kattri',
+        '$APP/Contents/Resources/licenses/libmpv',
+        'BUILD-INFO.txt', 'fribidi.LGPL', 'ffmpeg.LGPL', 'harfbuzz.MIT',
+        'dav1d.BSD-2-Clause', 'libass.ISC', 'libplacebo.LGPL', 'mpv.LGPL', 'freetype.FTL'
+    )) {
+        if ($macosSmokeJob -notmatch [regex]::Escape($macosPayload)) {
+            throw "macOS installation smoke is missing exact payload assertion: $macosPayload."
+        }
+    }
+    if ($macosSmokeJob -match 'licenses/libmpv/\$\{?file\}?') {
+        throw 'macOS installation smoke must enumerate its exact upstream license payload, not only a generic loop variable.'
+    }
+    foreach ($macosStartupContract in @(
+        'require_payload()',
+        'Starting mounted DMG app with Launch Services.',
+        'remained alive for 10s after launch',
+        'was not observed within 60s after open -a',
+        'remained alive 15s after the normal quit request',
+        'unified-log.txt',
+        'PASS: DMG app process started and quit after the normal AppleScript request (no playback/rendering claim).'
+    )) {
+        if ($macosSmokeJob -notmatch [regex]::Escape($macosStartupContract)) {
+            throw "macOS startup smoke is missing diagnostic/behavior contract: $macosStartupContract."
+        }
+    }
+    if ($macosSmokeJob -match 'crash(ed)?' -and $macosSmokeJob -notmatch 'not evidence of a crash') {
+        throw 'macOS launch/startup failure must not be mislabeled as a confirmed crash.'
+    }
+
     foreach ($workflowPath in @(
         '.github/workflows/release-windows.yml',
         '.github/workflows/release-linux.yml',
@@ -276,6 +381,40 @@ try {
         if ($installWorkflow -notmatch [regex]::Escape($requiredWorkflow)) {
             throw "Installation smoke workflow must follow $requiredWorkflow."
         }
+    }
+    $macosSmokeStart = $installWorkflow.IndexOf('  macos:')
+    $linuxDebStart = $installWorkflow.IndexOf('  linux-deb:', $macosSmokeStart)
+    if ($macosSmokeStart -lt 0 -or $linuxDebStart -le $macosSmokeStart) {
+        throw 'Could not isolate the macOS installation-smoke job.'
+    }
+    $macosSmokeJob = $installWorkflow.Substring($macosSmokeStart, $linuxDebStart - $macosSmokeStart)
+    if ($macosSmokeJob -notmatch '(?s)uses: actions/checkout@[^\r\n]+\r?\n\s+with:\r?\n\s+ref: \$\{\{ github\.event\.workflow_run\.head_sha \}\}\r?\n\s+persist-credentials: false') {
+        throw 'macOS installation smoke must check out the triggering release head SHA without persisting credentials.'
+    }
+
+    $universalWorkflow = Get-Content '.github/workflows/universal-installers.yml' -Raw
+    $universalJobs = @(
+        @{ Start = '  windows-msi:'; End = '  linux-appimage-x64:'; Required = @('needs: [windows-x64, windows-arm64]', 'name: universal-windows-msi', 'JellyfinKattri-*-universal.msi', 'JellyfinKattri-*-universal.msi.sha256', 'if-no-files-found: error') },
+        @{ Start = '  linux-run:'; End = '  macos-pkg:'; Required = @('needs: [linux-appimage-x64]', 'name: universal-linux-run', 'dist/*.run', 'if-no-files-found: error', 'sh "$RUN_FILE" --help') },
+        @{ Start = '  macos-pkg:'; End = $null; Required = @('target: aarch64-apple-darwin,x86_64-apple-darwin', 'packaging/macos/build-app.sh', 'packaging/macos/build-pkg.sh', 'name: universal-macos-pkg', 'dist-macos/*.pkg', 'if-no-files-found: error') }
+    )
+    foreach ($universalJob in $universalJobs) {
+        $start = $universalWorkflow.IndexOf($universalJob.Start)
+        $end = if ($null -ne $universalJob.End) { $universalWorkflow.IndexOf($universalJob.End, $start) } else { $universalWorkflow.Length }
+        if ($start -lt 0 -or $end -le $start) {
+            throw "Could not isolate universal installer job $($universalJob.Start.Trim())."
+        }
+        $jobText = $universalWorkflow.Substring($start, $end - $start)
+        foreach ($contract in $universalJob.Required) {
+            if (-not $jobText.Contains($contract)) {
+                throw "Universal installer job $($universalJob.Start.Trim()) is missing contract: $contract"
+            }
+        }
+    }
+    if ($universalWorkflow -notmatch '(?s)name: universal-payload-linux-x64.*?path: dist/linux/\*\.AppImage' -or
+        $universalWorkflow -notmatch 'universal-payload-windows-x64' -or
+        $universalWorkflow -notmatch 'universal-payload-windows-arm64') {
+        throw 'Universal installers must preserve architecture payload artifact handoffs.'
     }
     $checkoutCount = [regex]::Matches($installWorkflow, [regex]::Escape('actions/checkout@')).Count
     $nonPersistedCheckoutCount = [regex]::Matches($installWorkflow, [regex]::Escape('persist-credentials: false')).Count
@@ -371,6 +510,11 @@ try {
         $linuxSmoke -notmatch 'xwininfo') {
         throw 'Linux smoke launcher must start a window manager and request a normal close.'
     }
+    if ($linuxSmoke -notmatch 'realpath -e --' -or
+        $linuxSmoke -notmatch 'calling init: ' -or
+        $linuxSmoke -notmatch 'realpath -e -- "\$candidate_path"') {
+        throw 'Deb and RPM smoke must normalize loader paths but still verify bundled library initialization.'
+    }
     foreach ($requiredAppImagePattern in @(
         'KATTRI_SMOKE_EXPECT_APPIMAGE_MOUNT',
         'AppImage mount verification requires loader tracing',
@@ -407,6 +551,9 @@ try {
         throw 'Could not isolate the AppImage installation-smoke job.'
     }
     $appImageSmokeJob = $installWorkflow.Substring($appImageStart, $flatpakStart - $appImageStart)
+    if ($appImageSmokeJob -notmatch 'libgl1-mesa-dri libegl1') {
+        throw 'AppImage installation smoke must install libEGL.so.1 on its runner.'
+    }
     if ($appImageSmokeJob -notmatch 'TMPDIR=/tmp' -or
         $appImageSmokeJob -notmatch 'KATTRI_SMOKE_EXPECT_APPIMAGE_MOUNT=1' -or
         $appImageSmokeJob -match 'KATTRI_SMOKE_EXPECT_LIBMPV_PATH|KATTRI_SMOKE_EXPECT_LIBJPEG_PATH') {
@@ -516,10 +663,9 @@ try {
     $intentBranch = $hostSource.Substring($dispatchStart, $dispatchElse - $dispatchStart)
     $fallbackBranch = $hostSource.Substring($dispatchElse, $dispatchEnd - $dispatchElse)
     if ($intentBranch -notmatch 'kattri_app\.apply_launch_intent\(intent\)' -or
-        $intentBranch -match 'offer_launch_picker|resume_saved_sign_in' -or
-        $fallbackBranch -notmatch 'kattri_app\.offer_launch_picker\(\)' -or
+        $intentBranch -match 'resume_saved_sign_in' -or
         $fallbackBranch -notmatch 'kattri_app\.resume_saved_sign_in\(\)') {
-        throw 'A link launch must skip the profile picker and saved sign-in resume.'
+        throw 'A link launch must skip saved sign-in resume.'
     }
     $prefillStart = $appSource.IndexOf('fn launch_intent_prefills_review_fields_without_sign_in_or_playback')
     $manualSignInStart = $appSource.IndexOf('fn matching_manual_sign_in_selects_launch_item_once_without_autoplay')

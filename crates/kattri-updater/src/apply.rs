@@ -108,6 +108,12 @@ pub enum ApplyError {
 pub trait InstallStore {
     fn installed(&self) -> Result<Option<Slot>, StoreError>;
     fn previous(&self) -> Result<Option<Slot>, StoreError>;
+    fn installed_identity(&self) -> Result<Option<(String, String)>, StoreError> {
+        Ok(self.installed()?.map(slot_identity))
+    }
+    fn previous_identity(&self) -> Result<Option<(String, String)>, StoreError> {
+        Ok(self.previous()?.map(slot_identity))
+    }
     fn staged(&self) -> Result<Option<Slot>, StoreError>;
     fn stage(&mut self, slot: Slot) -> Result<(), StoreError>;
     fn discard_staged(&mut self) -> Result<(), StoreError>;
@@ -123,8 +129,9 @@ pub trait InstallStore {
 
 /// Apply a verified update whose artifact bytes were downloaded for `platform` and `arch`.
 ///
-/// Returns `Ok` only after the staged build is committed. On any error the installed build is
-/// unchanged and the staged bytes are discarded when possible.
+/// Returns `Ok` after the staged build is committed. On an error before replacement the installed
+/// build is unchanged; if a later durability step fails, the pending journal is retained so launch
+/// recovery can reconcile the installed version.
 pub fn apply_verified<S: InstallStore>(
     store: &mut S,
     verified: &VerifiedManifest,
@@ -143,47 +150,97 @@ pub fn apply_verified<S: InstallStore>(
     // Checks before any write: the bytes first, then the state.
     verify_artifact_bytes(artifact, bytes)?;
 
-    let journal = store.journal()?;
-    if let Some(pending) = &journal.pending {
-        return Err(ApplyError::AlreadyPending {
-            target: pending.target.clone(),
-        });
-    }
-    if journal.failed_targets.contains(&manifest.version) {
-        return Err(ApplyError::PreviouslyFailed {
-            version: manifest.version.clone(),
-        });
-    }
-    let installed = store.installed()?.ok_or(ApplyError::NoInstalledArtifact)?;
-    let offered = parse_version(&manifest.version)?;
-    let installed_version = parse_version(&installed.version)?;
-    if offered.cmp_precedence(&installed_version).is_le() {
-        return Err(ApplyError::NotNewer {
-            installed: installed.version.clone(),
-            offered: manifest.version.clone(),
-        });
-    }
-
-    if let Err(err) = switch_over(
+    let (installed, journal) = check_apply(store, &manifest.version)?;
+    let result = switch_over(
         store,
         artifact,
         &installed,
         &journal,
         &manifest.version,
         bytes,
-    ) {
-        // Best effort: the staged bytes are not the installed build, so leaving them is harmless,
-        // but discarding keeps the store tidy.
-        let _ = store.discard_staged();
-        return Err(err);
+    );
+    finish_apply(store, result)
+}
+
+/// Apply a signed artifact from a streamed payload to the filesystem slot store.
+/// The copied payload is verified before recording intent or changing the installed slot.
+pub fn apply_verified_reader(
+    store: &mut crate::install_store::FsInstallStore,
+    verified: &VerifiedManifest,
+    platform: &str,
+    arch: &str,
+    reader: impl std::io::Read,
+) -> Result<(), ApplyError> {
+    let manifest = verified.manifest();
+    let artifact = manifest
+        .artifact_for(platform, arch)
+        .ok_or_else(|| ApplyError::NoArtifact {
+            platform: platform.to_owned(),
+            arch: arch.to_owned(),
+        })?;
+    let (installed, journal) = check_apply(store, &manifest.version)?;
+    let result = (|| {
+        store.stage_payload(&manifest.version, reader.take(artifact.size_bytes + 1))?;
+        let (staged_version, staged) = store
+            .staged_payload()?
+            .ok_or(ApplyError::StagedDigestMismatch)?;
+        if staged_version != manifest.version {
+            return Err(ApplyError::StagedDigestMismatch);
+        }
+        crate::verify::verify_artifact_reader(artifact, staged)?;
+        commit_verified_slot(store, &installed, &journal, &manifest.version)
+    })();
+    finish_apply(store, result)
+}
+
+fn check_apply<S: InstallStore>(
+    store: &S,
+    version: &str,
+) -> Result<((String, String), Journal), ApplyError> {
+    let journal = store.journal()?;
+    if let Some(pending) = &journal.pending {
+        return Err(ApplyError::AlreadyPending {
+            target: pending.target.clone(),
+        });
     }
-    Ok(())
+    if journal
+        .failed_targets
+        .iter()
+        .any(|failed| failed == version)
+    {
+        return Err(ApplyError::PreviouslyFailed {
+            version: version.to_owned(),
+        });
+    }
+    let installed = store
+        .installed_identity()?
+        .ok_or(ApplyError::NoInstalledArtifact)?;
+    let offered = parse_version(version)?;
+    let installed_version = parse_version(&installed.0)?;
+    if offered.cmp_precedence(&installed_version).is_le() {
+        return Err(ApplyError::NotNewer {
+            installed: installed.0.clone(),
+            offered: version.to_owned(),
+        });
+    }
+
+    Ok((installed, journal))
+}
+
+fn finish_apply<S: InstallStore>(
+    store: &mut S,
+    result: Result<(), ApplyError>,
+) -> Result<(), ApplyError> {
+    if result.is_err() {
+        let _ = store.discard_staged();
+    }
+    result
 }
 
 fn switch_over<S: InstallStore>(
     store: &mut S,
     artifact: &Artifact,
-    installed: &Slot,
+    installed: &(String, String),
     journal: &Journal,
     target: &str,
     bytes: &[u8],
@@ -202,18 +259,27 @@ fn switch_over<S: InstallStore>(
         return Err(ApplyError::StagedDigestMismatch);
     }
 
+    commit_verified_slot(store, installed, journal, target)
+}
+
+fn commit_verified_slot<S: InstallStore>(
+    store: &mut S,
+    installed: &(String, String),
+    journal: &Journal,
+    target: &str,
+) -> Result<(), ApplyError> {
     let mut next = journal.clone();
     next.pending = Some(Pending {
         target: target.to_owned(),
-        previous: installed.version.clone(),
-        previous_sha256: sha256_hex(&installed.bytes),
+        previous: installed.0.clone(),
+        previous_sha256: installed.1.clone(),
         failed_launches: 0,
     });
     store.set_journal(next)?;
 
     if let Err(err) = store.commit_staged() {
-        // The switch did not happen, so the journal must not claim an update is pending.
-        let _ = store.set_journal(journal.clone());
+        // Keep the intent record: the store may have replaced the installed slot before a later
+        // durability step failed. The next launch reconciles the recorded target with reality.
         return Err(err.into());
     }
     Ok(())
@@ -326,14 +392,12 @@ pub fn rollback<S: InstallStore>(store: &mut S) -> Result<(), ApplyError> {
     let Some(pending) = journal.pending.clone() else {
         return Err(ApplyError::NoPendingUpdate);
     };
-    let previous = store.previous()?.ok_or(ApplyError::NoPrevious)?;
+    let previous = store.previous_identity()?.ok_or(ApplyError::NoPrevious)?;
     // Trust boundary: the digest and the slot live in the same user-writable store, so this
     // check detects corruption and partial writes, not an attacker who can already rewrite the
     // installed build. Authenticating a rollback would require the previous build's signed
     // envelope, which the updater does not retain; see docs/BLOCKERS.md (M4-16).
-    if previous.version != pending.previous
-        || sha256_hex(&previous.bytes) != pending.previous_sha256
-    {
+    if previous.0 != pending.previous || previous.1 != pending.previous_sha256 {
         return Err(ApplyError::PreviousMismatch);
     }
 
@@ -346,6 +410,10 @@ pub fn rollback<S: InstallStore>(store: &mut S) -> Result<(), ApplyError> {
     store.set_journal(journal)?;
     store.drop_previous()?;
     Ok(())
+}
+
+fn slot_identity(slot: Slot) -> (String, String) {
+    (slot.version, sha256_hex(&slot.bytes))
 }
 
 /// Lowercase hex SHA-256 of `bytes`.

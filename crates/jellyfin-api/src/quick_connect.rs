@@ -153,6 +153,27 @@ fn request_from_result(mut result: QuickConnectResultDto) -> Result<QuickConnect
 }
 
 impl JellyfinClient {
+    /// Approve the six-digit code displayed on another device using this session.
+    /// A false reply means the server did not authorize the request.
+    pub async fn authorize_quick_connect(
+        &self,
+        session: &Session,
+        code: &str,
+    ) -> Result<bool, ApiError> {
+        let code = code.trim();
+        if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(ApiError::InvalidResponse);
+        }
+        let url = self.endpoint(&["QuickConnect", "Authorize"]);
+        let request = self
+            .http
+            .request(Method::POST, url)
+            .query(&[("code", code)]);
+        let request = self.add_metadata(request, Some(session.access_token.as_str()));
+        let response = request.send().await.map_err(crate::transport_error)?;
+        decode_response(response).await
+    }
+
     /// Ask the server whether Quick Connect is enabled.
     ///
     /// A 401 or 404 response means the server does not offer Quick Connect and

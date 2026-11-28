@@ -280,7 +280,16 @@ pub(super) fn audio_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
         ui.horizontal(|ui| {
             let caption = ui.label(ui_text(ids::SETTINGS_MEDIA_AUDIO_OUTPUT_DEVICE));
             if app.audio_devices.is_empty() {
-                ui.text_edit_singleline(&mut audio.device);
+                let response = ui
+                    .text_edit_singleline(&mut audio.device)
+                    .labelled_by(caption.id);
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::Role::TextInput,
+                        true,
+                        ui_text(ids::SETTINGS_MEDIA_AUDIO_OUTPUT_DEVICE).to_owned(),
+                    )
+                });
             } else {
                 let automatic = ui_text(ids::SETTINGS_MEDIA_AUDIO_DEVICE_AUTOMATIC);
                 let shown = if audio.device == "auto" {
@@ -526,8 +535,17 @@ pub(super) fn subtitles_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) 
     settings_card(ui, |ui| {
         let subtitles = &mut app.settings.settings_mut().subtitles;
         ui.horizontal(|ui| {
-            ui.label(ui_text(ids::SETTINGS_MEDIA_SUBTITLE_FONT));
-            ui.text_edit_singleline(&mut subtitles.font);
+            let caption = ui.label(ui_text(ids::SETTINGS_MEDIA_SUBTITLE_FONT));
+            let response = ui
+                .text_edit_singleline(&mut subtitles.font)
+                .labelled_by(caption.id);
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::Role::TextInput,
+                    true,
+                    ui_text(ids::SETTINGS_MEDIA_SUBTITLE_FONT).to_owned(),
+                )
+            });
         });
         ui.checkbox(
             &mut subtitles.bold,
@@ -715,6 +733,59 @@ pub(super) fn video_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
 #[cfg(test)]
 mod sound_tests {
     use super::*;
+    use egui::accesskit::Role;
+
+    #[test]
+    fn audio_device_fallback_and_subtitle_font_text_fields_have_accesskit_labels() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut app = KattriApp::new(context.clone());
+        app.audio_devices.clear();
+        let colors = crate::theme::palette();
+        let mut outputs = Vec::new();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 1000.0),
+                )),
+                ..Default::default()
+            },
+            |ui| audio_page(ui, &mut app, colors),
+        );
+        output.textures_delta.clear();
+        outputs.extend(output.platform_output.accesskit_update.unwrap().nodes);
+
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 1000.0),
+                )),
+                ..Default::default()
+            },
+            |ui| subtitles_page(ui, &mut app, colors),
+        );
+        output.textures_delta.clear();
+        outputs.extend(output.platform_output.accesskit_update.unwrap().nodes);
+
+        for expected in [
+            ui_text(ids::SETTINGS_MEDIA_AUDIO_OUTPUT_DEVICE),
+            ui_text(ids::SETTINGS_MEDIA_SUBTITLE_FONT),
+        ] {
+            assert!(
+                outputs
+                    .iter()
+                    .any(|(_, node)| node.role() == Role::TextInput
+                        && node.label() == Some(expected)),
+                "missing accessible text input {expected:?}; nodes={:?}",
+                outputs
+                    .iter()
+                    .map(|(_, node)| (node.role(), node.label()))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 
     #[test]
     fn audio_output_picker_uses_the_persisted_device_type_enum() {

@@ -5,6 +5,8 @@ use kattri_i18n::ids;
 use std::collections::HashMap;
 
 use egui::{self, RichText, TextureHandle, Ui, Vec2};
+
+use crate::catalog::MediaItem;
 use jellyfin_api::BaseItemDto;
 
 /// Cast data needed by the UI, kept separate from networking and API ownership.
@@ -30,8 +32,10 @@ pub fn draw(
     ui: &mut Ui,
     cast: &[CastPerson],
     similar: &[BaseItemDto],
+    similar_media: &[MediaItem],
     current_item_id: &str,
     textures_by_name: &HashMap<String, TextureHandle>,
+    visible_artwork: &mut Vec<(String, String)>,
 ) -> PeopleAction {
     let colors = crate::theme::active_palette();
     let similar = without_current_item(current_item_id, similar);
@@ -49,14 +53,14 @@ pub fn draw(
                             if let Some(texture) = textures_by_name.get(&person.name) {
                                 ui.add(
                                     egui::Image::new(texture)
-                                        .fit_to_exact_size(Vec2::new(112.0, 140.0)),
+                                        .fit_to_exact_size(Vec2::new(96.0, 120.0)),
                                 );
                             } else {
                                 egui::Frame::new()
                                     .fill(colors.raised)
                                     .corner_radius(egui::CornerRadius::same(12))
                                     .show(ui, |ui| {
-                                        ui.set_min_size(Vec2::new(112.0, 140.0));
+                                        ui.set_min_size(Vec2::new(96.0, 120.0));
                                         ui.centered_and_justified(|ui| {
                                             ui.label(
                                                 RichText::new(initials(&person.name))
@@ -68,16 +72,18 @@ pub fn draw(
                                     });
                             }
                             ui.add_space(6.0);
-                            let label = match person.role.as_deref().filter(|role| !role.is_empty())
-                            {
-                                Some(role) => format!("{}\n{role}", person.name),
-                                None => person.name.clone(),
-                            };
                             let response = ui.add_enabled(
                                 person.id.is_some(),
-                                egui::Button::new(RichText::new(label).strong())
-                                    .min_size(Vec2::new(132.0, 52.0)),
+                                egui::Label::new(RichText::new(&person.name).strong().size(13.0))
+                                    .sense(egui::Sense::click()),
                             );
+                            if let Some(role) = person.role.as_deref().filter(|r| !r.is_empty()) {
+                                ui.label(
+                                    RichText::new(truncate(role, 26))
+                                        .size(11.0)
+                                        .color(colors.muted),
+                                );
+                            }
                             if response.clicked() {
                                 action.person_id = person_activation_id(person);
                             }
@@ -91,55 +97,50 @@ pub fn draw(
         ui.add_space(16.0);
         ui.heading(ui_text(ids::DETAIL_HEADING_SIMILAR));
         ui.add_space(8.0);
-        egui::ScrollArea::horizontal()
-            .id_salt("item_detail_similar")
-            .show(ui, |ui| {
+        if similar_media.is_empty() {
+            // Tests and early frames can draw the section without catalog entries.
+            for item in similar {
+                if ui.button(RichText::new(&item.name).strong()).clicked() {
+                    action.item_id = Some(item.id.clone());
+                }
+            }
+        } else {
+            // Poster cards, the same ones the library and Home use.
+            let columns =
+                super::grid_columns(ui.available_width(), super::artwork::CARD_WIDTH).max(1);
+            for chunk in similar_media.chunks(columns) {
                 ui.horizontal(|ui| {
-                    for item in similar {
-                        ui.vertical(|ui| {
-                            if let Some(texture) = textures_by_name.get(&item.name) {
-                                ui.add(
-                                    egui::Image::new(texture)
-                                        .fit_to_exact_size(Vec2::new(156.0, 104.0)),
-                                );
-                            } else {
-                                egui::Frame::new()
-                                    .fill(colors.raised)
-                                    .corner_radius(egui::CornerRadius::same(12))
-                                    .show(ui, |ui| {
-                                        ui.set_min_size(Vec2::new(156.0, 104.0));
-                                        ui.centered_and_justified(|ui| {
-                                            ui.label(
-                                                RichText::new("···").size(24.0).color(colors.muted),
-                                            );
-                                        });
-                                    });
-                            }
-                            let label = match item.item_type.as_deref() {
-                                Some(kind) if !kind.is_empty() => {
-                                    format!("{}\n{kind}", item.name)
-                                }
-                                _ => item.name.clone(),
-                            };
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new(label).strong())
-                                        .min_size(Vec2::new(156.0, 48.0)),
-                                )
-                                .clicked()
-                            {
-                                action.item_id = Some(item.id.clone());
-                            }
-                        });
+                    ui.spacing_mut().item_spacing.x = super::GRID_GAP;
+                    for media in chunk {
+                        let response = super::artwork::media_card(ui, media, colors, false);
+                        let handled = super::item_menu::card_actions(ui, &response, media);
+                        if ui.clip_rect().intersects(response.rect)
+                            && let Some(tag) = media.primary_image_tag.as_deref()
+                        {
+                            visible_artwork.push((media.artwork_id.clone(), tag.to_owned()));
+                        }
+                        if response.clicked() && !handled {
+                            action.item_id = Some(media.id.clone());
+                        }
                     }
                 });
-            });
+            }
+        }
     }
 
     action
 }
 
 const CAST_LIMIT: usize = 20;
+
+fn truncate(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let mut out: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
+}
 
 fn initials(name: &str) -> String {
     let initials = name
@@ -273,8 +274,10 @@ mod tests {
                         primary_image_tag: None,
                     }],
                     &[],
+                    &[],
                     "current-item",
                     &std::collections::HashMap::new(),
+                    &mut Vec::new(),
                 );
             },
         );
@@ -282,6 +285,7 @@ mod tests {
 
         assert!(contains_text(&output, "Cast"));
         assert!(!contains_text(&output, "More like this"));
-        assert!(contains_text(&output, "Ada Vale\nLead"));
+        assert!(contains_text(&output, "Ada Vale"));
+        assert!(contains_text(&output, "Lead"));
     }
 }

@@ -210,6 +210,7 @@ mod tests {
             image_tags: None,
             backdrop_image_tags: None,
             user_data: None,
+            ..BaseItemDto::default()
         }
     }
 

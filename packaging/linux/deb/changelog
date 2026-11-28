@@ -1,3 +1,14 @@
+kattri (1.0.3-1) unstable; urgency=medium
+
+  * Local playlist management for the running profile, stored as item IDs only.
+  * A manual, informational GitHub release-metadata check; it does not verify, download or
+    install anything, and the signed-updater keyring stays empty.
+  * Updater staged-file download hardening and packaging smoke checks.
+  * The high-contrast toggle was removed; an existing `high_contrast` setting key is kept
+    through a settings round-trip so a downgrade restores it.
+
+ -- Kattri maintainers <maintainers@kattri.invalid>  Thu, 26 Nov 2026 00:00:00 +0000
+
 kattri (1.0.1-1) unstable; urgency=medium
 
   * Patch release.

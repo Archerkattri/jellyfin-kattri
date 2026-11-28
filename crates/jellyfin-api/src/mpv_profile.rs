@@ -338,6 +338,8 @@ impl EffectiveMpvProfile {
 
         DeviceProfile {
             name: Some("Jellyfin Kattri (libmpv)".into()),
+            max_streaming_bitrate: Some(120_000_000),
+            max_static_bitrate: Some(120_000_000),
             direct_play_profiles: Some(direct_play_profiles),
             container_profiles: Some(
                 self.video_containers
@@ -1165,8 +1167,18 @@ mod tests {
     #[test]
     fn jellyfin_projection_uses_current_field_names() {
         let profile = baseline_device_profile();
-        let json = serde_json::to_value(profile).expect("serialize device profile");
+        let json = serde_json::to_value(&profile).expect("serialize device profile");
         assert!(json.get("Name").is_some());
+        assert_eq!(profile.max_streaming_bitrate, Some(120_000_000));
+        assert_eq!(profile.max_static_bitrate, Some(120_000_000));
+        assert!(
+            profile.subtitle_profiles.as_ref().is_some_and(|subs| {
+                subs.iter().any(|s| {
+                    s.format.as_deref() == Some("pgssub") && s.method.as_deref() == Some("Embed")
+                })
+            }),
+            "embedded pgssub should be advertised in baseline subtitle profiles"
+        );
         assert!(json.get("DirectPlayProfiles").is_some());
         assert!(json.get("ContainerProfiles").is_some());
         assert!(json.get("CodecProfiles").is_some());

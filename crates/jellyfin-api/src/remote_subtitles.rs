@@ -235,14 +235,11 @@ fn subtitle_streams(item: ItemMediaSources) -> Vec<ItemSubtitleStream> {
                 if stream.stream_type.as_deref() != Some("Subtitle") {
                     return None;
                 }
+                let codec = stream.codec.as_deref().and_then(file_format)?;
                 Some(ItemSubtitleStream {
                     media_source_id: source_id.clone(),
                     index: stream.index?,
-                    codec: stream
-                        .codec
-                        .as_deref()
-                        .and_then(file_format)
-                        .unwrap_or_default(),
+                    codec,
                     language: stream.language,
                     title: stream.display_title.or(stream.title),
                     is_external: stream.is_external,
@@ -256,6 +253,12 @@ fn subtitle_streams(item: ItemMediaSources) -> Vec<ItemSubtitleStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    use crate::{ClientConfig, UserDto};
 
     #[test]
     fn search_results_read_the_fields_the_list_shows() {
@@ -276,15 +279,17 @@ mod tests {
     }
 
     #[test]
-    fn subtitle_streams_keep_only_subtitles_with_an_index_and_a_source() {
+    fn subtitle_streams_keep_only_downloadable_subtitle_formats() {
         let item: ItemMediaSources = serde_json::from_str(
             r#"{"MediaSources":[{"Id":"src","MediaStreams":[
               {"Type":"Video","Index":0,"Codec":"h264"},
               {"Type":"Subtitle","Index":2,"Codec":"SRT","Language":"eng","DisplayTitle":"English",
                "IsExternal":true,"IsTextSubtitleStream":true},
               {"Type":"Subtitle","Codec":"ass"},
-              {"Type":"Subtitle","Index":3,"Codec":"../x"}]},
-              {"MediaStreams":[{"Type":"Subtitle","Index":1,"Codec":"srt"}]}]}"#,
+              {"Type":"Subtitle","Index":3,"Codec":"../x"},
+              {"Type":"Subtitle","Index":4,"Codec":""},
+              {"Type":"Subtitle","Index":5}]},
+              {"Id":"src2","MediaStreams":[{"Type":"Subtitle","Index":1,"Codec":"WebVTT"}]}]}"#,
         )
         .expect("item");
         let streams = subtitle_streams(item);
@@ -301,8 +306,88 @@ mod tests {
                 is_text: true,
             }
         );
-        // A codec that is not a plain extension is kept as a stream but cannot be read back.
-        assert_eq!(streams[1].codec, "");
+        assert_eq!(streams[1].media_source_id, "src2");
+        assert_eq!(streams[1].index, 1);
+        assert_eq!(streams[1].codec, "webvtt");
+    }
+
+    #[tokio::test]
+    async fn subtitle_stream_file_uses_source_index_and_normalized_codec_route() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept item request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let count = stream.read(&mut chunk).await.expect("read item request");
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let item_request = String::from_utf8_lossy(&request).into_owned();
+            let body = r#"{"MediaSources":[{"Id":"source-1","MediaStreams":[{"Type":"Subtitle","Index":7,"Codec":" SRT ","IsExternal":true,"IsTextSubtitleStream":true}]}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write item response");
+            drop(stream);
+
+            let (mut stream, _) = listener.accept().await.expect("accept stream request");
+            request.clear();
+            loop {
+                let count = stream.read(&mut chunk).await.expect("read stream request");
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let stream_request = String::from_utf8_lossy(&request).into_owned();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+                )
+                .await
+                .expect("write subtitle response");
+            (item_request, stream_request)
+        });
+        let client = JellyfinClient::new(
+            ClientConfig::new(&format!("http://{address}"), "Kattri", "device", "id", "1")
+                .expect("config"),
+        )
+        .expect("client");
+        let session = Session {
+            access_token: "token".into(),
+            user: UserDto {
+                policy: None,
+                id: "user".into(),
+                name: "User".into(),
+                server_id: None,
+            },
+            server_id: None,
+            session_info: None,
+        };
+        let streams = client
+            .item_subtitle_streams(&session, "item")
+            .await
+            .expect("streams");
+        assert_eq!(streams.len(), 1);
+        let body = client
+            .subtitle_stream_file(&session, "item", &streams[0])
+            .await
+            .expect("subtitle file");
+        assert_eq!(body, b"hello");
+        let (item_request, stream_request) = server.await.expect("server");
+        assert!(
+            item_request
+                .starts_with("GET /Items/item?userId=user&fields=MediaSources%2CMediaStreams ")
+        );
+        assert!(stream_request.starts_with("GET /Videos/item/source-1/Subtitles/7/Stream.srt "));
     }
 
     #[test]

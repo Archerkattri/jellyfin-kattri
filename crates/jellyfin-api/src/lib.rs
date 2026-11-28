@@ -39,7 +39,10 @@ mod theme_media;
 pub mod trickplay;
 pub mod websocket;
 
-pub use admin::{MAX_SCHEDULED_TASKS, ScheduledTask, ServerInfo, UserCounts, VirtualFolder};
+pub use admin::{
+    ActivityLogEntry, ItemCounts, MAX_SCHEDULED_TASKS, ScheduledTask, ServerInfo, SessionInfo,
+    SessionNowPlayingItem, UserCounts, VirtualFolder,
+};
 pub use admin_users::{AdminUser, AdminUserPolicy, AdminUserPolicyChanges, MAX_ADMIN_USERS};
 pub use collections::{CollectionRuntime, collection_runtime};
 pub use device_profile::{
@@ -388,6 +391,92 @@ impl JellyfinClient {
         })
     }
 
+    /// Read the current account's server-side preferences without changing local settings.
+    pub async fn account_preferences(
+        &self,
+        session: &Session,
+    ) -> Result<Option<AccountPreferences>, ApiError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct Account {
+            id: String,
+            configuration: Option<AccountPreferences>,
+        }
+        let url = self.endpoint(&["Users", "Me"]);
+        let account: Account = self
+            .send_json(Method::GET, url, Some(session.access_token.as_str()), None)
+            .await?;
+        if account.id != session.user.id {
+            return Err(ApiError::InvalidResponse);
+        }
+        Ok(account.configuration)
+    }
+
+    /// Write the account preferences that this client can edit, preserving every other server
+    /// field by patching the account JSON it just read.
+    pub async fn set_account_preferences(
+        &self,
+        session: &Session,
+        preferences: &AccountPreferences,
+    ) -> Result<(), ApiError> {
+        let token = Some(session.access_token.as_str());
+        let url = self.endpoint(&["Users", "Me"]);
+        let mut account: serde_json::Value = self.send_json(Method::GET, url, token, None).await?;
+        if account.get("Id").and_then(serde_json::Value::as_str) != Some(session.user.id.as_str()) {
+            return Err(ApiError::InvalidResponse);
+        }
+        let mut configuration = account
+            .get_mut("Configuration")
+            .and_then(serde_json::Value::as_object_mut)
+            .map(std::mem::take)
+            .ok_or(ApiError::InvalidResponse)?;
+        let mut changed = false;
+        patch_string(
+            &mut configuration,
+            "AudioLanguagePreference",
+            preferences.audio_language_preference.as_deref(),
+            &mut changed,
+        );
+        patch_string(
+            &mut configuration,
+            "SubtitleLanguagePreference",
+            preferences.subtitle_language_preference.as_deref(),
+            &mut changed,
+        );
+        patch_string(
+            &mut configuration,
+            "SubtitleMode",
+            preferences.subtitle_mode.as_deref(),
+            &mut changed,
+        );
+        patch_bool(
+            &mut configuration,
+            "PlayDefaultAudioTrack",
+            preferences.play_default_audio_track,
+            &mut changed,
+        );
+        patch_bool(
+            &mut configuration,
+            "HidePlayedInLatest",
+            preferences.hide_played_in_latest,
+            &mut changed,
+        );
+        patch_bool(
+            &mut configuration,
+            "DisplayMissingEpisodes",
+            preferences.display_missing_episodes,
+            &mut changed,
+        );
+        if !changed {
+            return Ok(());
+        }
+        let mut url = self.endpoint(&["Users", "Configuration"]);
+        url.query_pairs_mut()
+            .append_pair("userId", &session.user.id);
+        let request = self.http.request(Method::POST, url).json(&configuration);
+        self.send_admin(session, request).await
+    }
+
     /// List items in the authenticated user's library.
     pub async fn list_items(
         &self,
@@ -571,24 +660,29 @@ impl JellyfinClient {
         decode_response(response).await
     }
 
-    /// List the server's suggestions for an item (`GET /Items/{itemId}/Suggestions`)
-    /// for the authenticated user. The limit is clamped to `1..=MAX_SUGGESTIONS`, and
-    /// no more than that many items are returned. A 404 or server error is returned
-    /// as [`ApiError::HttpStatus`], the same as [`JellyfinClient::list_similar`].
+    /// List the server's item suggestions (`GET /Items/Suggestions`) for the
+    /// authenticated user, optionally filtered to one Jellyfin item type such as
+    /// `"Movie"`. The limit is clamped to `1..=MAX_SUGGESTIONS`, and no more than
+    /// that many items are returned. A 404 or server error is returned as
+    /// [`ApiError::HttpStatus`], the same as [`JellyfinClient::list_similar`].
     pub async fn list_suggestions(
         &self,
         session: &Session,
-        item_id: &str,
+        item_type: Option<&str>,
         limit: u32,
     ) -> Result<Vec<BaseItemDto>, ApiError> {
-        home::validate_id(item_id)?;
-        let url = self.endpoint(&["Items", item_id, "Suggestions"]);
+        let url = self.endpoint(&["Items", "Suggestions"]);
         let limit = limit.clamp(1, MAX_SUGGESTIONS);
         let limit_value = limit.to_string();
-        let request = self.http.request(Method::GET, url).query(&[
+        let mut query = vec![
             ("userId", session.user.id.as_str()),
             ("limit", limit_value.as_str()),
-        ]);
+        ];
+        if let Some(item_type) = item_type.map(str::trim).filter(|value| !value.is_empty()) {
+            home::validate_id(item_type)?;
+            query.push(("type", item_type));
+        }
+        let request = self.http.request(Method::GET, url).query(&query);
         let request = self.add_metadata(request, Some(&session.access_token));
         let response = request.send().await.map_err(transport_error)?;
         let response: ItemsResponse = decode_response(response).await?;
@@ -1771,6 +1865,49 @@ pub struct UserDto {
     pub policy: Option<UserPolicy>,
 }
 
+/// Playback and library preferences stored on a Jellyfin account. `Default` means "every field
+/// unset", which is what a patch request sends for fields the form does not touch.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct AccountPreferences {
+    pub audio_language_preference: Option<String>,
+    pub subtitle_language_preference: Option<String>,
+    pub subtitle_mode: Option<String>,
+    pub play_default_audio_track: Option<bool>,
+    pub hide_played_in_latest: Option<bool>,
+    pub display_missing_episodes: Option<bool>,
+}
+
+/// Set one string field only when the server's value differs, so a save of an untouched field
+/// costs nothing and an absent field is never cleared.
+fn patch_string(
+    configuration: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: Option<&str>,
+    changed: &mut bool,
+) {
+    if let Some(value) = value
+        && configuration.get(key).and_then(serde_json::Value::as_str) != Some(value)
+    {
+        configuration.insert(key.to_owned(), value.into());
+        *changed = true;
+    }
+}
+
+fn patch_bool(
+    configuration: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: Option<bool>,
+    changed: &mut bool,
+) {
+    if let Some(value) = value
+        && configuration.get(key).and_then(serde_json::Value::as_bool) != Some(value)
+    {
+        configuration.insert(key.to_owned(), value.into());
+        *changed = true;
+    }
+}
+
 impl UserDto {
     /// Whether the server marks this user an administrator. False when no policy was sent.
     pub fn is_administrator(&self) -> bool {
@@ -1876,6 +2013,7 @@ pub struct ItemQuery {
     pub filters: Option<Vec<ItemFilter>>,
     pub genres: Option<Vec<String>>,
     pub years: Option<Vec<i32>>,
+    pub official_ratings: Option<Vec<String>>,
     pub person_ids: Option<Vec<String>>,
     /// Genre item IDs (`genreIds`), as listed by `GET /Genres`.
     pub genre_ids: Option<Vec<String>>,
@@ -2010,6 +2148,13 @@ impl ItemQuery {
                     .map(|value| ("years".into(), value.to_string())),
             );
         }
+        if let Some(official_ratings) = &self.official_ratings {
+            params.extend(
+                official_ratings
+                    .iter()
+                    .map(|value| ("officialRatings".into(), value.clone())),
+            );
+        }
         if let Some(person_ids) = &self.person_ids {
             params.extend(
                 person_ids
@@ -2047,6 +2192,16 @@ impl ItemQuery {
         }
         params
     }
+
+    pub fn with_years(mut self, years: Vec<i32>) -> Self {
+        self.years = Some(years);
+        self
+    }
+
+    pub fn with_official_ratings(mut self, official_ratings: Vec<String>) -> Self {
+        self.official_ratings = Some(official_ratings);
+        self
+    }
 }
 
 impl Default for ItemQuery {
@@ -2063,6 +2218,7 @@ impl Default for ItemQuery {
             filters: None,
             genres: None,
             years: None,
+            official_ratings: None,
             person_ids: None,
             genre_ids: None,
             studio_ids: None,
@@ -2086,7 +2242,7 @@ pub struct ItemsResponse {
     pub start_index: u32,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct BaseItemDto {
     pub id: String,
@@ -2130,6 +2286,40 @@ pub struct BaseItemDto {
     pub backdrop_image_tags: Option<Vec<String>>,
     #[serde(default)]
     pub user_data: Option<UserItemDataDto>,
+    #[serde(default)]
+    pub community_rating: Option<f32>,
+    #[serde(default)]
+    pub critic_rating: Option<f32>,
+    #[serde(default)]
+    pub taglines: Option<Vec<String>>,
+    #[serde(default)]
+    pub studios: Option<Vec<NameGuidPair>>,
+    #[serde(default)]
+    pub chapters: Option<Vec<ChapterInfo>>,
+    #[serde(default)]
+    pub provider_ids: Option<HashMap<String, String>>,
+}
+
+/// Name/GUID pair attached to a Jellyfin item (for example, studio credits).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct NameGuidPair {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Chapter marker attached to a Jellyfin media item.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct ChapterInfo {
+    #[serde(default)]
+    pub start_position_ticks: Option<u64>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub image_tag: Option<String>,
 }
 
 /// Person credit attached to a Jellyfin item.
@@ -2186,6 +2376,15 @@ mod base_item_dto_tests {
             .expect("valid BaseItemDto fixture without optional rating");
 
         assert_eq!(item.official_rating, None);
+        assert_eq!(item.provider_ids, None);
+
+        let with_providers: BaseItemDto = serde_json::from_str(
+            r#"{"Id":"item-2","Name":"With Providers","ProviderIds":{"Imdb":"tt1234567","Tmdb":"99"}}"#,
+        )
+        .expect("valid BaseItemDto fixture with provider ids");
+        let providers = with_providers.provider_ids.expect("provider ids");
+        assert_eq!(providers.get("Imdb").map(String::as_str), Some("tt1234567"));
+        assert_eq!(providers.get("Tmdb").map(String::as_str), Some("99"));
     }
 
     #[test]
@@ -2703,7 +2902,11 @@ mod primary_image_tests {
 
     #[tokio::test]
     async fn suggestions_uses_authenticated_route_and_clamps_the_limit() {
-        for (requested, expected) in [(1000, "50"), (0, "1"), (25, "25")] {
+        for (requested, expected, item_type) in [
+            (1000, "50", Some("Movie")),
+            (0, "1", Some("Movie")),
+            (25, "25", None),
+        ] {
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind mock server");
@@ -2725,7 +2928,7 @@ mod primary_image_tests {
             });
 
             let items = client_for(address)
-                .list_suggestions(&session(), "item/id", requested)
+                .list_suggestions(&session(), item_type, requested)
                 .await
                 .expect("list suggestions");
             let request = server.await.expect("mock server task");
@@ -2737,7 +2940,7 @@ mod primary_image_tests {
 
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].id, "suggestion-1");
-            assert!(uri.starts_with("/jellyfin/Items/item%2Fid/Suggestions?"));
+            assert!(uri.starts_with("/jellyfin/Items/Suggestions?"));
             assert_eq!(
                 query.get("userId").map(|value| value.as_ref()),
                 Some("user-id")
@@ -2746,6 +2949,7 @@ mod primary_image_tests {
                 query.get("limit").map(|value| value.as_ref()),
                 Some(expected)
             );
+            assert_eq!(query.get("type").map(|value| value.as_ref()), item_type);
             assert!(!uri.contains("secret-token"));
         }
     }
@@ -2770,7 +2974,7 @@ mod primary_image_tests {
             });
 
             let result = client_for(address)
-                .list_suggestions(&session(), "item-id", 10)
+                .list_suggestions(&session(), Some("Movie"), 10)
                 .await;
             server.await.expect("mock server task");
             assert!(matches!(result, Err(ApiError::HttpStatus(actual)) if actual == status));
@@ -2780,9 +2984,11 @@ mod primary_image_tests {
     #[tokio::test]
     async fn suggestions_reject_invalid_identifiers_before_request() {
         let client = client_for("127.0.0.1:1".parse().expect("local socket address"));
-        for item_id in ["", ".", "..", "a\nb", &"x".repeat(129)] {
+        for item_type in [".", "..", "a\nb", &"x".repeat(129)] {
             assert!(matches!(
-                client.list_suggestions(&session(), item_id, 10).await,
+                client
+                    .list_suggestions(&session(), Some(item_type), 10)
+                    .await,
                 Err(ApiError::InvalidResponse)
             ));
         }
@@ -2854,6 +3060,7 @@ mod item_query_serialization_tests {
             filters: Some(vec![ItemFilter::IsUnplayed, ItemFilter::IsFavorite]),
             genres: Some(vec!["Science Fiction".into(), "Drama".into()]),
             years: Some(vec![1999, 2024]),
+            official_ratings: Some(vec!["PG-13".into(), "R".into()]),
             person_ids: Some(vec!["person-1".into(), "person-2".into()]),
             ids: Some(vec!["item-1".into(), "item-2".into()]),
             enable_total_record_count: Some(false),
@@ -2875,6 +3082,7 @@ mod item_query_serialization_tests {
             ("filters", &["IsUnplayed", "IsFavorite"]),
             ("genres", &["Science Fiction", "Drama"]),
             ("years", &["1999", "2024"]),
+            ("officialRatings", &["PG-13", "R"]),
             ("personIds", &["person-1", "person-2"]),
             ("ids", &["item-1,item-2"]),
             ("enableTotalRecordCount", &["false"]),

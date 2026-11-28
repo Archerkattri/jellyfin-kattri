@@ -9,6 +9,8 @@ build/
 *.msi
 *.dmg
 *.AppImage
+/.flatpak-builder/
+/packaging/flatpak/cargo-sources.json
 
 # Local development material
 /.local/

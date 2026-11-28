@@ -12,11 +12,11 @@ use super::{
 pub(super) const CONTROL_CAPACITY: usize = 32;
 const DISCONNECT_CAPACITY: usize = 32;
 pub(super) const READ_CAPACITY: usize = 24;
-pub(super) const ARTWORK_CAPACITY: usize = 12;
+pub(super) const ARTWORK_CAPACITY: usize = 24;
 pub(super) const EVENT_CAPACITY: usize = 32;
 const READ_CONCURRENCY: usize = 3;
-const ARTWORK_CONCURRENCY: usize = 2;
-const READ_KEYS: usize = 16;
+const ARTWORK_CONCURRENCY: usize = 4;
+const READ_KEYS: usize = 39;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 /// Submission never waits for HTTP, queue space or event consumption.
@@ -66,7 +66,6 @@ struct Queued {
     ticket: Ticket,
 }
 
-#[derive(Default)]
 struct QueueState {
     controls: VecDeque<Queued>,
     reads: VecDeque<Queued>,
@@ -76,6 +75,21 @@ struct QueueState {
     versions: [u64; READ_KEYS],
     epoch: u64,
     closing: bool,
+}
+
+impl Default for QueueState {
+    fn default() -> Self {
+        Self {
+            controls: VecDeque::new(),
+            reads: VecDeque::new(),
+            artwork: VecDeque::new(),
+            active_photo_requests: HashSet::new(),
+            cancelled_photo_requests: HashSet::new(),
+            versions: [0; READ_KEYS],
+            epoch: 0,
+            closing: false,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -110,6 +124,28 @@ impl WorkerCommand {
                     message,
                 })
             }
+            Self::LoadAccountPreferences {
+                request_id, epoch, ..
+            } => Some(WorkerEvent::AccountPreferencesLoaded {
+                saved: false,
+                request_id: *request_id,
+                epoch: *epoch,
+                result: Err(jellyfin_api::ErrorClass::Unexpected),
+            }),
+            Self::LoadMetadataManager {
+                request_id, epoch, ..
+            } => Some(WorkerEvent::MetadataManagerLoaded {
+                request_id: *request_id,
+                epoch: *epoch,
+                result: Err(jellyfin_api::ErrorClass::Unexpected),
+            }),
+            Self::AuthorizeQuickConnect {
+                request_id, epoch, ..
+            } => Some(WorkerEvent::QuickConnectAuthorized {
+                request_id: *request_id,
+                epoch: *epoch,
+                approval: Err(jellyfin_api::ErrorClass::Unexpected),
+            }),
             Self::SetPlayed {
                 request_id,
                 item_id,
@@ -185,6 +221,10 @@ impl WorkerCommand {
                 item_id: item_id.clone(),
                 result: Err(super::SubtitleRequestError::Failed),
             }),
+            Self::CheckLatestRelease { request_id } => Some(WorkerEvent::ReleaseCheckFinished {
+                request_id: *request_id,
+                result: Err(super::release_check::ReleaseCheckError::Network),
+            }),
             // These are local idempotent barriers; disconnect also clears their secret.
             Self::QuickConnectCancel { .. } | Self::Disconnect | Self::Shutdown => None,
             _ => None,
@@ -194,6 +234,7 @@ impl WorkerCommand {
     fn read_key(&self) -> Option<usize> {
         use super::HomeCatalogKind;
         match self {
+            Self::CheckLatestRelease { .. } => Some(16),
             Self::CheckServer { .. } => Some(0),
             Self::FetchItems { .. } => Some(1),
             // A tab load and a catalog page are the same navigation read: a newer one supersedes
@@ -213,6 +254,28 @@ impl WorkerCommand {
             Self::GetTrickplayResolutions { .. } => Some(13),
             Self::SearchRemoteSubtitles { .. } => Some(14),
             Self::ListSubtitleCultures { .. } => Some(15),
+            Self::ThemeMedia { .. } => Some(17),
+            Self::GetAdjacentEpisodes { .. } => Some(18),
+            Self::ListSeasonSiblings { .. } => Some(19),
+            Self::ListExtras { .. } => Some(20),
+            Self::GetLyrics { .. } => Some(21),
+            Self::ListMediaSegments { .. } => Some(22),
+            Self::GetSeriesNextUp { .. } => Some(23),
+            Self::ListGenres { .. } => Some(24),
+            Self::ListMusicAlbumTracks { .. } => Some(25),
+            Self::ListPlaylistItems { .. } => Some(26),
+            Self::ListUserPlaylists { .. } => Some(27),
+            Self::ListMenuCollections { .. } => Some(28),
+            Self::LoadPlaylistCandidates { .. } => Some(29),
+            Self::LoadLiveTvChannels { .. } => Some(30),
+            Self::SearchLiveTvChannels { .. } => Some(31),
+            Self::LoadLiveTvPrograms { .. } => Some(32),
+            Self::LoadRecordings { .. } => Some(33),
+            Self::RestoreQueueItems { .. } => Some(34),
+            Self::ShuffleSeries { .. } => Some(35),
+            Self::LoadDashboard { .. } => Some(36),
+            Self::LoadAdminUsers { .. } => Some(37),
+            Self::LoadMetadataManager { .. } => Some(38),
             _ => None,
         }
     }
@@ -462,7 +525,7 @@ impl CommandQueue {
 
     fn pop_read(&self, allow_background: bool, prefer_background: bool) -> Option<Queued> {
         let mut state = self.state.lock().ok()?;
-        let background = |entry: &Queued| matches!(entry.ticket.key, Some(3..=7));
+        let background = |entry: &Queued| matches!(entry.ticket.key, Some(3..=7 | 16));
         let preferred = prefer_background
             .then(|| state.reads.iter().position(background))
             .flatten();
@@ -480,7 +543,7 @@ impl CommandQueue {
             state
                 .reads
                 .iter()
-                .any(|entry| !matches!(entry.ticket.key, Some(3..=7)))
+                .any(|entry| !matches!(entry.ticket.key, Some(3..=7 | 16)))
         })
     }
 
@@ -648,7 +711,8 @@ async fn run_with_grace(
                     let background_count = active
                         .values()
                         .filter(|job| {
-                            job.ticket.lane == Lane::Read && matches!(job.ticket.key, Some(3..=7))
+                            job.ticket.lane == Lane::Read
+                                && matches!(job.ticket.key, Some(3..=7 | 16))
                         })
                         .count();
                     let queued = if lane == Lane::Read {
@@ -763,6 +827,29 @@ mod photo_cancellation_tests {
             photo_index: request_id as usize,
             visible: true,
         }
+    }
+
+    #[test]
+    fn release_checks_are_coalesced_reads_and_cancellation_finishes_request() {
+        let queue = CommandQueue::default();
+        queue
+            .send(WorkerCommand::CheckLatestRelease { request_id: 1 })
+            .expect("queue first release check");
+        queue
+            .send(WorkerCommand::CheckLatestRelease { request_id: 2 })
+            .expect("queue newer release check");
+        let commands = queue.take_commands_for_test();
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            commands.first(),
+            Some(WorkerCommand::CheckLatestRelease { request_id: 2 })
+        ));
+        let cancelled =
+            WorkerCommand::CheckLatestRelease { request_id: 3 }.cancellation_event(false);
+        assert!(matches!(
+            cancelled,
+            Some(WorkerEvent::ReleaseCheckFinished { request_id: 3, .. })
+        ));
     }
 
     #[test]
@@ -1046,16 +1133,12 @@ mod photo_cancellation_tests {
         }
         let _ = state.requests.send(path.clone());
 
-        let gated_item = ["photo-cancel", "photo-keep"]
-            .into_iter()
-            .find(|item_id| path.contains(item_id));
-        if let Some(item_id) = gated_item
-            && let Some(gate) = state
-                .gates
-                .lock()
-                .ok()
-                .and_then(|gates| gates.get(item_id).cloned())
-        {
+        if let Some(gate) = state.gates.lock().ok().and_then(|gates| {
+            gates
+                .iter()
+                .find(|(item_id, _)| path.contains(item_id.as_str()))
+                .map(|(_, gate)| gate.clone())
+        }) {
             gate.wait();
         }
 
@@ -1069,6 +1152,8 @@ mod photo_cancellation_tests {
                 "200 OK",
                 r#"{"AccessToken":"fixture-token","ServerId":"fixture","User":{"Id":"user-1","Name":"fixture"}}"#,
             )
+        } else if path.contains("/PlaybackInfo") {
+            ("200 OK", r#"{"MediaSources":[]}"#)
         } else if path.contains("/Items") && !path.contains("/Images/") {
             (
                 "200 OK",
@@ -1201,6 +1286,15 @@ mod photo_cancellation_tests {
             _ => panic!("worker did not finish loading the fixture library"),
         }
 
+        let fill_gates: Vec<_> = (0..(ARTWORK_CONCURRENCY - 2))
+            .map(|index| {
+                (
+                    format!("photo-fill-{index}"),
+                    fixture.gate(&format!("photo-fill-{index}")),
+                )
+            })
+            .collect();
+
         queue
             .send(WorkerCommand::LoadPhotoThumbnail {
                 request_id: 100,
@@ -1219,6 +1313,15 @@ mod photo_cancellation_tests {
                 visible: true,
             })
             .expect("enqueue photo to preserve");
+        for (index, (item_id, _)) in fill_gates.iter().enumerate() {
+            queue
+                .send(WorkerCommand::GetPrimaryArtwork {
+                    request_id: 200 + index as u64,
+                    item_id: item_id.clone(),
+                    image_tag: None,
+                })
+                .expect("enqueue filler artwork to occupy concurrency slot");
+        }
         queue
             .send(WorkerCommand::GetPrimaryArtwork {
                 request_id: 102,
@@ -1228,8 +1331,8 @@ mod photo_cancellation_tests {
             .expect("enqueue unrelated artwork");
 
         let (cancel_path, keep_path) = tokio::time::timeout(Duration::from_secs(5), async {
-            let (mut cancel_path, mut keep_path) = (None, None);
-            while cancel_path.is_none() || keep_path.is_none() {
+            let (mut cancel_path, mut keep_path, mut seen_fill) = (None, None, 0usize);
+            while cancel_path.is_none() || keep_path.is_none() || seen_fill < fill_gates.len() {
                 let path = fixture
                     .requests
                     .recv()
@@ -1239,12 +1342,14 @@ mod photo_cancellation_tests {
                     cancel_path = Some(path);
                 } else if path.contains("photo-keep") {
                     keep_path = Some(path);
+                } else if path.contains("photo-fill-") {
+                    seen_fill += 1;
                 }
             }
             (cancel_path, keep_path)
         })
         .await
-        .expect("both concurrent photo requests reach the fixture");
+        .expect("all concurrent artwork slots reach the fixture");
         assert!(cancel_path.expect("cancel request").contains("Images"));
         assert!(keep_path.expect("preserved request").contains("Images"));
 
@@ -1269,7 +1374,7 @@ mod photo_cancellation_tests {
         .await
         .expect("cancelled request must release its artwork slot");
 
-        // The third request cannot start until the scheduler observes the abort and
+        // The queued request cannot start until the scheduler observes the abort and
         // removes that active job, proving the cancellation reached run_with_grace.
         assert!(
             next_path(&mut fixture.requests, "poster-keep", &queue, &fixture.state)
@@ -1278,23 +1383,41 @@ mod photo_cancellation_tests {
         );
         cancel_gate.release();
         keep_gate.release();
-        let (preserved_photo, preserved_art) =
+        for (_, gate) in &fill_gates {
+            gate.release();
+        }
+        let (preserved_photo, preserved_art, remaining_fillers) =
             tokio::time::timeout(Duration::from_secs(5), async {
                 let (mut photo, mut artwork) = (false, false);
-                while !photo || !artwork {
+                let mut fillers: HashSet<u64> =
+                    (0..fill_gates.len()).map(|i| 200 + i as u64).collect();
+                while !photo || !artwork || !fillers.is_empty() {
                     match events.recv().await.expect("worker event stream") {
+                        WorkerEvent::PhotoThumbnailLoaded {
+                            request_id: 100, ..
+                        }
+                        | WorkerEvent::PhotoThumbnailFailed {
+                            request_id: 100, ..
+                        } => panic!("cancelled photo emitted a completion"),
                         WorkerEvent::PhotoFullSizeFailed {
                             request_id: 101, ..
                         } => photo = true,
-                        WorkerEvent::PrimaryArtworkFailed { request_id: 102 } => artwork = true,
+                        WorkerEvent::PrimaryArtworkNotFound { request_id }
+                        | WorkerEvent::PrimaryArtworkFailed { request_id } => {
+                            if request_id == 102 {
+                                artwork = true;
+                            } else {
+                                fillers.remove(&request_id);
+                            }
+                        }
                         _ => {}
                     }
                 }
-                (photo, artwork)
+                (photo, artwork, fillers)
             })
             .await
             .expect("timed out waiting for preserved image jobs");
-        assert!(preserved_photo && preserved_art);
+        assert!(preserved_photo && preserved_art && remaining_fillers.is_empty());
 
         queue.shutdown();
         tokio::time::timeout(Duration::from_secs(5), worker)
@@ -1305,5 +1428,143 @@ mod photo_cancellation_tests {
             events.try_recv().is_err(),
             "cancelled photo emitted a completion"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn metadata_reads_use_read_lane_and_do_not_block_playback_control() {
+        let epoch = kattri_client_core::epoch::Epoch::NONE;
+        let read_commands = [
+            WorkerCommand::ThemeMedia {
+                request_id: 10,
+                epoch,
+                item_id: "read-gate-theme".into(),
+            },
+            WorkerCommand::GetAdjacentEpisodes {
+                request_id: 11,
+                epoch,
+                series_id: "read-gate-adj".into(),
+                episode_id: "ep-1".into(),
+            },
+            WorkerCommand::ListSeasonSiblings {
+                request_id: 12,
+                epoch,
+                series_id: "read-gate-sib".into(),
+                season: 1,
+            },
+            WorkerCommand::ListExtras {
+                request_id: 13,
+                epoch,
+                item_id: "read-gate-extras".into(),
+            },
+            WorkerCommand::GetLyrics {
+                request_id: 14,
+                epoch,
+                item_id: "read-gate-lyrics".into(),
+            },
+        ];
+
+        let mut seen_keys = HashSet::new();
+        for command in &read_commands {
+            assert_eq!(command.lane(), Lane::Read);
+            let key = command.read_key().expect("read key assigned");
+            assert!(key < READ_KEYS);
+            assert!(seen_keys.insert(key), "duplicate read key {key}");
+        }
+
+        let playback_info = WorkerCommand::PlaybackInfo {
+            request_id: 200,
+            epoch,
+            item_id: "play-item".into(),
+            is_audio: false,
+            request: Box::new(jellyfin_api::PlaybackInfoRequest::default()),
+        };
+        let prepare_playback = WorkerCommand::PreparePlayback {
+            request_id: 201,
+            negotiation_id: 1,
+            item_id: "play-item".into(),
+            source_index: 0,
+            play_method: jellyfin_api::PlayMethod::DirectPlay,
+            start_time_ticks: None,
+            burn_in_subtitles: false,
+            live_device_profile: None,
+            live_tune_started_at: None,
+        };
+        assert_eq!(playback_info.lane(), Lane::Control);
+        assert_eq!(prepare_playback.lane(), Lane::Control);
+
+        let mut fixture = PhotoFixture::start();
+        let read_gate = fixture.gate("read-gate-");
+        let queue = Arc::new(CommandQueue::default());
+        let (event_sender, mut events) = tokio_mpsc::channel(EVENT_CAPACITY);
+        let sink = WorkerSink::for_test(event_sender);
+        let worker = tokio::spawn(run_with_grace(
+            queue.clone(),
+            sink,
+            "read-lane-playback-test".into(),
+            Duration::from_secs(2),
+        ));
+
+        queue
+            .send(WorkerCommand::Connect {
+                request_id: 1,
+                server_url: fixture.url.clone(),
+                username: "fixture".into(),
+                password: zeroize::Zeroizing::new("fixture".into()),
+                allow_insecure_remote_http: false,
+                saved: crate::worker::SavedSignInRequest::not_remembered(),
+            })
+            .expect("enqueue fixture connection");
+        next_matching_event(&mut events, "fixture catalog", |event| {
+            matches!(event, WorkerEvent::ItemsLoaded { request_id: 1, .. })
+        })
+        .await;
+
+        for command in read_commands {
+            queue.send(command).expect("enqueue metadata read");
+        }
+
+        // Fill all READ_CONCURRENCY slots with held metadata reads while the remaining
+        // two wait on Lane::Read.
+        for _ in 0..READ_CONCURRENCY {
+            assert!(
+                next_path(&mut fixture.requests, "read-gate-", &queue, &fixture.state)
+                    .await
+                    .contains("read-gate-")
+            );
+        }
+
+        queue.send(playback_info).expect("enqueue PlaybackInfo");
+        next_matching_event(&mut events, "PlaybackInfo while reads held", |event| {
+            matches!(
+                event,
+                WorkerEvent::PlaybackInfoLoaded {
+                    request_id: 200,
+                    ..
+                }
+            )
+        })
+        .await;
+
+        queue
+            .send(prepare_playback)
+            .expect("enqueue PreparePlayback");
+        next_matching_event(&mut events, "PreparePlayback while reads held", |event| {
+            matches!(
+                event,
+                WorkerEvent::PlaybackPrepareFailed {
+                    request_id: 201,
+                    ..
+                }
+            )
+        })
+        .await;
+
+        read_gate.release();
+        queue.shutdown();
+        let report = tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("scheduler shut down")
+            .expect("scheduler task joined");
+        assert_eq!(report, WorkerShutdownReport::default());
     }
 }

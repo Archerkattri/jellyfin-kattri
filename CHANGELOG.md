@@ -4,13 +4,55 @@ All notable changes to Jellyfin Kattri are recorded here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are release dates on GitHub.
 Everything before 0.7.0 was published as a prerelease.
 
-## Unreleased
+## 1.0.3 - Unreleased
+
+Draft for the next local release candidate. It supersedes the unpublished 1.0.2 draft; the
+published release remains 1.0.1.
+
+### Added
+
+- Library pages and search results render poster cards with two-line titles, year, runtime and rating, matching the Home shelves. Search keeps its grouped layout and the card context menu.
+- The About page reports the runtime the host actually loaded: libmpv and FFmpeg versions and the GPU identity, alongside the app version, build target, device-ID file and log folder.
+- The profile menu now offers signed-in Quick Connect, a server account panel with an explicit
+  save action for the Latest watched-items preference, and an administrator-only Metadata Manager.
+  The manager searches and pages through items and opens the existing metadata editor.
+
+### Fixed
+
+- UI: Escape dismisses popups; TLS settings save correctly and expose AccessKit labels; stale shuffle
+  results are discarded; Live TV pages can be retried.
+- Security: update the `url` dependency to 2.5.9 for the applicable advisory; this is separate from
+  updater verification or any completed update path.
+
+### Changed
+
+- Update notification is manual-only and reports a version from GitHub release metadata. It is not
+  the signed-manifest updater and does not download or install a release.
+- Updater: staged-file downloads use incremental hashing and a bounded asynchronous write queue.
+  Cancellation releases the temporary file. Unix builds use `statvfs` for staging space checks;
+  the probe was tested under Ubuntu on WSL, not on macOS. The desktop worker streams signed
+  payloads into the local install store and verifies the staged copy before switching slots.
+  The offline test covers download, apply, and rollback; production HTTPS and OS-installed
+  package replacement have not been demonstrated.
+- Packaging smoke and documentation contract checks were strengthened; Linux/macOS runtime execution
+  remains unvalidated on this Windows host.
+
+### Removed
+
+- The high-contrast appearance toggle was removed; theme presets and the interface-size setting
+  cover appearance now. A settings file that still contains `general.high_contrast` keeps that key
+  through a load and save, so downgrading to 1.0.1 restores the old preference.
+
+### Not yet provisioned / validated
+
+- No production signing key or endpoint is configured. No actual installed-package replacement has
+  been validated, and no actual HTTPS transport acceptance has been completed.
 
 ### Changed
 
 - Refactor: screen state lives in its own state machines with explicit transitions, the app owns
   that state instead of passing it through handlers, and an epoch boundary discards results that
-  arrive after a state change. Evidence: `scripts/check.ps1` PASS with 3,083 tests.
+  arrive after a state change. Evidence: historical `scripts/check.ps1` run passed with 3,083 tests.
 
 ## 1.0.1 - 2026-11-21
 

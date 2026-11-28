@@ -26,7 +26,8 @@ pub fn media_card_scaled(
 ) -> egui::Response {
     let scale = scale.clamp(0.65, 1.55);
     let width = CARD_WIDTH * scale;
-    let height = 246.0 * scale;
+    // Room for a two-line title and one muted meta line, so long titles wrap instead of losing text.
+    let height = 266.0 * scale;
     let poster_height = 188.0 * scale;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
     let art_rect = Rect::from_min_size(rect.min, egui::vec2(width, poster_height));
@@ -42,23 +43,31 @@ pub fn media_card_scaled(
         } else {
             paint_artwork(&painter, art_rect, item.artwork);
         }
+        let title = super::row::layout_text(
+            &painter,
+            &item.title,
+            FontId::proportional(15.0 * scale),
+            colors.text,
+            width - 2.0,
+            2,
+        );
+        let title_height = title.size().y;
         painter.galley(
             egui::pos2(rect.left() + 1.0, art_rect.bottom() + 10.0),
-            super::row::layout_text(
-                &painter,
-                &item.title,
-                FontId::proportional(15.0 * scale),
-                colors.text,
-                width - 2.0,
-                1,
-            ),
+            title,
             colors.text,
         );
+        // A year, runtime and rating say more than repeating the item type under every poster.
+        let meta = item.meta_line();
         painter.galley(
-            egui::pos2(rect.left() + 1.0, art_rect.bottom() + 31.0),
+            egui::pos2(rect.left() + 1.0, art_rect.bottom() + 12.0 + title_height),
             super::row::layout_text(
                 &painter,
-                item.subtitle(),
+                if meta.is_empty() {
+                    item.subtitle()
+                } else {
+                    &meta
+                },
                 FontId::proportional(11.5 * scale),
                 colors.muted,
                 width - 2.0,
@@ -69,17 +78,17 @@ pub fn media_card_scaled(
 
         if response.has_focus() {
             painter.rect_stroke(
-                art_rect.expand(2.0),
-                CornerRadius::same(9),
+                art_rect,
+                CornerRadius::same(10),
                 Stroke::new(2.5, colors.focus),
-                egui::StrokeKind::Outside,
+                egui::StrokeKind::Inside,
             );
         } else if selected || response.hovered() {
             painter.rect_stroke(
-                art_rect.expand(1.0),
-                CornerRadius::same(8),
+                art_rect,
+                CornerRadius::same(10),
                 Stroke::new(if selected { 2.0 } else { 1.5 }, colors.accent),
-                egui::StrokeKind::Outside,
+                egui::StrokeKind::Inside,
             );
         }
     }
@@ -127,38 +136,94 @@ fn card_label(item: &MediaItem) -> String {
 }
 
 pub fn paint_artwork(painter: &egui::Painter, rect: Rect, art: ArtworkPalette) {
-    paint_vertical_gradient(painter, rect, art.top, art.bottom);
+    // Clip every motif to the tile so a vector placeholder can never spill into
+    // neighbouring cells or the title strip below the poster.
+    let clipped = painter.with_clip_rect(rect);
+    paint_vertical_gradient(&clipped, rect, art.top, art.bottom);
     match art.motif {
-        ArtworkMotif::Horizon => horizon(painter, rect, art),
-        ArtworkMotif::Orbit => orbit(painter, rect, art),
-        ArtworkMotif::Peaks => peaks(painter, rect, art),
-        ArtworkMotif::Arches => arches(painter, rect, art),
-        ArtworkMotif::Sound => sound(painter, rect, art),
+        ArtworkMotif::Horizon => horizon(&clipped, rect, art),
+        ArtworkMotif::Orbit => orbit(&clipped, rect, art),
+        ArtworkMotif::Peaks => peaks(&clipped, rect, art),
+        ArtworkMotif::Arches => arches(&clipped, rect, art),
+        ArtworkMotif::Sound => sound(&clipped, rect, art),
     }
-    painter.rect_filled(
+    clipped.rect_filled(
         rect,
-        CornerRadius::same(8),
+        CornerRadius::same(10),
         Color32::from_rgba_unmultiplied(0, 0, 0, 7),
     );
 }
 
+fn rounded_rect_points(rect: Rect, radius: f32) -> Vec<egui::Pos2> {
+    let r = radius.clamp(0.0, (rect.width() * 0.5).min(rect.height() * 0.5));
+    if r <= 0.0 {
+        return vec![
+            rect.left_top(),
+            rect.right_top(),
+            rect.right_bottom(),
+            rect.left_bottom(),
+        ];
+    }
+    const STEPS: usize = 6;
+    let corners = [
+        (
+            egui::pos2(rect.left() + r, rect.top() + r),
+            std::f32::consts::PI,
+            std::f32::consts::FRAC_PI_2 * 3.0,
+        ),
+        (
+            egui::pos2(rect.right() - r, rect.top() + r),
+            std::f32::consts::FRAC_PI_2 * 3.0,
+            std::f32::consts::TAU,
+        ),
+        (
+            egui::pos2(rect.right() - r, rect.bottom() - r),
+            0.0,
+            std::f32::consts::FRAC_PI_2,
+        ),
+        (
+            egui::pos2(rect.left() + r, rect.bottom() - r),
+            std::f32::consts::FRAC_PI_2,
+            std::f32::consts::PI,
+        ),
+    ];
+    let mut points = Vec::with_capacity(corners.len() * (STEPS + 1));
+    for (center, start_angle, end_angle) in corners {
+        for step in 0..=STEPS {
+            let t = step as f32 / STEPS as f32;
+            let angle = start_angle + (end_angle - start_angle) * t;
+            let (sin, cos) = angle.sin_cos();
+            points.push(egui::pos2(center.x + cos * r, center.y + sin * r));
+        }
+    }
+    points
+}
+
 fn paint_vertical_gradient(painter: &egui::Painter, rect: Rect, top: [u8; 3], bottom: [u8; 3]) {
-    const STEPS: usize = 32;
-    for index in 0..STEPS {
-        let t = index as f32 / (STEPS - 1) as f32;
-        let color = Color32::from_rgb(
+    let points = rounded_rect_points(rect, 10.0);
+    if points.len() < 3 || rect.height() <= 0.0 {
+        return;
+    }
+    let color_at = |y: f32| {
+        let t = ((y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+        Color32::from_rgb(
             lerp(top[0], bottom[0], t),
             lerp(top[1], bottom[1], t),
             lerp(top[2], bottom[2], t),
-        );
-        let y0 = rect.top() + rect.height() * index as f32 / STEPS as f32;
-        let y1 = rect.top() + rect.height() * (index + 1) as f32 / STEPS as f32 + 0.6;
-        painter.rect_filled(
-            Rect::from_min_max(egui::pos2(rect.left(), y0), egui::pos2(rect.right(), y1)),
-            CornerRadius::ZERO,
-            color,
-        );
+        )
+    };
+    let mut mesh = egui::epaint::Mesh::default();
+    let center = rect.center();
+    mesh.colored_vertex(center, color_at(center.y));
+    for pos in &points {
+        mesh.colored_vertex(*pos, color_at(pos.y));
     }
+    let count = points.len() as u32;
+    for index in 0..count {
+        let next = if index + 1 == count { 1 } else { index + 2 };
+        mesh.add_triangle(0, index + 1, next);
+    }
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 pub(crate) fn cover_uv(image_size: egui::Vec2, target_size: egui::Vec2) -> Rect {
@@ -190,7 +255,12 @@ fn horizon(painter: &egui::Painter, rect: Rect, art: ArtworkPalette) {
             egui::pos2(rect.left(), rect.top() + rect.height() * 0.62),
             rect.right_bottom(),
         ),
-        CornerRadius::ZERO,
+        CornerRadius {
+            nw: 0,
+            ne: 0,
+            sw: 10,
+            se: 10,
+        },
         Color32::from_rgba_unmultiplied(10, 22, 31, 150),
     );
     for line in 0..5 {
@@ -230,11 +300,34 @@ fn orbit(painter: &egui::Painter, rect: Rect, art: ArtworkPalette) {
     );
 }
 
+fn append_bottom_rounded_corners(points: &mut Vec<egui::Pos2>, rect: Rect, radius: f32) {
+    let r = radius.clamp(0.0, (rect.width() * 0.5).min(rect.height() * 0.11));
+    if r <= 0.0 {
+        points.push(rect.right_bottom());
+        points.push(rect.left_bottom());
+        return;
+    }
+    const STEPS: usize = 6;
+    let br_center = egui::pos2(rect.right() - r, rect.bottom() - r);
+    for step in 0..=STEPS {
+        let angle = (step as f32 / STEPS as f32) * std::f32::consts::FRAC_PI_2;
+        let (sin, cos) = angle.sin_cos();
+        points.push(egui::pos2(br_center.x + cos * r, br_center.y + sin * r));
+    }
+    let bl_center = egui::pos2(rect.left() + r, rect.bottom() - r);
+    for step in 0..=STEPS {
+        let angle = std::f32::consts::FRAC_PI_2
+            + (step as f32 / STEPS as f32) * std::f32::consts::FRAC_PI_2;
+        let (sin, cos) = angle.sin_cos();
+        points.push(egui::pos2(bl_center.x + cos * r, bl_center.y + sin * r));
+    }
+}
+
 fn peaks(painter: &egui::Painter, rect: Rect, art: ArtworkPalette) {
     let left = rect.left();
     let right = rect.right();
     let base = rect.bottom();
-    let back = vec![
+    let mut back = vec![
         egui::pos2(left, base - rect.height() * 0.38),
         egui::pos2(
             left + rect.width() * 0.28,
@@ -242,21 +335,19 @@ fn peaks(painter: &egui::Painter, rect: Rect, art: ArtworkPalette) {
         ),
         egui::pos2(left + rect.width() * 0.55, base - rect.height() * 0.22),
         egui::pos2(right, rect.top() + rect.height() * 0.39),
-        egui::pos2(right, base),
-        egui::pos2(left, base),
     ];
+    append_bottom_rounded_corners(&mut back, rect, 10.0);
     painter.add(egui::Shape::convex_polygon(
         back,
         theme::color(art.shape),
         Stroke::NONE,
     ));
-    let foreground = vec![
+    let mut foreground = vec![
         egui::pos2(left, base - rect.height() * 0.2),
         egui::pos2(left + rect.width() * 0.43, base - rect.height() * 0.58),
         egui::pos2(right, base - rect.height() * 0.12),
-        egui::pos2(right, base),
-        egui::pos2(left, base),
     ];
+    append_bottom_rounded_corners(&mut foreground, rect, 10.0);
     painter.add(egui::Shape::convex_polygon(
         foreground,
         Color32::from_rgba_unmultiplied(8, 18, 25, 180),
@@ -275,7 +366,7 @@ fn peaks(painter: &egui::Painter, rect: Rect, art: ArtworkPalette) {
 }
 
 fn arches(painter: &egui::Painter, rect: Rect, art: ArtworkPalette) {
-    let base = rect.bottom() + rect.height() * 0.08;
+    let base = rect.bottom();
     for index in 0..3 {
         let inset = rect.width() * (0.12 + index as f32 * 0.16);
         let arch = Rect::from_min_max(
@@ -340,6 +431,55 @@ fn sound(painter: &egui::Painter, rect: Rect, art: ArtworkPalette) {
 
 fn lerp(start: u8, end: u8, t: f32) -> u8 {
     (f32::from(start) + (f32::from(end) - f32::from(start)) * t).round() as u8
+}
+
+#[cfg(test)]
+mod paint_artwork_clip_tests {
+    use super::{ArtworkMotif, ArtworkPalette, paint_artwork};
+    use egui::{Pos2, RawInput, Rect, Vec2};
+
+    #[test]
+    fn paint_artwork_clips_every_motif_to_tile() {
+        let context = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(150.0, 188.0));
+        let motifs = [
+            ArtworkMotif::Horizon,
+            ArtworkMotif::Orbit,
+            ArtworkMotif::Peaks,
+            ArtworkMotif::Arches,
+            ArtworkMotif::Sound,
+        ];
+        for motif in motifs {
+            let art = ArtworkPalette {
+                top: [10, 20, 30],
+                bottom: [30, 20, 10],
+                shape: [50, 60, 70],
+                detail: [70, 60, 50],
+                motif,
+            };
+            let mut output = context.run_ui(
+                RawInput {
+                    screen_rect: Some(rect),
+                    ..Default::default()
+                },
+                |ui| {
+                    let painter = ui.painter_at(rect);
+                    paint_artwork(&painter, rect, art);
+                },
+            );
+            output.textures_delta.clear();
+            assert!(
+                !output.shapes.is_empty(),
+                "motif {motif:?} produced no shapes"
+            );
+            for clipped in &output.shapes {
+                assert_eq!(
+                    clipped.clip_rect, rect,
+                    "motif {motif:?} left a non-tile clip rect"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

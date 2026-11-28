@@ -38,6 +38,8 @@ pub(crate) enum ItemMenuAction {
     PlayNextInQueue,
     /// Add the item to the playlist in [`ItemMenuTarget::playlist_id`].
     AddToPlaylist,
+    /// Add the item to this profile's local playlist (M6-13). Item IDs only, no server write.
+    AddToLocalPlaylist,
     /// Administrators: ask the server to refresh the item's metadata.
     RefreshMetadata,
     /// Administrators: delete the item, after a confirmation.
@@ -91,6 +93,8 @@ pub(crate) fn entries(item: &MediaItem) -> Vec<ItemMenuAction> {
         MediaKind::Movie | MediaKind::Episode | MediaKind::Audio | MediaKind::Video
     ) {
         entries.push(ItemMenuAction::Download);
+        // Local list membership stays in this profile; the action never writes to the server.
+        entries.push(ItemMenuAction::AddToLocalPlaylist);
     }
     entries
 }
@@ -122,6 +126,7 @@ fn label(action: ItemMenuAction) -> &'static str {
         ItemMenuAction::AddToQueue => ids::ITEM_MENU_ADD_TO_QUEUE,
         ItemMenuAction::PlayNextInQueue => ids::ITEM_MENU_PLAY_NEXT,
         ItemMenuAction::AddToPlaylist => ids::ITEM_MENU_ADD_TO_PLAYLIST,
+        ItemMenuAction::AddToLocalPlaylist => ids::ITEM_MENU_ADD_TO_LOCAL_PLAYLIST,
         ItemMenuAction::RefreshMetadata => ids::ITEM_MENU_REFRESH_METADATA,
         ItemMenuAction::Delete => ids::ITEM_MENU_DELETE,
         ItemMenuAction::AddToCollection => ids::ITEM_MENU_ADD_TO_COLLECTION,
@@ -256,12 +261,73 @@ fn menu_popup(response: &egui::Response) -> egui::Popup<'_> {
     }
 }
 
+pub(crate) fn menu_row(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let colors = crate::theme::active_palette();
+    let width = ui.available_width().max(180.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        if response.hovered() || response.has_focus() || response.is_pointer_button_down_on() {
+            let fill = if response.is_pointer_button_down_on() {
+                colors.raised
+            } else {
+                colors.raised.gamma_multiply(0.85)
+            };
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::same(8), fill);
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect,
+                egui::CornerRadius::same(8),
+                egui::Stroke::new(1.5, colors.focus),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let text_pos = egui::pos2(rect.left() + 10.0, rect.center().y);
+        ui.painter().text(
+            text_pos,
+            egui::Align2::LEFT_CENTER,
+            text,
+            egui::FontId::proportional(14.0),
+            colors.text,
+        );
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, text));
+    response
+}
+
+pub(crate) fn menu_separator(ui: &mut egui::Ui) {
+    let colors = crate::theme::active_palette();
+    let width = ui.available_width().max(180.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 9.0), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let y = rect.center().y;
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.left() + 6.0, y),
+                egui::pos2(rect.right() - 6.0, y),
+            ],
+            egui::Stroke::new(1.0, colors.divider),
+        );
+    }
+}
+
 fn show(ui: &mut egui::Ui, item: &MediaItem) {
-    ui.set_min_width(200.0);
-    ui.label(egui::RichText::new(&item.title).strong());
-    ui.separator();
+    let colors = crate::theme::active_palette();
+    ui.set_min_width(210.0);
+    ui.spacing_mut().item_spacing.y = 4.0;
+    ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+    ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    ui.visuals_mut().widgets.hovered.weak_bg_fill = colors.raised.gamma_multiply(0.85);
+    ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new(&item.title).strong().color(colors.text));
+    });
+    menu_separator(ui);
     for action in entries(item) {
-        if ui.button(label(action)).clicked() {
+        if menu_row(ui, label(action)).clicked() {
             choose(ui, item, action, None);
             ui.close();
         }
@@ -278,7 +344,7 @@ fn show(ui: &mut egui::Ui, item: &MediaItem) {
         .unwrap_or(false);
     if subtitles && can_search_subtitles(item) {
         let action = ItemMenuAction::SearchSubtitles;
-        if ui.button(label(action)).clicked() {
+        if menu_row(ui, label(action)).clicked() {
             choose(ui, item, action, None);
             ui.close();
         }
@@ -288,7 +354,7 @@ fn show(ui: &mut egui::Ui, item: &MediaItem) {
         .data(|data| data.get_temp(admin_id()))
         .unwrap_or(false);
     if admin {
-        ui.separator();
+        menu_separator(ui);
         let collections: Option<MenuPlaylists> =
             ui.ctx().data(|data| data.get_temp(collections_id()));
         if let Some(collections) = collections.filter(|collections| !collections.is_empty())
@@ -297,7 +363,7 @@ fn show(ui: &mut egui::Ui, item: &MediaItem) {
             list_submenu(ui, item, ItemMenuAction::AddToCollection, &collections);
         }
         for action in admin_entries(item) {
-            if ui.button(label(action)).clicked() {
+            if menu_row(ui, label(action)).clicked() {
                 choose(ui, item, action, None);
                 ui.close();
             }
@@ -313,11 +379,13 @@ fn list_submenu(
     lists: &MenuPlaylists,
 ) {
     ui.menu_button(label(action), |ui| {
+        ui.set_min_width(180.0);
+        ui.spacing_mut().item_spacing.y = 4.0;
         egui::ScrollArea::vertical()
             .max_height(320.0)
             .show(ui, |ui| {
                 for (list_id, name) in lists.iter() {
-                    if ui.button(name).clicked() {
+                    if menu_row(ui, name).clicked() {
                         choose(ui, item, action, Some(list_id.clone()));
                         ui.close();
                     }
@@ -335,10 +403,81 @@ pub(crate) fn take(ctx: &egui::Context) -> Option<(ItemMenuTarget, ItemMenuActio
     })
 }
 
-/// Same menu for a server DTO such as a search result, which is not a catalog entry yet. The
-/// catalog item is built only when the menu opens, so a frame of results costs nothing.
-pub(crate) fn attach_dto(response: &egui::Response, dto: &jellyfin_api::BaseItemDto) {
-    menu_popup(response).show(|ui| show(ui, &MediaItem::from_api(dto.clone())));
+/// Same menu for a server DTO, for callers that have no catalog entry for it yet. The catalog item
+/// is built only when the menu opens, so a frame of results costs nothing.
+#[cfg(test)]
+pub(crate) fn attach_dto(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    dto: &jellyfin_api::BaseItemDto,
+) -> bool {
+    let item = MediaItem::from_api(dto.clone());
+    card_actions(ui, response, &item)
+}
+
+/// Inset controls share the card's hover area, so moving onto either control keeps it visible.
+/// Return true when an overlay action should take precedence over opening the card.
+pub(crate) fn card_actions(ui: &mut egui::Ui, card: &egui::Response, item: &MediaItem) -> bool {
+    attach(card, item);
+    let more_rect = egui::Rect::from_min_size(
+        card.rect.right_top() + egui::vec2(-33.0, 5.0),
+        egui::vec2(28.0, 27.0),
+    );
+    let more_id = card.id.with("more-actions");
+    let played_id = card.id.with("played-action");
+    let popup_id = more_id.with("popup");
+    let reveal = card.contains_pointer()
+        || card.has_focus()
+        || egui::Popup::is_id_open(ui.ctx(), popup_id)
+        || ui.memory(|memory| memory.has_focus(more_id) || memory.has_focus(played_id));
+    if !reveal || !ui.is_rect_visible(card.rect) {
+        return false;
+    }
+    let colors = crate::theme::active_palette();
+    let more = ui.interact(more_rect, more_id, egui::Sense::click());
+    let paint = |response: &egui::Response, glyph: &str, name: &str| {
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+        let fill = if response.hovered() || response.has_focus() {
+            colors.raised
+        } else {
+            colors.panel.gamma_multiply(0.92)
+        };
+        ui.painter().rect_filled(response.rect, 6.0, fill);
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                response.rect,
+                6.0,
+                egui::Stroke::new(1.5, colors.focus),
+                egui::StrokeKind::Inside,
+            );
+        }
+        ui.painter().text(
+            response.rect.center(),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            egui::FontId::proportional(18.0),
+            colors.text,
+        );
+    };
+    paint(&more, "⋯", ui_text(ids::SHELL_NAV_MORE));
+    egui::Popup::menu(&more)
+        .id(popup_id)
+        .show(|ui| show(ui, item));
+    let mut handled = more.clicked();
+    let action = ItemMenuAction::SetPlayed(!item.played);
+    if entries(item).contains(&action) {
+        let played = ui.interact(
+            more_rect.translate(egui::vec2(-32.0, 0.0)),
+            played_id,
+            egui::Sense::click(),
+        );
+        paint(&played, "✓", label(action));
+        if played.clone().on_hover_text(label(action)).clicked() {
+            choose(ui, item, action, None);
+            handled = true;
+        }
+    }
+    handled
 }
 
 #[cfg(test)]
@@ -365,6 +504,7 @@ mod tests {
                 ItemMenuAction::SetPlayed(true),
                 ItemMenuAction::SetFavorite(false),
                 ItemMenuAction::Download,
+                ItemMenuAction::AddToLocalPlaylist,
             ]
         );
     }
@@ -410,6 +550,7 @@ mod tests {
                 ItemMenuAction::SetPlayed(true),
                 ItemMenuAction::SetFavorite(true),
                 ItemMenuAction::Download,
+                ItemMenuAction::AddToLocalPlaylist,
             ]
         );
     }

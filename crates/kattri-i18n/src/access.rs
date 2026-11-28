@@ -63,10 +63,6 @@ pub const CONTROLS: &[ControlName] = &[
         message_id: ids::ACCESS_BROWSE_RETRY,
     },
     ControlName {
-        control_id: "nav.high_contrast",
-        message_id: ids::ACCESS_NAV_HIGH_CONTRAST,
-    },
-    ControlName {
         control_id: "nav.disconnect",
         message_id: ids::ACCESS_NAV_DISCONNECT,
     },

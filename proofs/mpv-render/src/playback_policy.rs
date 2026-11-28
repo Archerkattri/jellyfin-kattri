@@ -94,21 +94,21 @@ impl OptionWriteLedger {
         Self::default()
     }
 
-    /// Return the pairs whose value differs from the last applied value, in input order, and
-    /// record them as applied.
-    pub fn changed_writes(
-        &mut self,
-        pairs: &[(&'static str, String)],
-    ) -> Vec<(&'static str, String)> {
-        let mut writes = Vec::new();
-        for &(name, ref value) in pairs {
-            if self.applied.get(name) == Some(value) {
-                continue;
-            }
-            self.applied.insert(name, value.clone());
-            writes.push((name, value.clone()));
-        }
-        writes
+    /// Return the pairs whose value differs from the last applied value, in input order.
+    ///
+    /// Returned values remain pending until [`Self::mark_applied`] is called after their
+    /// submission succeeds.
+    pub fn changed_writes(&self, pairs: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
+        pairs
+            .iter()
+            .filter(|(name, value)| self.applied.get(name) != Some(value))
+            .map(|(name, value)| (*name, value.clone()))
+            .collect()
+    }
+
+    /// Record one option only after its submission has succeeded.
+    pub fn mark_applied(&mut self, name: &'static str, value: String) {
+        self.applied.insert(name, value);
     }
 
     /// The last value recorded for `name`, if any.
@@ -527,6 +527,8 @@ mod tests {
             ("sub-scale", "1".to_owned()),
         ];
         assert_eq!(ledger.changed_writes(&first), first);
+        ledger.mark_applied("sub-font", "Arial".to_owned());
+        ledger.mark_applied("sub-scale", "1".to_owned());
         let second = vec![
             ("sub-font", "Arial".to_owned()),
             ("sub-scale", "1.5".to_owned()),
@@ -535,6 +537,7 @@ mod tests {
             ledger.changed_writes(&second),
             vec![("sub-scale", "1.5".to_owned())]
         );
+        ledger.mark_applied("sub-scale", "1.5".to_owned());
         assert_eq!(ledger.applied("sub-scale"), Some("1.5"));
         assert!(ledger.changed_writes(&second).is_empty());
     }

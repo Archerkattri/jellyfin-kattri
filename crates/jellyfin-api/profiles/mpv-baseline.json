@@ -8,11 +8,27 @@
     "maxVideoBitDepth": 10,
     "subtitleProfiles": [
       {"format": "srt", "method": "External"},
+      {"format": "srt", "method": "Embed"},
       {"format": "ass", "method": "External"},
+      {"format": "ass", "method": "Embed"},
       {"format": "ssa", "method": "External"},
+      {"format": "ssa", "method": "Embed"},
       {"format": "vtt", "method": "External"},
+      {"format": "vtt", "method": "Embed"},
       {"format": "pgs", "method": "External"},
-      {"format": "sub", "method": "External"}
+      {"format": "pgs", "method": "Embed"},
+      {"format": "pgssub", "method": "External"},
+      {"format": "pgssub", "method": "Embed"},
+      {"format": "sub", "method": "External"},
+      {"format": "sub", "method": "Embed"},
+      {"format": "dvdsub", "method": "Embed"},
+      {"format": "subrip", "method": "External"},
+      {"format": "subrip", "method": "Embed"},
+      {"format": "webvtt", "method": "External"},
+      {"format": "webvtt", "method": "Embed"},
+      {"format": "dvbsub", "method": "Embed"},
+      {"format": "mov_text", "method": "Embed"},
+      {"format": "text", "method": "Embed"}
     ]
   },
   "provenance": [

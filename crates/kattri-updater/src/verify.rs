@@ -192,8 +192,47 @@ pub fn verify_artifact_bytes(artifact: &Artifact, bytes: &[u8]) -> Result<(), Up
             actual,
         });
     }
-    let digest = to_hex(&Sha256::digest(bytes));
-    if digest != artifact.sha256 {
+    verify_digest(artifact, &Sha256::digest(bytes))
+}
+
+/// Verify a payload from a bounded stream without allocating its full contents.
+pub fn verify_artifact_reader(
+    artifact: &Artifact,
+    reader: impl std::io::Read,
+) -> Result<(), UpdateError> {
+    use std::io::Read as _;
+    if artifact.size_bytes > MAX_ARTIFACT_BYTES {
+        return Err(UpdateError::TooLarge {
+            what: "artifact",
+            limit: MAX_ARTIFACT_BYTES,
+        });
+    }
+    let mut reader = reader.take(artifact.size_bytes + 1);
+    let mut hash = Sha256::new();
+    let mut actual = 0;
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result.map_err(|_| UpdateError::ArtifactFileIo)?,
+        };
+        if count == 0 {
+            break;
+        }
+        actual += count as u64;
+        hash.update(&buffer[..count]);
+    }
+    if actual != artifact.size_bytes {
+        return Err(UpdateError::SizeMismatch {
+            expected: artifact.size_bytes,
+            actual,
+        });
+    }
+    verify_digest(artifact, &hash.finalize())
+}
+
+fn verify_digest(artifact: &Artifact, digest: &[u8]) -> Result<(), UpdateError> {
+    if to_hex(digest) != artifact.sha256 {
         return Err(UpdateError::DigestMismatch {
             platform: artifact.platform.clone(),
             arch: artifact.arch.clone(),
@@ -213,7 +252,7 @@ fn channel_name(channel: Channel) -> &'static str {
     }
 }
 
-fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes
         .iter()

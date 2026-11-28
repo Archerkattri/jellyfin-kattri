@@ -3,7 +3,6 @@ use kattri_settings::{GeneralSettings, ThemePreset};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 static CURRENT_PRESET: AtomicU8 = AtomicU8::new(0);
-static CURRENT_HIGH_CONTRAST: AtomicBool = AtomicBool::new(false);
 const NO_CUSTOM_COLOR: u32 = 0x0100_0000;
 static CURRENT_CUSTOM_THEME_ENABLED: AtomicBool = AtomicBool::new(false);
 static CURRENT_CUSTOM_ACCENT: AtomicU32 = AtomicU32::new(NO_CUSTOM_COLOR);
@@ -22,7 +21,6 @@ struct CustomTheme {
 struct ThemeCacheKey {
     requested: ThemePreset,
     resolved: ThemePreset,
-    high_contrast: bool,
     reduce_motion: bool,
     custom: CustomTheme,
 }
@@ -77,11 +75,10 @@ pub fn set_current_preset(preset: ThemePreset) {
 }
 
 #[cfg(test)]
-fn apply(ctx: &egui::Context, high_contrast: bool, reduce_motion: bool) {
+fn apply(ctx: &egui::Context, reduce_motion: bool) {
     apply_to_context(
         ctx,
         ThemePreset::JellyfinDark,
-        high_contrast,
         reduce_motion,
         CustomTheme::default(),
         false,
@@ -109,12 +106,10 @@ pub const PANEL: Color32 = Color32::from_rgb(0x15, 0x15, 0x17);
 pub const RAISED: Color32 = Color32::from_rgb(0x2A, 0x2A, 0x2D);
 pub const PRIMARY_TEXT: Color32 = Color32::from_rgb(0xF5, 0xF5, 0xF7);
 pub const MUTED_TEXT: Color32 = Color32::from_rgb(0xA1, 0xA1, 0xA6);
-pub const JELLYFIN_BLUE: Color32 = Color32::from_rgb(0x00, 0xA4, 0xDC);
 /// Warning and failure copy on the interface pages.
 pub const WARNING_TEXT: Color32 = Color32::from_rgb(0xE8, 0xB9, 0x77);
 pub const DANGER_TEXT: Color32 = Color32::from_rgb(0xF0, 0xA0, 0x99);
 const SELECTION_BLUE: Color32 = Color32::from_rgb(0x48, 0x48, 0x4C);
-const ACTIVE_FILL_HIGH_CONTRAST: Color32 = Color32::from_rgb(0x00, 0x68, 0x90);
 const HOVER_FILL: Color32 = Color32::from_rgb(0x3A, 0x3A, 0x3E);
 /// Fill of text fields, a step above the page so an empty field is still visible.
 pub const FIELD: Color32 = Color32::from_rgb(0x1E, 0x1E, 0x22);
@@ -127,37 +122,19 @@ const SMALL_SIZE: f32 = 11.5;
 const BODY_SIZE: f32 = 14.0;
 const HEADING_SIZE: f32 = 22.0;
 
-pub fn palette(high_contrast: bool) -> Palette {
-    palette_for_customization(current_preset(), high_contrast, current_custom_theme())
+pub fn palette() -> Palette {
+    palette_for_customization(current_preset(), current_custom_theme())
 }
 
 /// The palette the app last applied, for chrome drawn outside the client's own draw pass (the
 /// host's status bar and notices), which never sees the app's settings directly.
 pub fn active_palette() -> Palette {
-    palette_for_customization(
-        current_preset(),
-        CURRENT_HIGH_CONTRAST.load(Ordering::Relaxed),
-        current_custom_theme(),
-    )
+    palette_for_customization(current_preset(), current_custom_theme())
 }
 
-/// Resolve a preset to the shared semantic palette. High contrast keeps its own foreground,
-/// surface and focus tokens regardless of the selected color preset.
-pub fn palette_for(preset: ThemePreset, high_contrast: bool) -> Palette {
-    if high_contrast {
-        Palette {
-            background: NIGHT_SLATE,
-            panel: PANEL,
-            raised: Color32::from_rgb(0x2D, 0x2D, 0x2D),
-            text: Color32::WHITE,
-            muted: Color32::from_rgb(0xE0, 0xE0, 0xE0),
-            accent: JELLYFIN_BLUE,
-            focus: Color32::WHITE,
-            divider: Color32::from_rgb(0x8A, 0x8A, 0x8A),
-            warning: WARNING_TEXT,
-            danger: DANGER_TEXT,
-        }
-    } else {
+/// Resolve a preset to the shared semantic palette.
+pub fn palette_for(preset: ThemePreset) -> Palette {
+    {
         match preset {
             ThemePreset::JellyfinDark | ThemePreset::Light | ThemePreset::System => Palette {
                 background: NIGHT_SLATE,
@@ -189,13 +166,9 @@ pub fn palette_for(preset: ThemePreset, high_contrast: bool) -> Palette {
 
 /// Resolve optional profile colors without touching the shared active palette. Invalid color
 /// combinations fall back safely; high contrast always keeps its fixed accessible palette.
-fn palette_for_customization(
-    preset: ThemePreset,
-    high_contrast: bool,
-    custom: CustomTheme,
-) -> Palette {
-    let base = palette_for(preset, high_contrast);
-    if high_contrast || !custom.enabled {
+fn palette_for_customization(preset: ThemePreset, custom: CustomTheme) -> Palette {
+    let base = palette_for(preset);
+    if !custom.enabled {
         return base;
     }
 
@@ -339,7 +312,6 @@ pub fn apply_with_general_settings(ctx: &egui::Context, general: &GeneralSetting
     apply_with_custom_theme(
         ctx,
         general.theme_preset,
-        general.high_contrast,
         general.reduce_motion,
         CustomTheme {
             enabled: general.custom_theme_enabled,
@@ -353,17 +325,15 @@ pub fn apply_with_general_settings(ctx: &egui::Context, general: &GeneralSetting
 fn apply_with_custom_theme(
     ctx: &egui::Context,
     requested: ThemePreset,
-    high_contrast: bool,
     reduce_motion: bool,
     custom: CustomTheme,
 ) {
-    apply_to_context(ctx, requested, high_contrast, reduce_motion, custom, true);
+    apply_to_context(ctx, requested, reduce_motion, custom, true);
 }
 
 fn apply_to_context(
     ctx: &egui::Context,
     requested: ThemePreset,
-    high_contrast: bool,
     reduce_motion: bool,
     custom: CustomTheme,
     publish_active: bool,
@@ -372,7 +342,6 @@ fn apply_to_context(
     if publish_active {
         set_current_preset(preset);
         publish_custom_theme(custom);
-        CURRENT_HIGH_CONTRAST.store(high_contrast, Ordering::Relaxed);
     }
     // The whole style is rebuilt only when its key changes. The draw loop calls this before each
     // pass, so unchanged colors and accessibility flags must not trigger another style update.
@@ -380,7 +349,6 @@ fn apply_to_context(
     let wanted = ThemeCacheKey {
         requested,
         resolved: preset,
-        high_contrast,
         reduce_motion,
         custom,
     };
@@ -388,22 +356,55 @@ fn apply_to_context(
         return;
     }
     ctx.data_mut(|data| data.insert_temp(applied, wanted));
-    let colors = palette_for_customization(preset, high_contrast, custom);
-    let custom_surfaces = !high_contrast
-        && custom.enabled
-        && (custom.background.is_some() || custom.surface.is_some());
+    let colors = palette_for_customization(preset, custom);
+    let custom_surfaces =
+        custom.enabled && (custom.background.is_some() || custom.surface.is_some());
     // Light mode is retired; the interface is always dark. Old Light/System settings still load
     // but resolve to Jellyfin Dark above.
     ctx.set_theme(egui::ThemePreference::Dark);
     ctx.global_style_mut(|style| {
+        let hover_fill = if custom_surfaces {
+            colors.raised
+        } else if preset == ThemePreset::WarmDark {
+            Color32::from_rgb(0x4A, 0x35, 0x28)
+        } else {
+            HOVER_FILL
+        };
+        let active_fill = if custom_surfaces {
+            colors.raised
+        } else {
+            match preset {
+                ThemePreset::WarmDark => Color32::from_rgb(0x4A, 0x35, 0x28),
+                ThemePreset::JellyfinDark | ThemePreset::Light | ThemePreset::System => {
+                    SELECTION_BLUE
+                }
+            }
+        };
         style.visuals = egui::Visuals::dark();
         style.visuals.panel_fill = colors.background;
-        style.visuals.window_fill = colors.panel;
+        style.visuals.window_fill = if custom_surfaces {
+            Color32::from_rgba_unmultiplied(
+                colors.panel.r(),
+                colors.panel.g(),
+                colors.panel.b(),
+                242,
+            )
+        } else if preset == ThemePreset::WarmDark {
+            Color32::from_rgba_unmultiplied(0x27, 0x1B, 0x16, 242)
+        } else {
+            Color32::from_rgba_unmultiplied(24, 26, 32, 242)
+        };
+        style.visuals.window_stroke = Stroke::new(1.0, Color32::from_white_alpha(28));
+        style.visuals.popup_shadow = egui::epaint::Shadow {
+            offset: [0, 8],
+            blur: 20,
+            spread: 0,
+            color: Color32::from_black_alpha(140),
+        };
+        style.visuals.window_shadow = style.visuals.popup_shadow;
         style.visuals.extreme_bg_color = colors.background;
         style.visuals.text_edit_bg_color = Some(if custom_surfaces {
             colors.panel
-        } else if high_contrast {
-            FIELD
         } else if preset == ThemePreset::WarmDark {
             Color32::from_rgb(0x30, 0x22, 0x1B)
         } else {
@@ -412,61 +413,35 @@ fn apply_to_context(
         style.visuals.faint_bg_color = colors.panel;
         // A global text override would mask the dark foreground on blue active controls.
         style.visuals.override_text_color = None;
-        style.visuals.selection.bg_fill = if custom_surfaces {
-            colors.raised
-        } else {
-            match (high_contrast, preset) {
-                (true, _) => ACTIVE_FILL_HIGH_CONTRAST,
-                (false, ThemePreset::WarmDark) => Color32::from_rgb(0x4A, 0x35, 0x28),
-                (false, ThemePreset::JellyfinDark) => SELECTION_BLUE,
-                // Light and System are resolved to Jellyfin Dark before this point.
-                (false, ThemePreset::Light | ThemePreset::System) => SELECTION_BLUE,
-            }
-        };
+        style.visuals.selection.bg_fill = active_fill;
         style.visuals.selection.stroke = Stroke::new(1.0, colors.text);
         style.visuals.widgets.noninteractive.bg_fill = colors.panel;
+        style.visuals.widgets.noninteractive.weak_bg_fill = colors.panel;
         style.visuals.widgets.noninteractive.fg_stroke.color = colors.text;
         style.visuals.widgets.inactive.bg_fill = colors.raised;
+        style.visuals.widgets.inactive.weak_bg_fill = colors.raised;
         style.visuals.widgets.inactive.fg_stroke.color = colors.text;
         // A hairline outlines text fields and checkboxes, which otherwise vanish on the page.
-        style.visuals.widgets.inactive.bg_stroke = Stroke::new(
-            1.0,
-            if high_contrast {
-                colors.divider
-            } else {
-                HAIRLINE
-            },
-        );
-        style.visuals.widgets.hovered.bg_fill = if custom_surfaces {
-            colors.raised
-        } else if high_contrast {
-            HOVER_FILL
-        } else if preset == ThemePreset::WarmDark {
-            Color32::from_rgb(0x4A, 0x35, 0x28)
-        } else {
-            HOVER_FILL
-        };
+        style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, HAIRLINE);
+        style.visuals.widgets.hovered.bg_fill = hover_fill;
+        style.visuals.widgets.hovered.weak_bg_fill = hover_fill;
         style.visuals.widgets.hovered.fg_stroke.color = colors.text;
         // egui draws `strong()` text, and the text of a pressed widget, in this foreground, so it
         // must be light. Pressed widgets get a mid-grey fill (a deep blue in high contrast).
-        style.visuals.widgets.active.bg_fill = if custom_surfaces {
-            colors.raised
-        } else {
-            match (high_contrast, preset) {
-                (true, _) => ACTIVE_FILL_HIGH_CONTRAST,
-                (false, ThemePreset::WarmDark) => Color32::from_rgb(0x4A, 0x35, 0x28),
-                (false, ThemePreset::JellyfinDark) => SELECTION_BLUE,
-                // Light and System are resolved to Jellyfin Dark before this point.
-                (false, ThemePreset::Light | ThemePreset::System) => SELECTION_BLUE,
-            }
-        };
+        style.visuals.widgets.active.bg_fill = active_fill;
+        style.visuals.widgets.active.weak_bg_fill = active_fill;
         style.visuals.widgets.active.fg_stroke.color = colors.text;
         // egui 0.36 resolves keyboard-focused widgets through the active visual state.
         style.visuals.widgets.active.bg_stroke = Stroke::new(2.5, colors.focus);
+        style.visuals.widgets.open.bg_fill = hover_fill;
+        style.visuals.widgets.open.weak_bg_fill = hover_fill;
+        style.visuals.widgets.open.fg_stroke = Stroke::new(1.0, colors.text);
+        style.visuals.widgets.open.bg_stroke = Stroke::new(1.0, colors.divider);
         style.visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(10);
         style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(10);
         style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(10);
         style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(10);
+        style.visuals.widgets.open.corner_radius = egui::CornerRadius::same(10);
         style.visuals.window_corner_radius = egui::CornerRadius::same(18);
         style.visuals.menu_corner_radius = egui::CornerRadius::same(14);
         style.spacing.item_spacing = egui::vec2(14.0, 10.0);
@@ -543,7 +518,7 @@ const AA_NON_TEXT_MIN: f32 = 3.0;
 /// The text and focus pairs of the default (not high-contrast) theme, each with its AA minimum.
 #[cfg(test)]
 fn default_theme_pairs() -> Vec<(&'static str, Color32, Color32, f32)> {
-    let colors = palette_for(ThemePreset::JellyfinDark, false);
+    let colors = palette_for(ThemePreset::JellyfinDark);
     vec![
         (
             "text on background",
@@ -633,8 +608,8 @@ mod tests {
 
     #[test]
     fn palette_text_and_focus_keep_contrast_on_each_surface() {
-        for high_contrast in [false, true] {
-            let colors = palette_for(ThemePreset::JellyfinDark, high_contrast);
+        {
+            let colors = palette_for(ThemePreset::JellyfinDark);
             for surface in [colors.background, colors.panel, colors.raised] {
                 assert!(contrast_ratio(colors.text, surface) >= 7.0);
                 assert!(contrast_ratio(colors.muted, surface) >= 4.5);
@@ -647,34 +622,30 @@ mod tests {
 
     #[test]
     fn palette_uses_apple_tv_surfaces_and_white_focus() {
-        for high_contrast in [false, true] {
-            let colors = palette_for(ThemePreset::JellyfinDark, high_contrast);
+        {
+            let colors = palette_for(ThemePreset::JellyfinDark);
             assert_eq!(colors.background, Color32::from_rgb(0x0A, 0x0A, 0x0C));
             assert_eq!(colors.panel, Color32::from_rgb(0x15, 0x15, 0x17));
             assert_eq!(colors.focus, Color32::WHITE);
         }
 
-        // The standard theme selects with a near-white accent; high contrast keeps the blue.
+        // The theme selects with a near-white accent.
         assert_eq!(
-            palette_for(ThemePreset::JellyfinDark, false).accent,
+            palette_for(ThemePreset::JellyfinDark).accent,
             Color32::from_rgb(0xF5, 0xF5, 0xF7)
-        );
-        assert_eq!(
-            palette_for(ThemePreset::JellyfinDark, true).accent,
-            JELLYFIN_BLUE
         );
     }
 
     #[test]
     fn apply_uses_consistent_widget_geometry_and_motion_setting() {
         let ctx = egui::Context::default();
-        apply(&ctx, false, true);
+        apply(&ctx, true);
         let style = ctx.style_of(egui::Theme::Dark);
 
         assert_eq!(style.visuals.override_text_color, None);
         assert_eq!(
             style.visuals.text_color(),
-            palette_for(ThemePreset::JellyfinDark, false).text
+            palette_for(ThemePreset::JellyfinDark).text
         );
         assert!(
             contrast_ratio(
@@ -717,12 +688,12 @@ mod tests {
     #[test]
     fn the_style_is_rebuilt_only_when_the_flags_change() {
         let ctx = egui::Context::default();
-        apply(&ctx, false, false);
+        apply(&ctx, false);
 
         // A marker the theme would overwrite: the second call with the same flags must leave it
         // alone, which is how the per-frame rebuild is skipped.
         ctx.global_style_mut(|style| style.spacing.item_spacing = egui::vec2(1.0, 1.0));
-        apply(&ctx, false, false);
+        apply(&ctx, false);
         assert_eq!(
             ctx.style_of(egui::Theme::Dark).spacing.item_spacing,
             egui::vec2(1.0, 1.0),
@@ -730,7 +701,7 @@ mod tests {
         );
 
         // A flag change rebuilds the whole style, marker included.
-        apply(&ctx, true, false);
+        apply(&ctx, true);
         assert_eq!(
             ctx.style_of(egui::Theme::Dark).spacing.item_spacing,
             egui::vec2(14.0, 10.0)
@@ -746,7 +717,7 @@ mod tests {
             ..CustomTheme::default()
         };
         let apply_custom = |custom| {
-            apply_to_context(&ctx, ThemePreset::JellyfinDark, false, false, custom, false);
+            apply_to_context(&ctx, ThemePreset::JellyfinDark, false, custom, false);
         };
         apply_custom(custom);
         assert_eq!(
@@ -796,7 +767,7 @@ mod tests {
             ThemePreset::Light,
             ThemePreset::System,
         ] {
-            let colors = palette_for(preset, false);
+            let colors = palette_for(preset);
             for surface in [colors.background, colors.panel, colors.raised] {
                 assert!(
                     contrast_ratio(colors.text, surface) >= 7.0,
@@ -823,17 +794,12 @@ mod tests {
     }
 
     #[test]
-    fn presets_have_distinct_surfaces_and_high_contrast_overrides_them() {
-        let dark = palette_for(ThemePreset::JellyfinDark, false);
-        let warm = palette_for(ThemePreset::WarmDark, false);
+    fn presets_have_distinct_surfaces() {
+        let dark = palette_for(ThemePreset::JellyfinDark);
+        let warm = palette_for(ThemePreset::WarmDark);
         assert_ne!(dark.background, warm.background);
         assert_ne!(dark.accent, warm.accent);
-
-        // High contrast keeps one palette whatever preset is selected.
-        let forced = palette_for(ThemePreset::WarmDark, true);
-        assert_eq!(forced.background, dark.background);
-        assert_eq!(forced.accent, JELLYFIN_BLUE);
-        assert_eq!(forced.focus, Color32::WHITE);
+        assert_eq!(dark.focus, Color32::WHITE);
     }
 
     fn assert_custom_palette_contrast(colors: Palette) {
@@ -860,7 +826,6 @@ mod tests {
             assert_eq!(
                 palette_for_customization(
                     preset,
-                    false,
                     CustomTheme {
                         enabled: false,
                         accent: Some([255, 0, 255]),
@@ -868,7 +833,7 @@ mod tests {
                         surface: Some([0, 0, 0]),
                     },
                 ),
-                palette_for(preset, false)
+                palette_for(preset)
             );
         }
     }
@@ -877,7 +842,6 @@ mod tests {
     fn custom_palette_keeps_contrast_for_black_white_and_saturated_choices() {
         let black_and_white = palette_for_customization(
             ThemePreset::JellyfinDark,
-            false,
             CustomTheme {
                 enabled: true,
                 accent: Some([0, 255, 255]),
@@ -891,7 +855,6 @@ mod tests {
 
         let saturated = palette_for_customization(
             ThemePreset::WarmDark,
-            false,
             CustomTheme {
                 enabled: true,
                 accent: Some([255, 0, 255]),
@@ -905,31 +868,16 @@ mod tests {
     }
 
     #[test]
-    fn high_contrast_ignores_every_custom_theme_color() {
-        let custom = CustomTheme {
-            enabled: true,
-            accent: Some([255, 0, 255]),
-            background: Some([255, 255, 255]),
-            surface: Some([0, 0, 0]),
-        };
-        assert_eq!(
-            palette_for_customization(ThemePreset::Light, true, custom),
-            palette_for(ThemePreset::Light, true)
-        );
-    }
-
-    #[test]
     fn light_mode_is_retired_and_every_saved_preset_stays_dark() {
-        let dark = palette_for(ThemePreset::JellyfinDark, false);
-        assert_eq!(palette_for(ThemePreset::Light, false), dark);
-        assert_eq!(palette_for(ThemePreset::System, false), dark);
+        let dark = palette_for(ThemePreset::JellyfinDark);
+        assert_eq!(palette_for(ThemePreset::Light), dark);
+        assert_eq!(palette_for(ThemePreset::System), dark);
 
         let ctx = egui::Context::default();
-        for (preset, system, high_contrast) in [
-            (ThemePreset::System, egui::Theme::Light, false),
-            (ThemePreset::System, egui::Theme::Dark, false),
-            (ThemePreset::Light, egui::Theme::Light, false),
-            (ThemePreset::Light, egui::Theme::Light, true),
+        for (preset, system) in [
+            (ThemePreset::System, egui::Theme::Light),
+            (ThemePreset::System, egui::Theme::Dark),
+            (ThemePreset::Light, egui::Theme::Light),
         ] {
             let mut output = ctx.run_ui(
                 egui::RawInput {
@@ -937,14 +885,7 @@ mod tests {
                     ..egui::RawInput::default()
                 },
                 |ui| {
-                    apply_to_context(
-                        ui.ctx(),
-                        preset,
-                        high_contrast,
-                        true,
-                        CustomTheme::default(),
-                        false,
-                    );
+                    apply_to_context(ui.ctx(), preset, true, CustomTheme::default(), false);
                     assert!(
                         ui.ctx().global_style().visuals.dark_mode,
                         "{preset:?} with {system:?} must stay dark"
@@ -957,7 +898,7 @@ mod tests {
 
     #[test]
     fn text_fields_stand_out_from_the_page_and_keep_text_contrast() {
-        let colors = palette_for(ThemePreset::JellyfinDark, false);
+        let colors = palette_for(ThemePreset::JellyfinDark);
         assert_ne!(FIELD, colors.background);
         assert!(contrast_ratio(colors.text, FIELD) >= 7.0);
         assert!(contrast_ratio(colors.muted, FIELD) >= AA_TEXT_MIN);

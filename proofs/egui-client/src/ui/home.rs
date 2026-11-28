@@ -37,7 +37,6 @@ pub enum RowStatus {
 pub struct HomeCard {
     pub media: MediaItem,
     pub subtitle: Option<String>,
-    pub series_name: Option<String>,
     pub progress: Option<f32>,
     /// The server's `OfficialRating`, used by the profile rating ceiling.
     pub official_rating: Option<String>,
@@ -247,7 +246,6 @@ pub struct HomeState {
     pub sections: HomeSections,
     rows: [HomeRowState; 3],
     suppressed_series_ids: BTreeSet<String>,
-    can_hide_series: bool,
     hero: HeroBanner,
     libraries_status: RowStatus,
     libraries_request_id: u64,
@@ -264,7 +262,6 @@ impl Default for HomeState {
             sections: HomeSections::default(),
             rows: HomeRowKind::ALL.map(HomeRowState::new),
             suppressed_series_ids: BTreeSet::new(),
-            can_hide_series: false,
             hero: HeroBanner::default(),
             libraries_status: RowStatus::Idle,
             libraries_request_id: 0,
@@ -285,6 +282,7 @@ pub enum HomeAction {
     /// Start playing this item now (resuming where it was left).
     Play(String),
     /// Hide a series from the Home episode shelf(s) for this server and profile.
+    #[cfg(test)]
     HideSeries(String),
     /// Reload all three rows.
     Refresh,
@@ -313,7 +311,6 @@ impl HomeState {
         can_hide_series: bool,
         series_ids: impl IntoIterator<Item = String>,
     ) {
-        self.can_hide_series = can_hide_series;
         self.suppressed_series_ids = if can_hide_series {
             series_ids
                 .into_iter()
@@ -673,11 +670,9 @@ pub fn card_from_item(item: BaseItemDto) -> HomeCard {
         item.production_year,
     );
     let official_rating = item.official_rating.clone();
-    let series_name = item.series_name.clone();
     HomeCard {
         media: MediaItem::from_api(item),
         subtitle,
-        series_name,
         progress,
         official_rating,
     }
@@ -694,57 +689,6 @@ fn combined_home_title(sections: HomeSections) -> String {
         (false, true) => ui_text(ids::HOME_ROW_NEXT_UP).to_owned(),
         (false, false) => String::new(),
     }
-}
-
-fn series_hide_choices<'a>(
-    cards: impl IntoIterator<Item = &'a HomeCard>,
-    suppressed_series_ids: &BTreeSet<String>,
-) -> Vec<(String, String)> {
-    let mut seen = BTreeSet::new();
-    cards
-        .into_iter()
-        .filter_map(|card| {
-            let id = canonical_guid(card.media.series_id.as_deref()?)?;
-            if suppressed_series_ids.contains(&id) || !seen.insert(id.clone()) {
-                return None;
-            }
-            let label = card
-                .series_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .unwrap_or("Series")
-                .to_owned();
-            Some((id, label))
-        })
-        .collect()
-}
-
-fn render_series_hide_menu<'a>(
-    ui: &mut egui::Ui,
-    cards: impl IntoIterator<Item = &'a HomeCard>,
-    suppressed_series_ids: &BTreeSet<String>,
-    can_hide_series: bool,
-    action: &mut Option<HomeAction>,
-) {
-    if !can_hide_series {
-        return;
-    }
-    let choices = series_hide_choices(cards, suppressed_series_ids);
-    if choices.is_empty() {
-        return;
-    }
-    ui.menu_button("Hide a series from this row", |ui| {
-        for (series_id, label) in &choices {
-            if ui
-                .button(format!("Hide {label} ({})", &series_id[..8]))
-                .clicked()
-            {
-                *action = Some(HomeAction::HideSeries(series_id.clone()));
-                ui.close();
-            }
-        }
-    });
 }
 
 fn render_combined_source_status(
@@ -895,7 +839,6 @@ pub(super) fn show(
 ) -> Option<HomeAction> {
     let mut action = None;
     let suppressed_series_ids = state.suppressed_series_ids.clone();
-    let can_hide_series = state.can_hide_series;
     let sections = state.sections;
     let combined_cards: Vec<HomeCard> = if sections.combine_continue_next_up {
         state.combined_cards().into_iter().cloned().collect()
@@ -903,7 +846,11 @@ pub(super) fn show(
         Vec::new()
     };
     let hero_card = state.hero_card().cloned();
-    let library_tiles = state.my_media_tiles();
+    let library_tiles: Vec<_> = state
+        .my_media_tiles()
+        .into_iter()
+        .filter(|tile| tile.target == HomeViewTarget::AllItems)
+        .collect();
     let library_empty_message = state.my_media_empty_message();
     let show_collections = state.collections_are_visible();
     let HomeState {
@@ -1072,21 +1019,12 @@ pub(super) fn show(
                     }
                     RowStatus::Idle | RowStatus::Ready => {}
                 }
-                if matches!(kind, HomeRowKind::ContinueWatching | HomeRowKind::NextUp) {
-                    render_series_hide_menu(
-                        ui,
-                        visible_cards.iter().copied(),
-                        &suppressed_series_ids,
-                        can_hide_series,
-                        &mut action,
-                    );
-                }
             }
         }};
     }
     macro_rules! render_my_media {
         ($focus_row:expr) => {{
-            if sections.my_media {
+            if sections.my_media && (!library_tiles.is_empty() || libraries.is_empty()) {
                 ui.add_space(24.0);
                 ui.label(
                     RichText::new(ui_text(ids::HOME_HEADING_MY_MEDIA))
@@ -1244,14 +1182,6 @@ pub(super) fn show(
                     for (kind, status) in &active_statuses {
                         render_combined_source_status(ui, *kind, status, colors, &mut action);
                     }
-
-                    render_series_hide_menu(
-                        ui,
-                        combined_cards.iter(),
-                        &suppressed_series_ids,
-                        can_hide_series,
-                        &mut action,
-                    );
                 } else {
                     let mut laid_out = false;
                     for (kind, status) in &active_statuses {

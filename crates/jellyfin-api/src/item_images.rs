@@ -26,22 +26,55 @@ impl JellyfinClient {
         session: &Session,
         item_id: &str,
     ) -> Result<Vec<u8>, BackdropImageError> {
+        // A full-width hero needs more than a card, but an original backdrop can be
+        // 4K or larger; 1920 wide keeps it sharp and inside the response cap.
+        self.fetch_backdrop_image(session, item_id, "1920", "90", None)
+            .await
+    }
+
+    /// Fetch a 480px-wide backdrop image for ambient background blur/tinting.
+    pub async fn get_ambient_backdrop_image(
+        &self,
+        session: &Session,
+        item_id: &str,
+        tag: Option<&str>,
+    ) -> Result<Vec<u8>, ApiError> {
+        self.fetch_backdrop_image(session, item_id, "480", "75", tag)
+            .await
+            .map_err(|error| match error {
+                BackdropImageError::NotFoundOrEmptyImage => {
+                    ApiError::HttpStatus(StatusCode::NOT_FOUND)
+                }
+                BackdropImageError::Api(api_error) => api_error,
+            })
+    }
+
+    async fn fetch_backdrop_image(
+        &self,
+        session: &Session,
+        item_id: &str,
+        max_width: &str,
+        quality: &str,
+        tag: Option<&str>,
+    ) -> Result<Vec<u8>, BackdropImageError> {
         if item_id.is_empty() || item_id.len() > 128 || item_id.chars().any(char::is_control) {
             return Err(ApiError::InvalidResponse.into());
         }
 
         let url = self.endpoint(&["Items", item_id, "Images", "Backdrop"]);
+        let mut query = vec![
+            ("imageIndex", "0"),
+            ("format", "jpg"),
+            ("maxWidth", max_width),
+            ("quality", quality),
+        ];
+        if let Some(tag) = tag.filter(|tag| !tag.is_empty()) {
+            query.push(("tag", tag));
+        }
         let request = self
             .http
             .request(Method::GET, url)
-            // A full-width hero needs more than a card, but an original backdrop can be
-            // 4K or larger; 1920 wide keeps it sharp and inside the response cap.
-            .query(&[
-                ("imageIndex", "0"),
-                ("format", "jpg"),
-                ("maxWidth", "1920"),
-                ("quality", "90"),
-            ])
+            .query(&query)
             .timeout(Duration::from_secs(15));
         let request = self
             .add_metadata(request, Some(&session.access_token))

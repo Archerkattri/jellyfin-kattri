@@ -4,7 +4,10 @@
 //! groups the supplied Jellyfin DTOs, draws visible groups, and returns an
 //! activated item's ID.
 
+use super::artwork;
 use super::{ui_text, ui_text_args};
+use crate::catalog::MediaItem;
+use crate::theme::Palette;
 use egui::{self, Response, Ui};
 use jellyfin_api::BaseItemDto;
 use kattri_i18n::ids;
@@ -93,6 +96,7 @@ pub(super) fn draw_with_channel_total_and_focus(
 }
 
 /// Draw results and report both media cards and the Show All controls as focus targets.
+#[cfg(test)]
 pub(super) fn draw_with_focus_targets(
     ui: &mut Ui,
     results: &[BaseItemDto],
@@ -124,11 +128,15 @@ pub(super) fn draw_with_focus_targets(
         ui.horizontal_wrapped(|ui| {
             for item in items.iter().take(SEARCH_GROUP_RESULT_LIMIT) {
                 let label = egui::RichText::new(&item.name).strong();
-                let response = ui.add_sized(egui::vec2(card_width, 54.0), egui::Button::new(label));
+                // A long episode title must stay inside its chip instead of widening the row.
+                let response = ui.add_sized(
+                    egui::vec2(card_width, 54.0),
+                    egui::Button::new(label).wrap_mode(egui::TextWrapMode::Truncate),
+                );
                 // The same context menu as a library card: a search result is a server DTO, so
                 // the menu converts it on demand.
-                super::item_menu::attach_dto(&response, item);
-                if response.clicked() {
+                let handled = super::item_menu::attach_dto(ui, &response, item);
+                if response.clicked() && !handled {
                     selected_id = Some(SearchAction::SelectItem(item.id.clone()));
                 }
                 let center_y = response.rect.center().y;
@@ -161,6 +169,93 @@ pub(super) fn draw_with_focus_targets(
     selected_id
 }
 
+/// Everything a search card needs besides the result itself.
+pub(super) struct SearchCards<'a> {
+    /// The results as catalog items, carrying their loaded posters.
+    pub(super) media: &'a [MediaItem],
+    pub(super) colors: Palette,
+}
+
+/// Search results as poster cards, matching the library grid instead of a row of text chips.
+pub(super) fn draw_cards_with_focus_targets(
+    ui: &mut Ui,
+    results: &[BaseItemDto],
+    cards: SearchCards<'_>,
+    channel_total: Option<u32>,
+    visible_artwork: &mut Vec<(String, String)>,
+    mut result_focus: impl FnMut(usize, &BaseItemDto, egui::Response),
+    mut show_all_focus: impl FnMut(usize, SearchGroup, egui::Response),
+) -> Option<SearchAction> {
+    let SearchCards { media, colors } = cards;
+    let groups = group_results(results);
+    let mut selected_id = None;
+    let mut focus_row = 0;
+    let card_width = artwork::CARD_WIDTH;
+    let columns = super::grid_columns(ui.available_width(), card_width).max(1);
+
+    for (group, items) in groups {
+        if items.is_empty() {
+            continue;
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(group.label()).size(21.0).strong());
+            ui.label(
+                egui::RichText::new(format!("{}", items.len()))
+                    .size(13.0)
+                    .color(egui::Color32::from_gray(164)),
+            );
+        });
+        ui.add_space(8.0);
+        let shown: Vec<&BaseItemDto> = items
+            .iter()
+            .copied()
+            .take(SEARCH_GROUP_RESULT_LIMIT)
+            .collect();
+        for (line, chunk) in shown.chunks(columns).enumerate() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = super::GRID_GAP;
+                for item in chunk {
+                    // The cached catalog item carries the loaded poster; a channel result that is not
+                    // in the catalog is converted for this frame.
+                    let converted;
+                    let media = match media.iter().find(|candidate| candidate.id == item.id) {
+                        Some(known) => known,
+                        None => {
+                            converted = MediaItem::from_api((*item).clone());
+                            &converted
+                        }
+                    };
+                    let response = artwork::media_card(ui, media, colors, false);
+                    let handled = super::item_menu::card_actions(ui, &response, media);
+                    if ui.clip_rect().intersects(response.rect)
+                        && let Some(tag) = media.primary_image_tag.as_deref()
+                    {
+                        visible_artwork.push((media.artwork_id.clone(), tag.to_owned()));
+                    }
+                    if response.clicked() && !handled {
+                        selected_id = Some(SearchAction::SelectItem(item.id.clone()));
+                    }
+                    result_focus(focus_row + line, item, response);
+                }
+            });
+        }
+        focus_row += shown.len().div_ceil(columns);
+        let has_more = items.len() > SEARCH_GROUP_RESULT_LIMIT
+            || (group == SearchGroup::Channels
+                && channel_total.is_some_and(|total| total > SEARCH_GROUP_RESULT_LIMIT as u32));
+        if has_more {
+            let response = show_all_button(ui, group);
+            focus_row += 1;
+            show_all_focus(focus_row, group, response.clone());
+            if response.clicked() {
+                selected_id = Some(SearchAction::ShowAll(group));
+            }
+        }
+        ui.add_space(14.0);
+    }
+    selected_id
+}
 /// Groups recognized item types while preserving result order within a group.
 /// Unknown or missing Jellyfin item types are intentionally omitted.
 pub fn group_results(results: &[BaseItemDto]) -> Vec<(SearchGroup, Vec<&BaseItemDto>)> {

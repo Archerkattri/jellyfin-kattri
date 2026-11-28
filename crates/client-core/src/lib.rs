@@ -36,6 +36,7 @@ pub mod pip;
 pub mod playback_plan;
 pub mod playback_reporting;
 pub mod playlist;
+pub mod playlist_store;
 pub mod profile_match;
 pub mod queue;
 pub mod queue_store;

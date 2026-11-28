@@ -95,6 +95,8 @@ enum SendError {
     Paused,
     /// The final URL left the original origin while a credential header was sent.
     RedirectRefused,
+    /// Plain HTTP targets a public host without explicit opt-in.
+    InsecureRemoteTransport,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -295,6 +297,20 @@ pub(crate) fn url_for_base_segments_with_policy(
     Ok(url.to_string())
 }
 
+/// Checks a parsed URL against the transfer's transport policy before any request is built.
+fn validate_transport(url: &Url, policy: InsecureHttpPolicy) -> Result<(), SendError> {
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(SendError::Network);
+    }
+    if url.scheme() == "http"
+        && policy == InsecureHttpPolicy::LocalNetworkOnly
+        && !url.host_str().is_some_and(is_local_host)
+    {
+        return Err(SendError::InsecureRemoteTransport);
+    }
+    Ok(())
+}
+
 /// Whether `host` names a loopback, private-network, link-local or `localhost` endpoint.
 ///
 /// Mirrors the private `jellyfin_api::is_local_host` policy: `.local` is deliberately not
@@ -330,6 +346,7 @@ fn is_local_host(host: &str) -> bool {
 #[derive(Clone, PartialEq, Eq)]
 pub struct OriginalFileSource {
     url: String,
+    policy: InsecureHttpPolicy,
 }
 
 impl OriginalFileSource {
@@ -348,6 +365,7 @@ impl OriginalFileSource {
     ) -> Result<Self, DriverError> {
         Ok(Self {
             url: original_file_url_with_policy(base, item_id, policy)?,
+            policy,
         })
     }
 
@@ -439,6 +457,7 @@ pub fn remove_failed_record(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FailureReason {
     Model(DownloadTransitionError),
+    InsecureRemoteTransport,
     Http(u16),
     DiskFull,
     Storage,
@@ -464,6 +483,7 @@ pub enum Outcome {
 pub struct Transfer {
     job: DownloadJob,
     url: String,
+    http_policy: InsecureHttpPolicy,
     temp_name: Option<String>,
     notice: Option<Notice>,
     stop: Arc<AtomicBool>,
@@ -485,13 +505,18 @@ enum Step {
 impl Transfer {
     /// A transfer for an already-built URL.
     ///
-    /// This constructor does not apply the source transport policy; callers that start
-    /// from a server base should use [`Transfer::from_source`] with a validated
-    /// [`OriginalFileSource`].
+    /// Plain HTTP is restricted to local/private hosts. Callers that need the explicit
+    /// remote-HTTP opt-in must construct a validated [`OriginalFileSource`] and use
+    /// [`Transfer::from_source`].
     pub fn new(url: String) -> Self {
+        Self::new_with_policy(url, InsecureHttpPolicy::LocalNetworkOnly)
+    }
+
+    fn new_with_policy(url: String, http_policy: InsecureHttpPolicy) -> Self {
         Self {
             job: DownloadJob::new(),
             url,
+            http_policy,
             temp_name: None,
             notice: None,
             stop: Arc::new(AtomicBool::new(false)),
@@ -504,7 +529,7 @@ impl Transfer {
     /// A transfer for a validated item source. Callers that have an
     /// [`OriginalFileSource`] use this instead of [`Transfer::new`].
     pub fn from_source(source: &OriginalFileSource) -> Self {
-        Self::new(source.url().to_owned())
+        Self::new_with_policy(source.url().to_owned(), source.policy)
     }
 
     /// A transfer rebuilt from a snapshot record after a restart. The caller
@@ -513,6 +538,7 @@ impl Transfer {
         Self {
             job,
             url,
+            http_policy: InsecureHttpPolicy::LocalNetworkOnly,
             temp_name,
             notice: None,
             stop: Arc::new(AtomicBool::new(false)),
@@ -651,6 +677,9 @@ impl Transfer {
                 Err(SendError::RedirectRefused) => {
                     return Step::Done(self.fail(FailureReason::RedirectRefused));
                 }
+                Err(SendError::InsecureRemoteTransport) => {
+                    return Step::Done(self.fail(FailureReason::InsecureRemoteTransport));
+                }
             };
             let status = response.status().as_u16();
             match status {
@@ -785,6 +814,7 @@ impl Transfer {
         range_from: Option<u64>,
     ) -> Result<reqwest::Response, SendError> {
         let original = Url::parse(&self.url).map_err(|_| SendError::Network)?;
+        validate_transport(&original, self.http_policy)?;
         let mut request = cfg.client.get(&self.url);
         if let Some(range_start) = range_from {
             request = request.header(header::RANGE, format!("bytes={range_start}-"));
@@ -1225,6 +1255,47 @@ mod transport_policy_tests {
         policy: InsecureHttpPolicy,
     ) -> Result<OriginalFileSource, DriverError> {
         OriginalFileSource::new_with_policy(base, "abc-1", policy)
+    }
+
+    #[tokio::test]
+    async fn raw_public_http_transfer_refuses_before_sending_auth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = DriverConfig::new(TempStore::new(dir.path().join("tmp"))).expect("config");
+        let auth = RequestAuth::new("Authorization", "MediaBrowser Token=secret").expect("auth");
+        let transfer = Transfer::new("http://203.0.113.8:8096/Items/abc/Download".to_owned());
+
+        assert!(matches!(
+            transfer.send(&cfg, Some(&auth), None).await,
+            Err(SendError::InsecureRemoteTransport)
+        ));
+    }
+
+    #[tokio::test]
+    async fn restored_public_http_transfer_refuses_before_sending_auth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = DriverConfig::new(TempStore::new(dir.path().join("tmp"))).expect("config");
+        let auth = RequestAuth::new("Authorization", "MediaBrowser Token=secret").expect("auth");
+        let job = DownloadJob::new();
+        let transfer = Transfer::restored(
+            "http://203.0.113.8:8096/Items/abc/Download".to_owned(),
+            job,
+            None,
+        );
+        assert_eq!(transfer.http_policy, InsecureHttpPolicy::LocalNetworkOnly);
+        assert!(matches!(
+            transfer.send(&cfg, Some(&auth), None).await,
+            Err(SendError::InsecureRemoteTransport)
+        ));
+    }
+
+    #[test]
+    fn explicit_remote_http_source_policy_reaches_transfer() {
+        let source = source_with("http://media.example", InsecureHttpPolicy::AllowRemote)
+            .expect("explicit remote HTTP opt-in");
+        let transfer = Transfer::from_source(&source);
+        let url = Url::parse(&transfer.url).expect("URL");
+        assert_eq!(transfer.http_policy, InsecureHttpPolicy::AllowRemote);
+        assert!(validate_transport(&url, transfer.http_policy).is_ok());
     }
 
     #[test]

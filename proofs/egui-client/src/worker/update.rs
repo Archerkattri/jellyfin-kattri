@@ -9,15 +9,17 @@
 //! supplies a signed envelope and a staged build that is already on disk.
 
 use std::fs;
-use std::io::Read;
+use std::io::Seek;
 use std::path::{Path, PathBuf};
 
 use kattri_updater::InstallState;
+use kattri_updater::apply::apply_verified_reader;
 use kattri_updater::apply::{ApplyError, InstallStore};
 use kattri_updater::gate::{PlaybackState, UpdateGate, playback_gate};
-use kattri_updater::space::{apply_verified_with_space, check_staging_space};
+use kattri_updater::space::check_staging_space;
+use kattri_updater::verify::verify_artifact_reader;
 use kattri_updater::{Channel, Keyring, VerifiedManifest, open_envelope};
-use kattri_updater::{FsInstallStore, FsReplayStateStore, verify_artifact_bytes};
+use kattri_updater::{FsInstallStore, FsReplayStateStore};
 
 /// Bytes kept free beyond the staged build and the kept previous build (journal, filesystem
 /// overhead). The updater crate takes the margin from its caller, so the app picks it here.
@@ -114,9 +116,59 @@ pub enum UpdateStatus {
 #[derive(Debug, Default)]
 pub struct UpdateState {
     pub(crate) status: UpdateStatus,
+    pub(crate) release_check: ReleaseCheckStatus,
+    pub(crate) release_request_id: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) enum ReleaseCheckStatus {
+    #[default]
+    Idle,
+    Checking,
+    Current {
+        version: String,
+    },
+    Newer {
+        version: String,
+    },
+    Failed {
+        error: crate::worker::release_check::ReleaseCheckError,
+    },
 }
 
 impl UpdateState {
+    pub(crate) fn begin_release_check(&mut self) -> u64 {
+        self.release_request_id = self.release_request_id.wrapping_add(1);
+        self.release_check = ReleaseCheckStatus::Checking;
+        self.release_request_id
+    }
+
+    pub(crate) fn finish_release_check(
+        &mut self,
+        request_id: u64,
+        result: Result<
+            crate::worker::release_check::ReleaseCheckResult,
+            crate::worker::release_check::ReleaseCheckError,
+        >,
+    ) {
+        if request_id != self.release_request_id {
+            return;
+        }
+        self.release_check = match result {
+            Ok(crate::worker::release_check::ReleaseCheckResult::Current { latest_version }) => {
+                ReleaseCheckStatus::Current {
+                    version: latest_version,
+                }
+            }
+            Ok(crate::worker::release_check::ReleaseCheckResult::Newer { latest_version }) => {
+                ReleaseCheckStatus::Newer {
+                    version: latest_version,
+                }
+            }
+            Err(error) => ReleaseCheckStatus::Failed { error },
+        };
+    }
+
     /// True while the worker owns a file step. A second request must wait.
     pub(crate) fn is_busy(&self) -> bool {
         matches!(
@@ -238,14 +290,9 @@ pub(crate) fn apply_blocking(job: &ApplyJob, probe: FreeSpaceProbe) -> UpdateOut
     let Some(artifact) = job.verified.manifest().artifact_for(job.platform, job.arch) else {
         return refused("The update manifest has no build for this OS and CPU.".to_owned());
     };
-    let bytes = match read_staged(&job.staged_path, artifact.size_bytes) {
-        Ok(bytes) => bytes,
-        Err(reason) => return refused(reason),
-    };
-
     // The kept previous build is a copy of the installed one, so the margin covers it too.
-    let installed_len = match store.installed() {
-        Ok(Some(slot)) => u64::try_from(slot.bytes.len()).unwrap_or(u64::MAX),
+    let installed_len = match store.installed_payload_len() {
+        Ok(Some(size)) => size,
         Ok(None) => 0,
         Err(error) => return failed(error.to_string()),
     };
@@ -257,26 +304,26 @@ pub(crate) fn apply_blocking(job: &ApplyJob, probe: FreeSpaceProbe) -> UpdateOut
         }
     };
 
-    // Do not advance the replay floor for invalid bytes or a refused free-space preflight.
-    if let Err(error) = verify_artifact_bytes(artifact, &bytes) {
-        return refused(error.to_string());
-    }
+    // Refuse insufficient space before reading the potentially large artifact.
     if let Err(error) = check_staging_space(free, artifact.size_bytes, margin) {
         return refused(error.to_string());
+    }
+    let mut payload = match open_staged(&job.staged_path, artifact.size_bytes) {
+        Ok(bytes) => bytes,
+        Err(reason) => return refused(reason),
+    };
+    // Do not advance the replay floor for invalid bytes.
+    if let Err(error) = verify_artifact_reader(artifact, &mut payload) {
+        return refused(error.to_string());
+    }
+    if payload.rewind().is_err() {
+        return refused("The staged build could not be read.".to_owned());
     }
     replay_state.record(&job.verified);
     if let Err(error) = replay_store.save(&replay_state) {
         return refused(error.to_string());
     }
-    match apply_verified_with_space(
-        &mut store,
-        &job.verified,
-        job.platform,
-        job.arch,
-        &bytes,
-        free,
-        margin,
-    ) {
+    match apply_verified_reader(&mut store, &job.verified, job.platform, job.arch, payload) {
         Ok(()) => UpdateOutcome::Applied {
             version: version.clone(),
         },
@@ -298,27 +345,23 @@ fn is_refusal(error: &ApplyError) -> bool {
     )
 }
 
-/// Read the staged build only if its size matches the manifest. The size bounds the read.
-fn read_staged(path: &Path, expected: u64) -> Result<Vec<u8>, String> {
+/// Open a regular staged file with the expected size before streaming it.
+fn open_staged(path: &Path, expected: u64) -> Result<fs::File, String> {
     let file =
         fs::File::open(path).map_err(|_| "The staged build could not be read.".to_owned())?;
     let meta = file
         .metadata()
         .map_err(|_| "The staged build could not be read.".to_owned())?;
+    if !meta.is_file() {
+        return Err("The staged build is not a regular file.".to_owned());
+    }
     if meta.len() != expected {
         return Err(format!(
             "The staged build is {} bytes, but the manifest says {expected}.",
             meta.len()
         ));
     }
-    let mut bytes = Vec::new();
-    file.take(expected.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|_| "The staged build could not be read.".to_owned())?;
-    if bytes.len() as u64 != expected {
-        return Err("The staged build changed while it was read.".to_owned());
-    }
-    Ok(bytes)
+    Ok(file)
 }
 
 /// Restore the kept previous build. Runs only when the user asks for it.
@@ -393,11 +436,18 @@ fn system_free_space(path: &Path) -> Result<u64, String> {
         .map_err(|error| error.to_string())
 }
 
-/// No free-space probe exists for this OS yet. Refusing is the safe default, since a write
-/// without a space check could fill the disk.
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn system_free_space(path: &Path) -> Result<u64, String> {
+    use kattri_platform::DiskSpace as _;
+    kattri_platform::UnixDiskSpace
+        .available_bytes(path)
+        .map_err(|error| error.to_string())
+}
+
+/// Refuse on platforms where we cannot verify available space.
+#[cfg(not(any(windows, unix)))]
 fn system_free_space(_path: &Path) -> Result<u64, String> {
-    Err("it is only checked on Windows so far".to_owned())
+    Err("available disk space cannot be checked on this platform".to_owned())
 }
 
 #[cfg(test)]
@@ -420,6 +470,33 @@ mod tests {
         ApplyRequest, UpdateOutcome, UpdateState, UpdateStatus, apply_blocking, host_target,
         prepare, rollback_blocking,
     };
+
+    #[test]
+    fn stale_release_check_results_are_ignored() {
+        let mut state = UpdateState::default();
+        let first = state.begin_release_check();
+        let latest = state.begin_release_check();
+        assert_ne!(first, latest);
+        state.finish_release_check(
+            first,
+            Ok(crate::worker::release_check::ReleaseCheckResult::Newer {
+                latest_version: "9.0.0".into(),
+            }),
+        );
+        assert_eq!(state.release_check, super::ReleaseCheckStatus::Checking);
+        state.finish_release_check(
+            latest,
+            Ok(crate::worker::release_check::ReleaseCheckResult::Current {
+                latest_version: "1.0.1".into(),
+            }),
+        );
+        assert_eq!(
+            state.release_check,
+            super::ReleaseCheckStatus::Current {
+                version: "1.0.1".into()
+            }
+        );
+    }
 
     const KID: &str = "egui-client-update-test-2026a";
     const OLD_VERSION: &str = "1.0.0";
@@ -761,6 +838,8 @@ mod tests {
         let req = request(&envelope, &keys, &scratch, PlaybackState::Stopped);
         let job = prepare(&req).expect("verified job");
 
+        // A missing payload must not mask the insufficient-space refusal.
+        std::fs::remove_file(&job.staged_path).expect("remove fixture payload");
         let outcome = apply_blocking(&job, none);
         assert!(
             matches!(&outcome, UpdateOutcome::Refused { version, reason }

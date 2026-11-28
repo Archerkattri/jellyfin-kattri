@@ -40,6 +40,11 @@ pub enum AdminUsersAction {
         user_id: String,
         changes: AdminUserPolicyChanges,
     },
+    /// Reset a user's password. The new password leaves the component only on submission.
+    ResetPassword {
+        user_id: String,
+        new_password: Zeroizing<String>,
+    },
     /// Delete the explicitly confirmed user.
     Delete { user_id: String },
 }
@@ -63,6 +68,11 @@ impl fmt::Debug for AdminUsersAction {
                 .field("user_id", user_id)
                 .field("changes", changes)
                 .finish(),
+            Self::ResetPassword { user_id, .. } => formatter
+                .debug_struct("ResetPassword")
+                .field("user_id", user_id)
+                .field("new_password", &"[REDACTED]")
+                .finish(),
             Self::Delete { user_id } => formatter
                 .debug_struct("Delete")
                 .field("user_id", user_id)
@@ -80,6 +90,7 @@ pub struct AdminUsersState {
     create_error: Option<&'static str>,
     rename: Option<RenameDraft>,
     policy: Option<PolicyDraft>,
+    reset_password: Option<ResetPasswordDraft>,
     delete: Option<DeleteDraft>,
     pending_policy: Option<PendingPolicyPatch>,
 }
@@ -93,6 +104,7 @@ impl Default for AdminUsersState {
             create_error: None,
             rename: None,
             policy: None,
+            reset_password: None,
             delete: None,
             pending_policy: None,
         }
@@ -109,6 +121,7 @@ impl fmt::Debug for AdminUsersState {
             .field("create_error", &self.create_error)
             .field("rename", &self.rename)
             .field("policy", &self.policy)
+            .field("reset_password", &self.reset_password)
             .field("delete", &self.delete)
             .field("pending_policy", &self.pending_policy)
             .finish()
@@ -122,6 +135,7 @@ impl AdminUsersState {
         self.cancel_create();
         self.rename = None;
         self.policy = None;
+        self.cancel_reset_password();
         self.delete = None;
         self.pending_policy = None;
     }
@@ -153,6 +167,41 @@ impl AdminUsersState {
             original: flags,
             edited: flags,
         });
+    }
+
+    fn open_reset_password(&mut self, user: &AdminUser) {
+        self.cancel();
+        self.reset_password = Some(ResetPasswordDraft {
+            user_id: user.id.clone(),
+            new_password: Zeroizing::new(String::new()),
+            error: None,
+        });
+    }
+
+    fn cancel_reset_password(&mut self) {
+        if let Some(mut draft) = self.reset_password.take() {
+            draft.new_password.zeroize();
+            draft.new_password.clear();
+        }
+    }
+
+    fn submit_reset_password(&mut self) -> Option<AdminUsersAction> {
+        let draft = self.reset_password.as_mut()?;
+        if draft.new_password.is_empty() {
+            draft.error = Some("Enter a new password.");
+            return None;
+        }
+        if draft.new_password.len() > MAX_PASSWORD_BYTES {
+            draft.error = Some("Passwords must be 4,096 bytes or fewer.");
+            return None;
+        }
+        let mut draft = self.reset_password.take()?;
+        let new_password =
+            std::mem::replace(&mut draft.new_password, Zeroizing::new(String::new()));
+        Some(AdminUsersAction::ResetPassword {
+            user_id: draft.user_id,
+            new_password,
+        })
     }
 
     fn open_delete(&mut self, user: &AdminUser, snapshot: AdminUsersSnapshot<'_>) {
@@ -332,6 +381,23 @@ struct DeleteDraft {
     typed_name: String,
 }
 
+struct ResetPasswordDraft {
+    user_id: String,
+    new_password: Zeroizing<String>,
+    error: Option<&'static str>,
+}
+
+impl fmt::Debug for ResetPasswordDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResetPasswordDraft")
+            .field("user_id", &self.user_id)
+            .field("new_password", &"[REDACTED]")
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
 #[derive(Debug)]
 struct PendingPolicyPatch {
     user_id: String,
@@ -350,15 +416,12 @@ pub fn show(
     let mut actions = Vec::new();
 
     ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.heading(
-                RichText::new("Users")
-                    .size(28.0)
-                    .strong()
-                    .color(colors.text),
-            );
-            ui.label(RichText::new("Manage accounts and server access.").color(colors.muted));
-        });
+        ui.heading(
+            RichText::new("Users")
+                .size(28.0)
+                .strong()
+                .color(colors.text),
+        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
                 .add_enabled(!snapshot.loading, egui::Button::new("Add user"))
@@ -399,22 +462,41 @@ pub fn show(
             ui.label(RichText::new("No user accounts found.").color(colors.muted));
         }
     } else {
-        egui::ScrollArea::vertical()
-            .id_salt("admin-users-list")
-            .auto_shrink([false, true])
-            .max_height(ui.available_height().max(180.0))
-            .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    for user in snapshot.users {
-                        user_row(ui, user, snapshot, state, colors);
-                        ui.add_space(8.0);
-                    }
-                });
-            });
+        ui.vertical(|ui| {
+            for user in snapshot.users {
+                user_row(ui, user, snapshot, state, &mut actions, colors);
+                ui.add_space(8.0);
+            }
+        });
     }
 
     draw_active_dialog(ui.ctx(), snapshot, state, &mut actions, colors);
     actions
+}
+
+fn user_initials(name: &str) -> String {
+    let initials = name
+        .split_whitespace()
+        .filter_map(|part| part.chars().next())
+        .take(2)
+        .flat_map(char::to_uppercase)
+        .collect::<String>();
+    if initials.is_empty() {
+        "•".to_owned()
+    } else {
+        initials
+    }
+}
+
+fn status_badge(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.16))
+        .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.4)))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(6, 1))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).small().color(color));
+        });
 }
 
 fn user_row(
@@ -422,6 +504,7 @@ fn user_row(
     user: &AdminUser,
     snapshot: AdminUsersSnapshot<'_>,
     state: &mut AdminUsersState,
+    actions: &mut Vec<AdminUsersAction>,
     colors: crate::theme::Palette,
 ) {
     let is_current = snapshot
@@ -435,6 +518,23 @@ fn user_row(
         .inner_margin(egui::Margin::symmetric(14, 10))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
+                egui::Frame::new()
+                    .fill(colors.accent.gamma_multiply(0.2))
+                    .stroke(egui::Stroke::new(1.0, colors.accent.gamma_multiply(0.45)))
+                    .corner_radius(egui::CornerRadius::same(18))
+                    .show(ui, |ui| {
+                        ui.set_min_size(egui::vec2(36.0, 36.0));
+                        ui.set_max_size(egui::vec2(36.0, 36.0));
+                        ui.centered_and_justified(|ui| {
+                            ui.label(
+                                RichText::new(user_initials(&user.name))
+                                    .size(14.0)
+                                    .strong()
+                                    .color(colors.accent),
+                            );
+                        });
+                    });
+                ui.add_space(10.0);
                 ui.vertical(|ui| {
                     ui.label(
                         RichText::new(&user.name)
@@ -442,28 +542,44 @@ fn user_row(
                             .strong()
                             .color(colors.text),
                     );
-                    ui.label(RichText::new(&user.id).small().color(colors.muted));
-                    ui.horizontal(|ui| {
-                        if is_current {
-                            ui.label(RichText::new("Signed in").small().color(colors.accent));
-                        }
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
                         if let Some(policy) = user.policy.as_ref() {
                             if policy.is_administrator == Some(true) {
-                                ui.label(
-                                    RichText::new("Administrator").small().color(colors.accent),
-                                );
+                                status_badge(ui, "Administrator", colors.accent);
+                            } else {
+                                status_badge(ui, "Standard", colors.muted);
+                            }
+                            if is_current {
+                                status_badge(ui, "Signed in", colors.accent);
                             }
                             if policy.is_disabled == Some(true) {
-                                ui.label(RichText::new("Disabled").small().color(colors.danger));
+                                status_badge(ui, "Disabled", colors.danger);
+                            }
+                            if policy.is_hidden == Some(true) {
+                                status_badge(ui, "Hidden", colors.muted);
                             }
                         } else {
-                            ui.label(
-                                RichText::new("Policy unavailable")
-                                    .small()
-                                    .color(colors.muted),
-                            );
+                            if is_current {
+                                status_badge(ui, "Signed in", colors.accent);
+                            }
+                            status_badge(ui, "Policy unavailable", colors.muted);
                         }
                     });
+                    if let Some(last_activity) = user
+                        .last_activity_date
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(format!("Last active: {last_activity}"))
+                                .small()
+                                .color(colors.muted),
+                        );
+                    }
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if is_current {
@@ -484,6 +600,12 @@ fn user_row(
                     }
 
                     if ui
+                        .add_enabled(!snapshot.loading, egui::Button::new("Reset password"))
+                        .clicked()
+                    {
+                        state.open_reset_password(user);
+                    }
+                    if ui
                         .add_enabled(!snapshot.loading, egui::Button::new("Permissions"))
                         .clicked()
                     {
@@ -497,6 +619,66 @@ fn user_row(
                     }
                 });
             });
+
+            if state
+                .reset_password
+                .as_ref()
+                .is_some_and(|draft| draft.user_id == user.id)
+            {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+                let mut submit = false;
+                let mut cancel = false;
+                if let Some(draft) = state.reset_password.as_mut() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("New password").color(colors.muted));
+                        let field = ui.add(
+                            egui::TextEdit::singleline(&mut *draft.new_password)
+                                .password(true)
+                                .char_limit(MAX_PASSWORD_BYTES)
+                                .hint_text("New password"),
+                        );
+                        field.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::Role::TextInput,
+                                true,
+                                "New password".to_owned(),
+                            )
+                        });
+                        if field.changed() {
+                            draft.error = None;
+                        }
+                        let valid = !draft.new_password.is_empty()
+                            && draft.new_password.len() <= MAX_PASSWORD_BYTES;
+                        if ui
+                            .add_enabled(
+                                !snapshot.loading && valid,
+                                egui::Button::new("Save password"),
+                            )
+                            .clicked()
+                        {
+                            submit = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                    if let Some(error) = draft.error {
+                        ui.colored_label(colors.danger, error);
+                    }
+                    if draft.new_password.len() > MAX_PASSWORD_BYTES {
+                        ui.colored_label(colors.danger, "Passwords must be 4,096 bytes or fewer.");
+                    }
+                }
+                if submit {
+                    if let Some(action) = state.submit_reset_password() {
+                        actions.push(action);
+                    }
+                } else if cancel {
+                    state.cancel_reset_password();
+                }
+            }
         });
 }
 
@@ -795,7 +977,8 @@ fn draw_policy_confirmation(
             if ui
                 .add_enabled(
                     !busy,
-                    egui::Button::new("Confirm change").fill(colors.danger),
+                    egui::Button::new(RichText::new("Confirm change").color(colors.background))
+                        .fill(colors.danger),
                 )
                 .clicked()
             {
@@ -852,7 +1035,11 @@ fn draw_delete_dialog(
                 canceled = true;
             }
             if ui
-                .add_enabled(ready, egui::Button::new("Delete user").fill(colors.danger))
+                .add_enabled(
+                    ready,
+                    egui::Button::new(RichText::new("Delete user").color(colors.background))
+                        .fill(colors.danger),
+                )
                 .clicked()
             {
                 confirmed = true;
@@ -1015,6 +1202,7 @@ mod tests {
             id: id.to_owned(),
             name: name.to_owned(),
             policy: Some(policy),
+            last_activity_date: None,
         }
     }
 
@@ -1164,5 +1352,169 @@ mod tests {
                 if changes.is_hidden == Some(true)
                     && changes.enable_remote_access.is_none()
         ));
+    }
+
+    #[test]
+    fn user_list_renders_all_rows_with_badges_and_without_subtitle_or_raw_id() {
+        let mut admin_policy = AdminUserPolicy::default();
+        admin_policy.is_administrator = Some(true);
+        let mut hidden_disabled_policy = AdminUserPolicy::default();
+        hidden_disabled_policy.is_administrator = Some(false);
+        hidden_disabled_policy.is_disabled = Some(true);
+        hidden_disabled_policy.is_hidden = Some(true);
+
+        let mut accounts = vec![
+            user(
+                "0000000000000000000000000000a001",
+                "AdminUser",
+                admin_policy,
+            ),
+            user(
+                "0000000000000000000000000000a002",
+                "HiddenDisabled",
+                hidden_disabled_policy,
+            ),
+        ];
+        for i in 3..=12 {
+            accounts.push(user(
+                &format!("0000000000000000000000000000a{i:03}"),
+                &format!("Member {i:02}"),
+                AdminUserPolicy::default(),
+            ));
+        }
+
+        let view = snapshot(&accounts, Some("0000000000000000000000000000a001"));
+        let mut state = AdminUsersState::default();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 1400.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let actions = show(ui, view, &mut state);
+                assert!(actions.is_empty());
+            },
+        );
+        output.textures_delta.clear();
+
+        let mut texts = Vec::new();
+        fn collect(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        collect(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut texts);
+        }
+
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t == "Manage accounts and server access.")
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t == "0000000000000000000000000000a001")
+        );
+        assert!(texts.iter().any(|t| t == "Administrator"));
+        assert!(texts.iter().any(|t| t == "Standard"));
+        assert!(texts.iter().any(|t| t == "Signed in"));
+        assert!(texts.iter().any(|t| t == "Disabled"));
+        assert!(texts.iter().any(|t| t == "Hidden"));
+        assert!(texts.iter().any(|t| t == "Member 12"));
+    }
+
+    #[test]
+    fn user_row_renders_initials_avatar_and_last_activity_date() {
+        let mut account = user(
+            "0000000000000000000000000000a009",
+            "Ada Lovelace",
+            AdminUserPolicy::default(),
+        );
+        account.last_activity_date = Some("2026-11-27T12:00:00Z".to_owned());
+        let accounts = [account];
+        let view = snapshot(&accounts, None);
+        let mut state = AdminUsersState::default();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let _ = show(ui, view, &mut state);
+            },
+        );
+        output.textures_delta.clear();
+
+        let mut texts = Vec::new();
+        fn collect(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        collect(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut texts);
+        }
+
+        assert!(texts.iter().any(|t| t == "AL"));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "Last active: 2026-11-27T12:00:00Z")
+        );
+    }
+
+    #[test]
+    fn reset_password_submission_moves_password_out_and_cancel_zeroizes() {
+        let account = user("user-1", "Riley", AdminUserPolicy::default());
+        let mut state = AdminUsersState::default();
+        state.open_reset_password(&account);
+        if let Some(draft) = state.reset_password.as_mut() {
+            draft.new_password = Zeroizing::new("reset-secret-1".to_owned());
+        }
+        state.cancel();
+        assert!(state.reset_password.is_none());
+
+        state.open_reset_password(&account);
+        if let Some(draft) = state.reset_password.as_mut() {
+            draft.new_password = Zeroizing::new("reset-secret-2".to_owned());
+        }
+        assert!(!format!("{state:?}").contains("reset-secret-2"));
+        let action = state
+            .submit_reset_password()
+            .expect("valid reset password draft");
+        assert!(state.reset_password.is_none());
+        assert!(!format!("{action:?}").contains("reset-secret-2"));
+        match action {
+            AdminUsersAction::ResetPassword {
+                user_id,
+                new_password,
+            } => {
+                assert_eq!(user_id, "user-1");
+                assert_eq!(new_password.as_str(), "reset-secret-2");
+            }
+            _ => panic!("expected ResetPassword action"),
+        }
     }
 }

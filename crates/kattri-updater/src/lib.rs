@@ -15,12 +15,18 @@
 //!   caller supplies the playback state and the free space; this crate reads neither.
 //! - Manifest fetching is available as a bounded, HTTPS-origin-pinned library component. No
 //!   release endpoint or signing key is configured here; the empty release keyring rejects
-//!   fetch-and-verify before making a network request. Artifact downloading remains unimplemented.
+//!   fetch-and-verify before making a network request. [`download::ArtifactDownloader`] fetches the
+//!   artifact the signed manifest names, on the same origin, refusing redirects and reading no
+//!   further than the manifest's declared size, and returns the bytes only after they match its
+//!   digest. `tests/e2e_install.rs` runs the whole chain against a real on-disk store: verify,
+//!   download, apply, failed-launch health checks and rollback.
 //!
 //! Trust rule: an artifact is installed only after its manifest envelope passes
 //! [`open_envelope`] and the downloaded bytes pass [`verify_artifact_bytes`].
 
 pub mod apply;
+pub mod download;
+pub mod download_file;
 pub mod fetch;
 pub mod gate;
 pub mod install_store;
@@ -32,6 +38,7 @@ pub mod state_store;
 pub mod verify;
 pub mod version;
 
+pub use download::ArtifactDownloader;
 pub use fetch::ManifestFetcher;
 pub use install_store::FsInstallStore;
 pub use keyring::{KeyState, Keyring, StaticKey};
@@ -92,6 +99,26 @@ pub enum UpdateError {
     SizeMismatch { expected: u64, actual: u64 },
     #[error("artifact digest does not match the manifest for {platform}/{arch}")]
     DigestMismatch { platform: String, arch: String },
+    #[error("the manifest has no artifact for {platform}/{arch}")]
+    NoArtifactForPlatform { platform: String, arch: String },
+    #[error("artifact transport initialization or request failed")]
+    ArtifactTransport,
+    #[error("artifact request timed out")]
+    ArtifactTimeout,
+    #[error("artifact URL is not on the configured HTTPS origin")]
+    ArtifactOrigin,
+    #[error("artifact request was redirected")]
+    ArtifactRedirect,
+    #[error("artifact request returned HTTP status {status}")]
+    ArtifactHttpStatus { status: u16 },
+    #[error("artifact stream exceeded the {limit}-byte limit from the manifest")]
+    ArtifactTooLarge { limit: u64 },
+    #[error(
+        "artifact is {declared} bytes, above the {limit}-byte in-memory limit; install this release manually"
+    )]
+    ArtifactTooLargeToBuffer { declared: u64, limit: u64 },
+    #[error("artifact staging file could not be created or written")]
+    ArtifactFileIo,
     #[error("{0} is not implemented yet")]
     NotImplemented(&'static str),
 }

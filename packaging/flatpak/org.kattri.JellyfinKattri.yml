@@ -14,11 +14,12 @@
 # libmpv is the pinned LGPL linux-x64 archive from packaging/libmpv/manifest.toml (same URL
 # and SHA-256), not a source build: FFmpeg, libplacebo and dav1d are linked into it
 # statically. Its remaining shared dependencies come from the runtime, except libass and
-# uchardet, which the runtime does not ship and are built below from checksummed releases.
+# uchardet and the JPEG 8 ABI, which are built below from checksummed releases.
 #
 # Offline build: flatpak-builder runs cargo with --offline. Every crate comes from
 # cargo-sources.json, generated from Cargo.lock with flatpak-builder-tools commit
-# 9d86d336a39b9af38b86f114b6ce5820fe260f91. The generated file is not committed.
+# 9d86d336a39b9af38b86f114b6ce5820fe260f91. The generator needs aiohttp and tomlkit.
+# The generated file is not committed. Regenerate it after any Cargo.lock change.
 #
 # Permissions: the finish args grant only the display sockets, GPU access, audio, the
 # network (needed to reach the Jellyfin server), and no general filesystem access. Files
@@ -37,6 +38,7 @@ finish-args:
   - --device=dri
   - --socket=pulseaudio
   - --share=network
+  - --env=LD_LIBRARY_PATH=/app/lib
 
 build-options:
   env:
@@ -50,6 +52,8 @@ modules:
       - -DCMAKE_BUILD_TYPE=Release
       - -DBUILD_BINARY=OFF
       - -DBUILD_STATIC=OFF
+      # Flatpak's app loader path includes /app/lib, not the architecture-specific /app/lib64.
+      - -DCMAKE_INSTALL_LIBDIR=lib
       # uchardet 0.0.8 declares cmake_minimum_required(2.8), which CMake 4 refuses.
       - -DCMAKE_POLICY_VERSION_MINIMUM=3.5
     sources:
@@ -83,11 +87,35 @@ modules:
         url: https://github.com/libass/libass/releases/download/0.17.4/libass-0.17.4.tar.xz
         sha256: 78f1179b838d025e9c26e8fef33f8092f65611444ffa1bfc0cfac6a33511a05a
 
+  # libmpv is linked against libjpeg.so.8, not the runtime's libjpeg ABI.
+  - name: libjpeg-turbo8
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DENABLE_STATIC=OFF
+      - -DWITH_JPEG8=ON
+      - -DCMAKE_INSTALL_LIBDIR=lib
+    post-install:
+      - install -Dm644 LICENSE.md /app/share/licenses/libjpeg-turbo/LICENSE.md
+      - install -Dm644 README.ijg /app/share/licenses/libjpeg-turbo/README.ijg
+    cleanup:
+      - /bin
+      - /include
+      - /lib/cmake
+      - /lib/pkgconfig
+      - /share/doc
+      - /share/man
+      - /lib/libturbojpeg.so*
+    sources:
+      - type: archive
+        url: https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.1.3/libjpeg-turbo-3.1.3.tar.gz
+        sha256: 075920b826834ac4ddf97661cc73491047855859affd671d52079c6867c1c6c0
+
   # Keep the URL and SHA-256 equal to [platforms.linux-x64] in packaging/libmpv/manifest.toml.
   - name: libmpv
     buildsystem: simple
     build-commands:
       - install -Dm755 libmpv.so.2 /app/lib/libmpv.so.2
+      # Unlike deb/rpm, Flatpak resolves bundled libraries via /app/lib (finish-args).
       - install -d /app/share/licenses/libmpv
       - install -m644 LICENSE.* BUILD-INFO.txt /app/share/licenses/libmpv/
     sources:
@@ -136,4 +164,5 @@ modules:
           - build
           - legacy
           - .local
+          - .flatpak-builder
       - cargo-sources.json

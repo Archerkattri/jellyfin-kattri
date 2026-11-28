@@ -33,7 +33,6 @@ const SETTINGS_0_7_0: &str = r##"schema_version = 3
 future_top_key = 1
 
 [general]
-high_contrast = true
 reduce_motion = false
 theme_preset = "warm-dark"
 custom_theme_enabled = true
@@ -245,7 +244,6 @@ series_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 #[allow(clippy::field_reassign_with_default)] // field-by-field build is the point of the fixture
 fn populated_0_7_0() -> Settings {
     let mut s = Settings::default();
-    s.general.high_contrast = true;
     s.general.reduce_motion = false;
     s.general.theme_preset = ThemePreset::WarmDark;
     s.general.custom_theme_enabled = true;
@@ -395,7 +393,6 @@ fn populated_0_7_0() -> Settings {
     s.diagnostics.log_level = LogDetail::Debug;
     s.parental.pin_record = FAKE_RECORD.to_owned();
     s.parental.max_rating = Some(13);
-    s.admin.dashboard = true;
 
     s.series_languages = vec![
         SeriesLanguageSetting {
@@ -596,7 +593,7 @@ fn a_newer_schema_file_is_loaded_read_only_and_kept_byte_for_byte() {
         (
             "far ahead with CRLF line endings",
             format!(
-                "schema_version = {}\r\n[future_section]\r\nfuture_value = \"keep me\"\r\n[general]\r\nhigh_contrast = false\r\n",
+                "schema_version = {}\r\n[future_section]\r\nfuture_value = \"keep me\"\r\n[general]\r\n",
                 supported + 100
             )
             .into_bytes(),

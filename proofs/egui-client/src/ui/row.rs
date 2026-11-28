@@ -24,7 +24,7 @@ const POSTER_ASPECT: f32 = 1.5;
 /// Corner radius of a poster.
 const POSTER_RADIUS: CornerRadius = CornerRadius::same(14);
 /// Vertical space reserved for the title and subtitle under each poster.
-const TEXT_BLOCK_H: f32 = 44.0;
+const TEXT_BLOCK_H: f32 = 64.0;
 const TEXT_GAP: f32 = 8.0;
 /// Half-life (seconds) of the kinetic scroll.
 const SCROLL_HALF_LIFE: f32 = 0.08;
@@ -62,7 +62,7 @@ impl Default for RowOptions {
             card_width: 190.0,
             image_aspect: POSTER_ASPECT,
             gap: 22.0,
-            palette: theme::palette(false),
+            palette: theme::palette(),
         }
     }
 }
@@ -114,19 +114,19 @@ impl PosterRow {
         // Room above and below the poster for the focus scale to grow into.
         let pad_y = poster_h * anim::FOCUS_SCALE_MAX * 0.5;
         let row_h = poster_h + 2.0 * pad_y + TEXT_GAP + TEXT_BLOCK_H;
-        // The row reaches EDGE_PADDING into the page gutters on both sides, so the first poster
-        // lines up with the row title and the page content while a focused poster still has room
-        // to grow.
-        let viewport_w = (ui.available_width() + 2.0 * EDGE_PADDING).max(0.0);
-        let row_origin = ui.cursor().min - Vec2::new(EDGE_PADDING, 0.0);
-        let row_rect = Rect::from_min_size(row_origin, Vec2::new(viewport_w, row_h));
+        // The row starts at the content column so the page never drifts sideways. Only the paint
+        // clip reaches EDGE_PADDING into the gutters, which leaves a focused poster room to grow
+        // without moving the layout.
+        let viewport_w = ui.available_width().max(0.0);
+        let row_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(viewport_w, row_h));
+        let paint_clip = row_rect.expand2(Vec2::new(EDGE_PADDING, 0.0));
         let count = cards.len();
 
         if count == 0 {
             let response = ui.allocate_rect(row_rect, Sense::hover());
             let rect = response.rect;
             ui.painter().text(
-                rect.left_center() + Vec2::new(EDGE_PADDING, 0.0),
+                rect.left_center(),
                 Align2::LEFT_CENTER,
                 ui_text(ids::ROW_EMPTY_NO_ITEMS),
                 FontId::proportional(16.0),
@@ -175,13 +175,8 @@ impl PosterRow {
             self.target = self.offset;
         }
         if response.hovered() {
-            let wheel = ctx.input(|i| i.smooth_scroll_delta);
-            let delta = if wheel.x.abs() > wheel.y.abs() {
-                wheel.x
-            } else {
-                wheel.y
-            };
-            self.target -= delta;
+            // Leave vertical wheel input to the containing page.
+            self.target -= ctx.input(|input| input.smooth_scroll_delta.x);
         }
 
         // Kinetic scroll: ease the displayed offset toward the target.
@@ -197,7 +192,7 @@ impl PosterRow {
         let mut animating = (self.offset - self.target).abs() > 0.5;
 
         let visible = anim::visible_range(count, card_w, gap, viewport_w, self.offset);
-        let painter = ui.painter_at(rect);
+        let painter = ui.painter_at(paint_clip);
         let base_y = rect.top() + pad_y;
         let text_y = base_y + poster_h + pad_y + TEXT_GAP;
         for index in visible.clone() {
@@ -214,7 +209,7 @@ impl PosterRow {
             );
             animating |= (t - goal).abs() > 1e-3;
 
-            let x = rect.left() + EDGE_PADDING + index as f32 * step - self.offset;
+            let x = rect.left() + index as f32 * step - self.offset;
             let scale = anim::focus_scale(t);
             let poster = Rect::from_center_size(
                 Pos2::new(x + card_w / 2.0, base_y + poster_h / 2.0),
@@ -229,8 +224,9 @@ impl PosterRow {
                 FontId::proportional(15.0),
                 palette.text,
                 card_w,
-                1,
+                2,
             );
+            let subtitle_y = title_galley.size().y + 3.0;
             painter.galley(text_left, title_galley, palette.text);
             if let Some(subtitle) = card.subtitle.as_deref() {
                 let galley = layout_text(
@@ -241,7 +237,11 @@ impl PosterRow {
                     card_w,
                     1,
                 );
-                painter.galley(text_left + Vec2::new(0.0, 20.0), galley, palette.muted);
+                painter.galley(
+                    text_left + Vec2::new(0.0, subtitle_y),
+                    galley,
+                    palette.muted,
+                );
             }
         }
 
@@ -264,9 +264,7 @@ impl PosterRow {
         response.widget_info(move || WidgetInfo::labeled(Role::Label, true, label.clone()));
 
         let card_centers = (0..count)
-            .map(|index| {
-                rect.left() + EDGE_PADDING + index as f32 * step - self.offset + card_w / 2.0
-            })
+            .map(|index| rect.left() + index as f32 * step - self.offset + card_w / 2.0)
             .collect();
         RowResponse {
             activated,
@@ -290,7 +288,7 @@ impl PosterRow {
 
 /// Index of the card under `x` (relative to the row's left edge), given the displayed offset.
 fn card_at(x: f32, offset: f32, count: usize, card_w: f32, step: f32) -> Option<usize> {
-    let content = x + offset - EDGE_PADDING;
+    let content = x + offset;
     if content < 0.0 {
         return None;
     }
@@ -430,31 +428,108 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vertical_wheel_over_a_poster_row_does_not_pan_it() {
+        let ctx = egui::Context::default();
+        let mut row = PosterRow::default();
+        let cards: Vec<_> = (0..12)
+            .map(|n| RowCard {
+                id: n.to_string(),
+                title: n.to_string(),
+                accessible_name: None,
+                subtitle: None,
+                progress: None,
+                image: None,
+            })
+            .collect();
+        for delta in [
+            Vec2::ZERO,
+            Vec2::new(0.0, -150.0),
+            Vec2::ZERO,
+            Vec2::new(-150.0, 0.0),
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(620.0, 500.0))),
+                    events: vec![
+                        egui::Event::PointerMoved(Pos2::new(100.0, 100.0)),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta,
+                            modifiers: egui::Modifiers::NONE,
+                            phase: egui::TouchPhase::Move,
+                            source: egui::MouseWheelSource::Unknown,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| {
+                    row.show(ui, "Movies", &cards, &RowOptions::default());
+                },
+            );
+            output.textures_delta.clear();
+            if delta.x == 0.0 {
+                assert_eq!(row.target, 0.0);
+            }
+        }
+        assert!(
+            row.target > 0.0,
+            "an explicit horizontal wheel gesture still pans the row"
+        );
+    }
+
+    #[test]
     fn card_at_maps_pointer_to_slots_and_gaps() {
-        // card_w 200, gap 24 -> step 224; content starts at EDGE_PADDING.
-        assert_eq!(card_at(EDGE_PADDING + 10.0, 0.0, 5, 200.0, 224.0), Some(0));
-        assert_eq!(card_at(EDGE_PADDING + 199.0, 0.0, 5, 200.0, 224.0), Some(0));
+        // card_w 200, gap 24 -> step 224; the content starts at the row's own left edge.
+        assert_eq!(card_at(10.0, 0.0, 5, 200.0, 224.0), Some(0));
+        assert_eq!(card_at(199.0, 0.0, 5, 200.0, 224.0), Some(0));
         // In the gap between card 0 (ends at 200) and card 1 (starts at 224).
-        assert_eq!(card_at(EDGE_PADDING + 210.0, 0.0, 5, 200.0, 224.0), None);
-        assert_eq!(card_at(EDGE_PADDING + 215.0, 0.0, 5, 200.0, 224.0), None);
-        assert_eq!(
-            card_at(EDGE_PADDING + 224.0 + 5.0, 0.0, 5, 200.0, 224.0),
-            Some(1)
-        );
+        assert_eq!(card_at(210.0, 0.0, 5, 200.0, 224.0), None);
+        assert_eq!(card_at(215.0, 0.0, 5, 200.0, 224.0), None);
+        assert_eq!(card_at(224.0 + 5.0, 0.0, 5, 200.0, 224.0), Some(1));
         // Offset shifts the hit test.
-        assert_eq!(
-            card_at(EDGE_PADDING + 10.0, 224.0, 5, 200.0, 224.0),
-            Some(1)
+        assert_eq!(card_at(10.0, 224.0, 5, 200.0, 224.0), Some(1));
+        assert_eq!(card_at(4.0 * 224.0 + 10.0, 0.0, 5, 200.0, 224.0), Some(4));
+        assert_eq!(card_at(5.0 * 224.0 + 10.0, 0.0, 5, 200.0, 224.0), None);
+    }
+
+    #[test]
+    fn consecutive_rows_keep_the_same_left_edge() {
+        // Regression: a row used to start EDGE_PADDING left of the content column and leave the
+        // cursor there, so every following row drifted another EDGE_PADDING off-screen.
+        let ctx = egui::Context::default();
+        let mut first = PosterRow::default();
+        let mut second = PosterRow::default();
+        let cards: Vec<_> = (0..6)
+            .map(|n| RowCard {
+                id: n.to_string(),
+                title: n.to_string(),
+                accessible_name: None,
+                subtitle: None,
+                progress: None,
+                image: None,
+            })
+            .collect();
+        let mut start = f32::NAN;
+        let mut after_first = f32::NAN;
+        let mut first_rect_left = f32::NAN;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 700.0))),
+                ..Default::default()
+            },
+            |ui| {
+                start = ui.cursor().min.x;
+                first.show(ui, "First", &cards, &RowOptions::default());
+                after_first = ui.cursor().min.x;
+                first_rect_left = ui.min_rect().left();
+                second.show(ui, "Second", &cards, &RowOptions::default());
+            },
         );
-        // Left of the first card and past the last card.
-        assert_eq!(card_at(0.0, 0.0, 5, 200.0, 224.0), None);
-        assert_eq!(
-            card_at(EDGE_PADDING + 4.0 * 224.0 + 10.0, 0.0, 5, 200.0, 224.0),
-            Some(4)
-        );
-        assert_eq!(
-            card_at(EDGE_PADDING + 5.0 * 224.0 + 10.0, 0.0, 5, 200.0, 224.0),
-            None
+        output.textures_delta.clear();
+        assert_eq!(after_first, start, "a row must not move the content column");
+        assert!(
+            first_rect_left >= start,
+            "a row must not extend left of the column"
         );
     }
 

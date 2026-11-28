@@ -10,7 +10,7 @@ use jellyfin_api::JellyfinTicks;
 use jellyfin_api::{DeviceProfile, device_profile_from_runtime_inventory};
 use jellyfin_egui_client::PlaybackReportSubmitError;
 use jellyfin_playback_relay::{RelayHandle, RelayPlaybackUrl};
-use kattri_client_core::ab_loop::{AbLoop, AbLoopCycle, AbLoopError, plan_frame_step};
+use kattri_client_core::ab_loop::plan_frame_step;
 use kattri_client_core::audio::gapless_audio_option;
 use kattri_client_core::cache::{BufferSettings, demuxer_options};
 use kattri_client_core::controls::{PlaybackSpeed, SeekRequest, seek_target};
@@ -64,12 +64,13 @@ use crate::media_info_panel::MediaInfoState;
 use crate::player_controls::{SecondarySubtitleChoice, TrackChoice};
 use crate::report_handoff::{ReportCounts, ReportHandoff};
 
+#[cfg(test)]
 pub(crate) const SYNC_MARKER_BUTTONS: [(CalibrationMarker, &str); 2] = [
     (CalibrationMarker::VoiceHeard, "I hear the spoken line"),
     (CalibrationMarker::TextSeen, "I see the subtitle"),
 ];
 
-const PLAYBACK_REPORT_CADENCE: Duration = Duration::from_secs(10);
+const PLAYBACK_REPORT_CADENCE: Duration = Duration::from_secs(2);
 // A broken HLS playlist can make mpv try every segment without ever opening the file.
 const SERVER_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 const OPEN_STOP_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -610,24 +611,6 @@ fn duration_from_seconds(seconds: f64) -> Option<Duration> {
         .flatten()
 }
 
-/// The `ab-loop-a`/`ab-loop-b` value for one loop point: a decimal second count, or `no`.
-fn ab_loop_time(point: Option<Duration>) -> String {
-    point.map_or_else(
-        || "no".to_owned(),
-        |point| format!("{:.3}", point.as_secs_f64()),
-    )
-}
-
-/// The feedback text for a refused A-B press.
-fn ab_loop_error_text(error: AbLoopError) -> &'static str {
-    match error {
-        AbLoopError::MissingA => "Set loop point A before loop point B.",
-        AbLoopError::NotAfterA => "Loop point B must come after loop point A.",
-        AbLoopError::NotBeforeB => "Loop point A must come before loop point B.",
-        AbLoopError::TooShort => "An A-B loop must be at least half a second long.",
-    }
-}
-
 fn resume_position_seconds(ticks: Option<i64>) -> Option<f64> {
     ticks
         .filter(|ticks| *ticks > 0)
@@ -691,19 +674,6 @@ fn relative_seek_delta(
     .unwrap_or(requested_seconds as f64)
 }
 
-fn chapter_seek_target(
-    chapters: &[PlaybackChapter],
-    index: usize,
-    duration: Option<Duration>,
-) -> Option<Duration> {
-    let chapter = chapters.iter().find(|chapter| chapter.index == index)?;
-    seek_target(
-        Duration::ZERO,
-        duration,
-        SeekRequest::Absolute(chapter.time),
-    )
-}
-
 fn playback_chapters(
     chapters: impl IntoIterator<Item = (Option<String>, f64)>,
 ) -> Vec<PlaybackChapter> {
@@ -721,23 +691,34 @@ fn playback_chapters(
         .collect()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ControlsFeedback {
+    pub(crate) message: String,
+    pub(crate) is_error: bool,
+}
+
+impl ControlsFeedback {
+    fn info(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            is_error: false,
+        }
+    }
+
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            is_error: true,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SyncFeedbackTone {
     Guidance,
     Pending,
     Success,
     Error,
-}
-
-impl SyncFeedbackTone {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Guidance => "Status",
-            Self::Pending => "In progress",
-            Self::Success => "Complete",
-            Self::Error => "Error",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -818,6 +799,7 @@ struct PendingMediaLoad<T> {
     generation: Option<u64>,
     relay: Option<T>,
     resume_seconds: Option<f64>,
+    resume_start_queued: bool,
     item: ItemPlaybackState,
     /// Reporting metadata for the file this load will start. It travels with the load so a
     /// `StartFile` for one entry can never consume another entry's metadata.
@@ -947,6 +929,8 @@ pub(crate) struct MpvHost<'session> {
     media_load: MediaLoadState<RelayHandle>,
     status: String,
     file_loaded: bool,
+    file_loading: bool,
+    first_frame_rendered: bool,
     playback_end_reason: Option<EndFileReason>,
     playback_end_item_id: Option<String>,
     playback_end_was_live: bool,
@@ -970,15 +954,12 @@ pub(crate) struct MpvHost<'session> {
     subtitle_track_id: Option<i64>,
     subtitle_delay_seconds: Option<f64>,
     controls: PlaybackControlsState,
-    /// A-B loop points for the current item. Session-only, so a loop never carries to the next
-    /// item; cleared on `StartFile` (M6-12).
-    ab_loop: AbLoop,
     chapter_list_request: Option<u64>,
     /// The `screenshot-to-file` command whose reply has not arrived yet.
     screenshot_command: Option<u64>,
     /// libmpv's reply code for the last requested screenshot; taken by the host for its notice.
     screenshot_result: Option<i32>,
-    controls_feedback: Option<String>,
+    controls_feedback: Option<ControlsFeedback>,
     sync_play_speed_locked: bool,
     track_inventory: Option<TrackInventory>,
     track_inventory_request: Option<u64>,
@@ -992,7 +973,9 @@ pub(crate) struct MpvHost<'session> {
     report_metadata: Option<PlaybackReportMetadata>,
     report_session: Option<PlaybackReportSessionId>,
     report_started_at: Option<Instant>,
+    report_nonzero_sent: bool,
     pending_resume_seconds: Option<f64>,
+    pending_resume_start_queued: bool,
     resume_seek_command: Option<u64>,
     playback_seek_pending: bool,
     next_report_generation: u64,
@@ -1026,6 +1009,8 @@ pub(crate) struct MpvHost<'session> {
     capability_warning: Option<ProbeWarning>,
     gpu_identity: String,
     driver_identity: String,
+    /// What libmpv reported about itself, for the About page.
+    identity: Option<RuntimeIdentity>,
     policy: PlaybackPolicyState,
     item: ItemPlaybackState,
     /// Track choices the viewer made, with the series they belong to. Drained once per frame.
@@ -1086,6 +1071,8 @@ impl<'session> MpvHost<'session> {
                 media_load: MediaLoadState::default(),
                 status: runtime_error.unwrap_or_else(|| "libmpv is unavailable".into()),
                 file_loaded: false,
+                file_loading: false,
+                first_frame_rendered: false,
                 playback_end_reason: None,
                 playback_end_item_id: None,
                 playback_end_was_live: false,
@@ -1124,13 +1111,14 @@ impl<'session> MpvHost<'session> {
                 report_metadata: None,
                 report_session: None,
                 report_started_at: None,
+                report_nonzero_sent: false,
                 pending_resume_seconds: None,
+                pending_resume_start_queued: false,
                 resume_seek_command: None,
                 playback_seek_pending: false,
                 next_report_generation: 0,
                 report_scheduler: playback_report_scheduler(true),
                 report_actions: ReportHandoff::default(),
-                ab_loop: AbLoop::new(),
                 sync_controller: SubtitleSyncController::new(),
                 sync_feedback: SyncFeedback::guidance(
                     "Load media with a selectable subtitle track to sync it.",
@@ -1151,6 +1139,7 @@ impl<'session> MpvHost<'session> {
                 capability_warning: Some(ProbeWarning::RuntimeUnavailable),
                 gpu_identity,
                 driver_identity,
+                identity: None,
                 policy: PlaybackPolicyState::default(),
                 item: ItemPlaybackState::default(),
                 track_memory_events: Vec::new(),
@@ -1196,6 +1185,8 @@ impl<'session> MpvHost<'session> {
                     media_load: MediaLoadState::default(),
                     status: format!("libmpv OpenGL renderer unavailable: {error}"),
                     file_loaded: false,
+                    file_loading: false,
+                    first_frame_rendered: false,
                     playback_end_reason: None,
                     playback_end_item_id: None,
                     playback_end_was_live: false,
@@ -1234,13 +1225,14 @@ impl<'session> MpvHost<'session> {
                     report_metadata: None,
                     report_session: None,
                     report_started_at: None,
+                    report_nonzero_sent: false,
                     pending_resume_seconds: None,
+                    pending_resume_start_queued: false,
                     resume_seek_command: None,
                     playback_seek_pending: false,
                     next_report_generation: 0,
                     report_scheduler: playback_report_scheduler(true),
                     report_actions: ReportHandoff::default(),
-                    ab_loop: AbLoop::new(),
                     sync_controller: SubtitleSyncController::new(),
                     sync_feedback: SyncFeedback::guidance(
                         "Load media with a selectable subtitle track to sync it.",
@@ -1261,6 +1253,7 @@ impl<'session> MpvHost<'session> {
                     capability_warning,
                     gpu_identity,
                     driver_identity,
+                    identity: None,
                     policy: PlaybackPolicyState::default(),
                     item: ItemPlaybackState::default(),
                     track_memory_events: Vec::new(),
@@ -1274,6 +1267,8 @@ impl<'session> MpvHost<'session> {
             media_load: MediaLoadState::default(),
             status: "OpenGL video surface ready; no media loaded".into(),
             file_loaded: false,
+            file_loading: false,
+            first_frame_rendered: false,
             playback_end_reason: None,
             playback_end_item_id: None,
             playback_end_was_live: false,
@@ -1312,13 +1307,14 @@ impl<'session> MpvHost<'session> {
             report_metadata: None,
             report_session: None,
             report_started_at: None,
+            report_nonzero_sent: false,
             pending_resume_seconds: None,
+            pending_resume_start_queued: false,
             resume_seek_command: None,
             playback_seek_pending: false,
             next_report_generation: 0,
             report_scheduler: playback_report_scheduler(true),
             report_actions: ReportHandoff::default(),
-            ab_loop: AbLoop::new(),
             sync_controller: SubtitleSyncController::new(),
             sync_feedback: SyncFeedback::guidance(
                 "Load media with a selectable subtitle track to sync it.",
@@ -1339,6 +1335,7 @@ impl<'session> MpvHost<'session> {
             capability_warning,
             gpu_identity,
             driver_identity,
+            identity: None,
             policy: PlaybackPolicyState::default(),
             item: ItemPlaybackState::default(),
             track_memory_events: Vec::new(),
@@ -1367,6 +1364,9 @@ impl<'session> MpvHost<'session> {
                     self.sync_feedback = subtitle_delay_error(error);
                 }
                 queue_hwdec(session, video.decode_mode);
+                if let Ok(option) = validate("start", OptionValue::Text("none")) {
+                    let _ = session.command(&["set", option.name, &option.value]);
+                }
                 for (setting, options) in local_file_layout_options(video, subtitles) {
                     queue_validated(session, setting, options);
                 }
@@ -1378,9 +1378,12 @@ impl<'session> MpvHost<'session> {
                             generation: None,
                             relay: None,
                             resume_seconds: None,
+                            resume_start_queued: false,
                             item: ItemPlaybackState::default(),
                             report_metadata: None,
                         });
+                        self.file_loading = true;
+                        self.first_frame_rendered = false;
                         self.status = "Loading local media".into();
                     }
                     Err(error) => self.status = format!("Could not queue local media: {error}"),
@@ -1392,13 +1395,15 @@ impl<'session> MpvHost<'session> {
     }
 
     /// Queues every settings-driven write that mpv reads when a file opens: passthrough, subtitle
-    /// timing, sync mode, audio, video and subtitle layout, and hwdec. Both the server stream and
-    /// a typed stream address use it, so they start from the same saved settings.
+    /// timing, sync mode, audio, video and subtitle layout, hwdec, and pre-load `start`. Both the
+    /// server stream and a typed stream address use it, so they start from the same saved settings.
+    /// Returns whether `start` was queued as a resume offset.
     fn queue_load_settings(
         &mut self,
         session: &MpvSession,
         load: &ItemLoadSettings<'_>,
-    ) -> Result<(), &'static str> {
+        resume_seconds: Option<f64>,
+    ) -> Result<bool, &'static str> {
         self.display_match = load
             .video
             .refresh_rate_auto_switch
@@ -1444,9 +1449,32 @@ impl<'session> MpvHost<'session> {
             queue_validated(session, setting, options);
         }
         self.subtitle_style.seed(load.subtitles);
-        // mpv reads hwdec when the file opens, so it must be queued before loadfile.
+        // mpv reads hwdec and start when the file opens, so both must be queued before loadfile.
         queue_hwdec(session, load.video.decode_mode);
-        Ok(())
+        let start_queued = match resume_seconds {
+            Some(secs) => match validate("start", OptionValue::Float(secs)) {
+                Ok(option) => match session.command(&["set", option.name, &option.value]) {
+                    Ok(_) => true,
+                    Err(error) => {
+                        tracing::warn!(setting = "start", %error, "start position was not queued");
+                        false
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(setting = "start", %error, "start position rejected by allowlist");
+                    false
+                }
+            },
+            None => {
+                if let Ok(option) = validate("start", OptionValue::Text("none"))
+                    && let Err(error) = session.command(&["set", option.name, &option.value])
+                {
+                    tracing::warn!(setting = "start", %error, "start reset was not queued");
+                }
+                false
+            }
+        };
+        Ok(start_queued)
     }
 
     /// Plays a typed stream address directly. It is not a Jellyfin item: no relay, no playback
@@ -1467,7 +1495,7 @@ impl<'session> MpvHost<'session> {
         let Some(session) = self.session else {
             return Err("libmpv is unavailable.");
         };
-        self.queue_load_settings(session, &load)?;
+        self.queue_load_settings(session, &load, None)?;
         let command = session
             .command(&["loadfile", url.as_str(), "replace"])
             .map_err(|_| "Could not queue the stream address in libmpv.")?;
@@ -1476,16 +1504,17 @@ impl<'session> MpvHost<'session> {
             generation: None,
             relay: None,
             resume_seconds: None,
+            resume_start_queued: false,
             item: ItemPlaybackState::default(),
             report_metadata: None,
         });
+        self.file_loading = true;
+        self.first_frame_rendered = false;
         self.status = format!("Loading stream {}", url.redacted());
         self.sync_controller.reset();
         self.policy.reset_item();
         self.subtitle_track_id = None;
         self.subtitle_delay_seconds = None;
-        self.sync_feedback =
-            SyncFeedback::guidance("Playback changed; start a new subtitle-sync pair.");
         Ok(())
     }
 
@@ -1509,7 +1538,13 @@ impl<'session> MpvHost<'session> {
         let Some(session) = self.session else {
             return Err(RelayLoadError::Failed("libmpv is unavailable."));
         };
-        self.queue_load_settings(session, &load)
+        let resume_seconds = if report_metadata.live_stream_id.is_none() {
+            resume_position_seconds(resume_position_ticks)
+        } else {
+            None
+        };
+        let resume_start_queued = self
+            .queue_load_settings(session, &load, resume_seconds)
             .map_err(RelayLoadError::Failed)?;
         let (pause_before_load, pause_after_load) = replacement_pause_plan(options.preserve_paused);
         if pause_before_load.is_some() {
@@ -1517,7 +1552,9 @@ impl<'session> MpvHost<'session> {
                 RelayLoadError::Failed("Could not preserve the playback pause state.")
             })?;
             if pause_after_load.is_some() {
-                self.controls_feedback = Some("Updating the subtitle; resuming playback…".into());
+                self.controls_feedback = Some(ControlsFeedback::info(
+                    "Updating the subtitle; resuming playback…",
+                ));
             }
         }
         let command = match session.command(&["loadfile", url.as_str(), "replace"]) {
@@ -1535,7 +1572,8 @@ impl<'session> MpvHost<'session> {
             command_id: command.get(),
             generation: Some(options.generation),
             relay: Some(relay),
-            resume_seconds: resume_position_seconds(resume_position_ticks),
+            resume_seconds,
+            resume_start_queued,
             item: ItemPlaybackState {
                 segment_item_id: Some(report_metadata.item_id.clone()),
                 series_id: load.series_id,
@@ -1544,17 +1582,18 @@ impl<'session> MpvHost<'session> {
             },
             report_metadata: Some(report_metadata),
         });
+        self.file_loading = true;
+        self.first_frame_rendered = false;
         self.status = "Loading the Jellyfin stream through the local relay".into();
         if pause_after_load.is_some() && session.set_paused(false).is_err() {
-            self.controls_feedback =
-                Some("The updated stream loaded paused; press Play to continue.".into());
+            self.controls_feedback = Some(ControlsFeedback::error(
+                "The updated stream loaded paused; press Play to continue.",
+            ));
         }
         self.sync_controller.reset();
         self.policy.reset_item();
         self.subtitle_track_id = None;
         self.subtitle_delay_seconds = None;
-        self.sync_feedback =
-            SyncFeedback::guidance("Playback changed; start a new subtitle-sync pair.");
         Ok(())
     }
 
@@ -1615,6 +1654,7 @@ impl<'session> MpvHost<'session> {
                 EventKind::FileLoaded if self.stream_opening != StreamOpening::TimedOut => {
                     self.stream_opening = StreamOpening::Idle;
                     self.file_loaded = true;
+                    self.file_loading = false;
                     self.playback_loaded_generation = self.active_generation;
                     self.status = if self.report_metadata.is_some() {
                         "Jellyfin stream is loaded".into()
@@ -1662,6 +1702,8 @@ impl<'session> MpvHost<'session> {
                 }
                 EventKind::StartFile { playlist_entry_id } => {
                     self.file_loaded = false;
+                    self.file_loading = true;
+                    self.first_frame_rendered = false;
                     self.media_info.clear_snapshot();
                     self.content_rate_request = None;
                     self.content_rate = None;
@@ -1674,10 +1716,12 @@ impl<'session> MpvHost<'session> {
                     if let Some(load) = self.media_load.started(playlist_entry_id) {
                         self.active_generation = load.generation;
                         self.pending_resume_seconds = load.resume_seconds;
+                        self.pending_resume_start_queued = load.resume_start_queued;
                         self.item = load.item;
                         self.report_metadata = load.report_metadata;
                     } else {
                         self.active_generation = None;
+                        self.pending_resume_start_queued = false;
                         self.report_metadata = None;
                     }
                     self.stream_opening = if self.media_load.active.is_some() {
@@ -1687,13 +1731,10 @@ impl<'session> MpvHost<'session> {
                     };
                     self.report_session = self.next_report_session();
                     self.report_started_at = None;
+                    self.report_nonzero_sent = false;
                     self.resume_seek_command = None;
                     self.playback_seek_pending = false;
                     self.controls.clear();
-                    // A-B points belong to one item, so they never reach the next file (M6-12).
-                    self.ab_loop.clear();
-                    let _ = session.command(&["set", "ab-loop-a", "no"]);
-                    let _ = session.command(&["set", "ab-loop-b", "no"]);
                     self.chapter_list_request = None;
                     self.controls_feedback = None;
                     self.track_inventory = None;
@@ -1736,9 +1777,12 @@ impl<'session> MpvHost<'session> {
                     // EndFile is the point at which mpv has stopped consuming
                     // the relay URL. Dropping the handle requests listener shutdown.
                     self.file_loaded = false;
+                    self.file_loading = false;
+                    self.first_frame_rendered = false;
                     self.playback_restart_seen = false;
                     self.stop_playback_report(playback_end_failed(reason));
                     self.pending_resume_seconds = None;
+                    self.pending_resume_start_queued = false;
                     self.resume_seek_command = None;
                     self.playback_seek_pending = false;
                     self.controls.clear();
@@ -1785,15 +1829,16 @@ impl<'session> MpvHost<'session> {
                     self.playback_end_was_live = metadata
                         .as_ref()
                         .is_some_and(|item| item.live_stream_id.is_some());
+                    self.file_loading = false;
                     self.status = format!("Could not start media (libmpv error {}).", event.error);
                 }
                 EventKind::CommandReply if Some(event.request_id) == self.resume_seek_command => {
                     self.resume_seek_command = None;
                     if event.error < 0 {
-                        self.controls_feedback = Some(format!(
+                        self.controls_feedback = Some(ControlsFeedback::error(format!(
                             "Could not seek to the saved resume position (libmpv error {}).",
                             event.error
-                        ));
+                        )));
                         self.pending_resume_seconds = None;
                         self.maybe_start_playback_report();
                     }
@@ -1802,10 +1847,10 @@ impl<'session> MpvHost<'session> {
                     if Some(event.request_id) == self.resume_seek_command =>
                 {
                     self.resume_seek_command = None;
-                    self.controls_feedback = Some(format!(
+                    self.controls_feedback = Some(ControlsFeedback::error(format!(
                         "Could not queue the saved resume seek (libmpv error {}).",
                         event.error
-                    ));
+                    )));
                     self.pending_resume_seconds = None;
                     self.maybe_start_playback_report();
                 }
@@ -1859,6 +1904,7 @@ impl<'session> MpvHost<'session> {
                             driver: (!self.driver_identity.trim().is_empty())
                                 .then(|| self.driver_identity.clone()),
                         };
+                        self.identity = Some(identity.clone());
                         let observed = RuntimeCapabilitySnapshot {
                             identity: identity.clone(),
                             decoder_names: probe_value(snapshot.decoders, "decoder-list"),
@@ -1905,8 +1951,6 @@ impl<'session> MpvHost<'session> {
                 }
                 EventKind::Seek => {
                     self.sync_controller.reset();
-                    self.sync_feedback =
-                        SyncFeedback::guidance("Seek completed; start a new subtitle-sync pair.");
                     if self.pending_resume_seconds.is_none() {
                         self.playback_seek_pending = true;
                     }
@@ -1914,8 +1958,6 @@ impl<'session> MpvHost<'session> {
                 EventKind::PlaybackRestart => {
                     self.playback_restart_seen = true;
                     self.sync_controller.reset();
-                    self.sync_feedback =
-                        SyncFeedback::guidance("Playback resumed; start a new subtitle-sync pair.");
                     self.maybe_start_playback_report();
                 }
                 EventKind::PropertyChange(change)
@@ -2141,8 +2183,8 @@ impl<'session> MpvHost<'session> {
         self.video_frame_result.take()
     }
 
-    pub(crate) fn controls_feedback(&self) -> Option<&str> {
-        self.controls_feedback.as_deref()
+    pub(crate) fn controls_feedback(&self) -> Option<&ControlsFeedback> {
+        self.controls_feedback.as_ref()
     }
 
     pub(crate) fn playing_item_id(&self) -> Option<&str> {
@@ -2185,7 +2227,7 @@ impl<'session> MpvHost<'session> {
 
     pub(crate) fn set_paused(&mut self, paused: bool) {
         let Some(session) = self.session else {
-            self.controls_feedback = Some("libmpv is unavailable.".into());
+            self.controls_feedback = Some(ControlsFeedback::error("libmpv is unavailable."));
             return;
         };
         self.record_control_result(session.set_paused(paused).map(|_| ()), "pause state");
@@ -2193,7 +2235,9 @@ impl<'session> MpvHost<'session> {
 
     pub(crate) fn toggle_paused(&mut self) {
         let Some(paused) = self.controls.paused else {
-            self.controls_feedback = Some("Playback pause state is not available yet.".into());
+            self.controls_feedback = Some(ControlsFeedback::error(
+                "Playback pause state is not available yet.",
+            ));
             return;
         };
         self.set_paused(!paused);
@@ -2201,8 +2245,9 @@ impl<'session> MpvHost<'session> {
 
     pub(crate) fn seek_relative(&mut self, delta_seconds: i64) {
         let Some(duration) = self.controls.duration().filter(|value| !value.is_zero()) else {
-            self.controls_feedback =
-                Some("Seeking is unavailable for live or unknown-length media.".into());
+            self.controls_feedback = Some(ControlsFeedback::error(
+                "Seeking is unavailable for live or unknown-length media.",
+            ));
             return;
         };
         let current = self
@@ -2211,7 +2256,7 @@ impl<'session> MpvHost<'session> {
             .and_then(duration_from_seconds);
         let delta = relative_seek_delta(current, duration, delta_seconds);
         let Some(session) = self.session else {
-            self.controls_feedback = Some("libmpv is unavailable.".into());
+            self.controls_feedback = Some(ControlsFeedback::error("libmpv is unavailable."));
             return;
         };
         self.record_control_result(session.seek_relative(delta).map(|_| ()), "seek");
@@ -2219,8 +2264,9 @@ impl<'session> MpvHost<'session> {
 
     pub(crate) fn seek_absolute(&mut self, target: Duration) {
         let Some(duration) = self.controls.duration().filter(|value| !value.is_zero()) else {
-            self.controls_feedback =
-                Some("Seeking is unavailable for live or unknown-length media.".into());
+            self.controls_feedback = Some(ControlsFeedback::error(
+                "Seeking is unavailable for live or unknown-length media.",
+            ));
             return;
         };
         let current = self
@@ -2230,68 +2276,19 @@ impl<'session> MpvHost<'session> {
             .unwrap_or_default();
         let Some(target) = seek_target(current, Some(duration), SeekRequest::Absolute(target))
         else {
-            self.controls_feedback = Some("The requested seek position is unavailable.".into());
+            self.controls_feedback = Some(ControlsFeedback::error(
+                "The requested seek position is unavailable.",
+            ));
             return;
         };
         let Some(session) = self.session else {
-            self.controls_feedback = Some("libmpv is unavailable.".into());
+            self.controls_feedback = Some(ControlsFeedback::error("libmpv is unavailable."));
             return;
         };
         self.record_control_result(
             session.seek_absolute(target.as_secs_f64()).map(|_| ()),
             "seek",
         );
-    }
-
-    /// The A-B loop points set for the current item, so the controls can label the next press
-    /// (M6-12). Session-only state; cleared when the item changes.
-    pub(crate) fn ab_loop_points(&self) -> (Option<Duration>, Option<Duration>) {
-        (self.ab_loop.a(), self.ab_loop.b())
-    }
-
-    /// One press of the A-B control: set A, then set B, then clear both. The host keeps the
-    /// points so the OSD can label the control, and mirrors them into libmpv so the player applies
-    /// the loop itself (M6-12). The `L` key and the on-screen control share this path.
-    pub(crate) fn cycle_ab_loop(&mut self) {
-        let Some(session) = self.session else {
-            self.controls_feedback = Some("libmpv is unavailable.".into());
-            return;
-        };
-        if !self
-            .controls
-            .duration()
-            .is_some_and(|value| !value.is_zero())
-        {
-            self.controls_feedback =
-                Some("A-B looping is unavailable for live or unknown-length media.".into());
-            return;
-        }
-        let position = self
-            .controls
-            .position_seconds
-            .and_then(duration_from_seconds)
-            .unwrap_or_default();
-        match self.ab_loop.cycle(position) {
-            AbLoopCycle::SetA(_) | AbLoopCycle::SetB(_) => {}
-            AbLoopCycle::Cleared => {}
-            AbLoopCycle::Rejected(error) => {
-                self.controls_feedback = Some(ab_loop_error_text(error).into());
-                return;
-            }
-        }
-        let (a, b) = self.ab_loop_points();
-        self.write_ab_loop(session, a, b);
-    }
-
-    /// Mirror the loop points into libmpv. `no` clears a point, a decimal number of seconds sets
-    /// it; mpv accepts both on `ab-loop-a` and `ab-loop-b`.
-    fn write_ab_loop(&mut self, session: &MpvSession, a: Option<Duration>, b: Option<Duration>) {
-        let a_text = ab_loop_time(a);
-        let b_text = ab_loop_time(b);
-        let result = session
-            .command(&["set", "ab-loop-a", &a_text])
-            .and_then(|_| session.command(&["set", "ab-loop-b", &b_text]));
-        self.record_control_result(result.map(|_| ()), "A-B loop");
     }
 
     /// Current SyncPlay timing is based on 1x. Keep the local default and manual
@@ -2308,12 +2305,13 @@ impl<'session> MpvHost<'session> {
 
     pub(crate) fn set_playback_speed(&mut self, speed: PlaybackSpeed) {
         if self.sync_play_speed_locked && speed != PlaybackSpeed::Normal {
-            self.controls_feedback =
-                Some("Playback speed is synchronized by Watch Together.".into());
+            self.controls_feedback = Some(ControlsFeedback::info(
+                "Playback speed is synchronized by Watch Together.",
+            ));
             return;
         }
         let Some(session) = self.session else {
-            self.controls_feedback = Some("libmpv is unavailable.".into());
+            self.controls_feedback = Some(ControlsFeedback::error("libmpv is unavailable."));
             return;
         };
         self.record_control_result(
@@ -2323,20 +2321,23 @@ impl<'session> MpvHost<'session> {
     }
 
     /// Apply a video aspect mode to the live player through the same validated writes the load
-    /// path queues before loadfile, so a cycle during playback matches what the next file starts
-    /// with. Persistence is owned by the caller that holds the settings store.
-    pub(crate) fn apply_video_aspect(&mut self, mode: AspectMode) {
+    /// path queues before loadfile, so a selection during playback matches what the next file
+    /// starts with. Persistence is owned by the caller that holds the settings store.
+    pub(crate) fn apply_video_aspect_mode(&mut self, mode: AspectMode) {
         let Some(session) = self.session else {
-            self.controls_feedback = Some("libmpv is unavailable.".into());
+            self.controls_feedback = Some(ControlsFeedback::error("libmpv is unavailable."));
             return;
         };
         queue_validated(session, "video.aspect", aspect_options(mode));
-        self.controls_feedback = Some(format!("Aspect ratio: {}", mode.label()));
+        self.controls_feedback = Some(ControlsFeedback::info(format!(
+            "Aspect ratio: {}",
+            mode.label()
+        )));
     }
 
     pub(crate) fn stop_playback(&mut self) {
         let Some(session) = self.session else {
-            self.controls_feedback = Some("libmpv is unavailable.".into());
+            self.controls_feedback = Some(ControlsFeedback::error("libmpv is unavailable."));
             return;
         };
         if let Err(error) = self.sync_controller.reset_subtitle_delay(session) {
@@ -2344,6 +2345,8 @@ impl<'session> MpvHost<'session> {
         }
         let result = session.stop_playback().map(|_| ());
         if result.is_ok() {
+            self.file_loading = false;
+            self.first_frame_rendered = false;
             self.stop_playback_report(false);
         }
         self.record_control_result(result, "stop playback");
@@ -2370,7 +2373,7 @@ impl<'session> MpvHost<'session> {
 
     fn set_remote_volume(&mut self, percent: u32) {
         let Some(session) = self.session else {
-            self.controls_feedback = Some("libmpv is unavailable.".into());
+            self.controls_feedback = Some(ControlsFeedback::error("libmpv is unavailable."));
             return;
         };
         match remote_volume_write(percent) {
@@ -2382,30 +2385,18 @@ impl<'session> MpvHost<'session> {
             }
             Err(error) => {
                 tracing::warn!(setting = "volume", %error, "remote volume refused by the allowlist");
-                self.controls_feedback = Some("Could not apply volume: value refused.".into());
+                self.controls_feedback = Some(ControlsFeedback::error(
+                    "Could not apply volume: value refused.",
+                ));
             }
         }
-    }
-
-    pub(crate) fn select_chapter(&mut self, index: usize) {
-        let Some(duration) = self.controls.duration().filter(|value| !value.is_zero()) else {
-            self.controls_feedback =
-                Some("Chapter seeking is unavailable for live or unknown-length media.".into());
-            return;
-        };
-        let Some(target) = chapter_seek_target(&self.controls.chapters, index, Some(duration))
-        else {
-            self.controls_feedback = Some("That chapter is no longer available.".into());
-            return;
-        };
-        self.seek_absolute(target);
     }
 
     /// One press of the muted control (M2-16). Mute is session-only: it is never written to
     /// settings, so a later run starts unmuted.
     pub(crate) fn toggle_mute(&mut self) {
         let Some(session) = self.session else {
-            self.controls_feedback = Some("libmpv is unavailable.".into());
+            self.controls_feedback = Some(ControlsFeedback::error("libmpv is unavailable."));
             return;
         };
         let muted = self.controls.muted.unwrap_or(false);
@@ -2413,7 +2404,9 @@ impl<'session> MpvHost<'session> {
             Ok(option) => option,
             Err(error) => {
                 tracing::warn!(setting = "mute", %error, "mute refused by the mpv allowlist");
-                self.controls_feedback = Some("Could not apply mute: value refused.".into());
+                self.controls_feedback = Some(ControlsFeedback::error(
+                    "Could not apply mute: value refused.",
+                ));
                 return;
             }
         };
@@ -2427,7 +2420,7 @@ impl<'session> MpvHost<'session> {
     /// and the remote-control path both end up here.
     pub(crate) fn set_volume_percent(&mut self, percent: u32, max_percent: u32) {
         let Some(session) = self.session else {
-            self.controls_feedback = Some("libmpv is unavailable.".into());
+            self.controls_feedback = Some(ControlsFeedback::error("libmpv is unavailable."));
             return;
         };
         let clamped = clamp_volume(percent, max_percent);
@@ -2435,7 +2428,9 @@ impl<'session> MpvHost<'session> {
             Ok(option) => option,
             Err(error) => {
                 tracing::warn!(setting = "volume", %error, "volume refused by the mpv allowlist");
-                self.controls_feedback = Some("Could not apply volume: value refused.".into());
+                self.controls_feedback = Some(ControlsFeedback::error(
+                    "Could not apply volume: value refused.",
+                ));
                 return;
             }
         };
@@ -2459,7 +2454,7 @@ impl<'session> MpvHost<'session> {
     fn record_control_result(&mut self, result: Result<(), impl std::fmt::Display>, action: &str) {
         self.controls_feedback = result
             .err()
-            .map(|error| format!("Could not apply {action}: {error}"));
+            .map(|error| ControlsFeedback::error(format!("Could not apply {action}: {error}")));
     }
 
     fn reset_speed_after_end(&mut self) {
@@ -2477,8 +2472,6 @@ impl<'session> MpvHost<'session> {
         self.policy.reset_item();
         self.subtitle_track_id = None;
         self.subtitle_delay_seconds = None;
-        self.sync_feedback =
-            SyncFeedback::guidance("Playback changed; start a new subtitle-sync pair.");
     }
 
     fn request_track_inventory(&mut self) {
@@ -2573,7 +2566,9 @@ impl<'session> MpvHost<'session> {
         match session.request_chapter_list() {
             Ok(request_id) => self.chapter_list_request = Some(request_id),
             Err(error) => {
-                self.controls_feedback = Some(format!("Could not request chapters: {error}"));
+                self.controls_feedback = Some(ControlsFeedback::error(format!(
+                    "Could not request chapters: {error}"
+                )));
             }
         }
     }
@@ -2593,7 +2588,9 @@ impl<'session> MpvHost<'session> {
             }
             Err(error) => {
                 self.controls.chapters.clear();
-                self.controls_feedback = Some(format!("Could not load chapters: {error}"));
+                self.controls_feedback = Some(ControlsFeedback::error(format!(
+                    "Could not load chapters: {error}"
+                )));
             }
         }
     }
@@ -2733,6 +2730,11 @@ impl<'session> MpvHost<'session> {
     }
 
     fn apply_resume_position(&mut self, session: &MpvSession) {
+        if self.pending_resume_start_queued {
+            self.pending_resume_start_queued = false;
+            self.pending_resume_seconds = None;
+            return;
+        }
         let Some(target_seconds) = self.pending_resume_seconds else {
             return;
         };
@@ -2747,7 +2749,9 @@ impl<'session> MpvHost<'session> {
 
         let Some(requested) = duration_from_seconds(target_seconds) else {
             self.pending_resume_seconds = None;
-            self.controls_feedback = Some("The saved resume position is invalid.".into());
+            self.controls_feedback = Some(ControlsFeedback::error(
+                "The saved resume position is invalid.",
+            ));
             return;
         };
         let target = match self.controls.duration() {
@@ -2765,9 +2769,9 @@ impl<'session> MpvHost<'session> {
             Ok(command) => self.resume_seek_command = Some(command.get()),
             Err(error) => {
                 self.pending_resume_seconds = None;
-                self.controls_feedback = Some(format!(
+                self.controls_feedback = Some(ControlsFeedback::error(format!(
                     "Could not apply the saved resume position: {error}"
-                ));
+                )));
             }
         }
     }
@@ -2791,7 +2795,8 @@ impl<'session> MpvHost<'session> {
         else {
             return;
         };
-        let report = metadata.progress_info(self.playback_position_ticks(), self.controls.paused);
+        let position_ticks = self.playback_position_ticks();
+        let report = metadata.progress_info(position_ticks, self.controls.paused);
         let Some(scheduler) = self.report_scheduler.as_mut() else {
             return;
         };
@@ -2804,6 +2809,7 @@ impl<'session> MpvHost<'session> {
             },
         ) {
             self.report_started_at = Some(Instant::now());
+            self.report_nonzero_sent = position_ticks.is_some_and(|t| t.as_ticks() > 0);
         }
     }
 
@@ -2837,18 +2843,28 @@ impl<'session> MpvHost<'session> {
         ) else {
             return;
         };
-        let report = metadata.progress_info(self.playback_position_ticks(), self.controls.paused);
+        let position_ticks = self.playback_position_ticks();
+        let report = metadata.progress_info(position_ticks, self.controls.paused);
         let Some(scheduler) = self.report_scheduler.as_mut() else {
             return;
         };
-        self.report_actions.apply(
-            scheduler,
+        let first_nonzero =
+            !self.report_nonzero_sent && position_ticks.is_some_and(|t| t.as_ticks() > 0);
+        let input = if first_nonzero {
+            self.report_nonzero_sent = true;
+            PlaybackReportInput::Seek {
+                session,
+                at: started_at.elapsed(),
+                report,
+            }
+        } else {
             PlaybackReportInput::Snapshot {
                 session,
                 at: started_at.elapsed(),
                 report,
-            },
-        );
+            }
+        };
+        self.report_actions.apply(scheduler, input);
     }
 
     fn stop_playback_report(&mut self, failed: bool) {
@@ -2871,6 +2887,7 @@ impl<'session> MpvHost<'session> {
         self.report_session = None;
         self.report_metadata = None;
         self.report_started_at = None;
+        self.report_nonzero_sent = false;
     }
 
     fn playback_position_ticks(&self) -> Option<JellyfinTicks> {
@@ -2937,6 +2954,7 @@ impl<'session> MpvHost<'session> {
             load.report_metadata = None;
         }
         self.report_started_at = None;
+        self.report_nonzero_sent = false;
         self.report_scheduler = playback_report_scheduler(self.reporting_enabled);
         self.report_actions.clear_for_connection_change()
     }
@@ -3301,8 +3319,9 @@ impl<'session> MpvHost<'session> {
                 if plan_frame_step(is_playing).pause_first
                     && let Err(error) = session.set_paused(true)
                 {
-                    self.controls_feedback =
-                        Some(format!("Could not pause for frame step: {error}"));
+                    self.controls_feedback = Some(ControlsFeedback::error(format!(
+                        "Could not pause for frame step: {error}"
+                    )));
                     return;
                 }
                 self.record_control_result(session.step_frame(backward).map(|_| ()), "frame step");
@@ -3312,11 +3331,6 @@ impl<'session> MpvHost<'session> {
                     session.step_chapter(step).map(|_| ()),
                     "chapter change",
                 );
-            }
-            PlaybackKeyAction::AbLoopCycle => {
-                // The key and the OSD control share this path, so the displayed points cannot
-                // drift from the loop mpv applies.
-                self.cycle_ab_loop();
             }
             PlaybackKeyAction::MediaInfo => self.media_info.toggle(),
             // The host intercepts this before dispatch so the settings store can persist the new
@@ -3338,6 +3352,10 @@ impl<'session> MpvHost<'session> {
 
     pub(crate) fn close_media_info(&mut self) {
         self.media_info.close();
+    }
+
+    pub(crate) fn set_media_info_hover(&mut self, hovered: bool) {
+        self.media_info.set_hover(hovered);
     }
 
     /// The rows of the media info panel, or `None` while it is closed. Until the first read of
@@ -3502,12 +3520,30 @@ impl<'session> MpvHost<'session> {
         })
     }
 
+    /// Runtime identity libmpv reported, once the capability probe finished. Taken once, because
+    /// the host hands it to the app and never needs it again.
+    pub(crate) fn take_runtime_identity(&mut self) -> Option<RuntimeIdentity> {
+        self.identity.take()
+    }
+
     pub(crate) fn has_renderer(&self) -> bool {
         self.renderer.is_some()
     }
 
+    pub(crate) fn mark_frame_rendered(&mut self) {
+        self.first_frame_rendered = true;
+    }
+
     pub(crate) fn has_media(&self) -> bool {
-        self.file_loaded || self.pending_report_metadata().is_some()
+        self.file_loaded || self.file_loading || self.pending_report_metadata().is_some()
+    }
+
+    pub(crate) fn is_loading(&self) -> bool {
+        self.media_load.pending.is_some()
+            || self.file_loading
+            || (self.file_loaded
+                && !self.first_frame_rendered
+                && self.has_video_track() != Some(false))
     }
 }
 
@@ -3762,7 +3798,6 @@ pub(crate) enum PlaybackKeyAction {
         backward: bool,
     },
     Chapter(ChapterStep),
-    AbLoopCycle,
     /// Show or hide the media info panel (M6-14).
     MediaInfo,
     /// Cycle the video aspect ratio. The caller that owns the settings store persists the new
@@ -3775,7 +3810,7 @@ pub(crate) enum PlaybackKeyAction {
 ///
 /// `X` stops playback. `[` and `]` move subtitles earlier and later by the fine step, or the
 /// coarse step with Shift. `,` and `.` step one frame back and forward. Page Up and Page Down
-/// jump to the next and previous chapter. `L` cycles the A-B loop. `I` shows or hides the media info
+/// jump to the next and previous chapter. `I` shows or hides the media info
 /// panel. Most follow mpv's defaults.
 pub(crate) fn playback_key_action(key: Key, shift: bool) -> Option<PlaybackKeyAction> {
     let step = if shift {
@@ -3797,7 +3832,6 @@ pub(crate) fn playback_key_action(key: Key, shift: bool) -> Option<PlaybackKeyAc
         Key::Period => Some(PlaybackKeyAction::FrameStep { backward: false }),
         Key::PageUp => Some(PlaybackKeyAction::Chapter(ChapterStep::Next)),
         Key::PageDown => Some(PlaybackKeyAction::Chapter(ChapterStep::Previous)),
-        Key::L => Some(PlaybackKeyAction::AbLoopCycle),
         Key::I => Some(PlaybackKeyAction::MediaInfo),
         Key::A => Some(PlaybackKeyAction::CycleAspect),
         _ => None,
@@ -4007,6 +4041,7 @@ mod tests {
                 generation: Some(10),
                 relay: Some("new relay"),
                 resume_seconds: Some(8.0),
+                resume_start_queued: false,
                 item: ItemPlaybackState::default(),
                 report_metadata: None,
             }),
@@ -4039,6 +4074,7 @@ mod tests {
                 generation: Some(10),
                 relay: Some("queued relay"),
                 resume_seconds: None,
+                resume_start_queued: false,
                 item: ItemPlaybackState::default(),
                 report_metadata: None,
             }),
@@ -4075,6 +4111,7 @@ mod tests {
                 generation: Some(7),
                 relay: None,
                 resume_seconds: None,
+                resume_start_queued: false,
                 item: ItemPlaybackState::default(),
                 report_metadata: Some(metadata),
             }),
@@ -4103,6 +4140,7 @@ mod tests {
                 generation: Some(10),
                 relay: None,
                 resume_seconds: None,
+                resume_start_queued: false,
                 item: ItemPlaybackState {
                     segment_item_id: Some("new".into()),
                     ..Default::default()
@@ -4343,33 +4381,6 @@ mod tests {
         assert_eq!(chapters[1].index, 1);
         assert_eq!(chapters[1].title, "Chapter 2");
         assert_eq!(chapters[2].index, 3);
-        assert_eq!(
-            chapter_seek_target(&chapters, chapters[2].index, Some(Duration::from_secs(100))),
-            Some(Duration::from_secs(50))
-        );
-    }
-
-    #[test]
-    fn ab_loop_points_are_written_as_seconds_or_cleared() {
-        assert_eq!(super::ab_loop_time(None), "no");
-        assert_eq!(
-            super::ab_loop_time(Some(Duration::from_millis(12_500))),
-            "12.500"
-        );
-        assert_eq!(super::ab_loop_time(Some(Duration::ZERO)), "0.000");
-    }
-
-    #[test]
-    fn a_refused_ab_loop_press_explains_why() {
-        use kattri_client_core::ab_loop::AbLoopError;
-        assert_eq!(
-            super::ab_loop_error_text(AbLoopError::NotAfterA),
-            "Loop point B must come after loop point A."
-        );
-        assert_eq!(
-            super::ab_loop_error_text(AbLoopError::TooShort),
-            "An A-B loop must be at least half a second long."
-        );
     }
 
     #[test]
@@ -4425,10 +4436,6 @@ mod tests {
         assert_eq!(
             playback_key_action(Key::PageDown, false),
             Some(PlaybackKeyAction::Chapter(ChapterStep::Previous))
-        );
-        assert_eq!(
-            playback_key_action(Key::L, false),
-            Some(PlaybackKeyAction::AbLoopCycle)
         );
         assert_eq!(
             playback_key_action(Key::I, false),
@@ -4498,24 +4505,6 @@ mod tests {
         assert_eq!(second.millis(), 100);
         let back = second.nudge(OffsetDirection::Earlier, OffsetStep::Coarse);
         assert_eq!(back.millis(), -400);
-    }
-
-    #[test]
-    fn chapter_seek_requires_known_duration_and_valid_index() {
-        let chapters = [PlaybackChapter {
-            index: 0,
-            title: "Finale".into(),
-            time: Duration::from_secs(120),
-        }];
-        assert_eq!(
-            chapter_seek_target(&chapters, 0, Some(Duration::from_secs(100))),
-            Some(Duration::from_secs(99))
-        );
-        assert_eq!(chapter_seek_target(&chapters, 0, None), None);
-        assert_eq!(
-            chapter_seek_target(&chapters, 1, Some(Duration::from_secs(100))),
-            None
-        );
     }
 }
 

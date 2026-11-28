@@ -90,7 +90,7 @@ impl Default for HeroOptions {
             overview_lines: 3,
             show_more_info: true,
             fade_secs: 0.4,
-            palette: theme::palette(false),
+            palette: theme::palette(),
         }
     }
 }

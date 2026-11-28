@@ -10,6 +10,7 @@ mod custom_backdrop;
 pub(crate) mod device_identity;
 pub(crate) mod downloads;
 pub(crate) mod downloads_batch;
+pub(crate) mod release_check;
 mod saved_sign_in;
 mod scheduler;
 mod session_socket;
@@ -31,13 +32,14 @@ use jellyfin_api::{
     PlaybackSourceRequestOptions, PlaylistEntry, PublicSystemInfo, QuickConnectRequest,
     QuickConnectStatus, Session, UserDto, UserItemDataDto, UserView,
 };
-use jellyfin_playback_relay::{RelayHandle, RelayPlaybackUrl, start_relay};
+use jellyfin_playback_relay::{RelayHandle, RelayPlaybackUrl};
 use kattri_client_core::epoch::Epoch;
 use kattri_client_core::playback_reporting::{PlaybackReportAction, PlaybackReportMetadata};
 use kattri_client_core::queue::MAX_QUEUE_LEN;
 use kattri_client_core::quick_connect_poll::PollOutcome;
 use kattri_client_core::remote::LocalAction;
 use kattri_downloads::manager::DownloadManager;
+use release_check::{ReleaseCheckError, ReleaseCheckResult};
 pub(crate) use saved_sign_in::SavedSignInRequest;
 use saved_sign_in::{SavedEntry, SavedSignInStore};
 use update::{ApplyJob, UpdateOutcome};
@@ -346,12 +348,21 @@ pub enum WorkerEvent {
     UpdateFinished {
         outcome: UpdateOutcome,
     },
+    ReleaseCheckFinished {
+        request_id: u64,
+        result: Result<ReleaseCheckResult, ReleaseCheckError>,
+    },
     CheckingServer {
         request_id: u64,
     },
     DashboardLoaded {
         request_id: u64,
         load: AdminLoad,
+    },
+    AdminActionFinished {
+        request_id: u64,
+        message: Option<String>,
+        error: Option<String>,
     },
     AdminUsersLoaded {
         request_id: u64,
@@ -767,6 +778,11 @@ pub enum WorkerEvent {
     PrimaryArtworkFailed {
         request_id: u64,
     },
+    /// The server has no primary image for this item/tag. Callers suppress further
+    /// fetches for the same identity/tag instead of treating it as transient.
+    PrimaryArtworkNotFound {
+        request_id: u64,
+    },
     PhotoThumbnailLoaded {
         request_id: u64,
         item_id: String,
@@ -969,6 +985,22 @@ pub enum WorkerEvent {
         request_id: u64,
         expired: bool,
     },
+    MetadataManagerLoaded {
+        request_id: u64,
+        epoch: Epoch,
+        result: Result<jellyfin_api::ItemsResponse, jellyfin_api::ErrorClass>,
+    },
+    AccountPreferencesLoaded {
+        request_id: u64,
+        epoch: Epoch,
+        saved: bool,
+        result: Result<Option<jellyfin_api::AccountPreferences>, jellyfin_api::ErrorClass>,
+    },
+    QuickConnectAuthorized {
+        request_id: u64,
+        epoch: Epoch,
+        approval: Result<bool, jellyfin_api::ErrorClass>,
+    },
     QuickConnectAvailability {
         request_id: u64,
         enabled: bool,
@@ -1047,7 +1079,9 @@ impl WorkerEvent {
             | Self::LiveTvChannelsLoaded { epoch, .. }
             | Self::LiveTvChannelsFailed { epoch, .. }
             | Self::LiveTvSearchResultsLoaded { epoch, .. }
-            | Self::LiveTvSearchResultsFailed { epoch, .. }
+            | Self::MetadataManagerLoaded { epoch, .. }
+            | Self::AccountPreferencesLoaded { epoch, .. }
+            | Self::QuickConnectAuthorized { epoch, .. }
             | Self::LiveTvProgramsLoaded { epoch, .. }
             | Self::LiveTvProgramsFailed { epoch, .. }
             | Self::LiveTvLogoLoaded { epoch, .. }
@@ -1253,7 +1287,7 @@ pub(crate) enum WorkerCommand {
         epoch: Epoch,
         query: ItemQuery,
     },
-    /// The server's suggestions for one library (`GET /Items/{id}/Suggestions`).
+    /// The server's suggestions for the user's movies library (`GET /Items/Suggestions`).
     ListLibrarySuggestions {
         request_id: u64,
         epoch: Epoch,
@@ -1285,6 +1319,35 @@ pub(crate) enum WorkerCommand {
     },
     LoadDashboard {
         request_id: u64,
+    },
+    RefreshAllLibraries {
+        request_id: u64,
+    },
+    StartScheduledTask {
+        request_id: u64,
+        task_id: String,
+    },
+    RestartServer {
+        request_id: u64,
+    },
+    ShutdownServer {
+        request_id: u64,
+    },
+    SendSessionMessage {
+        request_id: u64,
+        session_id: String,
+        header: String,
+        text: String,
+    },
+    RevokeDevice {
+        request_id: u64,
+        device_id: String,
+    },
+    ResetAdminUserPassword {
+        request_id: u64,
+        generation: u64,
+        user_id: String,
+        new_password: Zeroizing<String>,
     },
     LoadAdminUsers {
         request_id: u64,
@@ -1617,6 +1680,22 @@ pub(crate) enum WorkerCommand {
         server_url: String,
         allow_insecure_remote_http: bool,
     },
+    LoadMetadataManager {
+        request_id: u64,
+        epoch: Epoch,
+        query: Box<jellyfin_api::ItemQuery>,
+    },
+    LoadAccountPreferences {
+        request_id: u64,
+        epoch: Epoch,
+        /// Preferences to write before reading back. `None` only reads.
+        save: Option<Box<jellyfin_api::AccountPreferences>>,
+    },
+    AuthorizeQuickConnect {
+        request_id: u64,
+        epoch: Epoch,
+        code: zeroize::Zeroizing<String>,
+    },
     CheckQuickConnect {
         request_id: u64,
         server_url: String,
@@ -1644,6 +1723,9 @@ pub(crate) enum WorkerCommand {
     },
     RollbackUpdate {
         store_dir: PathBuf,
+    },
+    CheckLatestRelease {
+        request_id: u64,
     },
     Shutdown,
 }
@@ -1854,6 +1936,80 @@ impl ApiWorker {
     pub fn load_dashboard(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
         self.commands
             .send(WorkerCommand::LoadDashboard { request_id })
+    }
+
+    /// Trigger a scan of all libraries. The result arrives as `AdminActionFinished`.
+    pub fn refresh_all_libraries(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::RefreshAllLibraries { request_id })
+    }
+
+    /// Start one scheduled task by ID. The result arrives as `AdminActionFinished`.
+    pub fn start_scheduled_task(
+        &self,
+        request_id: u64,
+        task_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::StartScheduledTask {
+            request_id,
+            task_id,
+        })
+    }
+
+    /// Request a server restart. The result arrives as `AdminActionFinished`.
+    pub fn restart_server(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::RestartServer { request_id })
+    }
+
+    /// Request a server shutdown. The result arrives as `AdminActionFinished`.
+    pub fn shutdown_server(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::ShutdownServer { request_id })
+    }
+
+    /// Send a toast message to an active session. The result arrives as `AdminActionFinished`.
+    pub fn send_session_message(
+        &self,
+        request_id: u64,
+        session_id: String,
+        header: String,
+        text: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::SendSessionMessage {
+            request_id,
+            session_id,
+            header,
+            text,
+        })
+    }
+
+    /// Revoke and delete a registered device. The result arrives as `AdminActionFinished`.
+    pub fn revoke_device(
+        &self,
+        request_id: u64,
+        device_id: String,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::RevokeDevice {
+            request_id,
+            device_id,
+        })
+    }
+
+    /// Reset or update a user's password. The result arrives as `AdminActionFinished`.
+    pub fn reset_admin_user_password(
+        &self,
+        request_id: u64,
+        generation: u64,
+        user_id: String,
+        new_password: Zeroizing<String>,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::ResetAdminUserPassword {
+            request_id,
+            generation,
+            user_id,
+            new_password,
+        })
     }
 
     /// Explicit read for the administration user-management subview.
@@ -2725,6 +2881,12 @@ impl ApiWorker {
             .send(WorkerCommand::ApplyUpdate { job: Box::new(job) })
     }
 
+    /// Queue a manual informational release metadata check.
+    pub(crate) fn check_latest_release(&self, request_id: u64) -> Result<(), WorkerSubmitError> {
+        self.commands
+            .send(WorkerCommand::CheckLatestRelease { request_id })
+    }
+
     /// Queue a rollback. Only the user asking for it reaches this.
     pub(crate) fn rollback_update(&self, store_dir: PathBuf) -> Result<(), WorkerSubmitError> {
         self.commands
@@ -2741,6 +2903,45 @@ impl ApiWorker {
             request_id,
             server_url,
             allow_insecure_remote_http,
+        })
+    }
+
+    pub(crate) fn load_metadata_manager(
+        &self,
+        request_id: u64,
+        epoch: Epoch,
+        query: jellyfin_api::ItemQuery,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::LoadMetadataManager {
+            request_id,
+            epoch,
+            query: Box::new(query),
+        })
+    }
+    /// Read the account preferences, optionally writing `save` first and reading back the result.
+    pub(crate) fn load_account_preferences(
+        &self,
+        request_id: u64,
+        epoch: Epoch,
+        save: Option<Box<jellyfin_api::AccountPreferences>>,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::LoadAccountPreferences {
+            request_id,
+            epoch,
+            save,
+        })
+    }
+
+    pub(crate) fn authorize_quick_connect(
+        &self,
+        request_id: u64,
+        epoch: Epoch,
+        code: zeroize::Zeroizing<String>,
+    ) -> Result<(), WorkerSubmitError> {
+        self.commands.send(WorkerCommand::AuthorizeQuickConnect {
+            request_id,
+            epoch,
+            code,
         })
     }
 
@@ -3081,6 +3282,8 @@ struct WorkerState {
     /// The "stay signed in" token saved for the live session. It is deleted when the session
     /// ends by sign-out, expiry, or being replaced.
     saved_sign_in: Option<SavedEntry>,
+    /// Shared HTTP client reused across playback relays so TLS/TCP pools stay warm.
+    relay_http: Option<jellyfin_playback_relay::HttpClient>,
 }
 
 impl WorkerState {
@@ -3191,6 +3394,7 @@ async fn execute_command(
         mut session_socket,
         mut clock_sampler,
         mut saved_sign_in,
+        mut relay_http,
     } = std::mem::take(state);
     let ctx = &events.ctx;
     async {
@@ -4729,13 +4933,17 @@ async fn execute_command(
                 epoch,
                 library_id,
             } => {
-                let result = match (client.as_ref(), session.as_ref()) {
-                    (Some(client), Some(session)) => {
-                        client
-                            .list_suggestions(session, &library_id, LIBRARY_TAB_LIMIT)
-                            .await
+                let result = if library_id.trim().is_empty() {
+                    Err(ApiError::InvalidConfiguration)
+                } else {
+                    match (client.as_ref(), session.as_ref()) {
+                        (Some(client), Some(session)) => {
+                            client
+                                .list_suggestions(session, Some("Movie"), LIBRARY_TAB_LIMIT)
+                                .await
+                        }
+                        _ => Err(ApiError::InvalidConfiguration),
                     }
-                    _ => Err(ApiError::InvalidConfiguration),
                 };
                 match result {
                     Ok(items) => {
@@ -5958,6 +6166,7 @@ async fn execute_command(
                                 &item_id,
                                 &device_profile,
                                 live_tune_started_at.unwrap_or_else(std::time::Instant::now),
+                                &mut relay_http,
                             )
                             .await
                         }
@@ -5972,6 +6181,7 @@ async fn execute_command(
                             start_time_ticks,
                             burn_in_subtitles,
                             subtitle_stream_index_override: None,
+                            relay_http: &mut relay_http,
                         }),
                     },
                     _ => Err("Connect to a Jellyfin server before starting playback.".into()),
@@ -6026,6 +6236,7 @@ async fn execute_command(
                                     subtitle_stream_index,
                                     start_time_ticks,
                                 },
+                                relay_http: &mut relay_http,
                             },
                         )
                         .await
@@ -6256,6 +6467,82 @@ async fn execute_command(
                     }
                 }
             }
+            WorkerCommand::LoadMetadataManager {
+                request_id,
+                epoch,
+                query,
+            } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) if session.user.is_administrator() => client
+                        .list_items(session, &query)
+                        .await
+                        .map_err(|error| error.classify()),
+                    _ => Err(jellyfin_api::ErrorClass::Unexpected),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::MetadataManagerLoaded {
+                        request_id,
+                        epoch,
+                        result,
+                    },
+                )
+                .await;
+            }
+            WorkerCommand::LoadAccountPreferences {
+                request_id,
+                epoch,
+                save,
+            } => {
+                let mut saved = false;
+                let result = async {
+                    let (Some(client), Some(session)) = (client.as_ref(), session.as_ref()) else {
+                        return Err(ApiError::InvalidConfiguration);
+                    };
+                    if let Some(preferences) = save.as_deref() {
+                        client.set_account_preferences(session, preferences).await?;
+                        saved = true;
+                    }
+                    client.account_preferences(session).await
+                }
+                .await
+                .map_err(|error| error.classify());
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::AccountPreferencesLoaded {
+                        request_id,
+                        epoch,
+                        saved,
+                        result,
+                    },
+                )
+                .await;
+            }
+            WorkerCommand::AuthorizeQuickConnect {
+                request_id,
+                epoch,
+                code,
+            } => {
+                let approval = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client
+                        .authorize_quick_connect(session, &code)
+                        .await
+                        .map_err(|error| error.classify()),
+                    _ => Err(jellyfin_api::ErrorClass::Unexpected),
+                };
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::QuickConnectAuthorized {
+                        request_id,
+                        epoch,
+                        approval,
+                    },
+                )
+                .await;
+            }
             WorkerCommand::CheckQuickConnect {
                 request_id,
                 server_url,
@@ -6424,7 +6711,7 @@ async fn execute_command(
                             ctx,
                             WorkerEvent::DashboardLoaded {
                                 request_id,
-                                load: AdminLoad::Loaded(snapshot),
+                                load: AdminLoad::Loaded(Box::new(snapshot)),
                             },
                         )
                         .await
@@ -6462,6 +6749,365 @@ async fn execute_command(
                             WorkerEvent::DashboardLoaded {
                                 request_id,
                                 load: AdminLoad::Failed,
+                            },
+                        )
+                        .await
+                    }
+                }
+            }
+            WorkerCommand::RefreshAllLibraries { request_id } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client.refresh_all_libraries(session).await,
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                match result {
+                    Ok(()) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: Some("Library scan started.".to_owned()),
+                                error: None,
+                            },
+                        )
+                        .await
+                    }
+                    Err(ApiError::ReauthenticationRequired) => {
+                        session = None;
+                        client = None;
+                        server = None;
+                        playback_info_cache = None;
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ReauthenticationRequired {
+                                request_id,
+                                message: "The server requires you to sign in again.".into(),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: None,
+                                error: Some(error.to_string()),
+                            },
+                        )
+                        .await
+                    }
+                }
+            }
+            WorkerCommand::StartScheduledTask {
+                request_id,
+                task_id,
+            } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        client.start_scheduled_task(session, &task_id).await
+                    }
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                match result {
+                    Ok(()) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: Some("Scheduled task started.".to_owned()),
+                                error: None,
+                            },
+                        )
+                        .await
+                    }
+                    Err(ApiError::ReauthenticationRequired) => {
+                        session = None;
+                        client = None;
+                        server = None;
+                        playback_info_cache = None;
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ReauthenticationRequired {
+                                request_id,
+                                message: "The server requires you to sign in again.".into(),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: None,
+                                error: Some(error.to_string()),
+                            },
+                        )
+                        .await
+                    }
+                }
+            }
+            WorkerCommand::RestartServer { request_id } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client.restart_server(session).await,
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                match result {
+                    Ok(()) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: Some("Server restart requested.".to_owned()),
+                                error: None,
+                            },
+                        )
+                        .await
+                    }
+                    Err(ApiError::ReauthenticationRequired) => {
+                        session = None;
+                        client = None;
+                        server = None;
+                        playback_info_cache = None;
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ReauthenticationRequired {
+                                request_id,
+                                message: "The server requires you to sign in again.".into(),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: None,
+                                error: Some(error.to_string()),
+                            },
+                        )
+                        .await
+                    }
+                }
+            }
+            WorkerCommand::ShutdownServer { request_id } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => client.shutdown_server(session).await,
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                match result {
+                    Ok(()) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: Some("Server shutdown requested.".to_owned()),
+                                error: None,
+                            },
+                        )
+                        .await
+                    }
+                    Err(ApiError::ReauthenticationRequired) => {
+                        session = None;
+                        client = None;
+                        server = None;
+                        playback_info_cache = None;
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ReauthenticationRequired {
+                                request_id,
+                                message: "The server requires you to sign in again.".into(),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: None,
+                                error: Some(error.to_string()),
+                            },
+                        )
+                        .await
+                    }
+                }
+            }
+            WorkerCommand::SendSessionMessage {
+                request_id,
+                session_id,
+                header,
+                text,
+            } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        client
+                            .send_session_message(session, &session_id, &header, &text)
+                            .await
+                    }
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                match result {
+                    Ok(()) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: Some("Session message sent.".to_owned()),
+                                error: None,
+                            },
+                        )
+                        .await
+                    }
+                    Err(ApiError::ReauthenticationRequired) => {
+                        session = None;
+                        client = None;
+                        server = None;
+                        playback_info_cache = None;
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ReauthenticationRequired {
+                                request_id,
+                                message: "The server requires you to sign in again.".into(),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: None,
+                                error: Some(error.to_string()),
+                            },
+                        )
+                        .await
+                    }
+                }
+            }
+            WorkerCommand::RevokeDevice {
+                request_id,
+                device_id,
+            } => {
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) => {
+                        client.revoke_device(session, &device_id).await
+                    }
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                match result {
+                    Ok(()) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: Some("Device revoked.".to_owned()),
+                                error: None,
+                            },
+                        )
+                        .await
+                    }
+                    Err(ApiError::ReauthenticationRequired) => {
+                        session = None;
+                        client = None;
+                        server = None;
+                        playback_info_cache = None;
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ReauthenticationRequired {
+                                request_id,
+                                message: "The server requires you to sign in again.".into(),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: None,
+                                error: Some(error.to_string()),
+                            },
+                        )
+                        .await
+                    }
+                }
+            }
+            WorkerCommand::ResetAdminUserPassword {
+                request_id,
+                generation,
+                user_id,
+                new_password,
+            } => {
+                let _ = generation;
+                let result = match (client.as_ref(), session.as_ref()) {
+                    (Some(client), Some(session)) if user_may_manage_admin_users(&session.user) => {
+                        client
+                            .reset_user_password(session, &user_id, new_password)
+                            .await
+                    }
+                    (Some(_), Some(_)) => Err(ApiError::Forbidden),
+                    _ => Err(ApiError::InvalidConfiguration),
+                };
+                match result {
+                    Ok(()) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: Some("User password updated.".to_owned()),
+                                error: None,
+                            },
+                        )
+                        .await
+                    }
+                    Err(ApiError::ReauthenticationRequired) => {
+                        session = None;
+                        client = None;
+                        server = None;
+                        playback_info_cache = None;
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::ReauthenticationRequired {
+                                request_id,
+                                message: "The server requires you to sign in again.".into(),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        send_event(
+                            events,
+                            ctx,
+                            WorkerEvent::AdminActionFinished {
+                                request_id,
+                                message: None,
+                                error: Some(error.to_string()),
                             },
                         )
                         .await
@@ -6630,6 +7276,15 @@ async fn execute_command(
                 let outcome = update::run_rollback(store_dir).await;
                 send_event(events, ctx, WorkerEvent::UpdateFinished { outcome }).await;
             }
+            WorkerCommand::CheckLatestRelease { request_id } => {
+                let result = release_check::fetch_latest(env!("CARGO_PKG_VERSION")).await;
+                send_event(
+                    events,
+                    ctx,
+                    WorkerEvent::ReleaseCheckFinished { request_id, result },
+                )
+                .await;
+            }
             WorkerCommand::Shutdown => (),
         }
     }
@@ -6648,6 +7303,7 @@ async fn execute_command(
         session_socket,
         clock_sampler,
         saved_sign_in,
+        relay_http,
     };
 }
 
@@ -7355,6 +8011,14 @@ async fn start_primary_artwork_load(
             )
             .await
         }
+        Err(ApiError::HttpStatus(status)) if status.as_u16() == 404 => {
+            send_event(
+                &events,
+                &ctx,
+                WorkerEvent::PrimaryArtworkNotFound { request_id },
+            )
+            .await
+        }
         Err(_) => {
             send_event(
                 &events,
@@ -7388,7 +8052,19 @@ async fn start_backdrop_artwork_load(
         return;
     };
 
-    let result = (client.get_backdrop_image(&session, &item_id)).await;
+    let result = if ambient {
+        client
+            .get_ambient_backdrop_image(&session, &item_id, None)
+            .await
+            .map_err(|error| match error {
+                ApiError::HttpStatus(reqwest::StatusCode::NOT_FOUND) => {
+                    BackdropImageError::NotFoundOrEmptyImage
+                }
+                other => BackdropImageError::Api(other),
+            })
+    } else {
+        client.get_backdrop_image(&session, &item_id).await
+    };
     match result {
         Ok(bytes) => match decode_backdrop(bytes, &events, ambient).await {
             Ok((width, height, rgba)) => {
@@ -7655,9 +8331,21 @@ async fn load_dashboard(
 ) -> Result<AdminSnapshot, ApiError> {
     let server = client.server_info(session).await?;
     let libraries = client.virtual_folders(session).await?;
-    let active_sessions = client.active_session_count(session).await?;
+    let sessions_list = client.active_sessions(session).await?;
+    let active_sessions = sessions_list.len();
     let users = client.user_counts(session).await?;
     let tasks = client.scheduled_tasks(session).await?;
+    let item_counts = match client.item_counts(session).await {
+        Ok(counts) => Some(counts),
+        Err(ApiError::ReauthenticationRequired) => return Err(ApiError::ReauthenticationRequired),
+        Err(ApiError::Forbidden) => return Err(ApiError::Forbidden),
+        Err(_) => None,
+    };
+    let activity_entries = match client.activity_log_entries(session, 25).await {
+        Ok(entries) => entries,
+        Err(ApiError::ReauthenticationRequired) => return Err(ApiError::ReauthenticationRequired),
+        Err(_) => Vec::new(),
+    };
     let mut library_item_counts = Vec::with_capacity(libraries.len().min(MAX_COUNTED_LIBRARIES));
     for library in libraries.iter().take(MAX_COUNTED_LIBRARIES) {
         let count = match library.item_id.as_deref() {
@@ -7679,6 +8367,9 @@ async fn load_dashboard(
         active_sessions,
         users,
         &tasks,
+        item_counts,
+        sessions_list,
+        activity_entries,
     ))
 }
 
@@ -7862,6 +8553,7 @@ struct PlaybackPreparation<'a> {
     start_time_ticks: Option<i64>,
     burn_in_subtitles: bool,
     subtitle_stream_index_override: Option<Option<i32>>,
+    relay_http: &'a mut Option<jellyfin_playback_relay::HttpClient>,
 }
 
 struct TranscodedSubtitleReplacementPreparation<'a> {
@@ -7869,6 +8561,7 @@ struct TranscodedSubtitleReplacementPreparation<'a> {
     session: &'a Session,
     cached: Option<&'a CachedPlaybackInfo>,
     replacement: BurnInSubtitleReplacement,
+    relay_http: &'a mut Option<jellyfin_playback_relay::HttpClient>,
 }
 
 /// The burn-in option to hand the URL builder. Burn-in needs all three: the setting, a server
@@ -7897,6 +8590,7 @@ fn prepare_playback(preparation: PlaybackPreparation<'_>) -> Result<PreparedPlay
         start_time_ticks,
         burn_in_subtitles,
         subtitle_stream_index_override,
+        relay_http,
     } = preparation;
     let (Some(client), Some(session)) = (client, session) else {
         return Err("Connect to a Jellyfin server before starting playback.".into());
@@ -7930,8 +8624,15 @@ fn prepare_playback(preparation: PlaybackPreparation<'_>) -> Result<PreparedPlay
     }
     .map_err(|error| error.to_string())?;
     let allowed_origin = client.server_origin();
-    let (url, relay) =
-        start_relay(allowed_origin.as_str(), request).map_err(|error| error.to_string())?;
+    if relay_http.is_none() {
+        *relay_http = jellyfin_playback_relay::build_relay_http_client().ok();
+    }
+    let (url, relay) = jellyfin_playback_relay::start_relay_with_client(
+        allowed_origin.as_str(),
+        request,
+        relay_http.clone(),
+    )
+    .map_err(|error| error.to_string())?;
     Ok(PreparedPlayback {
         url,
         relay,
@@ -7964,6 +8665,7 @@ async fn prepare_transcoded_subtitle_replacement(
         session,
         cached,
         replacement,
+        relay_http,
     } = preparation;
     let BurnInSubtitleReplacement {
         negotiation_id,
@@ -8010,6 +8712,7 @@ async fn prepare_transcoded_subtitle_replacement(
         start_time_ticks,
         burn_in_subtitles: true,
         subtitle_stream_index_override: Some(subtitle_stream_index),
+        relay_http,
     })
     .map_err(|_| ApiError::InvalidResponse)?;
     playback.set_resume_position_ticks(start_time_ticks);
@@ -8057,6 +8760,7 @@ async fn tune_live_tv(
     channel_id: &str,
     device_profile: &DeviceProfile,
     tune_started_at: std::time::Instant,
+    relay_http: &mut Option<jellyfin_playback_relay::HttpClient>,
 ) -> Result<PreparedPlayback, String> {
     let opened = client
         .open_live_stream(
@@ -8133,6 +8837,7 @@ async fn tune_live_tv(
             start_time_ticks: None,
             burn_in_subtitles: false,
             subtitle_stream_index_override: None,
+            relay_http,
         })?;
         playback.report_metadata.live_stream_id = Some(live_stream_id.clone());
         playback.report_metadata.live_tune_started_at = Some(tune_started_at);

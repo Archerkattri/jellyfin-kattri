@@ -317,8 +317,8 @@ fn commit_failure_between_stage_and_swap_leaves_installed_build_unchanged() {
     assert!(store.previous_slot().is_none());
     assert!(store.staged_slot().is_none(), "staged bytes are discarded");
     assert!(
-        store.journal().unwrap().pending.is_none(),
-        "no pending claim without a switch"
+        store.journal().unwrap().pending.is_some(),
+        "failed commit retains an intent record for launch recovery"
     );
 }
 

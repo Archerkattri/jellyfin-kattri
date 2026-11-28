@@ -11,16 +11,30 @@ use std::time::{Duration, Instant};
 use kattri_client_core::media_info::MediaInfo;
 use mpv_render_proof::StreamSnapshot;
 
+use crate::blur::{BackdropBlur, show_frosted_glass_frame};
+
 /// How often the properties are read again while the panel is open. Some of them (the decoder in
 /// use, the video color) only settle after the first frames.
 pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
-const PANEL_WIDTH: f32 = 380.0;
+const PANEL_WIDTH: f32 = 340.0;
+
+/// Host runtime state shown alongside the sanitized stream rows. These strings are display-only;
+/// clipboard output stays limited to [`MediaInfo::diagnostics_text`].
+#[derive(Clone, Copy, Default)]
+pub(crate) struct RuntimeDiagnostics<'a> {
+    pub(crate) status: &'a str,
+    pub(crate) capability_warning: Option<&'a str>,
+    pub(crate) report_feedback: Option<&'a str>,
+}
 
 /// Whether the panel is open and the latest properties the player returned.
 #[derive(Default)]
 pub(crate) struct MediaInfoState {
-    open: bool,
+    pinned: bool,
+    hovered: bool,
+    /// Suppresses hover re-opening until the pointer leaves after an explicit close/unpin.
+    hover_suppressed: bool,
     /// The read in flight, if any.
     request: Option<u64>,
     /// When the last read was queued (or failed to queue).
@@ -30,22 +44,46 @@ pub(crate) struct MediaInfoState {
 
 impl MediaInfoState {
     pub(crate) fn is_open(&self) -> bool {
-        self.open
+        self.pinned || self.hovered
     }
 
-    /// Open the panel, or close it when it is already open. Opening reads the properties at the
-    /// next opportunity.
+    /// Pin or unpin the panel. Opening reads the properties at the next opportunity.
     pub(crate) fn toggle(&mut self) {
-        if self.open {
-            self.close();
+        if self.pinned {
+            self.pinned = false;
+            self.hovered = false;
+            self.hover_suppressed = true;
+            self.clear_snapshot();
         } else {
-            self.open = true;
+            self.pinned = true;
+            self.hover_suppressed = false;
             self.last_attempt = None;
         }
     }
 
+    pub(crate) fn set_hover(&mut self, hovered: bool) {
+        if !hovered {
+            self.hover_suppressed = false;
+            self.hovered = false;
+            if !self.pinned {
+                self.clear_snapshot();
+            }
+            return;
+        }
+        if self.hover_suppressed {
+            return;
+        }
+        if !self.is_open() {
+            self.last_attempt = None;
+        }
+        self.hovered = true;
+    }
+
     pub(crate) fn close(&mut self) {
-        *self = Self::default();
+        self.pinned = false;
+        self.hovered = false;
+        self.hover_suppressed = true;
+        self.clear_snapshot();
     }
 
     /// A new file started: the old properties no longer describe the stream.
@@ -57,7 +95,7 @@ impl MediaInfoState {
 
     /// True when the panel is open, no read is in flight, and the last read is old enough.
     pub(crate) fn read_due(&self, now: Instant) -> bool {
-        self.open
+        self.is_open()
             && self.request.is_none()
             && self
                 .last_attempt
@@ -93,68 +131,110 @@ impl MediaInfoState {
 }
 
 /// What the viewer did in the panel this frame.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PanelOutcome {
     pub(crate) close: bool,
+    pub(crate) hovered_or_focused: bool,
+    pub(crate) rect: egui::Rect,
+}
+
+impl Default for PanelOutcome {
+    fn default() -> Self {
+        Self {
+            close: false,
+            hovered_or_focused: false,
+            rect: egui::Rect::NOTHING,
+        }
+    }
 }
 
 /// Draw the panel over the video, at the top right. "Copy diagnostics" puts the same fields on
 /// the clipboard as plain text.
-pub(crate) fn show(ctx: &egui::Context, info: &MediaInfo) -> PanelOutcome {
+pub(crate) fn show(
+    ctx: &egui::Context,
+    info: &MediaInfo,
+    runtime: RuntimeDiagnostics<'_>,
+    backdrop: Option<BackdropBlur>,
+) -> PanelOutcome {
     let mut outcome = PanelOutcome::default();
+    let mut panel_focused = false;
     let max_height = (ctx.content_rect().height() - 150.0).max(120.0);
-    egui::Area::new(egui::Id::unique("media_info_panel"))
+    let area = egui::Area::new(egui::Id::unique("media_info_panel"))
         .order(egui::Order::Foreground)
-        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-24.0, 20.0))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-24.0, 44.0))
         .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(egui::Color32::from_black_alpha(215))
-                .corner_radius(egui::CornerRadius::same(12))
-                .inner_margin(egui::Margin::same(16))
-                .show(ui, |ui| {
-                    ui.set_width(PANEL_WIDTH);
-                    ui.label(
-                        egui::RichText::new("Media info")
-                            .size(18.0)
-                            .strong()
-                            .color(egui::Color32::WHITE),
-                    );
-                    ui.add_space(8.0);
-                    egui::ScrollArea::vertical()
-                        .max_height(max_height)
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            egui::Grid::new("media_info_rows")
-                                .num_columns(2)
-                                .spacing([14.0, 6.0])
-                                .show(ui, |ui| {
-                                    for row in info.rows() {
-                                        ui.label(
-                                            egui::RichText::new(row.label)
-                                                .color(egui::Color32::from_gray(170)),
-                                        );
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(row.value)
-                                                    .color(egui::Color32::WHITE),
-                                            )
-                                            .wrap(),
-                                        );
-                                        ui.end_row();
-                                    }
-                                });
-                        });
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Copy diagnostics").clicked() {
-                            ui.ctx().copy_text(info.diagnostics_text());
-                        }
-                        if ui.button("Close").clicked() {
-                            outcome.close = true;
-                        }
+            show_frosted_glass_frame(ui, backdrop, 1.0, egui::Margin::same(16), |ui| {
+                ui.set_width(PANEL_WIDTH);
+                ui.label(
+                    egui::RichText::new("Media info")
+                        .size(18.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical()
+                    .max_height(max_height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        egui::Grid::new("media_info_rows")
+                            .num_columns(2)
+                            .spacing([14.0, 6.0])
+                            .show(ui, |ui| {
+                                for row in info.rows() {
+                                    ui.label(
+                                        egui::RichText::new(row.label)
+                                            .color(egui::Color32::from_gray(170)),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(row.value)
+                                                .color(egui::Color32::WHITE),
+                                        )
+                                        .wrap(),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
                     });
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new("Player status")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_gray(170)),
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(runtime.status).color(egui::Color32::WHITE),
+                    )
+                    .wrap(),
+                );
+                if let Some(warning) = runtime.capability_warning {
+                    ui.colored_label(egui::Color32::YELLOW, warning);
+                }
+                if let Some(feedback) = runtime.report_feedback {
+                    ui.colored_label(egui::Color32::LIGHT_RED, feedback);
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let copy = ui.button("Copy diagnostics");
+                    if copy.clicked() {
+                        ui.ctx().copy_text(info.diagnostics_text());
+                    }
+                    let close = ui.button("Close");
+                    if close.clicked() {
+                        outcome.close = true;
+                    }
+                    panel_focused = copy.has_focus() || close.has_focus();
                 });
+            });
         });
+    let pointer_in_panel = ctx
+        .pointer_hover_pos()
+        .is_some_and(|pos| area.response.rect.contains(pos));
+    outcome.hovered_or_focused =
+        pointer_in_panel || area.response.contains_pointer() || panel_focused;
+    outcome.rect = area.response.rect;
     outcome
 }
 
@@ -284,7 +364,7 @@ mod tests {
     ) -> (PanelOutcome, Vec<String>) {
         let mut outcome = PanelOutcome::default();
         let mut output = context.run_ui(input, |ui| {
-            outcome = show(ui.ctx(), info);
+            outcome = show(ui.ctx(), info, RuntimeDiagnostics::default(), None);
         });
         // egui checks in debug builds that the host took the texture changes.
         output.textures_delta.clear();
@@ -329,6 +409,49 @@ mod tests {
         let (outcome, copied) = frame(&context, key_press(Key::Enter), &info);
         assert!(outcome.close);
         assert!(copied.is_empty());
+    }
+
+    #[test]
+    fn runtime_diagnostics_are_visible_but_never_copied() {
+        let context = egui::Context::default();
+        let info = fixture_info();
+        let runtime = RuntimeDiagnostics {
+            status: "Synthetic runtime status",
+            capability_warning: Some("Synthetic capability warning"),
+            report_feedback: Some("Synthetic report feedback"),
+        };
+        let mut warmup = context.run_ui(egui::RawInput::default(), |ui| {
+            let _ = show(ui.ctx(), &info, runtime, None);
+        });
+        warmup.textures_delta.clear();
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+            let _ = show(ui.ctx(), &info, runtime, None);
+        });
+        output.textures_delta.clear();
+        let painted = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for expected in [
+            "Synthetic runtime status",
+            "Synthetic capability warning",
+            "Synthetic report feedback",
+        ] {
+            assert!(
+                painted.iter().any(|text| text.contains(expected)),
+                "{expected:?} remains visible"
+            );
+        }
+
+        frame(&context, egui::RawInput::default(), &info);
+        frame(&context, key_press(Key::Tab), &info);
+        let (_, copied) = frame(&context, key_press(Key::Enter), &info);
+        assert_eq!(copied, vec![info.diagnostics_text()]);
+        assert!(!copied[0].contains("Synthetic"));
     }
 
     #[test]

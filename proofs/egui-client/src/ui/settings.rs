@@ -97,6 +97,7 @@ pub(crate) struct AboutInfo {
     pub(crate) version: String,
     pub(crate) target: String,
     pub(crate) libmpv_version: Option<String>,
+    pub(crate) ffmpeg_version: Option<String>,
     pub(crate) gpu_name: Option<String>,
     pub(crate) device_id_path: Option<String>,
     /// Folder of `kattri.log`, for testers who are asked to share it.
@@ -104,14 +105,14 @@ pub(crate) struct AboutInfo {
 }
 
 impl AboutInfo {
-    fn current() -> Self {
+    fn current(runtime: &crate::app::RuntimeAbout) -> Self {
         Self {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
-            // This client process does not load libmpv; the mpv host is a separate process.
-            libmpv_version: None,
-            // No GL host is attached to this process, so no GPU name is available.
-            gpu_name: None,
+            // The host reports what it actually loaded; without a host these stay unavailable.
+            libmpv_version: runtime.mpv_version.clone(),
+            ffmpeg_version: runtime.ffmpeg_version.clone(),
+            gpu_name: runtime.gpu.clone(),
             device_id_path: device_id_path(),
             log_folder: kattri_logging::log_directory().map(|dir| dir.display().to_string()),
         }
@@ -145,6 +146,12 @@ pub(crate) fn about_rows(info: &AboutInfo) -> Vec<(&'static str, String)> {
             info.libmpv_version
                 .clone()
                 .unwrap_or_else(|| ui_text(ids::SETTINGS_ABOUT_LIBMPV_NOT_LOADED).to_owned()),
+        ),
+        (
+            ui_text(ids::SETTINGS_ABOUT_FFMPEG),
+            info.ffmpeg_version
+                .clone()
+                .unwrap_or_else(|| ui_text(ids::SETTINGS_VALUE_NOT_AVAILABLE).to_owned()),
         ),
         (
             ui_text(ids::SETTINGS_ABOUT_GPU),
@@ -354,33 +361,46 @@ pub(crate) fn show(
         app.settings.reload();
         settings_input::reset(&ctx);
     }
-    match state.open {
-        None => section_list(ui, app, &mut state, colors),
-        Some(section) => section_page(ui, app, &mut state, colors, section),
+
+    let wide = ui.available_width() >= 860.0;
+    if wide && state.open.is_none() {
+        // A wide window shows the categories and a page side by side, so there is always a page.
+        state.open = Some(SettingsSection::General);
+    }
+    if wide {
+        ui.horizontal_top(|ui| {
+            let mut sidebar = state;
+            sidebar.reveal_focus &= state.open.is_none();
+            ui.vertical(|ui| {
+                ui.set_width(300.0);
+                section_list(ui, &mut sidebar, colors);
+            });
+            if sidebar.open != state.open {
+                state = sidebar;
+                app.settings.reload();
+                settings_input::reset(&ctx);
+            }
+            ui.add_space(24.0);
+            ui.vertical(|ui| {
+                if let Some(section) = state.open {
+                    ui.push_id(section.label(), |ui| {
+                        section_page(ui, app, &mut state, colors, section, true)
+                    });
+                }
+            });
+        });
+    } else {
+        match state.open {
+            None => section_list(ui, &mut state, colors),
+            Some(section) => section_page(ui, app, &mut state, colors, section, false),
+        }
     }
     save_state(&ctx, state);
 }
 
-fn section_list(ui: &mut Ui, app: &mut KattriApp, state: &mut SettingsPageState, colors: Palette) {
+fn section_list(ui: &mut Ui, state: &mut SettingsPageState, colors: Palette) {
     ui.set_max_width(ui.available_width().min(760.0));
     heading(ui, ui_text(ids::SETTINGS_HEADING_TITLE), colors);
-    let running = app.settings.running_name().map(str::to_owned);
-    if let Some(name) = running {
-        ui.label(
-            RichText::new(ui_text_args(
-                ids::SETTINGS_LABEL_ACTIVE_PROFILE,
-                &[("name", name.as_str())],
-            ))
-            .color(colors.muted),
-        );
-        // The picker opens in its own window; a restart-based switch is handled there.
-        if ui
-            .button(ui_text(ids::SETTINGS_BUTTON_SWITCH_PROFILE))
-            .clicked()
-        {
-            app.open_profile_picker();
-        }
-    }
     ui.label(
         RichText::new(ui_text(ids::SETTINGS_HELP_CHOOSE_CATEGORY))
             .size(14.0)
@@ -462,11 +482,17 @@ fn section_row(
         egui::FontId::proportional(16.0),
         colors.text,
     );
-    painter.text(
-        egui::pos2(left, rect.top() + 35.0),
-        egui::Align2::LEFT_TOP,
+    let description = super::row::layout_text(
+        &painter,
         section.description(),
         egui::FontId::proportional(12.5),
+        colors.muted,
+        (width - 55.0).max(1.0),
+        2,
+    );
+    painter.galley(
+        egui::pos2(left, rect.top() + 31.0),
+        description,
         colors.muted,
     );
     let chevron = egui::pos2(rect.right() - 22.0, rect.center().y);
@@ -496,22 +522,34 @@ fn section_page(
     state: &mut SettingsPageState,
     colors: Palette,
     section: SettingsSection,
+    side_by_side: bool,
 ) {
     ui.set_max_width(ui.available_width().min(760.0));
     let reveal = std::mem::take(&mut state.reveal_focus);
-    let back_label = if state.series_memory {
-        ui_text(ids::SETTINGS_BUTTON_BACK_TO_PLAYBACK)
+    if side_by_side {
+        // The category list stays visible beside the page, so a Back button would be redundant.
+        if state.series_memory
+            && ui
+                .button(ui_text(ids::SETTINGS_BUTTON_BACK_TO_PLAYBACK))
+                .clicked()
+        {
+            state.series_memory = false;
+        }
     } else {
-        ui_text(ids::SETTINGS_BUTTON_BACK_TO_SETTINGS)
-    };
-    let back = ui.button(back_label);
-    if reveal {
-        back.request_focus();
+        let back_label = if state.series_memory {
+            ui_text(ids::SETTINGS_BUTTON_BACK_TO_PLAYBACK)
+        } else {
+            ui_text(ids::SETTINGS_BUTTON_BACK_TO_SETTINGS)
+        };
+        let back = ui.button(back_label);
+        if reveal {
+            back.request_focus();
+        }
+        if back.clicked() {
+            *state = page_back(*state);
+        }
+        ui.add_space(14.0);
     }
-    if back.clicked() {
-        *state = page_back(*state);
-    }
-    ui.add_space(14.0);
     if state.series_memory {
         heading(ui, ui_text(ids::SETTINGS_MEMORY_HEADING), colors);
         ui.add_space(8.0);
@@ -541,7 +579,7 @@ fn section_page(
             video_preferences_page(ui, app, colors);
         }
         SettingsSection::Input => settings_input::input_page(ui, app, colors),
-        SettingsSection::About => about_page(ui, colors),
+        SettingsSection::About => about_page(ui, app, colors),
     }
 }
 
@@ -557,7 +595,7 @@ pub(super) fn finish_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette, bef
 /// A filled, rounded card that groups a page's controls, like the settings list.
 pub(super) fn settings_card(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
-        .fill(crate::theme::palette(false).panel)
+        .fill(crate::theme::palette().panel)
         .corner_radius(egui::CornerRadius::same(14))
         .inner_margin(egui::Margin::symmetric(20, 16))
         .show(ui, |ui| {
@@ -635,14 +673,9 @@ fn reorder_button(ui: &mut Ui, up: bool, enabled: bool, accessible_name: &str) -
 
 fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
     let before = app.settings.settings().clone();
-    let mut switch_profile = false;
     settings_card(ui, |ui| {
         subsection_heading(ui, ui_text(ids::SETTINGS_HEADING_DISPLAY), colors);
         let general = &mut app.settings.settings_mut().general;
-        ui.checkbox(
-            &mut general.high_contrast,
-            ui_text(ids::SETTINGS_GENERAL_HIGH_CONTRAST),
-        );
         ui.checkbox(
             &mut general.reduce_motion,
             ui_text(ids::SETTINGS_GENERAL_REDUCE_MOTION),
@@ -665,11 +698,16 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
             ui_text(ids::SETTINGS_GENERAL_SCREENSAVER_HELP),
             12.0,
         );
+        let mut displayed_preset = match general.theme_preset {
+            ThemePreset::Light | ThemePreset::System => ThemePreset::JellyfinDark,
+            preset => preset,
+        };
+        let previous_preset = displayed_preset;
         choice(
             ui,
             ui_text(ids::SETTINGS_GENERAL_THEME),
             "general_theme_preset",
-            &mut general.theme_preset,
+            &mut displayed_preset,
             &[
                 (
                     ThemePreset::JellyfinDark,
@@ -681,6 +719,9 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
                 ),
             ],
         );
+        if displayed_preset != previous_preset {
+            general.theme_preset = displayed_preset;
+        }
         crate::theme::set_current_preset(general.theme_preset);
         // Light mode is retired; a saved Light or System preset previews as Jellyfin Dark.
         let default_preset = match general.theme_preset {
@@ -692,7 +733,7 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
         custom_theme_controls(
             ui,
             general,
-            crate::theme::palette_for(default_preset, false),
+            crate::theme::palette_for(default_preset),
             colors,
         );
         choice(
@@ -779,7 +820,6 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
                 12.0,
             );
         }
-        app.high_contrast = general.high_contrast;
         app.reduce_motion = general.reduce_motion;
         muted(ui, colors, ui_text(ids::SETTINGS_GENERAL_MOTION_HELP), 12.0);
         ui.add_space(8.0);
@@ -915,21 +955,6 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
     }
     ui.add_space(12.0);
     settings_card(ui, |ui| {
-        subsection_heading(ui, "Profiles", colors);
-        if let Some(name) = app.settings.running_name() {
-            muted(
-                ui,
-                colors,
-                &ui_text_args(ids::SETTINGS_LABEL_ACTIVE_PROFILE, &[("name", name)]),
-                12.0,
-            );
-        }
-        switch_profile = ui
-            .button(ui_text(ids::SETTINGS_BUTTON_SWITCH_PROFILE))
-            .clicked();
-    });
-    ui.add_space(12.0);
-    settings_card(ui, |ui| {
         subsection_heading(ui, "Window", colors);
         let window = &mut app.settings.settings_mut().window;
         ui.checkbox(&mut window.fullscreen, "Start in fullscreen");
@@ -981,13 +1006,9 @@ fn general_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
     ui.add_space(12.0);
     super::update::show_install(ui, app, colors);
     ui.add_space(12.0);
-    admin_section(ui, app, colors);
     ui.add_space(12.0);
     super::settings_parental::show(ui, app, colors);
     finish_page(ui, app, colors, &before);
-    if switch_profile {
-        app.open_profile_picker();
-    }
 }
 
 fn custom_theme_controls(
@@ -1016,14 +1037,6 @@ fn custom_theme_controls(
     });
     if !general.custom_theme_enabled {
         return;
-    }
-    if general.high_contrast {
-        muted(
-            ui,
-            colors,
-            "High contrast keeps its accessible palette while custom colors are saved.",
-            12.0,
-        );
     }
     custom_color_control(
         ui,
@@ -1180,20 +1193,8 @@ fn diagnostics_section(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
     });
 }
 
-/// The admin-lite dashboard gate (M4-22). Off by default. The navigation reads the switch on
-/// every frame, so a change shows at once. The server still decides who may read the data.
-fn admin_section(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
-    settings_card(ui, |ui| {
-        subsection_heading(ui, ui_text(ids::SETTINGS_HEADING_ADMIN), colors);
-        ui.checkbox(
-            &mut app.settings.settings_mut().admin.dashboard,
-            ui_text(ids::SETTINGS_ADMIN_SHOW_DASHBOARD),
-        );
-        muted(ui, colors, ui_text(ids::SETTINGS_ADMIN_HELP), 12.0);
-    });
-}
-
 fn server_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
+    let before = app.settings.settings().clone();
     settings_card(ui, |ui| {
         if let Some(server) = &app.server {
             ui.label(RichText::new(&server.name).size(16.0).color(colors.text));
@@ -1240,6 +1241,7 @@ fn server_page(ui: &mut Ui, app: &mut KattriApp, colors: Palette) {
         );
         muted(ui, colors, ui_text(ids::SETTINGS_SERVER_TLS_HELP), 12.0);
     });
+    finish_page(ui, app, colors, &before);
 }
 
 /// A single-line path field. An empty value stores `None`, so the default trust store applies.
@@ -1249,17 +1251,21 @@ fn path_field(ui: &mut Ui, label: &str, value: &mut Option<PathBuf>) {
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     ui.horizontal(|ui| {
-        ui.label(label);
-        if ui.text_edit_singleline(&mut text).changed() {
+        let caption = ui.label(label);
+        let response = ui.text_edit_singleline(&mut text).labelled_by(caption.id);
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::TextInput, true, label.to_owned())
+        });
+        if response.changed() {
             let trimmed = text.trim();
             *value = (!trimmed.is_empty()).then(|| PathBuf::from(trimmed));
         }
     });
 }
 
-fn about_page(ui: &mut Ui, colors: Palette) {
+fn about_page(ui: &mut Ui, app: &KattriApp, colors: Palette) {
     settings_card(ui, |ui| {
-        for (label, value) in about_rows(&AboutInfo::current()) {
+        for (label, value) in about_rows(&AboutInfo::current(app.runtime_about())) {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(label).strong().color(colors.text));
                 ui.label(RichText::new(value).color(colors.muted));
@@ -1542,8 +1548,11 @@ mod tests {
     use super::{
         AboutInfo, SettingsPageState, SettingsSection, about_rows, activate_gamepad_focus,
         custom_theme_controls, focus_direction, list_action, move_gamepad_focus, move_home_section,
-        next_focus_index, normalized_home_section_order, page_back, server_address_text,
+        next_focus_index, normalized_home_section_order, page_back, path_field,
+        server_address_text,
     };
+    use std::path::PathBuf;
+
     use kattri_client_core::focus::NavAction;
     use kattri_settings::{GeneralSettings, ThemePreset};
 
@@ -1774,6 +1783,7 @@ mod tests {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             target: "x86_64-windows".to_owned(),
             libmpv_version: libmpv_version.map(str::to_owned),
+            ffmpeg_version: None,
             gpu_name: None,
             device_id_path: Some("C:/config/Kattri/device-id".to_owned()),
             log_folder: Some("C:/data/Kattri/logs".to_owned()),
@@ -1811,7 +1821,10 @@ mod tests {
     #[test]
     fn about_reports_app_version_from_the_package() {
         // The About page, ClientVersion, and update check all read this one crate version.
-        assert_eq!(AboutInfo::current().version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            AboutInfo::current(&crate::app::RuntimeAbout::default()).version,
+            env!("CARGO_PKG_VERSION")
+        );
         let rows = about_rows(&about_fixture(None));
         assert_eq!(value(&rows, "App version"), env!("CARGO_PKG_VERSION"));
     }
@@ -1838,6 +1851,7 @@ mod tests {
                 "App version",
                 "Build target",
                 "libmpv",
+                "FFmpeg",
                 "GPU",
                 "Device ID file",
                 "Log folder"
@@ -1845,6 +1859,83 @@ mod tests {
         );
         assert_eq!(value(&rows, "Device ID file"), "C:/config/Kattri/device-id");
         assert_eq!(value(&rows, "Log folder"), "C:/data/Kattri/logs");
+    }
+
+    #[test]
+    fn server_page_settings_use_the_normal_save_flow() {
+        let dir = std::env::temp_dir().join(format!(
+            "kattri-server-tls-settings-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut app = crate::app::KattriApp::new(egui::Context::default());
+        app.settings = crate::settings_state::SettingsState::open(Some(&dir), None);
+        let before = app.settings.settings().clone();
+        let ca_path = PathBuf::from("C:/certs/private-ca.pem");
+        let cert_path = PathBuf::from("C:/certs/client.pem");
+        let key_path = PathBuf::from("C:/certs/client-key.pem");
+        app.settings.settings_mut().general.custom_ca_path = Some(ca_path.clone());
+        app.settings.settings_mut().general.client_cert_path = Some(cert_path.clone());
+        app.settings.settings_mut().general.client_key_path = Some(key_path.clone());
+        app.commit_settings(&before);
+        app.settings.wait_for_pending_save();
+        app.settings.poll_save_results();
+
+        let reopened = crate::settings_state::SettingsState::open(Some(&dir), None);
+        assert_eq!(reopened.settings().general.custom_ca_path, Some(ca_path));
+        assert_eq!(
+            reopened.settings().general.client_cert_path,
+            Some(cert_path)
+        );
+        assert_eq!(reopened.settings().general.client_key_path, Some(key_path));
+        drop(reopened);
+        drop(app);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn server_tls_path_fields_have_accesskit_labels() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut ca = None;
+        let mut cert = None;
+        let mut key = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                path_field(ui, "CA certificate (PEM)", &mut ca);
+                path_field(ui, "Client certificate (PEM)", &mut cert);
+                path_field(ui, "Client key (PEM)", &mut key);
+            },
+        );
+        // No renderer consumes the test frame's texture uploads; discard them before any assertion
+        // can unwind, so the TexturesDelta destructor does not mask a test failure.
+        output.textures_delta.clear();
+        let tree = output
+            .platform_output
+            .accesskit_update
+            .expect("TLS path fields produce an accessibility tree");
+        for label in [
+            "CA certificate (PEM)",
+            "Client certificate (PEM)",
+            "Client key (PEM)",
+        ] {
+            assert!(
+                tree.nodes.iter().any(|(_, node)| {
+                    node.role() == egui::accesskit::Role::TextInput && node.label() == Some(label)
+                }),
+                "missing accessible path field named {label:?}; nodes={:?}",
+                tree.nodes
+                    .iter()
+                    .map(|(_, node)| (node.role(), node.label()))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
@@ -1877,11 +1968,6 @@ mod tests {
     }
 
     #[test]
-    fn the_dashboard_switch_bound_by_the_checkbox_is_off_by_default() {
-        assert!(!kattri_settings::Settings::default().admin.dashboard);
-    }
-
-    #[test]
     fn custom_theme_controls_expose_headless_accessible_names() {
         let context = egui::Context::default();
         context.enable_accesskit();
@@ -1898,7 +1984,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                let palette = crate::theme::palette_for(ThemePreset::JellyfinDark, false);
+                let palette = crate::theme::palette_for(ThemePreset::JellyfinDark);
                 custom_theme_controls(ui, &mut general, palette, palette);
             },
         );
